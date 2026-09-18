@@ -1,0 +1,12 @@
+# Allowlist: never send local credentials, state, projects, tests or VCS to build.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!LICENSE
+!workspace_bridge/
+!workspace_bridge/**
+workspace_bridge/**/__pycache__/
+workspace_bridge/**/*.pyc
+workspace_bridge/**/.env*

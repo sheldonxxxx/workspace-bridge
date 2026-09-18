@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.env*
+*.sqlite3*
+admin-token
+.workspace-handoff/
+.DS_Store
+!.env.example
+compose.override.yaml
+.docker-state/
+
+tunnel-client.yaml

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workspace-bridge"
+version = "0.7.0"
+description = "Private workspace-scoped MCP browsing and manual planning handoffs"
+requires-python = ">=3.11"
+dependencies = ["starlette>=0.50,<1", "uvicorn>=0.35,<1", "pydantic>=2.12,<3", "regex>=2025.7.34,<2027", "Pillow>=12.3,<13"]
+license = "MIT"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "httpx>=0.28,<1", "pytest-asyncio>=1,<2", "PyYAML>=6,<7"]
+
+[project.scripts]
+workspace-bridge = "workspace_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["workspace_bridge*"]
+
+[tool.setuptools.package-data]
+workspace_bridge = ["static/*", "skills/*/SKILL.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

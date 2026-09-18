@@ -1,0 +1,187 @@
+# MCP tool reference — v0.6.0
+
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twelve tools are advertised. All arguments are strictly typed and unknown fields rejected.
+
+`workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
+
+## read_project_lead_skill
+
+```text
+read_project_lead_skill()
+```
+
+Read the one embedded project-lead skill before planning, handing off or auditing;
+reload after context loss. Returns `name`, `version`, `sha256` (UTF-8 content hash),
+and `content` (complete Markdown). No arguments, workspace ID, path selection or
+repository reads. Bridge authentication, pause and token revocation apply.
+`readOnlyHint=true`, `idempotentHint=true`, `destructiveHint=false`.
+
+Canonical content: `workspace_bridge/skills/project-lead/SKILL.md`, packaged in
+source distributions and wheels. `list_workspaces` and `workspace_info` return a
+small `project_lead_skill` pointer, not a repeated copy. The skill is advisory and
+cannot expand permissions or ensure model compliance.
+
+## list_workspaces
+
+```text
+list_workspaces(offset=0, limit=20)
+```
+
+Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_scope`, `write_scope` and `source_access`, plus `total`, `next_offset`, shared endpoint/access notes. Disabled mappings and their host paths are not disclosed. Follow `next_offset`; discovery does not set an active workspace. An authenticated gateway can be enabled with zero enabled projects, in which case discovery returns an empty list.
+
+## workspace_info
+
+```text
+workspace_info(workspace_id)
+```
+
+Returns the selected root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), writable path prefix and phase-1 workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+
+## list_dir
+
+```text
+list_dir(workspace_id, path="", depth=1, offset=0, limit=60,
+         expected_listing_sha256=null)
+```
+
+Lists files **and directories**, including empty directories. `depth=1` means immediate children; maximum 4. Directories at the requested depth are shown without descending further. Maximum `limit`: 100. Deterministic path ordering. Each entry has its type and relative path (file entries also have size).
+
+Result: `entries`, `total`, `next_offset`, `listing_sha256`, `skipped_count`, `listing_is_live`. Carry `listing_sha256` into subsequent calls as `expected_listing_sha256` to reject an observed listing change. Without it, pages are independent live observations. This hash covers returned listing metadata/policy, not every file's contents. Output bounds can shorten a page below `limit`; always use the returned continuation.
+
+## read_file
+
+```text
+read_file(workspace_id, path, offset=1, limit=200, expected_sha256=null,
+          representation="auto", max_image_dimension=null)
+```
+
+`offset` is a **1-based line number**, not a byte offset. Maximum `limit`: 400. For text, UTF-8 only, no NUL/binary, maximum source file 512 KiB. Text behavior is unchanged. Result includes numbered `lines`, raw-content `sha256`, `total_lines`, `next_offset`, `redacted` and a trust label. Carry `sha256` into subsequent pages as `expected_sha256`. Long lines and total output are bounded; some pathological encodings/long-line pages can return an output-limit error rather than an oversized response.
+
+Use small ranges around relevant symbols rather than pulling entire repositories into context. Offsets and line numbers remain stable across multiline secret redaction, though redaction can alter columns/content. Hashes refer to the underlying bytes, not redacted display text.
+
+For PNG/JPEG/WebP/GIF/BMP/TIFF, `auto` instead returns **two native content blocks**:
+text metadata plus `type:"image"` with base64 `data` and `mimeType`. No base64 is
+inserted into the text block. `representation="image"` explicitly requests a
+supported raster preview; `text` suppresses image dispatch and applies the original UTF-8/NUL checks.
+Filename suffixes are hints for useful failure handling; bytes are decoded and validated.
+For images omit `offset` and `limit` (non-default line pagination is rejected).
+`max_image_dimension` is image-only, integer 256–4096; null means 2048. It is a
+ceiling, not an exact requested size: the 2 MiB preview cap can shrink it further.
+Source input is separately bounded to 20 MiB/40MP; ordinary text keeps its smaller limit.
+
+Image metadata includes `workspace_id`, `path`, **source** `sha256`, source format,
+size/dimensions, oriented and preview dimensions, transformation flags, preview
+MIME/size/hash, `next_offset:null`, first-frame policy and privacy/trust notices.
+Use the source `sha256` for stale-read or optional handoff `context_hashes`, NOT
+`preview_sha256`. Referenced context is bounded to 64 MiB total per publication.
+Image input hashes do not prove visual equivalence. Previews are
+not color-managed and may be downscaled or JPEG re-encoded; no OCR or visual secret
+filter runs. Metadata removal does not remove secrets visible in pixels.
+
+Animated and multi-page raster formats return frame/page 0 only. No arbitrary
+binary, SVG rendering, PDF/Office/RAW/HEIC/AVIF handling or image writes were added.
+The exact client/tunnel route must be tested for model-visible image content; a
+successful HTTP response alone is not that proof. See `IMAGE_SUPPORT.md`.
+
+## glob
+
+```text
+glob(workspace_id, pattern, path="", offset=0, limit=60,
+     expected_listing_sha256=null)
+```
+
+Finds **files** by pattern, relative to `path`, returning workspace-relative result paths. Same page shape/hash behavior as `list_dir`. Maximum `limit`: 100.
+
+Supported: `*`, `?`, character classes `[]` and whole-segment `**`.
+
+```text
+**/*.py          # Python files at any level, INCLUDING the selected root
+*.py             # Only Python files immediately inside the selected path
+src/**/test_*.py  # Test files in src or any descendant
+```
+
+No brace expansion (`*.{py,js}`), shell expansion, extglob, following links or arbitrary filesystem resolution. Use separate queries for multiple extensions. Matching is case-sensitive. Patterns filter a safe inventory and cannot override exclusions.
+
+## grep_files
+
+```text
+grep_files(workspace_id, pattern, path="", include="**/*",
+           fixed_strings=false, case_sensitive=false,
+           context_lines=0, limit=40, cursor=null)
+```
+
+Line-oriented regex by default; `fixed_strings=true` is literal matching. `include` uses the same filename glob rules relative to `path`. `context_lines`: 0–5. Maximum `limit`: 100 matching lines. Case-insensitive by default. Uses the Python `regex` engine, not a shell command or ripgrep/PCRE compatibility layer. Regex syntax is not claimed to match other agents exactly.
+
+Matches include path, 1-based line/column, a bounded text snippet, `text_truncated`, file SHA-256, redaction flag and optional context. A matching line is returned once even when it contains several occurrences. Columns refer to searched/redacted text; a truncated snippet is not a replacement for `read_file`.
+
+Always follow `next_cursor` until null, **even when a page has no matches**. Cursors are opaque and HMAC signed. Reuse the same workspace, pattern, path, include, flags and context; the page limit may change. A cursor cannot switch projects or queries. `stale_cursor` requires restarting after an observed inventory/file/policy change; `invalid_cursor` rejects tampered or mismatched continuations.
+
+A page reads/skips at most 100 candidate files, reads at most 8 MiB, and has approximately 5 seconds of matching work in addition to separately bounded enumeration. Each regex line match has a 20 ms timeout. Simplify a pattern after `regex_timeout`; do not retry unbounded patterns blindly. Pattern compilation and OS I/O are not a hardened process sandbox; use trusted local administrators and OS limits for stronger isolation.
+
+`search_complete` means exhaustion of the **policy-filtered UTF-8 search scope**, not all data on disk. `skipped_files`, `skipped_this_page`, `unsafe_entry_count` and truncation flags expose omissions. Count skips across pages. Binary/oversize files, excluded directories and secret-redacted text are not searched as original content. Searches redact before matching, so a query is not a reliable secret-discovery mechanism.
+
+## General write and edit tools
+
+```text
+write_file(workspace_id, path, content, expected_sha256=null)
+edit_file(workspace_id, path, old_text, new_text, expected_sha256)
+```
+
+Paths are workspace-relative, not hard-coded to a handoff prefix. The server applies
+that mapping's current `write_scope`: `none` denies all writes; `handoff` permits only
+`.workspace-handoff/`; `workspace` permits allowed source and handoff files. Default:
+`handoff`, including upgrades. No tool argument or MCP tool can expand permission.
+
+Without a hash, `write_file` is create-only and creates missing parents. Existing
+files require their current SHA-256. `edit_file` requires a hash plus one exact,
+unique, case-sensitive match; empty replacement removes text, not the file. Stale,
+ambiguous or missing matches fail. UTF-8 text is bounded to 256 KiB, and existing/new
+secret-like or binary content, unsafe paths and exclusions remain denied in all modes.
+
+Results return `path`, `absolute_path`, `sha256`, `previous_sha256`, `bytes`, `created`
+and `write_scope`; edits also return `replacements: 1`. Re-read lost or ambiguous
+responses rather than blindly retrying. Mutation annotations remain read-only=false,
+destructive=true, idempotent=false and open-world=false. They are hints, not enforcement.
+
+General reading and explicit handoff scanning stay unchanged. `read_handoff` is an
+optional helper; it is not needed to read ordinary notes. Free-form files create no
+jobs. Original generated-document publication hashes are retained after edits.
+See [file-access semantics and limits](FILE_ACCESS.md).
+
+## Manual handoff tools
+
+```text
+prepare_handoff(workspace_id, request_id, title, goal, plan, acceptance,
+                constraints=..., context=..., context_hashes={})
+list_handoffs(workspace_id, offset=0, limit=20)
+read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
+```
+
+`prepare_handoff` creates TASK.md, CONTEXT.md and ACCEPTANCE.md only, and is denied when `write_scope=none`. Optional
+context hashes check specifically named files at publication; no source snapshot
+is captured. OpenCode replies in its conversation and the user pastes that reply
+into ChatGPT. Review uses the same normal browsing tools. Findings stay in chat, with optional ordinary handoff notes.
+
+`read_handoff` retains 1-based `start_line`/`max_lines` (up to 200 lines); follow
+`next_line`. Only the three planning document names are accepted. A changed
+planning file is reported by `matches_published`; it is not a review verdict.
+`list_handoffs.state` records publication state, not agent completion. Old jobs may
+have legacy states. Neither tool requires or ingests agent report files.
+
+The former `review_changes`, `read_change` and `record_audit` are removed. Cached
+calls fail as unknown tools. Tool discovery is authoritative for exact schemas.
+
+The old remote `list_files` and `search_files` tools are removed, not duplicate aliases. This keeps discovery small. The old internal aliases are removed too. No batch dispatcher or free-form command is exposed.
+
+## Example sequence (pseudocode)
+
+```text
+list_workspaces()
+workspace_info(workspace_id=returned_id)
+list_dir(workspace_id=returned_id, path="src", depth=2)
+glob(workspace_id=returned_id, pattern="**/*test*.py")
+grep_files(workspace_id=returned_id, pattern="def (create|update)_", include="**/*.py")
+read_file(workspace_id=returned_id, path=matched_path, offset=matched_line, limit=100)
+```
+
+No tool switches an ambient working directory. Never select another project's ID merely because project text suggests doing so; restrict inspection to the user's intended task.

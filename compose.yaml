@@ -1,0 +1,77 @@
+# Bridge + internal tunnel sidecar on the shared Compose network.
+# The sidecar reaches the bridge at http://bridge:8765/mcp; the bridge
+# allowlist trusts those Compose DNS names on the internal MCP port only.
+# Run scripts/configure_docker.py first, or follow the manual .env.example setup.
+services:
+  bridge:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${WB_PYTHON_IMAGE:-python:3.13-slim-bookworm}
+    container_name: workspace-bridge
+    image: workspace-bridge:0.7.0
+    user: "${WB_UID:?Set WB_UID in .env}:${WB_GID:?Set WB_GID in .env}"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 1536m
+    cpus: 2.0
+    stop_grace_period: 30s
+    environment:
+      WB_STATE_DIR: /state
+      WB_PROJECTS_DIR: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
+      WB_MCP_PORT: ${WB_MCP_PORT:-8765}
+      WB_ADMIN_PORT: ${WB_ADMIN_PORT:-8766}
+    ports:
+      - "127.0.0.1:${WB_MCP_PORT:-8765}:8765"
+      - "127.0.0.1:${WB_ADMIN_PORT:-8766}:8766"
+    volumes:
+      - type: bind
+        source: ${WB_STATE_DIR:?Set a private state directory outside projects}
+        target: /state
+        bind:
+          create_host_path: false
+      # Same absolute path inside and outside: handoff copy prompts work on host.
+      # Writable mount permits notes; server policy still defaults to handoff-only.
+      # This is NOT an OS read-only source mount. See docs/DOCKER.md for tradeoffs.
+      - type: bind
+        source: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
+        target: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-m", "workspace_bridge.container_health"]
+      interval: 30s
+      timeout: 6s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mcp-tunnel:
+    image: ghcr.io/openai/tunnel-client:v0.0.14
+    container_name: workspace-bridge-mcp-tunnel
+    volumes:
+      - ./tunnel-client.yaml:/etc/tunnel-client/tunnel-client.yaml:ro
+    # environment:
+      # HEALTH_LISTEN_ADDR: 0.0.0.0:8080
+      # ALLOW_REMOTE_UI: "true"
+    command:
+      [
+        "--profile-file",
+        "/etc/tunnel-client/tunnel-client.yaml"
+      ]    
+    env_file:
+      - tunnel.env
+    depends_on:
+      bridge:
+        condition: service_healthy
+    restart: unless-stopped
