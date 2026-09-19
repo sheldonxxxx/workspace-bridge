@@ -1,8 +1,9 @@
-# Docker Compose — v0.7.0
+# Docker Compose — v0.8.4
 
-Runs **Workspace Bridge** with an internal tunnel sidecar on the shared Compose
-network. The image is built locally from this source; no public Workspace Bridge
-image has been published.
+Runs **Workspace Bridge** with an internal tunnel sidecar and a private, client-only
+OpenCode SDK adapter on the shared Compose network. The images are built locally from
+this source; no public Workspace Bridge image has been published. The OpenCode server
+itself is **not** part of this stack: it runs natively on the host and is managed by you.
 
 ## Requirements and scope
 
@@ -19,12 +20,16 @@ are installed in the image. Builds require access to the Python image registry
 and Python package index. The Docker base tag can be pinned to a reviewed digest
 with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 
-**Validation boundary:** Docker CLI/daemon were unavailable in the delivery
-container. The source, app contracts and local HTTP were tested, but the image
-build, Docker port publishing, bind ownership and actual Compose runtime were
-not executed. `scripts/test_docker.py` and the CI Docker job perform those checks
-on a Docker-equipped host. Do not confuse successful YAML parsing with a successful
-container run. See `../VALIDATION.md`.
+**Validation boundary:** `docker compose config` validated, both the bridge
+(`workspace-bridge:0.8.4`) and adapter (`workspace-bridge-opencode-adapter:0.1.4`)
+images built, and a disposable bridge+adapter container smoke passed here: the bridge
+served MCP (401 unauthenticated) and the loopback manager, the adapter reported
+`server_configured=false`/locked with **no published port**, settings/health resolved,
+and a new workspace defaulted to disabled/handoff/agent-disabled. The full Compose
+stack with the tunnel sidecar and a live host OpenCode server was **not** run in this
+environment. `scripts/test_docker.py` performs the real Compose build/start/health
+checks on a Docker-equipped host; do not confuse a successful image build or YAML
+parse with a successful end-to-end run.
 
 ## Quick start
 
@@ -130,6 +135,57 @@ Credentials are obtained/generated in the local manager and supplied to the host
 tunnel using the existing setup guide. They are not image build arguments or
 Compose environment variables. The container's admin token is available with the
 explicit `exec ... show-admin-token` command, never printed in startup logs.
+
+## OpenCode runtime (optional)
+
+Agent execution is off until you enable it per workspace. The private adapter stays
+**locked** until `WB_RUNTIME_TOKEN` is set: with an empty token every operational
+endpoint (`/models`, `/sessions`, prompt, permission reply, abort, `/events`) returns
+401 and the bridge fails closed. `/health` remains readable and reports
+`locked: true` / `token_configured: false` without revealing any secret. To connect
+the host OpenCode server:
+
+1. Start the server natively on the host with Basic Auth, e.g.
+   `OPENCODE_SERVER_PASSWORD=<secret> opencode serve --hostname 127.0.0.1 --port 4096`.
+   Keep it bound as narrowly as your setup allows.
+2. In `.env` set `WB_OPENCODE_SERVER_URL` and the matching username/password, plus a
+   random `WB_RUNTIME_TOKEN` shared between the bridge and its adapter. The token is
+   **required** to unlock agent operations; an empty value never means allow.
+   - Docker Desktop: `WB_OPENCODE_SERVER_URL=http://host.docker.internal:4096`.
+   - Linux Docker Engine: set an explicit reachable host URL. The adapter declares
+     `host.docker.internal:host-gateway`; if that does not resolve your server, use
+     the host's bridge address or a reachable DNS name. Do **not** assume `localhost`
+     inside a container means the host.
+3. `docker compose up -d` (recreates the adapter and bridge). The manager's
+   **OpenCode runtime** panel shows health/version and the locked state;
+   `docker compose logs opencode-adapter` shows `server_configured`/`locked` without
+   printing credentials.
+
+Docker Compose starts the bridge before the adapter. That ordering is safe: a
+transient adapter-unavailable result during startup reconciliation never orphans an
+active run. Reconciliation retries until the runtime is reachable and only orphans a
+run after a positive missing-session result.
+
+The adapter has **no published port** and is reachable only on the private Compose
+network at `http://opencode-adapter:8770`. The bridge never receives provider
+credentials or the OpenCode URL. Never add a `ports:` entry to the adapter and never
+put the OpenCode server in this Compose file.
+
+## Image layering
+
+The bridge image builds third-party Python wheels in a dependency-only layer
+(dependencies extracted from `pyproject.toml` with stdlib `tomllib`) before any
+Workspace Bridge source is copied, so source/static/test edits reuse the cached
+dependency layer. The builder uses a BuildKit pip cache mount; the runtime stage
+still installs offline (`--no-index`) from prebuilt wheels with no cache. The
+adapter installs from its lockfile with a BuildKit npm cache mount and keeps
+`node_modules` (no dev dependencies) inside the image. Both images stay minimal:
+explicit `COPY` allowlists, non-root runtime, read-only rootfs, and health checks.
+
+Discord notifications are optional: set `WB_DISCORD_WEBHOOK_URL` in `.env` (kept out
+of the repo and never returned by any API). Waiting and completion states are
+notified with safe metadata only. `docker compose config` interpolates these values;
+review `.env` permissions (0600) as you would other secrets.
 
 ## What is protected — and what is not
 

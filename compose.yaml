@@ -1,6 +1,8 @@
-# Bridge + internal tunnel sidecar on the shared Compose network.
-# The sidecar reaches the bridge at http://bridge:8765/mcp; the bridge
-# allowlist trusts those Compose DNS names on the internal MCP port only.
+# Bridge + internal tunnel sidecar + private OpenCode SDK adapter on the shared
+# Compose network. The tunnel sidecar reaches the bridge at http://bridge:8765/mcp;
+# the bridge allowlist trusts those Compose DNS names on the internal MCP port only.
+# The OpenCode server itself runs NATIVELY on the host and is managed by the user:
+# this Compose stack never starts, packages or publishes it.
 # Run scripts/configure_docker.py first, or follow the manual .env.example setup.
 services:
   bridge:
@@ -9,7 +11,7 @@ services:
       args:
         PYTHON_IMAGE: ${WB_PYTHON_IMAGE:-python:3.13-slim-bookworm}
     container_name: workspace-bridge
-    image: workspace-bridge:0.7.0
+    image: workspace-bridge:0.8.4
     user: "${WB_UID:?Set WB_UID in .env}:${WB_GID:?Set WB_GID in .env}"
     init: true
     restart: unless-stopped
@@ -25,6 +27,12 @@ services:
       WB_PROJECTS_DIR: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
       WB_MCP_PORT: ${WB_MCP_PORT:-8765}
       WB_ADMIN_PORT: ${WB_ADMIN_PORT:-8766}
+      # Client boundary to the private OpenCode SDK adapter; the bridge never
+      # reaches the host OpenCode server directly and never starts one.
+      # WB_RUNTIME_TOKEN must be set for agent operations; empty locks the adapter.
+      WB_OPENCODE_RUNTIME_URL: http://opencode-adapter:8770
+      WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
+      WB_DISCORD_WEBHOOK_URL: ${WB_DISCORD_WEBHOOK_URL:-}
     ports:
       - "127.0.0.1:${WB_MCP_PORT:-8765}:8765"
       - "127.0.0.1:${WB_ADMIN_PORT:-8766}:8766"
@@ -50,6 +58,45 @@ services:
       timeout: 6s
       start_period: 15s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  opencode-adapter:
+    # Client-only @opencode-ai/sdk adapter. No published ports; it is reachable
+    # only on the private Compose network. It CONNECTS to the externally managed
+    # host OpenCode server and never creates/starts one.
+    build:
+      context: ./runtime/opencode-adapter
+    image: workspace-bridge-opencode-adapter:0.1.4
+    container_name: workspace-bridge-opencode-adapter
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      # Docker Desktop: http://host.docker.internal:<port>. Linux Docker Engine:
+      # set an explicit reachable host URL (see docs/DOCKER.md).
+      WB_OPENCODE_SERVER_URL: ${WB_OPENCODE_SERVER_URL:-}
+      WB_OPENCODE_SERVER_USERNAME: ${WB_OPENCODE_SERVER_USERNAME:-}
+      WB_OPENCODE_SERVER_PASSWORD: ${WB_OPENCODE_SERVER_PASSWORD:-}
+      # Empty token locks every adapter endpoint (fail closed); set it to enable runs.
+      WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
+      WB_ADAPTER_PORT: "8770"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # No ports: the adapter must never be host-published.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    depends_on:
+      bridge:
+        condition: service_healthy
     logging:
       driver: json-file
       options:

@@ -1,14 +1,21 @@
-# Architecture — v0.6
+# Architecture
 
 One `/mcp` endpoint behind one private tunnel and one shared bridge credential
 serves all explicitly enabled mappings. Every project call carries its workspace
 ID. The separate loopback manager cannot be reached on the MCP listener.
 
-## Components
+## Component map
 
-- `api.py`: strict typed tool schemas, tools-only MCP adapter and local manager API.
+- `api.py`: strict typed tool schemas, tools-only MCP adapter and loopback manager API.
 - `service.py`: shared auth, mappings, safe source access, planning publication,
-  handoff reads, per-workspace write policy and metadata. No source snapshot, diff or review engine.
+  handoff reads, per-workspace write and agent policy, and metadata. No source snapshot or diff engine.
+- `orchestration.py`: the only long-running OpenCode lifecycle owner: handoff-bound
+  session creation, run/request persistence, event handling, permission decisions,
+  cancellation and restart reconciliation.
+- `runtime.py`: narrow, bounded client boundary to the private SDK adapter; request
+  and metadata sanitization; no arbitrary command surface.
+- `notifications.py`: bounded Discord notifications from local runtime configuration,
+  safe metadata only.
 - `security.py`: pinned roots, descriptor-relative no-follow traversal, exclusions,
   bounded reads, fixed planning publication and hash-checked policy-scoped text writes.
 - `media.py` / `image_worker.py`: typed native image results and fixed, timed
@@ -18,7 +25,10 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
 - `embedded_skill.py` and `skills/project-lead/SKILL.md`: fixed package-owned
   project-lead guidance, retrieved on demand.
 - `static/`: local manager with workspace controls, plan/context/acceptance viewing,
-  shared-token controls and copyable manual handoffs.
+  run/session views, permission approvals, shared-token controls and copyable manual handoffs.
+- `runtime/opencode-adapter/`: private Node client-only sidecar around
+  `@opencode-ai/sdk`; it connects to the externally managed host OpenCode server and
+  never creates one.
 
 ## Read and write boundaries
 
@@ -47,8 +57,34 @@ Normal file tools allow explicit handoff reads and scans; default source-root
 scans still exclude it. Published job hashes and metadata remain original and may
 therefore differ from a deliberately edited document.
 
-OpenCode remains an external manually invoked actor. Its response travels through
-the user, not a callback, report parser, polling loop or agent integration.
+OpenCode remains an external actor owned by the host user. The manual path still
+travels through the user. The optional automated path uses a private client-only SDK
+adapter: a fresh start creates one native OpenCode session per prepared handoff
+under the exact mapped workspace directory, submits a server-generated prompt,
+and monitors runtime events. An explicit safe continuation instead creates a new
+Bridge run and handoff iteration that reuses a completed run's OpenCode session
+through promptAsync, keeping the same model. Only one active Bridge run owns a
+session at a time, and continuation fails closed when binding, model, status or
+scope validation fails.
+The bridge never starts, supervises or packages an OpenCode server, and holds no
+provider credentials. Runs have their own lifecycle (`starting`, `running`,
+`waiting_permission`, `waiting_question`, `completed`, `blocked`, `failed`,
+`cancelled`, `orphaned`) isolated from `jobs.state`. `waiting_permission` and
+`waiting_question` are non-terminal and resumable; `always` approvals pass through
+OpenCode's own proposed scope unchanged.
+
+## Agent execution boundary
+
+Handoffs remain the mandatory execution unit: `start_opencode_run` requires a
+prepared job in the same workspace and accepts no free-form prompt or path. Agent
+execution is a per-workspace local-admin policy (`agent_enabled`, default FALSE,
+independent from `write_scope`); MCP cannot change it. The runtime session directory
+is routing context plus an explicit binding check, not a hard filesystem sandbox —
+OpenCode permissions are not an OS sandbox and the native server has the host user's
+authority. Pending requests are persisted with bounded, redacted review metadata and
+the OpenCode-proposed pattern; the bridge never broadens it. On startup, interrupted
+work is reconciled positively with the runtime or explicitly orphaned, and persisted
+pending waits stay answerable.
 
 ## Image read path
 
@@ -84,10 +120,12 @@ v0.1 is unchanged. See the migration guides.
 
 ## Intentional omissions
 
-No agent API, shell execution, Git operation, automatic source-write enablement, snapshot
-audit, arbitrary binary reader, public OAuth, per-chat ACL, automatic completion tracking,
-or background scheduling. Skill following and review quality are model behavior,
-not enforced guarantees. The protocol adapter now supports mixed text/image results; the tunnel profile is unchanged.
+No general shell execution, Git operation, automatic source-write enablement, snapshot
+audit, arbitrary binary reader, public OAuth, per-chat ACL, or background scheduling.
+Agent execution exists only through the bounded, opt-in OpenCode tools described
+above; there is no arbitrary command endpoint and no host-published adapter port.
+Skill following and review quality are model behavior, not enforced guarantees. The
+protocol adapter supports mixed text/image results; the tunnel profile is unchanged.
 No external conformance certification is claimed.
 
 ## Docker transport wrapper — v0.7
@@ -103,4 +141,15 @@ Compose uses a separate private state bind and a dedicated project-parent bind a
 the same absolute host path, preserving copyable OpenCode paths. State and the
 parent must not overlap. Write scope remains none/handoff/workspace; read-only
 rootfs does not make the writable project bind read-only. The host tunnel remains
-separate, and the package-owned skill stays version 1.4.0.
+separate, and the package-owned skill is version 1.6.1.
+
+## OpenCode runtime — v0.8
+
+The Compose stack adds a private `opencode-adapter` sidecar with no published port.
+It imports `@opencode-ai/sdk`, builds `createOpencodeClient` against
+`WB_OPENCODE_SERVER_URL`, and exposes only health, model list, session create/get,
+prompt-async, bounded message read, permission reply, abort and an event long-poll.
+It never calls `createOpencode()`/`createOpencodeServer()`. The bridge reaches it at
+`http://opencode-adapter:8770` with a shared `WB_RUNTIME_TOKEN`; the host OpenCode
+server stays outside Compose. Docker Desktop uses `host.docker.internal`; Linux
+Engine needs an explicit reachable host URL. See [Docker](DOCKER.md).

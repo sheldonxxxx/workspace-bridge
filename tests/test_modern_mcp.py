@@ -2,7 +2,7 @@ import base64
 import json
 import httpx
 import pytest
-from workspace_bridge.api import make_mcp
+from workspace_bridge.api import make_mcp, TOOLS
 from workspace_bridge.protocol import PREFIX, MODERN
 
 async def modern_call(env, method='server/discover', params=None, *, header_changes=None, body_changes=None):
@@ -31,7 +31,7 @@ async def test_modern_discovery_no_initialize(env):
 
 async def test_modern_tools_list_and_read(env):
     response = await modern_call(env, 'tools/list')
-    assert len(response.json()['result']['tools']) == 12
+    assert len(response.json()['result']['tools']) == len(TOOLS)
     response = await modern_call(env, 'tools/call', {'name':'read_file','arguments':{'path':'README.md'}})
     result = response.json()['result']
     assert result['resultType'] == 'complete' and not result['isError']

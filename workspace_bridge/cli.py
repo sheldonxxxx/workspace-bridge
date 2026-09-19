@@ -10,6 +10,8 @@ import sys
 
 import uvicorn
 from .api import make_admin, make_mcp
+from .notifications import notifier_from_environment
+from .runtime import runtime_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
 
@@ -133,7 +135,8 @@ def main(argv: list[str] | None = None):
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise BridgeError("A bridge process already owns this state directory; rotate online in the local manager") from None
-            service = Service(state, config, recover_incomplete=args.command == "serve")
+            service = Service(state, config, recover_incomplete=args.command == "serve",
+                              runtime=runtime_from_environment(), notifier=notifier_from_environment())
             try:
                 if args.command == "rotate-bridge-token":
                     result = service.manage_bridge("rotate_token")
@@ -150,7 +153,9 @@ def main(argv: list[str] | None = None):
                             result = exc.code
                         report.append({"workspace": ws["name"], "enabled": bool(ws["enabled"]), "check": result})
                     print(json.dumps({"config": "ok", "workspaces": report,
-                        "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked", "opencode": "out_of_scope"}, indent=2))
+                        "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked",
+                        "opencode": service.orchestrator.runtime_status(),
+                        "model_policy": service.orchestrator.model_policy_status()}, indent=2))
                 else:
                     print(f"MCP: http://127.0.0.1:{config['mcp_port']}/mcp | Local admin: http://127.0.0.1:{config['admin_port']}/")
                     if args.container:

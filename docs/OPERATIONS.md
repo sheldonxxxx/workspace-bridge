@@ -18,7 +18,7 @@ The bridge has no admin-token rotation button. For a compromised admin secret, s
 
 ## Root replacement / moving projects
 
-Mappings pin a root's device/inode and canonical path. Renaming/replacing the project makes the mapping fail. Existing mappings, including disabled mappings, cannot be overlapped. Phase 1 has no destructive delete/remap operation; use fresh state with a preserved archive, or implement and review a deliberate state migration. Never bypass the pin by editing SQLite identifiers as a convenience.
+Mappings pin a root's device/inode and canonical path. Renaming/replacing the project makes the mapping fail. Existing mappings, including disabled mappings, cannot be overlapped. There is no destructive delete/remap operation; use fresh state with a preserved archive, or implement and review a deliberate state migration. Never bypass the pin by editing SQLite identifiers as a convenience.
 
 ## Limits and incomplete coverage
 
@@ -37,13 +37,55 @@ may still consume space after upgrading, even though new handoffs create none.
 ## Service persistence
 
 Native startup remains foreground-only; no launchd/systemd or reverse proxy is installed.
-v0.7 adds Dockerfile/Compose with restart policy, health check, non-root UID/GID,
-private persistent state and explicit project binds. See DOCKER.md. Native listeners
+v0.8 adds Dockerfile/Compose with restart policy, health check, non-root UID/GID,
+private persistent state, explicit project binds and a private client-only OpenCode
+adapter with no published port. See DOCKER.md. Native listeners
 remain loopback-only; only explicit container startup binds 0.0.0.0 inside the
 container, with both Docker-published host ports restricted to 127.0.0.1.
 The tunnel client stays on the host; no Docker socket is mounted into the bridge.
 
-The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. Phase 1 still contains no model/agent execution path.
+The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. OpenCode execution is available only through the bounded, opt-in agent tools and the separate host runtime; the server never exposes a shell or arbitrary command tool.
+
+## OpenCode runs and restart recovery (v0.8)
+
+Agent execution is enabled per workspace in the local manager (Agent execution,
+default off, independent from write scope). The manager shows runtime health/version,
+the Discord configured/not-configured state, the global model policy (enabled models
+plus the mandatory default, saved atomically in a "Manage models" modal; MCP cannot change it),
+linked runs
+(status, handoff/job, bridge run id, OpenCode session id, exact model, timestamps,
+notification status), a global Bridge-owned "OpenCode sessions" table across all
+workspaces (newest first, bounded pagination, View/Stop on owned records only),
+a bounded escaped session transcript, and any pending
+permission/question requests with the exact OpenCode-proposed `always` scope. It can
+stop an active session and answer `once`/`always`/`reject`. None of these admin routes
+exist on the MCP listener.
+
+On restart, the bridge reconciles: a persisted pending request stays `waiting` and is
+answerable; a run whose session still exists is kept running; a session that is gone
+becomes `orphaned`; and a final assistant message is only accepted as `completed` when
+the runtime positively shows a completed, non-error response. An interrupted worker is
+never assumed to have finished, and a transient adapter-unavailable result at startup
+(e.g. Compose starts the bridge before the adapter) leaves the run active and retries
+until the runtime is reachable rather than orphaning it. Pending requests are
+re-verified against the recorded session so a positively missing session becomes an
+explicit orphan instead of an indefinitely answerable wait.
+
+The private adapter is **locked until `WB_RUNTIME_TOKEN` is set**: with an empty token
+every operational endpoint returns 401 and the bridge fails closed. `/health` reports
+`locked`/`token_configured` without revealing the token. Agent execution therefore
+stays unavailable until both the per-workspace policy and the token are deliberately
+configured. Discord notifications (if `WB_DISCORD_WEBHOOK_URL` is set) are sent on
+waiting/completed/blocked/failed/cancelled with safe metadata only; delivery failures
+are bounded and never change run state. The persisted `notification` record carries
+only `status`/`attempts`/`code` plus an optional short non-secret `detail` parsed
+from Discord JSON error bodies (HTML/proxy pages are never stored). Post-deploy live
+smoke (user-triggered only, never in automated tests): with a webhook configured,
+start a real run and let it reach a notified state (for example completion), then
+read the run's `notification` field in the manager or via `read_opencode_run`;
+`sent` confirms delivery and `failed` with `http_403` points at webhook/egress
+filtering, not the bridge payload. `workspace-bridge doctor` reports runtime
+configuration and the model policy status without contacting the host server.
 
 ## Writable handoff notes
 

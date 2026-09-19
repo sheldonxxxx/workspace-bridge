@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "1.4.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "1.6.1"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -53,6 +53,38 @@ def test_skill_is_complete_versioned_and_bounded():
 ])
 def test_skill_covers_project_lead_contract(text):
     assert text in read_project_lead_skill()["content"]
+
+
+@pytest.mark.parametrize("text", [
+    "silent user",
+    "explicit",
+    "category",
+    "free/cheap",
+    "self-initiated",
+    "ask first",
+    "never silently switch",
+    "never use a disabled model",
+    "Reuse the session",
+    "corrective",
+])
+def test_skill_encodes_model_choice_and_continuation_rules(text):
+    assert text in read_project_lead_skill()["content"]
+
+
+def test_skill_no_longer_forbids_all_non_default_models():
+    content = read_project_lead_skill()["content"]
+    assert "rejects other selectors" not in content
+    assert "do not continue an old session" not in content
+
+
+def test_mcp_instructions_match_skill_model_rule():
+    assert "enabled model" in INSTRUCTIONS
+    assert "model-choice rule" in INSTRUCTIONS
+    assert "always uses the global default" not in INSTRUCTIONS
+    start_description = TOOLS["start_opencode_run"][1]
+    assert "model_not_enabled" in start_description or "admin-enabled" in start_description
+    assert "model_override_forbidden" not in start_description
+    assert TOOLS["list_opencode_models"][1].count("scope=global") >= 1
 
 
 def test_tool_schema_is_read_only_unscoped_and_empty():

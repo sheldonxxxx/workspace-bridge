@@ -1,11 +1,13 @@
-# Manual handoff — v0.5
+# Handoff protocol — v0.8
 
 ## Responsibilities
 
 ChatGPT owns understanding, technical decisions, scoped instructions, acceptance
 criteria and code review. OpenCode implements and runs checks locally. The user
-manually carries instructions to OpenCode and pastes its response back into ChatGPT.
-The bridge publishes plans and exposes current files; it does not track completion.
+manually carries instructions to OpenCode and pastes its response back into ChatGPT,
+or — when the local administrator enabled agent execution — ChatGPT starts one
+bounded run for the prepared handoff and reads the final result itself. Run state is
+tracked independently of handoff publication state.
 
 ## Publish
 
@@ -65,3 +67,22 @@ detect every deletion, or prove who changed a file. It does not run tests. Curre
 source reads do not preserve newline bytes in their displayed line representation.
 Stop other writers during review; refresh evidence if files change. Publication
 state is not a completion signal.
+
+## Optional automated run
+
+When a workspace has agent execution enabled, `start_opencode_run` requires a
+prepared handoff in the same workspace and accepts no free-form prompt or path. A run
+is bound to one OpenCode session under the canonical mapped workspace root and stores
+its exact model selector (the configured default when `model` is omitted, or an
+explicit admin-enabled selector per the project-lead skill model-choice rule;
+MCP cannot change the policy), lifecycle state, timestamps and notification status.
+`starting`, `running`, `waiting_permission` and `waiting_question` are active;
+`completed`, `blocked`, `failed`, `cancelled` and `orphaned` are terminal.
+`waiting_permission`/`waiting_question` are resumable and never imply failure.
+
+`once`/`always`/`reject` answer only a still-pending request bound to that exact
+workspace/run/session and resume the SAME session. `always` passes OpenCode's own
+proposed pattern through unchanged and fails closed when it cannot be reviewed. The
+manager can stop an active session; abort is recorded as `cancelled` only after a
+positive result, otherwise the run stays explicit. A corrective iteration is a new
+handoff and a new run (`parent_run_id` is traceability only). See `MCP_TOOLS.md`.

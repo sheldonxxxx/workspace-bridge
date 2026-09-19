@@ -1,6 +1,6 @@
-# MCP tool reference — v0.6.0
+# MCP tool reference — v0.8.4
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twelve tools are advertised. All arguments are strictly typed and unknown fields rejected.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Nineteen tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 `workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
 
@@ -27,7 +27,7 @@ cannot expand permissions or ensure model compliance.
 list_workspaces(offset=0, limit=20)
 ```
 
-Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_scope`, `write_scope` and `source_access`, plus `total`, `next_offset`, shared endpoint/access notes. Disabled mappings and their host paths are not disclosed. Follow `next_offset`; discovery does not set an active workspace. An authenticated gateway can be enabled with zero enabled projects, in which case discovery returns an empty list.
+Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_scope`, `write_scope`, `agent_execution` and `source_access`, plus `total`, `next_offset`, shared endpoint/access notes. Disabled mappings and their host paths are not disclosed. Follow `next_offset`; discovery does not set an active workspace. An authenticated gateway can be enabled with zero enabled projects, in which case discovery returns an empty list.
 
 ## workspace_info
 
@@ -35,7 +35,7 @@ Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_sco
 workspace_info(workspace_id)
 ```
 
-Returns the selected root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), writable path prefix and phase-1 workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+Returns the selected root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), the separate `agent_execution` (`enabled`/`disabled`) policy, writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
 
 ## list_dir
 
@@ -171,7 +171,60 @@ have legacy states. Neither tool requires or ingests agent report files.
 The former `review_changes`, `read_change` and `record_audit` are removed. Cached
 calls fail as unknown tools. Tool discovery is authoritative for exact schemas.
 
-The old remote `list_files` and `search_files` tools are removed, not duplicate aliases. This keeps discovery small. The old internal aliases are removed too. No batch dispatcher or free-form command is exposed.
+## OpenCode run tools
+
+```text
+list_opencode_models(workspace_id, query="", limit=25)
+start_opencode_run(workspace_id, job_id, request_id, model=null, parent_run_id=null, continue_from_run_id=null)
+list_opencode_runs(workspace_id, offset=0, limit=20)
+read_opencode_run(workspace_id, run_id)
+read_opencode_request(workspace_id, run_id, request_id)
+respond_opencode_permission(workspace_id, run_id, request_id, decision)
+cancel_opencode_run(workspace_id, run_id)
+```
+
+`list_opencode_models` reads the GLOBAL model list from the runtime (identical for
+every workspace; `scope="global"`) and returns exact canonical `provider/model`
+selectors annotated with their global policy status (`enabled`, `policy_default`).
+A `query` filters or ranks candidates; it never selects one. `start_opencode_run`
+is handoff-bound: it requires a prepared handoff in the same workspace, fails
+closed when `agent_execution=disabled`, fails closed with
+`model_policy_unconfigured` until the local administrator saves a global model
+policy, and resolves the model against the admin-enabled allowlist plus default:
+omitting `model` uses the configured global default, while an explicit `model`
+is allowed only when its exact selector is enabled and currently available
+(`model_not_enabled`/`model_unavailable` otherwise; MCP cannot change the
+policy). It is idempotent per `request_id`. It accepts no free-form
+prompt or path and returns promptly with `run_id`, `session_id` and the exact model.
+For a small corrective follow-up with unchanged task, workspace, model and
+permission scope, `continue_from_run_id` reuses a completed run's OpenCode
+session via `promptAsync` as a NEW Bridge run for the new handoff (no
+`session.create`; implies `parent_run_id`; exposes `session_reused=true`).
+Continuation keeps the source run's exact model and fails closed with
+`continuation_unavailable` / `session_busy` / `session_mismatch`
+(`continuation_model_mismatch` on a model change) without silently starting a
+fresh session. It never sends into a busy session: an open OpenCode v1.18.x
+issue can persist such a prompt without scheduling it, so busy/retry blocks
+continuation and OpenCode does not queue prompts safely while busy. Reusing a
+session inherits its context, including session-scoped `always` approvals, so
+continuation requires an unchanged intended permission scope. Each run owns
+only messages after its durable boundary; results and transcripts are
+iteration-scoped and older runs never show a later continuation's messages.
+
+`list_opencode_runs`/`read_opencode_run` expose persisted run state, bounded final
+result, sanitized error and any pending requests. `read_opencode_request` shows the
+pending request kind, action/tool, resource, sanitized metadata, and OpenCode's exact
+proposed `always` scope plus `always_allowed`. `respond_opencode_permission` accepts
+`once`, `always` or `reject` only for a still-pending request bound to that exact
+workspace/run/session; a successful `once`/`always` resumes the same session.
+`always` passes through the OpenCode-proposed pattern unchanged and fails closed with
+`always_scope_unknown` when no scope is reviewable. `cancel_opencode_run` aborts only
+the recorded session and records `cancelled` only after positive confirmation; an
+ambiguous abort leaves the run explicit and unchanged.
+
+A run's final result is what the agent reported. It is unverified evidence: audit
+current source with the general tools. This server does not independently run tests
+and exposes no arbitrary command tool.
 
 ## Example sequence (pseudocode)
 

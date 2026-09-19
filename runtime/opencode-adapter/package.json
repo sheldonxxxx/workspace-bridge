@@ -1,0 +1,17 @@
+{
+  "name": "workspace-bridge-opencode-adapter",
+  "version": "0.1.4",
+  "private": true,
+  "type": "module",
+  "description": "Private, client-only adapter that connects Workspace Bridge to an externally managed native OpenCode server via @opencode-ai/sdk. It never starts an OpenCode server.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.18.31"
+  },
+  "scripts": {
+    "start": "node adapter.mjs",
+    "test": "node --test test/"
+  }
+}

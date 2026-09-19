@@ -2,7 +2,7 @@
 
 ## Intended threat model
 
-Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no command execution and handoff-only writes by default. Only local administrators may explicitly enable bounded source-text writes. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
+Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no arbitrary command execution and handoff-only writes by default. Only local administrators may explicitly enable bounded source-text writes and, separately, opt-in OpenCode agent execution. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job/session confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
 
 Not covered: a hostile local user/process with the service user's permissions; root/admin compromise; malicious browser extensions; compromised Python dependencies or tunnel-client; vulnerabilities in the host OS; comprehensive secret detection; prevention of every prompt-injection attempt; or ensuring that the local coding agent obeys a handoff. A prompt cannot substitute for the local agent's sandbox.
 
@@ -17,7 +17,9 @@ The first v0.1 migration disables all existing mappings once and starts the shar
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
 - Explicit project-parent allowlist; immutable root mappings; overlapping mappings rejected even if disabled; device/inode pinning; current allowed-parent validation; default-disabled registration.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
-- General reads are available in all modes. Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, subprocess, test or Git invocation in the server package.
+- Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, subprocess, test or Git invocation is exposed as an MCP tool.
+- Agent execution is a separate per-workspace policy (`agent_enabled`, default FALSE). It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_opencode_run` is handoff-bound, accepts no free-form prompt or path, resolves the model against the admin-enabled global allowlist plus default (`model_not_enabled`/`model_unavailable` for disallowed selectors, `model_policy_unconfigured` until a policy is saved), and fails closed when disabled. There is no arbitrary command endpoint and the private SDK adapter is not host-published.
+- Model policy (`model_policy`: enabled selectors plus one mandatory default) and the global Bridge-owned sessions table (`/api/opencode/sessions`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change the default, bypass it, or act on arbitrary OpenCode session IDs.
 - All writes reject secret-like/binary/control content and administrator exclusions. Staging uses private files and complete-content publication, not in-place truncation. Rechecks catch ordinary target/parent changes; they are not a sandbox or a portable atomic compare-and-swap against hostile external writers. Parent folders may remain after a later write failure; read back after an ambiguous I/O failure.
 - Built-in sensitive-name and build-directory exclusions. Additional administrator globs are conservative and case-insensitive. Repository ignore files cannot grant access or relax policy.
 - Request type/size bounds, bounded reads/search, output budget, concurrency gate and quotas. File changes during reads and stale context hashes fail rather than silently succeeding.
@@ -99,6 +101,32 @@ Do not use this as arbitrary storage; configure OS quotas for stricter limits.
 Normal notes and user-pasted returns remain untrusted data, not proof that tests
 ran or that an independent audit occurred.
 
+## OpenCode execution — v0.8
+
+The OpenCode server is started and managed by you, natively on the host. Workspace
+Bridge never starts, supervises, packages or host-publishes an OpenCode server. A
+private, token-authenticated, client-only SDK adapter sidecar talks to the host
+server; the bridge container reaches only that adapter and never receives provider
+credentials or the server URL. There is no host-published adapter port and no Docker
+socket. The adapter **fails closed without `WB_RUNTIME_TOKEN`**: an empty token locks
+every operational endpoint (401), so a sibling Compose-network process cannot list
+models, create sessions, submit prompts, reply to permissions or abort without the
+shared token. `/health` exposes only booleans and never the token. Every run is bound
+to the exact canonical mapped workspace; the recorded OpenCode session cannot be
+read, answered or aborted through a different workspace, and an absent or mismatched
+observed session directory fails closed rather than substituting the requested path.
+
+OpenCode's own permission configuration is preserved; the bridge does not inject
+blanket auto-approval. An `ask` becomes a persisted non-terminal `waiting_permission`
+request with bounded, redacted review metadata and OpenCode's exact proposed `always`
+pattern. `once`/`always`/`reject` resume the same session; `always` passes the
+OpenCode scope through unchanged and fails closed when no reviewable scope exists. An
+explicit OpenCode `deny` is a policy rejection and is not remotely approvable. These
+permissions are **not an OS sandbox**: the native server runs with the host user's
+authority. Containers, a dedicated OS identity or other isolation are optional
+hardening, not a Phase-2 guarantee. Never enable agent execution for a workspace you
+would not let that host user modify.
+
 ## Local policy control
 
 Upgrades add write_scope=handoff without broadening any mapping. The manager requires
@@ -132,14 +160,18 @@ Supported animation/multi-page formats return only the first frame/page. No full
 animation review, OCR, external fetch, raw-binary export or exact color/byte fidelity
 is implied. Client-side handling still requires live validation.
 
-## Docker deployment — v0.7
+## Docker deployment — v0.8
 
 The container uses a non-root host UID/GID, read-only root filesystem, a bounded
 noexec/nosuid/nodev temporary filesystem, dropped capabilities and no-new-privileges.
 No privileged mode, Docker socket, host network, cloud API keys or tunnel credential
-is included. Both published ports are explicitly host-loopback only; use a current
+is included. Both bridge ports are explicitly host-loopback only; the private
+`opencode-adapter` sidecar publishes **no** port. Use a current
 Docker Engine (28+ avoids the documented old localhost-publication L2 exposure).
 Never attach untrusted services to its Compose network or add a public reverse proxy.
+The adapter reaches the host OpenCode server through `host.docker.internal` (Docker
+Desktop) or an explicit reachable host URL (Linux Engine); provider credentials stay
+in the local Compose `.env`/adapter environment only and are never logged or returned.
 
 The project-parent bind is writable so handoffs and later authorized source writes
 can reach the host. All mounted files, including disabled mappings, are visible to

@@ -14,7 +14,12 @@ from workspace_bridge.service import Service
 RETIRED = ('review_changes', 'read_change', 'record_audit')
 EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
-            'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file'}
+            'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
+            'list_opencode_models', 'start_opencode_run', 'list_opencode_runs',
+            'read_opencode_run', 'read_opencode_request', 'respond_opencode_permission',
+            'cancel_opencode_run'}
+MUTATING = {'prepare_handoff', 'write_file', 'edit_file', 'start_opencode_run',
+            'respond_opencode_permission', 'cancel_opencode_run'}
 
 
 def publish(env, payload):
@@ -27,9 +32,9 @@ def read(env, path, expected=None):
         dict(path=path, start_line=1, max_lines=100, expected_sha256=expected))
 
 
-def test_only_twelve_tools_and_only_handoff_mutates():
+def test_tool_surface_and_mutations_are_deliberate():
     assert set(TOOLS) == EXPECTED
-    assert {n for n, (_, _, ro, _) in TOOLS.items() if not ro} == {'prepare_handoff', 'write_file', 'edit_file'}
+    assert {n for n, (_, _, ro, _) in TOOLS.items() if not ro} == MUTATING
     assert not any(hasattr(Service, n) for n in (*RETIRED, 'snapshot', 'snapshot_once', 'artifact_state'))
 
 

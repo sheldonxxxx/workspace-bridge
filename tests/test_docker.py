@@ -250,7 +250,7 @@ def test_entrypoint_invokes_cli_with_explicit_container_flags(tmp_path,monkeypat
 
 def test_compose_security_and_same_host_path():
     cfg=yaml.safe_load((ROOT/'compose.yaml').read_text())
-    assert set(cfg['services'])=={'bridge','mcp-tunnel'}
+    assert set(cfg['services'])=={'bridge','mcp-tunnel','opencode-adapter'}
     svc=cfg['services']['bridge']
     assert svc['read_only'] and svc['init']
     assert svc['cap_drop']==['ALL'] and 'no-new-privileges:true' in svc['security_opt']
@@ -262,26 +262,70 @@ def test_compose_security_and_same_host_path():
     assert svc['restart']=='unless-stopped'
     assert svc['mem_limit']=='1536m' and svc['pids_limit']==64
     assert svc['healthcheck']['test']==['CMD','python','-m','workspace_bridge.container_health']
+    # The bridge only reaches the private adapter; the external OpenCode server
+    # (and its credentials) never enters the bridge container.
+    assert svc['environment']['WB_OPENCODE_RUNTIME_URL']=='http://opencode-adapter:8770'
+    assert 'WB_OPENCODE_SERVER_PASSWORD' not in svc['environment']
+    # Private client-only adapter: no host-published port, no project/state mounts,
+    # no Docker socket, and it reaches the host via host-gateway.
+    adapter=cfg['services']['opencode-adapter']
+    assert 'ports' not in adapter and 'network_mode' not in adapter and 'privileged' not in adapter
+    assert adapter['read_only'] and adapter['cap_drop']==['ALL']
+    assert 'no-new-privileges:true' in adapter['security_opt']
+    assert not any('docker.sock' in str(m) for m in adapter.get('volumes', []))
+    assert adapter['environment']['WB_ADAPTER_PORT']=='8770'
+    assert 'host.docker.internal:host-gateway' in adapter['extra_hosts']
+    # The adapter is locked until WB_RUNTIME_TOKEN is deliberately set (empty default).
+    assert 'WB_RUNTIME_TOKEN' in adapter['environment'] and 'WB_RUNTIME_TOKEN' in svc['environment']
+    # Compose starts the bridge before the adapter (bridge healthy gate); startup
+    # reconciliation must therefore tolerate a transient adapter-unavailable result.
+    assert adapter['depends_on']['bridge']['condition']=='service_healthy'
     # Tunnel sidecar: internal-only client, no published ports, no project/state mounts.
     tunnel=cfg['services']['mcp-tunnel']
     assert 'ports' not in tunnel and 'network_mode' not in tunnel and 'privileged' not in tunnel
     assert not any('docker.sock' in str(m) for m in tunnel.get('volumes', []))
-    assert all('WB_STATE_DIR' not in str(m) and 'WB_PROJECTS_DIR' not in str(m)
-               for m in tunnel.get('volumes', []))
+    for name in ('mcp-tunnel','opencode-adapter'):
+        assert all('WB_STATE_DIR' not in str(m) and 'WB_PROJECTS_DIR' not in str(m)
+                   for m in cfg['services'][name].get('volumes', []))
     assert tunnel['depends_on']['bridge']['condition']=='service_healthy'
     profile=yaml.safe_load((ROOT/'tunnel-client.yaml').read_text())
     urls=[row['url'] for row in profile['mcp']['server_urls']]
     assert urls==['http://bridge:8765/mcp']
 
 
-def test_dockerfile_packaging_not_copy_all():
-    text=(ROOT/'Dockerfile').read_text()
-    assert 'USER 10001:10001' in text and 'COPY . ' not in text
+def test_dockerfile_dependency_layer_before_source():
+    """Third-party wheel work must not be invalidated by source-only changes."""
+    text = (ROOT/'Dockerfile').read_text()
+    assert 'COPY . ' not in text
     assert 'pip wheel' in text and '--no-index' in text
     assert 'ENTRYPOINT ["python", "-m", "workspace_bridge.docker_entrypoint"]' in text
-    ignore=(ROOT/'.dockerignore').read_text()
+    builder = text.split('FROM ${PYTHON_IMAGE} AS runtime')[0]
+    assert 'PIP_NO_CACHE_DIR' not in builder
+    assert '--mount=type=cache,target=/root/.cache/pip' in builder
+    dep_wheel = builder.index('pip wheel --wheel-dir /wheels -r')
+    toml_copy = builder.index('COPY pyproject.toml')
+    source_copy = builder.index('COPY workspace_bridge/')
+    local_wheel = builder.index('pip wheel --no-deps --no-build-isolation')
+    assert toml_copy < dep_wheel < source_copy < local_wheel
+    assert 'tomllib' in builder, "Dependencies must be extracted from pyproject with stdlib tomllib"
+    # A source/static/test-only change touches none of the dependency-layer inputs.
+    assert builder.count('COPY') == 3
+    runtime = text.split('FROM ${PYTHON_IMAGE} AS runtime')[1]
+    assert '--no-cache-dir --no-index --find-links=/wheels' in runtime
+    assert 'USER 10001:10001' in runtime
+    ignore = (ROOT/'.dockerignore').read_text()
     assert '\n**\n' in ignore and '!workspace_bridge/' in ignore and '!README.md' in ignore
     assert '!scripts/' not in ignore and '!.env' not in ignore
+
+
+def test_adapter_dockerfile_cached_lockfile_layer():
+    text = (ROOT/'runtime/opencode-adapter/Dockerfile').read_text()
+    lockfile_copy = text.index('COPY package.json package-lock.json')
+    install = text.index('npm ci --omit=dev')
+    assert lockfile_copy < install
+    assert '--mount=type=cache,target=/root/.npm' in text
+    assert 'npm cache clean' not in text, "The BuildKit cache mount owns the npm cache; do not delete it"
+    assert 'USER node' in text and '--omit=dev' in text
 
 
 def test_setup_generates_private_config_no_source_changes(tmp_path,monkeypatch):
@@ -342,5 +386,5 @@ def test_health_unavailable(monkeypatch):
 def test_no_skill_or_remote_schema_expansion():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==12 and SKILL_VERSION=='1.4.0'
+    assert len(TOOLS)==19 and SKILL_VERSION=='1.6.1'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
