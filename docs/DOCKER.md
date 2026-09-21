@@ -21,7 +21,7 @@ and Python package index. The Docker base tag can be pinned to a reviewed digest
 with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 
 **Validation boundary:** `docker compose config` validated, both the bridge
-(`workspace-bridge:0.8.4`) and adapter (`workspace-bridge-opencode-adapter:0.1.4`)
+(`workspace-bridge:0.8.4`) and adapter (`workspace-bridge-opencode-adapter:0.1.8`)
 images built, and a disposable bridge+adapter container smoke passed here: the bridge
 served MCP (401 unauthenticated) and the loopback manager, the adapter reported
 `server_configured=false`/locked with **no published port**, settings/health resolved,
@@ -113,6 +113,33 @@ unused, distinct ports in 1024–65535. Apply changes with `docker compose up -d
 environment/port definitions. Do not edit `/state/config.json` ports to change
 Docker publishing. Native non-Docker installs still use config.json as before.
 
+`WB_ADMIN_ALLOWED_HOSTS` (empty by default) is the sole opt-in remote-admin
+path: comma-separated bare hostnames/IPs that widen only the admin listener to
+`0.0.0.0` inside the container and allow those `Host` values. MCP is
+unaffected. The default Compose publishing stays `127.0.0.1`-only, so LAN
+access additionally requires republishing the admin port (e.g.
+`"0.0.0.0:${WB_ADMIN_PORT:-8766}:8766"` via local override) plus firewall/TLS
+hardening. Prefer SSH forwarding or VPN; never tunnel the manager.
+
+Behind a TLS-terminating nginx, set the env to the external name the browser
+uses (e.g. `WB_ADMIN_ALLOWED_HOSTS=admin.example.com`), not the upstream
+address. Bare `Host: admin.example.com` / `:443` and `Origin:
+https://admin.example.com` (no internal port) are accepted for allowlisted
+names; unknown ports such as `:9999` and unlisted names stay 403. Minimal
+proxy snippet (keep the manager off the tunnel):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name admin.example.com;
+    location / {
+        proxy_pass http://127.0.0.1:8766;
+        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+    }
+}
+```
+
 Point the sidecar profile at the internal bridge listener:
 
 ```yaml
@@ -170,6 +197,52 @@ The adapter has **no published port** and is reachable only on the private Compo
 network at `http://opencode-adapter:8770`. The bridge never receives provider
 credentials or the OpenCode URL. Never add a `ports:` entry to the adapter and never
 put the OpenCode server in this Compose file.
+
+## Operational container logs
+
+The primary operational view is the container logs (Docker `json-file` logging
+with `max-size: 10m` / `max-file: 3` rotation is already configured in
+`compose.yaml`):
+
+```sh
+docker compose logs -f bridge opencode-adapter
+docker compose logs --tail=200 bridge
+docker compose logs --tail=200 opencode-adapter
+```
+
+Both processes emit one-line JSON records with stable event names and bounded
+scalar fields only. Representative SAFE fields (placeholders, not real
+IDs/secrets):
+
+```json
+{"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"runtime_configured":true,"workspace_count":3}
+{"component":"bridge","event":"run_created","level":"INFO","job_id":"job_…","model":"provider/model","run_id":"run_…","session_id":"ses_…","workspace_id":"ws_…"}
+{"component":"bridge","event":"permission_asked","level":"INFO","action":"external_directory","request_id":"per_…","run_id":"run_…","source":"event","session_id":"ses_…"}
+{"component":"bridge","event":"run_state","level":"INFO","run_id":"run_…","state":"completed","reason":"idle"}
+{"component":"adapter","event":"eventhub_transition","level":"INFO","status":"subscribed","transitions":4}
+{"component":"adapter","event":"permission_list","level":"WARNING","code":"runtime_error","session_id":"ses_…","status":"degraded"}
+```
+
+`WB_LOG_LEVEL` (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`) controls both
+services. An invalid value fails fast at bridge startup (`BridgeError`); the
+adapter safely falls back to `INFO` with a warning record. Uvicorn access logs
+stay disabled — routine lifecycle is covered by the records above, not by
+request logs.
+
+Logs never contain prompts, message/final-response text, file contents,
+absolute paths, permission resources/patterns/metadata, tool arguments,
+workspace roots/names, tokens, usernames/passwords, or raw error bodies — only
+IDs, state/event names, counts, durations, sanitized codes and boolean health
+flags.
+
+Troubleshooting a stale `running` session (TUI says completed but the Bridge
+still shows running): look for the `event_stream` status in the bridge
+`bridge_ready` record and adapter `eventhub_transition` lines (is the stream
+`subscribed` or stuck `reconnecting`?), the run's `permission_sync` outcome in
+the API versus `permission_resync` log lines (`ok` with `matched` count means a
+successful listing; `degraded` with a sanitized `code` means the listing
+failed and stays retryable), and the startup `reconcile_start` /
+`reconcile_result` lines for the reconcile outcome.
 
 ## Image layering
 
@@ -277,17 +350,18 @@ archive includes no image layers, tokens or user project data.
 
 The default Docker state directory is **separate** from the native one. Do not run
 native and Docker services against the same state concurrently. A host-to-container
-mount may change device/inode identities even at the same path; the bridge must
-not silently re-pin trusted roots. The simplest switch is to preserve the native
+mount may change device/inode identities even at the same path; the same
+configured path stays usable and each request re-validates the current root
+with containment still enforced. The simplest switch is to preserve the native
 state as an archive, start fresh Docker state, register intended mappings, and
 update the host tunnel's shared credential. Old handoff files remain on the host,
 but fresh state does not import their job records.
 
-A state-preserving native-to-container migration requires reviewing paths,
-internal-port configuration and identity checks on the actual host. No automatic
-migration/import or SQLite identity bypass is supplied. For an already-working
+A state-preserving native-to-container migration requires reviewing paths and
+internal-port configuration on the actual host. No automatic
+migration/import is supplied. For an already-working
 Compose deployment, ordinary recreate/upgrade uses the existing Docker state;
-if root identities change, stop and investigate instead of weakening the checks.
+a genuinely missing root still fails as unavailable.
 
 ## Validation on your host
 

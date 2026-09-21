@@ -18,7 +18,14 @@ The bridge has no admin-token rotation button. For a compromised admin secret, s
 
 ## Root replacement / moving projects
 
-Mappings pin a root's device/inode and canonical path. Renaming/replacing the project makes the mapping fail. Existing mappings, including disabled mappings, cannot be overlapped. There is no destructive delete/remap operation; use fresh state with a preserved archive, or implement and review a deliberate state migration. Never bypass the pin by editing SQLite identifiers as a convenience.
+Mappings authorize a canonical path. The same configured path stays usable
+across reboot/remount even when device/inode identity changes; each request
+re-validates the current root and still enforces containment, excludes and
+scopes. A genuinely missing root fails as unavailable, and a symlink/file
+replacement fails closed. Existing mappings, including disabled mappings,
+cannot be overlapped. There is no destructive delete/remap operation and no
+automatic fallback search for moved repositories; use fresh state with a
+preserved archive, or implement and review a deliberate state migration.
 
 ## Limits and incomplete coverage
 
@@ -40,8 +47,10 @@ Native startup remains foreground-only; no launchd/systemd or reverse proxy is i
 v0.8 adds Dockerfile/Compose with restart policy, health check, non-root UID/GID,
 private persistent state, explicit project binds and a private client-only OpenCode
 adapter with no published port. See DOCKER.md. Native listeners
-remain loopback-only; only explicit container startup binds 0.0.0.0 inside the
+remain loopback-only by default; only explicit container startup binds 0.0.0.0 inside the
 container, with both Docker-published host ports restricted to 127.0.0.1.
+Setting `WB_ADMIN_ALLOWED_HOSTS` widens only the admin listener to 0.0.0.0 with
+those `Host` values allowed (MCP unaffected); invalid values fail closed.
 The tunnel client stays on the host; no Docker socket is mounted into the bridge.
 
 The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. OpenCode execution is available only through the bounded, opt-in agent tools and the separate host runtime; the server never exposes a shell or arbitrary command tool.
@@ -71,6 +80,58 @@ until the runtime is reachable rather than orphaning it. Pending requests are
 re-verified against the recorded session so a positively missing session becomes an
 explicit orphan instead of an indefinitely answerable wait.
 
+The OpenCode SSE/event stream is treated as optional best-effort
+acceleration: direct live validation in this environment (`curl -N` against
+the native event endpoint) produced only `server.connected`/`server.heartbeat`
+while a real session ran, so events are latency hints only and are never
+required for correctness. A dedicated reconciliation loop (independent of
+the 25s event long poll) owns authoritative state convergence while runs
+are active, sharing one run enumeration per sweep across checks but never
+merging their failure semantics:
+
+- Permissions: exact-session pending snapshot (V2 session-scoped primary
+  with V1 compatibility fallback) every ~4s for `starting`/`running` runs.
+  A successful empty snapshot is not a failure; a persisted request is
+  never resolved merely because it disappeared from a snapshot.
+- Completion: durable bounded session messages after the run floor every
+  ~7s (`starting`/`running` only, prompt acceptance proven, no pending
+  request). The latest in-scope completed non-error assistant message is
+  the only completion evidence; session status/idle never gate or prove it.
+- Questions: V2 session-scoped snapshot primary
+  (`GET /api/session/{sessionID}/question`), verified V1 global fallback
+  (`GET /question`, strictly filtered by exact owning `sessionID`) only
+  when V2 is explicitly unsupported/not-found (missing method, 404/405/501
+  or not-supported), every ~4s with the same strict binding/dedupe/
+  persistence semantics. A successful V2 response (even empty) never
+  consults V1; generic failures fail closed without fallback. Post-restart
+  live validation showed the deployed server not serving the V2 question
+  route while completion/permission polling worked, so the fallback is the
+  live-compatible path there. No TUI scraping, internal state reads,
+  private endpoints, text inference, or ownership guessing exist.
+
+Each sweep covers at most 50 distinct sessions, issues no work when no
+relevant active run exists, and stops polling terminal runs immediately.
+Expected worst-case detection latency is ~4s (poll tick) + 4s/7s cadence
+plus one bounded adapter round trip. `read_opencode_run` keeps an
+immediate permission resync, question resync and completion self-heal
+(`reason=read_reconcile`); sweeps complete with
+`reason=background_reconcile`. Waiting permission/question runs and
+pre-continuation history never complete a run, and completion notifies
+exactly once under repeated reads, sweeps and duplicate events.
+
+Event-stream health is functional, not just transport: the adapter counts
+raw/control (`server.connected`/`server.heartbeat`)/functional frames
+(`event_stream` in `/health`, counters and timestamps only, never
+contents). While runs are active, subscribed transport with no functional
+event for 45s reports `functional_status=degraded`
+(`reason=no_functional_events`); a never-subscribed transport reports
+`unknown` (`transport_not_subscribed`) instead of a false healthy. This
+diagnostic never blocks runs because polling is authoritative; degraded /
+recovered transitions log once at WARNING / INFO (DEBUG aggregate counts
+only). If the adapter is still starting, background loops back off safely
+(DEBUG inside the first 30s, throttled WARNINGs after) and recover
+automatically.
+
 The private adapter is **locked until `WB_RUNTIME_TOKEN` is set**: with an empty token
 every operational endpoint returns 401 and the bridge fails closed. `/health` reports
 `locked`/`token_configured` without revealing the token. Agent execution therefore
@@ -86,6 +147,32 @@ read the run's `notification` field in the manager or via `read_opencode_run`;
 `sent` confirms delivery and `failed` with `http_403` points at webhook/egress
 filtering, not the bridge payload. `workspace-bridge doctor` reports runtime
 configuration and the model policy status without contacting the host server.
+
+## Pi file permissions (3B1)
+
+Pi runs natively with your macOS user authority: the permission layer is
+pre-tool policy/approval, not a sandbox. By default Pi sessions are
+read-only (`read,grep,find,ls`; no trusted extension loaded). The local
+manager ("Manage permissions" on the Pi runtime card) can enable writable
+tools (`edit`/`write`) with per-tool Allow/Ask/Deny, workspace-relative
+protected glob patterns (hard deny, never approvable) with template
+exceptions, and an "Always allow exact target" session toggle.
+
+Safe defaults are read-only; restoring them is an explicit save, never a
+hidden mutation. Every change is validated strictly (invalid input never
+partially applies), logged as an activity event without policy contents,
+and applies to NEW Pi sessions only: each session carries an immutable
+policy snapshot plus revision, and continuation across a policy change is
+refused fail-closed (start a fresh session). An `ask` suspends the exact
+tool invocation and resumes it on `once`/`always`/`reject` through the
+existing neutral permission flow; `always` is exact-resource and
+session-local, never persisted. The adapter (`adapter_version >= 0.2.0`,
+`capabilities` in `/health`) re-validates the snapshot, confines every
+path canonically to the mapped workspace (symlink escapes denied), and
+self-protects the permission implementation from edit/write. No bash, no
+project/global extension discovery, no raw args/paths in pending records.
+Do not restart live services from an implementation job; the project lead
+deploys after audit.
 
 ## Writable handoff notes
 

@@ -1,0 +1,768 @@
+// Pi session ownership for the native host adapter.
+//
+// In-memory map ties each Pi sessionId to its owned child process, canonical
+// cwd, and bounded state. No restart resume/recovery from sessionFile yet:
+// child exit/EOF marks the session dead and every later operation fails
+// closed instead of silently creating a replacement.
+import { randomUUID } from "node:crypto";
+
+import { isTrustedExtensionUsable, trustedExtensionPath } from "./config.mjs";
+import { resolveSessionDir } from "./paths.mjs";
+import {
+  canonicalJson,
+  evaluateToolCall,
+  policyRevision,
+  safeDefaultPolicy,
+  selfProtectionDir,
+  validatePolicy,
+} from "./policy.mjs";
+import { PiRpcProcess, RpcError } from "./rpc.mjs";
+import {
+  MARKER_PREFIX,
+  OPTION_ALWAYS,
+  OPTION_ONCE,
+  OPTION_REJECT,
+} from "./trusted-permission-extension.mjs";
+
+export const MAX_MESSAGE_TEXT = 8000;
+export const MAX_MESSAGES = 100;
+export const MAX_TOOLS_PER_MESSAGE = 24;
+export const MAX_MODELS = 2000;
+export const TITLE_LIMIT = 200;
+export const MAX_PREFLIGHTS = 200;
+export const MAX_PENDING_PERMISSIONS = 50;
+
+// Opaque permission marker grammar: EXACTLY prefix + toolCallId, where the
+// id is 1..200 non-whitespace characters. No trailing text (tool, action,
+// resource, or path) is accepted; anything else fails closed.
+export function parseOpaqueMarker(title) {
+  if (typeof title !== "string" || !title.startsWith(MARKER_PREFIX)) return "";
+  const id = title.slice(MARKER_PREFIX.length);
+  if (!id || id.length > 200 || /[\s\0]/.test(id)) return "";
+  return id;
+}
+
+export class AdapterError extends Error {
+  constructor(message, status = 502, code = "runtime_unavailable") {
+    super(message);
+    this.name = "AdapterError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function bounded(value, limit) {
+  if (typeof value === "string") return value.slice(0, limit);
+  if (value === null || value === undefined) return "";
+  return String(value).slice(0, limit);
+}
+
+function textFromContent(content) {
+  // Concatenate visible text blocks only. Thinking/reasoning blocks,
+  // images, and tool arguments are never exposed.
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("");
+}
+
+function toolsFromContent(content) {
+  if (!Array.isArray(content)) return [];
+  const tools = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "toolCall" && typeof block.name === "string" && block.name) {
+      tools.push(block.name.slice(0, 120));
+    }
+  }
+  return tools.slice(0, MAX_TOOLS_PER_MESSAGE);
+}
+
+export function sanitizeMessage(raw, index) {
+  if (!raw || typeof raw !== "object") return null;
+  const role = bounded(raw.role, 40) || "unknown";
+  const text = textFromContent(raw.content ?? raw.text).slice(0, MAX_MESSAGE_TEXT);
+  const tools = toolsFromContent(raw.content);
+  const created = typeof raw.timestamp === "number" ? raw.timestamp : null;
+  const error = typeof raw.errorMessage === "string" && raw.errorMessage
+    ? raw.errorMessage.slice(0, 300)
+    : null;
+  // Completion evidence for assistant messages only, derived from the
+  // native stopReason. "stop"/"length" are successful terminal LLM turns;
+  // "toolUse" is an intermediate turn; "pending"/"deferred"/"error"/
+  // "aborted"/unknown/missing are never completion evidence. Fail closed
+  // for unknown future reasons. The raw stopReason itself is not exposed.
+  const stopReason = typeof raw.stopReason === "string" ? raw.stopReason : "";
+  const terminal = role === "assistant"
+    && (stopReason === "stop" || stopReason === "length")
+    && created !== null
+    && error === null;
+  return {
+    id: bounded(raw.id, 200) || `msg-${index}`,
+    role,
+    created,
+    completed: terminal ? created : null,
+    text,
+    tools,
+    error,
+  };
+}
+
+export function sanitizeMessages(raw, limit = 40) {
+  const count = Math.max(1, Math.min(Number(limit) || 40, MAX_MESSAGES));
+  if (!Array.isArray(raw)) throw new AdapterError("Pi message list was invalid", 502, "runtime_unavailable");
+  const rows = raw.slice(-MAX_MESSAGES);
+  const result = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const message = sanitizeMessage(rows[index], index);
+    if (message) result.push(message);
+  }
+  return result.slice(-count);
+}
+
+export function sanitizeModels(raw) {
+  if (!Array.isArray(raw)) throw new AdapterError("Pi model list was invalid", 502, "runtime_unavailable");
+  const result = [];
+  for (const row of raw.slice(0, MAX_MODELS)) {
+    if (!row || typeof row !== "object") continue;
+    const provider = bounded(row.provider, 120);
+    const id = bounded(row.id, 200);
+    if (!provider || !id) continue;
+    result.push({ provider, id, name: bounded(row.name, 200) || id });
+  }
+  return result;
+}
+
+// Normalize a prompt-async `model` value to {provider, id}, or null when
+// absent. Accepts "provider/id" strings and {provider,model|modelId|id}
+// objects (including the OpenCode-style providerID/modelID aliases).
+export function normalizeModelRef(model) {
+  if (model === null || model === undefined) return null;
+  if (typeof model === "string") {
+    const text = model.trim();
+    const slash = text.indexOf("/");
+    if (slash <= 0 || slash === text.length - 1) {
+      throw new AdapterError("Unsupported model selector", 400, "rejected");
+    }
+    return { provider: text.slice(0, slash).slice(0, 120), id: text.slice(slash + 1).slice(0, 200) };
+  }
+  if (typeof model === "object") {
+    const provider = bounded(model.provider ?? model.providerID ?? model.providerId, 120);
+    const id = bounded(model.model ?? model.modelID ?? model.modelId ?? model.id, 200);
+    if (!provider || !id) throw new AdapterError("Unsupported model selector", 400, "rejected");
+    return { provider, id };
+  }
+  throw new AdapterError("Unsupported model selector", 400, "rejected");
+}
+
+export class PiAdapter {
+  constructor({ projectsRoot, piBinary, agentDir, timeoutMs, spawnFn, maxLineBytes,
+                piUsable = true, piVersion = "" }) {
+    this.projectsRoot = projectsRoot;
+    this.piBinary = piBinary;
+    this.agentDir = agentDir;
+    this.timeoutMs = timeoutMs;
+    this.spawnFn = spawnFn;
+    this.maxLineBytes = maxLineBytes;
+    this.piUsable = piUsable;
+    this.piVersion = piVersion;
+    this.sessions = new Map();
+    this.instance = randomUUID();
+  }
+
+  get sessionCount() {
+    return this.sessions.size;
+  }
+
+  _entry(sessionId) {
+    return this.sessions.get(String(sessionId)) || null;
+  }
+
+  // Resolve the requested directory and require exact binding to the stored
+  // canonical cwd. Any mismatch fails closed.
+  _boundEntry(sessionId, directory) {
+    const entry = this._entry(sessionId);
+    if (!entry) return null;
+    let canonical;
+    try {
+      canonical = resolveSessionDir(this.projectsRoot, directory);
+    } catch {
+      throw new AdapterError("directory does not match the session workspace", 400, "rejected");
+    }
+    if (canonical !== entry.cwd) {
+      throw new AdapterError("directory does not match the session workspace", 400, "rejected");
+    }
+    if (entry.rpc.dead || !entry.rpc.alive) {
+      throw new AdapterError("Pi session is unavailable", 502, "unavailable");
+    }
+    return entry;
+  }
+
+  _spawnRpc(cwd, { extensionPath = null, extraEnv = {}, onEvent = null } = {}) {
+    return new PiRpcProcess({
+      binary: this.piBinary,
+      cwd,
+      agentDir: this.agentDir,
+      spawnFn: this.spawnFn,
+      timeoutMs: this.timeoutMs,
+      maxLineBytes: this.maxLineBytes,
+      extraEnv,
+      extensionPath,
+      onEvent,
+    });
+  }
+
+  // Resolve the Bridge-delivered permission policy into an immutable
+  // session snapshot (defense in depth: validated AGAIN here, and the
+  // Bridge-supplied revision must equal the recomputed canonical revision).
+  // - neither policy nor revision supplied => read-only safe default
+  //   (legacy Bridge compatibility only);
+  // - exactly one of policy/revision supplied => fail closed, no session;
+  // - supplied policy invalid or revision malformed => fail closed;
+  // - revision mismatch against the recomputed canonical revision =>
+  //   fail closed; a different snapshot revision is never silently accepted.
+  _snapshotPolicy(options) {
+    const raw = options && typeof options === "object" ? options.permission_policy : undefined;
+    const suppliedRevision = options && typeof options === "object" ? options.policy_revision : undefined;
+    const hasPolicy = raw !== undefined && raw !== null;
+    const hasRevision = suppliedRevision !== undefined && suppliedRevision !== null;
+    if (!hasPolicy && !hasRevision) {
+      const policy = safeDefaultPolicy();
+      return { policy, revision: policyRevision(policy), writable: false };
+    }
+    if (hasPolicy !== hasRevision) {
+      throw new AdapterError("Pi permission policy revision is missing", 400, "invalid_policy");
+    }
+    let policy;
+    try {
+      policy = validatePolicy(raw);
+    } catch {
+      throw new AdapterError("Pi permission policy is invalid", 400, "invalid_policy");
+    }
+    if (typeof suppliedRevision !== "string" || !/^[0-9a-fA-F]{64}$/.test(suppliedRevision)) {
+      throw new AdapterError("Pi permission policy revision is malformed", 400, "invalid_policy");
+    }
+    const computed = policyRevision(policy);
+    if (suppliedRevision.toLowerCase() !== computed) {
+      throw new AdapterError("Pi permission policy revision mismatch", 409, "conflict");
+    }
+    // Store the verified (equal) revision.
+    return { policy, revision: computed, writable: policy.enabled === true };
+  }
+
+  async createSession(directory, title = "", options = {}) {
+    if (!this.piUsable) {
+      throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
+    }
+    const cwd = resolveSessionDir(this.projectsRoot, directory);
+    const snapshot = this._snapshotPolicy(options);
+    // Writable mode requires the package-owned trusted extension to be a
+    // usable regular file; otherwise session creation fails closed. The
+    // full extension path is never logged or returned.
+    let extensionPath = null;
+    let extraEnv = {};
+    if (snapshot.writable) {
+      extensionPath = trustedExtensionPath();
+      if (!isTrustedExtensionUsable(extensionPath)) {
+        throw new AdapterError("Pi writable session is unavailable", 502, "unavailable");
+      }
+      extraEnv = { WB_PI_POLICY_JSON: canonicalJson(snapshot.policy) };
+    }
+    const holder = {};
+    const rpc = this._spawnRpc(cwd, {
+      extensionPath,
+      extraEnv,
+      onEvent: (message) => this._onRpcEvent(holder.entry || null, holder.sessionId || "", message),
+    });
+    let state;
+    try {
+      state = await rpc.start();
+    } catch (error) {
+      if (error instanceof RpcError) {
+        throw new AdapterError(error.message, error.status, error.code);
+      }
+      throw new AdapterError("Pi session creation failed", 502, "runtime_unavailable");
+    }
+    const sessionId = state && typeof state.sessionId === "string" ? state.sessionId : "";
+    if (!sessionId || this.sessions.has(sessionId)) {
+      try { await rpc.close({ graceMs: 0 }); } catch { /* best effort */ }
+      throw new AdapterError("Pi session binding failed", 502, "runtime_unavailable");
+    }
+    const entry = {
+      rpc,
+      cwd,
+      title: bounded(title, TITLE_LIMIT),
+      createdAt: Date.now(),
+      // Immutable permission snapshot for this session. Never mutated
+      // after creation; policy changes affect new sessions only.
+      permissionPolicy: snapshot.policy,
+      policyRevision: snapshot.revision,
+      writable: snapshot.writable,
+      preflights: new Map(),
+      pendingByUi: new Map(),
+      pendingByPermission: new Map(),
+    };
+    holder.entry = entry;
+    holder.sessionId = sessionId;
+    // Child exit/EOF must never leave UI waits hanging: drop correlation
+    // state so late HTTP responses fail closed as not_found.
+    rpc.onExit = () => {
+      entry.preflights.clear();
+      entry.pendingByUi.clear();
+      entry.pendingByPermission.clear();
+    };
+    this.sessions.set(sessionId, entry);
+    return { id: sessionId, directory: cwd, title: bounded(title, TITLE_LIMIT) };
+  }
+
+  async getSession(directory, sessionId) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) return null;
+    const state = await this._checkedState(entry, String(sessionId));
+    return {
+      session: { id: String(sessionId), directory: entry.cwd, title: entry.title },
+      status: state && state.isStreaming ? "busy" : "idle",
+      state: {
+        isStreaming: Boolean(state && state.isStreaming),
+        messageCount: typeof (state && state.messageCount) === "number" ? state.messageCount : null,
+        pendingMessageCount: typeof (state && state.pendingMessageCount) === "number"
+          ? state.pendingMessageCount
+          : null,
+      },
+    };
+  }
+
+  async sessionStatus(directory, sessionId) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    const state = await this._checkedState(entry, String(sessionId));
+    const streaming = Boolean(state && state.isStreaming);
+    return streaming ? "busy" : "idle";
+  }
+
+  // Run get_state and verify the returned sessionId still matches the
+  // adapter-owned session id. A drifted id fails closed (the entry is
+  // marked dead) and is never silently rebound.
+  async _checkedState(entry, ownedSessionId) {
+    let state;
+    try {
+      state = await entry.rpc.command("get_state");
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+    const reported = state && typeof state.sessionId === "string" ? state.sessionId : "";
+    if (reported && reported !== ownedSessionId) {
+      try { entry.rpc.failClosed("session drift"); } catch { /* best effort */ }
+      throw new AdapterError("Pi session is unavailable", 502, "unavailable");
+    }
+    return state;
+  }
+
+  async promptAsync(directory, sessionId, text, model = null) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    const message = bounded(text, 60000);
+    if (!message) throw new AdapterError("text is required", 400, "rejected");
+    const wanted = normalizeModelRef(model);
+    try {
+      if (wanted) await this._switchModel(entry.rpc, wanted);
+      await entry.rpc.command("prompt", { message });
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+    // The RPC prompt response means accepted only; work continues
+    // asynchronously and the Bridge polls.
+    return { accepted: true };
+  }
+
+  async _switchModel(rpc, wanted) {
+    let data;
+    try {
+      data = await rpc.command("get_available_models");
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+    const models = sanitizeModels(data && data.models);
+    const matches = models.filter((m) => m.provider === wanted.provider && m.id === wanted.id);
+    if (matches.length !== 1) {
+      throw new AdapterError("Unsupported model selector", 400, "rejected");
+    }
+    try {
+      await rpc.command("set_model", { provider: wanted.provider, modelId: wanted.id });
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+  }
+
+  async messages(directory, sessionId, limit = 40) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    let data;
+    try {
+      data = await entry.rpc.command("get_messages");
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+    return sanitizeMessages(data && data.messages, limit);
+  }
+
+  async listModels(directory) {
+    const cwd = resolveSessionDir(this.projectsRoot, directory);
+    if (!this.piUsable) {
+      throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
+    }
+    // Reuse a live child only for the exact same canonical workspace.
+    // Borrowing a child from another cwd could observe project-specific Pi
+    // configuration/trust state, so any other workspace gets a bounded
+    // short-lived child that is closed before returning.
+    for (const entry of this.sessions.values()) {
+      if (entry.cwd === cwd && !entry.rpc.dead && entry.rpc.alive) {
+        try {
+          const data = await entry.rpc.command("get_available_models");
+          return sanitizeModels(data && data.models);
+        } catch (error) {
+          throw this._asAdapterError(error);
+        }
+      }
+    }
+    const rpc = this._spawnRpc(cwd);
+    try {
+      await rpc.start();
+      const data = await rpc.command("get_available_models");
+      return sanitizeModels(data && data.models);
+    } catch (error) {
+      throw this._asAdapterError(error);
+    } finally {
+      try { await rpc.close({ graceMs: 1000 }); } catch { /* best effort */ }
+    }
+  }
+
+  async abortSession(directory, sessionId) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    // Abort resolves owned pending UI first so no extension select stays
+    // suspended, then aborts Pi. Best effort; never blocks the abort.
+    await this._cancelOwnedPending(entry);
+    // Normal abort uses RPC abort and waits for success; the child process
+    // is never killed for a normal abort.
+    try {
+      await entry.rpc.command("abort");
+    } catch (error) {
+      throw this._asAdapterError(error);
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------- permissions
+  // Resolve an entry for permission endpoints. Missing or dead sessions
+  // fail closed as not_found (never an empty success that callers could
+  // misread, and never a live binding to a dead child).
+  _permissionEntry(sessionId, directory) {
+    let canonical;
+    try {
+      canonical = resolveSessionDir(this.projectsRoot, directory);
+    } catch {
+      throw new AdapterError("directory does not match the session workspace", 400, "rejected");
+    }
+    const entry = this._entry(sessionId);
+    if (!entry || canonical !== entry.cwd) {
+      throw new AdapterError("Session not found", 404, "not_found");
+    }
+    if (entry.rpc.dead || !entry.rpc.alive) {
+      entry.preflights.clear();
+      entry.pendingByUi.clear();
+      entry.pendingByPermission.clear();
+      throw new AdapterError("Session not found", 404, "not_found");
+    }
+    return entry;
+  }
+
+  _evaluate(entry, toolName, input) {
+    return evaluateToolCall({
+      cwd: entry.cwd,
+      policy: entry.permissionPolicy,
+      toolName,
+      input,
+      selfProtectedDirs: [selfProtectionDir()],
+    });
+  }
+
+  _onRpcEvent(entry, sessionId, message) {
+    if (!entry || !message || typeof message !== "object") return;
+    if (this.sessions.get(String(sessionId)) !== entry) return;
+    try {
+      if (message.type === "tool_execution_start") {
+        this._onToolStart(entry, message);
+      } else if (message.type === "tool_execution_end") {
+        this._onToolEnd(entry, message);
+      } else if (message.type === "extension_ui_request") {
+        void this._onUiRequest(entry, String(sessionId), message);
+      }
+      // Unrelated events (agent_settled, ui_prompt_*, notify, ...) are ignored.
+    } catch {
+      // Correlation must never break the session; fail closed per event.
+    }
+  }
+
+  _onToolStart(entry, message) {
+    const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+    const toolName = typeof message.toolName === "string" ? message.toolName : "";
+    if (!toolCallId || toolCallId.length > 200 || !toolName) return;
+    // Normalized path-only permission metadata from the RPC layer (never
+    // raw tool payloads). Defensive: anything else evaluates as malformed.
+    // {path: null} marks a present-but-invalid path so evaluation denies
+    // instead of defaulting to the workspace root.
+    const rawInput = message.input;
+    const input = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+      ? rawInput
+      : null;
+    const verdict = this._evaluate(entry, toolName, input);
+    if (entry.preflights.size >= MAX_PREFLIGHTS) {
+      const oldest = entry.preflights.keys().next();
+      if (!oldest.done) entry.preflights.delete(oldest.value);
+    }
+    // Exact preflight for this toolCallId: validated name + args snapshot.
+    entry.preflights.set(toolCallId, {
+      toolName,
+      input,
+      effect: verdict.effect,
+      resource: verdict.resource,
+      grantKey: verdict.grantKey,
+      alwaysPattern: verdict.alwaysPattern,
+    });
+  }
+
+  _onToolEnd(entry, message) {
+    const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+    if (!toolCallId) return;
+    entry.preflights.delete(toolCallId);
+  }
+
+  _expectedUiOptions(entry) {
+    return entry.permissionPolicy.allow_session_always
+      ? [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]
+      : [OPTION_ONCE, OPTION_REJECT];
+  }
+
+  // Cancel one trusted UI request, or fail the owned RPC session closed
+  // when cancellation cannot be delivered. A malformed trusted ask that
+  // cannot be cancelled must never leave an untracked suspended call:
+  // failClosed marks the session dead (no replacement is ever created).
+  // Foreign non-WB UI stays ignored by the caller and never reaches here.
+  async _cancelOrFailClosed(entry, uiId) {
+    let delivered = false;
+    try {
+      delivered = await entry.rpc.writeUiResponse({ id: uiId, cancelled: true });
+    } catch {
+      delivered = false;
+    }
+    if (!delivered) {
+      try {
+        entry.rpc.failClosed("permission cancel undelivered");
+      } catch { /* best effort */ }
+    }
+  }
+
+  async _onUiRequest(entry, sessionId, message) {
+    // Accept only the exact trusted marker/options shape. The marker is
+    // opaque: EXACTLY prefix + toolCallId with no trailing text. Anything
+    // else is ignored (fire-and-forget UI) or cancelled fail-closed below.
+    if (message.method !== "select") return;
+    const uiId = typeof message.id === "string" ? message.id : "";
+    const title = typeof message.title === "string" ? message.title : "";
+    const options = Array.isArray(message.options) ? message.options : null;
+    if (!uiId || uiId.length > 200 || !options) return;
+    if (entry.pendingByUi.has(uiId)) return; // duplicate redelivery: ignore
+    const toolCallId = parseOpaqueMarker(title);
+    if (!toolCallId) {
+      // No valid marker: foreign UI or malformed shape. Cancel only when
+      // it claims our marker prefix (a broken trusted ask must not hang);
+      // otherwise ignore unrelated UI.
+      if (title.startsWith(MARKER_PREFIX)) {
+        await this._cancelOrFailClosed(entry, uiId);
+      }
+      return;
+    }
+    const preflight = entry.preflights.get(toolCallId);
+    if (!preflight) {
+      // No exact preflight for this call: never allow.
+      await this._cancelOrFailClosed(entry, uiId);
+      return;
+    }
+    const expected = this._expectedUiOptions(entry);
+    if (options.length !== expected.length || !expected.every((v, i) => options[i] === v)) {
+      await this._cancelOrFailClosed(entry, uiId);
+      return;
+    }
+    // Recompute ask against the immutable snapshot; duplicates, mismatches
+    // and non-ask effects fail closed without a pending record.
+    const verdict = this._evaluate(entry, preflight.toolName, preflight.input);
+    if (verdict.effect !== "ask"
+        || verdict.grantKey !== preflight.grantKey
+        || verdict.resource !== preflight.resource) {
+      await this._cancelOrFailClosed(entry, uiId);
+      return;
+    }
+    if (entry.pendingByPermission.size >= MAX_PENDING_PERMISSIONS) {
+      await this._cancelOrFailClosed(entry, uiId);
+      return;
+    }
+    const permissionId = `perm_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    const record = {
+      id: permissionId,
+      uiId,
+      sessionId,
+      tool: verdict.tool,
+      action: verdict.action,
+      resource: verdict.resource,
+      requested: verdict.requested,
+      alwaysPattern: verdict.alwaysPattern,
+      toolCallId,
+      created: new Date().toISOString(),
+      reason: verdict.reason,
+      code: verdict.code,
+    };
+    entry.pendingByUi.set(uiId, record);
+    entry.pendingByPermission.set(permissionId, record);
+  }
+
+  _publicPending(record) {
+    // Bounded public record only: no raw args, file contents, reasoning,
+    // tokens, or outside paths.
+    return {
+      session: String(record.sessionId).slice(0, 200),
+      id: String(record.id).slice(0, 200),
+      tool: String(record.tool).slice(0, 40),
+      action: String(record.action).slice(0, 120),
+      resource: String(record.resource).slice(0, 400),
+      requested: (Array.isArray(record.requested) ? record.requested : []).slice(0, 8)
+        .map((v) => String(v).slice(0, 400)),
+      always_pattern: String(record.alwaysPattern || "").slice(0, 400),
+      tool_call_id: String(record.toolCallId).slice(0, 200),
+      created: String(record.created).slice(0, 60),
+      metadata: {
+        reason: String(record.reason || "").slice(0, 200),
+        code: String(record.code || "").slice(0, 80),
+      },
+    };
+  }
+
+  async listPermissions(directory, sessionId) {
+    const entry = this._permissionEntry(sessionId, directory);
+    return [...entry.pendingByPermission.values()].map((record) => this._publicPending(record));
+  }
+
+  async respondPermission(directory, sessionId, permissionId, response) {
+    if (response !== "once" && response !== "always" && response !== "reject") {
+      throw new AdapterError("response must be once, always or reject", 400, "rejected");
+    }
+    const entry = this._permissionEntry(sessionId, directory);
+    const pid = String(permissionId || "");
+    const record = entry.pendingByPermission.get(pid);
+    if (!record || record.sessionId !== String(sessionId)) {
+      throw new AdapterError("Permission not found", 404, "not_found");
+    }
+    if (response === "always" && !entry.permissionPolicy.allow_session_always) {
+      throw new AdapterError("Always-allow is disabled by policy", 400, "rejected");
+    }
+    // The pending record is only honored while the EXACT original
+    // preflight still exists and re-evaluates identically. A missing or
+    // changed preflight fails closed: once/always can never send an allow
+    // response without it. Stale waits are removed ONLY after the
+    // cancellation delivery is positively confirmed; a failed cancel keeps
+    // the pending record and reports unavailable (never success). A reject
+    // on a stale wait returns ok only after confirmed cancellation (never
+    // a validated approval).
+    const preflight = entry.preflights.get(record.toolCallId);
+    if (!preflight) {
+      const cancelled = await this._confirmedCancel(entry, record.uiId);
+      if (!cancelled) {
+        throw new AdapterError("Pi session is unavailable", 502, "unavailable");
+      }
+      entry.pendingByUi.delete(record.uiId);
+      entry.pendingByPermission.delete(pid);
+      if (response === "reject") {
+        return { ok: true, decision: "reject" };
+      }
+      throw new AdapterError("Permission scope changed; failing closed", 409, "conflict");
+    }
+    const verdict = this._evaluate(entry, preflight.toolName, preflight.input);
+    if (verdict.effect !== "ask"
+        || verdict.grantKey !== preflight.grantKey
+        || verdict.resource !== record.resource) {
+      const cancelled = await this._confirmedCancel(entry, record.uiId);
+      if (!cancelled) {
+        throw new AdapterError("Pi session is unavailable", 502, "unavailable");
+      }
+      entry.pendingByUi.delete(record.uiId);
+      entry.pendingByPermission.delete(pid);
+      throw new AdapterError("Permission scope changed; failing closed", 409, "conflict");
+    }
+    let payload;
+    if (response === "once") payload = { id: record.uiId, value: OPTION_ONCE };
+    else if (response === "always") payload = { id: record.uiId, value: OPTION_ALWAYS };
+    else payload = { id: record.uiId, cancelled: true };
+    const written = await entry.rpc.writeUiResponse(payload);
+    if (!written) {
+      throw new AdapterError("Pi session is unavailable", 502, "unavailable");
+    }
+    // Remove pending only after the response was positively confirmed.
+    entry.pendingByUi.delete(record.uiId);
+    entry.pendingByPermission.delete(pid);
+    return { ok: true, decision: response };
+  }
+
+  // Positively confirmed cancellation of one suspended UI request.
+  // Resolves true only when the extension_ui_response write callback
+  // confirms delivery; false on any validation failure, throw, or
+  // callback error. Never removes caller state itself.
+  async _confirmedCancel(entry, uiId) {
+    try {
+      return await entry.rpc.writeUiResponse({ id: uiId, cancelled: true });
+    } catch {
+      return false;
+    }
+  }
+
+  async _cancelOwnedPending(entry) {
+    // Best-effort cancellation of owned suspended UI only; abort never
+    // reports a permission approval.
+    const cancels = [];
+    for (const record of entry.pendingByUi.values()) {
+      try {
+        cancels.push(entry.rpc.writeUiResponse({ id: record.uiId, cancelled: true }));
+      } catch { /* best effort */ }
+    }
+    if (cancels.length) {
+      try {
+        await Promise.allSettled(cancels);
+      } catch { /* best effort */ }
+    }
+    entry.pendingByUi.clear();
+    entry.pendingByPermission.clear();
+  }
+
+  _asAdapterError(error) {
+    if (error instanceof AdapterError) return error;
+    if (error instanceof RpcError) return new AdapterError(error.message, error.status, error.code);
+    if (error && error.code === "rejected") {
+      return new AdapterError(String(error.message || "rejected"), 400, "rejected");
+    }
+    return new AdapterError("Pi runtime is unavailable", 502, "runtime_unavailable");
+  }
+
+  // Bounded-grace shutdown of owned children only.
+  async shutdown({ graceMs = 3000 } = {}) {
+    const entries = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.all(entries.map(async (entry) => {
+      try { await entry.rpc.close({ graceMs }); } catch { /* best effort */ }
+    }));
+  }
+}

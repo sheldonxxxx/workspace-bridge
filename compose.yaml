@@ -27,12 +27,29 @@ services:
       WB_PROJECTS_DIR: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
       WB_MCP_PORT: ${WB_MCP_PORT:-8765}
       WB_ADMIN_PORT: ${WB_ADMIN_PORT:-8766}
+      # Opt-in remote admin Host allowlist (bare hostnames/IPs, comma-separated).
+      # Empty (default) keeps the manager loopback-only. When set, the admin
+      # listener binds 0.0.0.0 inside the container and allows those Host values.
+      # MCP is unaffected. Prefer SSH forwarding/VPN; never tunnel the manager.
+      WB_ADMIN_ALLOWED_HOSTS: ${WB_ADMIN_ALLOWED_HOSTS:-}
       # Client boundary to the private OpenCode SDK adapter; the bridge never
       # reaches the host OpenCode server directly and never starts one.
       # WB_RUNTIME_TOKEN must be set for agent operations; empty locks the adapter.
       WB_OPENCODE_RUNTIME_URL: http://opencode-adapter:8770
+      # Optional native macOS Pi host-adapter URL, e.g. http://host.docker.internal:8780.
+      # Empty (default) leaves Pi unconfigured. No Pi Compose service exists:
+      # the adapter runs natively on the Mac and the bridge only holds this
+      # URL plus the shared runtime token (provider credentials stay on the Mac).
+      # The adapter must stay bound narrowly; verified on this host under
+      # OrbStack 29.4.0: the container host.docker.internal gateway reached
+      # the native 127.0.0.1-bound adapter. Docker Desktop behavior may
+      # differ and must be smoke-tested; never broaden to 0.0.0.0/LAN.
+      WB_PI_RUNTIME_URL: ${WB_PI_RUNTIME_URL:-}
       WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
       WB_DISCORD_WEBHOOK_URL: ${WB_DISCORD_WEBHOOK_URL:-}
+      # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.
+      # Invalid values fail fast at bridge startup (BridgeError); see docs/DOCKER.md.
+      WB_LOG_LEVEL: ${WB_LOG_LEVEL:-INFO}
     ports:
       - "127.0.0.1:${WB_MCP_PORT:-8765}:8765"
       - "127.0.0.1:${WB_ADMIN_PORT:-8766}:8766"
@@ -70,7 +87,7 @@ services:
     # host OpenCode server and never creates/starts one.
     build:
       context: ./runtime/opencode-adapter
-    image: workspace-bridge-opencode-adapter:0.1.4
+    image: workspace-bridge-opencode-adapter:0.1.9
     container_name: workspace-bridge-opencode-adapter
     init: true
     restart: unless-stopped
@@ -89,6 +106,9 @@ services:
       # Empty token locks every adapter endpoint (fail closed); set it to enable runs.
       WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
       WB_ADAPTER_PORT: "8770"
+      # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.
+      # Invalid values safely fall back to INFO with a warning record.
+      WB_LOG_LEVEL: ${WB_LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # No ports: the adapter must never be host-published.
@@ -115,7 +135,7 @@ services:
       [
         "--profile-file",
         "/etc/tunnel-client/tunnel-client.yaml"
-      ]    
+      ]        
     env_file:
       - tunnel.env
     depends_on:

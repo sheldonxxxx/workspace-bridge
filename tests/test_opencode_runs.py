@@ -39,6 +39,18 @@ def permission_wait(agent_env, run, pattern=("/Users/me/projects/**",), permissi
     return call(agent_env, "read_opencode_run", run_id=run["run_id"])
 
 
+def hold_open(agent_env):
+    """Script a transcript with no durable completion evidence.
+
+    Permission/cancel/pre-start tests isolate non-completion behavior, so
+    the fake session must not contain a completed assistant message that
+    the live completion probe would (correctly) complete from. Assertions
+    on the tested behavior are unchanged.
+    """
+    from workspace_bridge.runtime import MessageInfo
+    agent_env["runtime"].messages_script = [MessageInfo(id="u", role="user", created=1)]
+
+
 # --------------------------------------------------------------- policy/migration
 def test_agent_execution_is_separate_and_fails_closed(agent_env, payload):
     assert call(agent_env, "workspace_info")["agent_execution"] == "enabled"
@@ -159,6 +171,7 @@ def test_permission_asked_creates_wait_and_external_reply_resolves(agent_env, pa
     """Realistic v1 ask -> wait -> manual approval in an attached client."""
     job = publish(agent_env, payload)
     run = start(agent_env, job["id"], "asked-flow")
+    hold_open(agent_env)
     asked = permission_event(run["session_id"], "per_asked", permission="edit",
                              patterns=["/data/requested/**"], always=["/data/always/**"])
     assert asked["type"] == "permission.asked"
@@ -226,6 +239,7 @@ def test_legacy_single_scope_ask_remains_reviewable(agent_env, payload):
 def test_waiting_permission_persists_and_once_resumes_same_session(agent_env, payload):
     job = publish(agent_env, payload)
     run = start(agent_env, job["id"])
+    hold_open(agent_env)
     detail = permission_wait(agent_env, run)
     assert detail["state"] == "waiting_permission" and detail["active"] is True
     pending = detail["pending_requests"]
@@ -332,6 +346,7 @@ def test_session_error_fails_with_sanitized_code(agent_env, payload):
 def test_cancel_positive_and_uncertain(agent_env, payload):
     job = publish(agent_env, payload)
     run = start(agent_env, job["id"])
+    hold_open(agent_env)
     assert call(agent_env, "cancel_opencode_run", run_id=run["run_id"])["state"] == "cancelled"
     assert agent_env["runtime"].abort_calls[-1] == (str(agent_env["root"]), run["session_id"])
 
@@ -430,6 +445,7 @@ def test_stale_idle_before_prompt_acceptance_cannot_complete(agent_env, payload)
         agent_env["service"].orchestrator.handle_event({"type": "session.idle", "session_id": session_id})
     agent_env["runtime"].prompt_hook = hook
     run = start(agent_env, job["id"], "stale-idle")
+    hold_open(agent_env)
     detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
     assert detail["state"] == "running" and detail["active"] is True
     assert detail["result"]["summary"] == "" and detail["result"]["has_final_response"] is False
@@ -451,6 +467,7 @@ def test_idle_without_completed_assistant_does_not_complete(agent_env, payload):
 def test_permission_replied_event_wins_the_respond_race(agent_env, payload):
     job = publish(agent_env, payload)
     run = start(agent_env, job["id"], "reply-race")
+    hold_open(agent_env)
     permission_wait(agent_env, run, pattern=("/x/**",), permission_id="per_race")
     def hook(session_id, permission_id, response):
         agent_env["service"].orchestrator.handle_event(
@@ -647,3 +664,473 @@ def test_missing_observed_directory_orphans_on_reconcile(agent_env, payload):
         assert detail["requests"][0]["state"] == "orphaned"
     finally:
         reopened.close()
+
+
+# --------------------------------------- missed permission.asked recovery
+def test_missed_ask_recovered_on_read_with_exact_scopes(agent_env, payload):
+    """CRITICAL regression: a live event never observed is repaired by a status read."""
+    from runtime_fakes import pending_permission
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "missed-ask")
+    hold_open(agent_env)
+    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] in ("running", "starting")
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission(run["session_id"], "per_missed",
+                           pattern=["/data/always/**"],
+                           requested_patterns=["/data/requested/**"]))
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["state"] == "waiting_permission" and detail["active"] is True
+    assert detail["pending_request_count"] == 1
+    assert detail["pending_requests"][0]["request_id"] == "per_missed"
+    # The exact OpenCode-proposed always scope stays in `pattern`;
+    # the requested target stays separately reviewable.
+    assert detail["pending_requests"][0]["pattern"] == ["/data/always/**"]
+    assert detail["pending_requests"][0]["requested_patterns"] == ["/data/requested/**"]
+    assert agent_env["runtime"].list_pending_calls[-1] == (str(agent_env["root"]), run["session_id"])
+
+
+def test_respond_once_resumes_recovered_session(agent_env, payload):
+    from runtime_fakes import pending_permission
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "recover-respond")
+    hold_open(agent_env)
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"], pending_permission(run["session_id"], "per_rec"))
+    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] == "waiting_permission"
+    response = call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                    request_id="per_rec", decision="once")
+    assert response["resumed_same_session"] is True and response["run_state"] == "running"
+    assert agent_env["runtime"].respond_calls == [(run["session_id"], "per_rec", "once")]
+    after = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert after["state"] == "running" and after["pending_requests"] == []
+    assert after["requests"][0]["decision"] == "once" and after["requests"][0]["state"] == "approved"
+
+
+def test_recovery_is_idempotent_across_read_and_restart(agent_env, payload):
+    from runtime_fakes import pending_permission
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "idempotent-recovery")
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission(run["session_id"], "per_dup",
+                           pattern=["/a/**"], requested_patterns=["/r/**"]))
+    first = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert first["pending_request_count"] == 1
+    second = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert second["pending_request_count"] == 1
+    agent_env["service"].orchestrator.reconcile_startup()
+    third = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert third["pending_request_count"] == 1
+    with agent_env["service"].lock:
+        count = agent_env["service"].db.execute(
+            "SELECT count(*) FROM agent_requests WHERE run=?", (run["run_id"],)).fetchone()[0]
+    assert count == 1
+    waits = [c for c in agent_env["notifier"].calls if c.get("state") == "waiting_permission"]
+    assert len(waits) == 1
+
+
+def test_restart_reconcile_recovers_unpersisted_ask(agent_env, payload):
+    from runtime_fakes import pending_permission
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "restart-missed")
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission(run["session_id"], "per_restart",
+                           pattern=["/data/always/**"],
+                           requested_patterns=["/data/requested/**"]))
+    reopened = _reopen(agent_env)
+    try:
+        reopened.orchestrator.reconcile_startup()
+        detail = reopened.call(agent_env["id"], agent_env["token"], "read_opencode_run",
+                               {"run_id": run["run_id"]})
+        assert detail["state"] == "waiting_permission"
+        assert detail["pending_request_count"] == 1
+        assert detail["pending_requests"][0]["request_id"] == "per_restart"
+        answered = reopened.call(agent_env["id"], agent_env["token"], "respond_opencode_permission",
+                                 {"run_id": run["run_id"], "request_id": "per_restart",
+                                  "decision": "once"})
+        assert answered["run_state"] == "running"
+    finally:
+        reopened.close()
+
+
+def test_permission_list_error_leaves_run_active(agent_env, payload):
+    from workspace_bridge.runtime import RuntimeUnavailable
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "list-error")
+    hold_open(agent_env)
+    agent_env["runtime"].set_list_pending_error(RuntimeUnavailable("adapter is down"))
+    try:
+        detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    finally:
+        agent_env["runtime"].set_list_pending_error(None)
+    assert detail["state"] in ("running", "starting")
+    assert detail["pending_request_count"] == 0
+    assert detail["pending_requests"] == []
+
+
+def test_cross_session_permission_never_attached(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "cross-session")
+    hold_open(agent_env)
+    ws = agent_env["service"].workspace(agent_env["id"], False)
+    row = agent_env["service"].orchestrator._row(ws, run["run_id"])
+    agent_env["service"].orchestrator._on_permission(
+        dict(row), {"id": "per_x", "session_id": "ses_other", "action": "edit",
+                    "title": "t", "pattern": ["/other/**"],
+                    "requested_patterns": ["/other/**"]})
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_request_count"] == 0
+    assert detail["state"] in ("running", "starting")
+
+
+def test_empty_list_does_not_resolve_persisted_wait(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "persisted-wait")
+    permission_wait(agent_env, run)
+    # OpenCode reports nothing pending (e.g. it restarted and lost the ask);
+    # the Bridge-persisted request must remain waiting, never auto-resolve.
+    assert agent_env["runtime"].list_pending_permissions(
+        str(agent_env["root"]), run["session_id"]) == []
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["state"] == "waiting_permission"
+    assert detail["pending_request_count"] == 1
+    assert detail["pending_requests"][0]["request_id"] == "per_1"
+
+
+# --------------------------------- permission-list failure observability (0.1.6)
+def test_list_failure_is_visible_degraded_without_fabrication(agent_env, payload):
+    """Regression: a failed listing is a visible degraded diagnostic, not []."""
+    from workspace_bridge.runtime import RuntimeRejected
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "list-degraded")
+    hold_open(agent_env)
+    agent_env["runtime"].set_list_pending_error(
+        RuntimeRejected("upstream encoding failure", "runtime_rejected"))
+    try:
+        detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    finally:
+        agent_env["runtime"].set_list_pending_error(None)
+    assert detail["state"] in ("running", "starting")
+    assert detail["active"] is True
+    assert detail["pending_request_count"] == 0
+    assert detail["pending_requests"] == []
+    sync = detail["permission_sync"]
+    assert sync["status"] == "degraded"
+    assert sync["reason"] == "permission_list_failed"
+    assert sync["matched"] is None
+    # No approval fabricated, no request persisted, no terminal failure.
+    assert detail["requests"] == []
+    assert detail["error"] is None
+
+
+def test_successful_resync_recovers_and_clears_diagnostic(agent_env, payload):
+    """A later successful list recovers the exact ask and clears degraded state."""
+    from runtime_fakes import pending_permission
+    from workspace_bridge.runtime import RuntimeUnavailable
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "recover-clears")
+    hold_open(agent_env)
+    agent_env["runtime"].set_list_pending_error(RuntimeUnavailable("adapter is down"))
+    try:
+        degraded = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    finally:
+        agent_env["runtime"].set_list_pending_error(None)
+    assert degraded["permission_sync"]["status"] == "degraded"
+    assert degraded["pending_request_count"] == 0
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission(run["session_id"], "per_late",
+                           pattern=["/data/always/**"],
+                           requested_patterns=["/data/requested/**"]))
+    recovered = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert recovered["state"] == "waiting_permission"
+    assert recovered["pending_request_count"] == 1
+    assert recovered["pending_requests"][0]["request_id"] == "per_late"
+    assert recovered["pending_requests"][0]["pattern"] == ["/data/always/**"]
+    assert recovered["permission_sync"]["status"] == "ok"
+    assert recovered["permission_sync"]["matched"] == 1
+
+
+def test_successful_empty_list_is_ok_and_distinct_from_failure(agent_env, payload):
+    """Successful [] reports ok/empty; it never looks like a failed listing."""
+    from workspace_bridge.runtime import RuntimeUnavailable
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "empty-ok")
+    hold_open(agent_env)
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_request_count"] == 0
+    assert detail["permission_sync"]["status"] == "ok"
+    assert detail["permission_sync"]["matched"] == 0
+    agent_env["runtime"].set_list_pending_error(RuntimeUnavailable("down"))
+    try:
+        failed = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    finally:
+        agent_env["runtime"].set_list_pending_error(None)
+    assert failed["permission_sync"]["status"] == "degraded"
+    assert failed["permission_sync"]["reason"] == "permission_list_failed"
+
+
+def test_binding_failure_is_visible_and_fail_closed(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "binding-diagnostic")
+    hold_open(agent_env)
+    agent_env["runtime"].set_session_directory("/somewhere/else")
+    try:
+        detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    finally:
+        agent_env["runtime"].set_session_directory(str(agent_env["root"]))
+    assert detail["state"] in ("running", "starting")
+    assert detail["pending_request_count"] == 0
+    assert detail["permission_sync"]["status"] == "degraded"
+    assert detail["permission_sync"]["reason"] == "session_binding"
+    assert detail["requests"] == []
+
+
+def test_start_marks_run_degraded_when_event_stream_not_subscribed(agent_env, payload):
+    job = publish(agent_env, payload)
+    agent_env["runtime"].event_stream_status = "reconnecting"
+    try:
+        run = start(agent_env, job["id"], "event-degraded-start")
+    finally:
+        agent_env["runtime"].event_stream_status = "subscribed"
+    assert run["permission_sync"] is not None
+    assert run["permission_sync"]["status"] == "degraded"
+    assert run["permission_sync"]["reason"] == "event_stream_not_subscribed"
+
+
+def test_runtime_status_exposes_event_stream_health(agent_env, payload):
+    status = agent_env["service"].orchestrator.runtime_status()
+    assert status["configured"] is True
+    assert isinstance(status.get("event_stream"), dict)
+    assert status["event_stream"]["status"] == "subscribed"
+
+
+# ------------------------------------------------- V2 permission generation (0.1.8)
+def test_v2_pending_recovers_wait_while_legacy_surface_is_empty(agent_env, payload):
+    """Exact live-bug shape: a real V2 pending ask exists for the run session
+    while the legacy V1 listing surface successfully returns []."""
+    from runtime_fakes import pending_permission_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-missed-ask")
+    hold_open(agent_env)
+    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] in ("running", "starting")
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission_v2(run["session_id"], "per_v2_live",
+                              action="external_directory",
+                              resources=["/data/requested/**"],
+                              save=["/data/always/**"]))
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["state"] == "waiting_permission" and detail["active"] is True
+    assert detail["pending_request_count"] == 1
+    pending = detail["pending_requests"][0]
+    assert pending["request_id"] == "per_v2_live"
+    assert pending["action"] == "external_directory"
+    assert pending["pattern"] == ["/data/always/**"]
+    assert pending["requested_patterns"] == ["/data/requested/**"]
+    assert pending["generation"] == "v2"
+    assert agent_env["runtime"].last_permission_source == "v2"
+    assert detail["permission_sync"]["status"] == "ok"
+    assert detail["permission_sync"]["matched"] == 1
+    assert detail["permission_sync"]["source"] == "v2"
+
+
+def test_v2_asked_event_transitions_without_resync(agent_env, payload):
+    from runtime_fakes import permission_event_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-live-event")
+    before = len(agent_env["runtime"].list_pending_calls)
+    agent_env["service"].orchestrator.handle_event(
+        permission_event_v2(run["session_id"], "per_v2_evt",
+                            resources=["/data/requested/**"],
+                            save=["/data/always/**"]))
+    assert len(agent_env["runtime"].list_pending_calls) == before
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["state"] == "waiting_permission"
+    assert detail["pending_requests"][0]["request_id"] == "per_v2_evt"
+    assert detail["pending_requests"][0]["generation"] == "v2"
+
+
+def test_v2_event_and_snapshot_dedupe_by_request_id(agent_env, payload):
+    from runtime_fakes import pending_permission_v2, permission_event_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-dedupe")
+    agent_env["service"].orchestrator.handle_event(
+        permission_event_v2(run["session_id"], "per_v2_dup",
+                            resources=["/data/requested/**"],
+                            save=["/data/always/**"]))
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission_v2(run["session_id"], "per_v2_dup",
+                              resources=["/data/requested/**"],
+                              save=["/data/always/**"]))
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_request_count"] == 1
+    with agent_env["service"].lock:
+        count = agent_env["service"].db.execute(
+            "SELECT count(*) FROM agent_requests WHERE run=?", (run["run_id"],)).fetchone()[0]
+    assert count == 1
+
+
+def test_v2_once_reply_routes_v2_and_resumes_same_session(agent_env, payload):
+    from runtime_fakes import pending_permission_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-respond")
+    hold_open(agent_env)
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission_v2(run["session_id"], "per_v2_once",
+                              resources=["/data/requested/**"],
+                              save=["/data/always/**"]))
+    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] == "waiting_permission"
+    response = call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                    request_id="per_v2_once", decision="once")
+    assert response["resumed_same_session"] is True and response["run_state"] == "running"
+    assert response["generation"] == "v2"
+    assert agent_env["runtime"].respond_calls == [(run["session_id"], "per_v2_once", "once")]
+    assert agent_env["runtime"].respond_generations == ["v2"]
+    after = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert after["state"] == "running" and after["pending_requests"] == []
+    assert after["requests"][0]["decision"] == "once" and after["requests"][0]["state"] == "approved"
+
+
+def test_v1_reply_still_routes_v1(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v1-still-v1")
+    permission_wait(agent_env, run)
+    response = call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                    request_id="per_1", decision="once")
+    assert response["generation"] == "v1"
+    assert agent_env["runtime"].respond_generations == ["v1"]
+
+
+def test_v2_always_requires_exact_save_scope(agent_env, payload):
+    from runtime_fakes import pending_permission_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-no-save")
+    agent_env["runtime"].add_pending_permission(
+        run["session_id"],
+        pending_permission_v2(run["session_id"], "per_v2_nosave",
+                              resources=["/data/requested/**"]))
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_requests"][0]["pattern"] == []
+    assert detail["pending_requests"][0]["requested_patterns"] == ["/data/requested/**"]
+    with pytest.raises(BridgeError) as exc:
+        call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+             request_id="per_v2_nosave", decision="always")
+    assert exc.value.code == "always_scope_unknown"
+    assert agent_env["runtime"].respond_calls == []
+    assert call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                request_id="per_v2_nosave", decision="once")["request_state"] == "approved"
+
+
+def test_wrong_session_v2_request_is_discarded(agent_env, payload):
+    from runtime_fakes import pending_permission_v2, permission_event_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-cross-session")
+    hold_open(agent_env)
+    ws = agent_env["service"].workspace(agent_env["id"], False)
+    row = agent_env["service"].orchestrator._row(ws, run["run_id"])
+    other = pending_permission_v2("ses_other", "per_v2_x",
+                                  resources=["/other/**"], save=["/other/**"])
+    agent_env["service"].orchestrator._on_permission(
+        dict(row), {"id": other.id, "session_id": other.session_id, "action": other.action,
+                    "title": "", "pattern": list(other.pattern),
+                    "requested_patterns": list(other.requested_patterns),
+                    "generation": "v2"})
+    agent_env["service"].orchestrator.handle_event(
+        permission_event_v2("ses_child_unowned", "per_v2_child",
+                            resources=["/child/**"], save=["/child/**"]))
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_request_count"] == 0
+    assert detail["state"] in ("running", "starting")
+
+
+def test_v2_empty_snapshot_never_invents_a_request(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "v2-empty")
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_request_count"] == 0
+    assert detail["requests"] == []
+    assert detail["permission_sync"]["status"] == "ok"
+    assert detail["permission_sync"]["matched"] == 0
+    assert detail["permission_sync"]["source"] == "v2"
+
+
+def test_legacy_v1_rows_without_generation_keep_working_as_v1(agent_env, payload):
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "legacy-row")
+    permission_wait(agent_env, run)
+    with agent_env["service"].lock:
+        agent_env["service"].db.execute(
+            "UPDATE agent_requests SET generation='v1' WHERE run=?", (run["run_id"],))
+        agent_env["service"].db.commit()
+    response = call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                    request_id="per_1", decision="reject")
+    assert response["request_state"] == "rejected" and response["generation"] == "v1"
+    assert agent_env["runtime"].respond_generations == ["v1"]
+
+
+def test_unknown_stored_generation_fails_closed(agent_env, payload):
+    import sqlite3
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "bad-generation")
+    permission_wait(agent_env, run)
+    with agent_env["service"].lock:
+        try:
+            agent_env["service"].db.execute(
+                "UPDATE agent_requests SET generation='v9' WHERE run=?", (run["run_id"],))
+            agent_env["service"].db.commit()
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            with pytest.raises(BridgeError) as exc:
+                call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+                     request_id="per_1", decision="once")
+            assert exc.value.code == "incompatible_request"
+            assert agent_env["runtime"].respond_calls == []
+            return
+    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    assert detail["pending_requests"][0]["generation"] == "v1"
+
+
+def test_permission_logs_carry_generation_without_scopes(agent_env, payload):
+    import json
+    import logging
+    from runtime_fakes import pending_permission_v2, permission_event_v2
+    job = publish(agent_env, payload)
+    run = start(agent_env, job["id"], "log-hygiene")
+    lines: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    logger = logging.getLogger("workspace_bridge.ops")
+    handler = Capture()
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        agent_env["service"].orchestrator.handle_event(
+            permission_event_v2(run["session_id"], "per_v2_log",
+                                resources=["/secret/requested/**"],
+                                save=["/secret/always/**"]))
+        agent_env["runtime"].add_pending_permission(
+            run["session_id"],
+            pending_permission_v2(run["session_id"], "per_v2_log",
+                                  resources=["/secret/requested/**"],
+                                  save=["/secret/always/**"]))
+        call(agent_env, "read_opencode_run", run_id=run["run_id"])
+        call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+             request_id="per_v2_log", decision="once")
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    assert lines, "expected operational log records"
+    blob = "\n".join(lines)
+    assert "/secret/requested" not in blob and "/secret/always" not in blob
+    assert "resources" not in blob and "metadata" not in blob
+    assert '"generation":"v2"' in blob.replace(" ", "")

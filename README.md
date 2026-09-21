@@ -278,6 +278,17 @@ authority. Stronger OS/container isolation is optional hardening, not a Phase-2
 requirement. Explicit OpenCode `deny` is a policy rejection and is not remotely
 approvable.
 
+Missed-ask recovery is best-effort: `read_opencode_run` resyncs the official
+pending-permission listing before reporting, but upstream `GET /permission` can
+itself fail (one malformed pending request can break the whole listing), in
+which case the run stays active with `pending_request_count=0` and a visible
+non-terminal `permission_sync: degraded` diagnostic instead of a silent zero.
+A later successful listing recovers the exact session ask and clears the
+diagnostic. Adapter event-stream health (`subscribed`/`reconnecting`) is
+exposed through runtime status; a run started while the stream is unconfirmed
+is marked degraded. Live revalidation with a real external-directory ask is
+still required after upgrades.
+
 If `WB_DISCORD_WEBHOOK_URL` is set locally, waiting and completion states produce
 notifications with safe metadata only (workspace name, handoff title, run id, request
 kind/action, timestamp). No external paths, command bodies, source snippets, prompt

@@ -15,7 +15,7 @@ The first v0.1 migration disables all existing mappings once and starts the shar
 ## Implemented controls
 
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
-- Explicit project-parent allowlist; immutable root mappings; overlapping mappings rejected even if disabled; device/inode pinning; current allowed-parent validation; default-disabled registration.
+- Explicit project-parent allowlist; canonical configured-root boundary; overlapping mappings rejected even if disabled; current allowed-parent validation; default-disabled registration. The same configured path stays usable across reboot/remount even when device/inode identity changes; each request still re-validates the current root and enforces containment.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
 - Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, subprocess, test or Git invocation is exposed as an MCP tool.
 - Agent execution is a separate per-workspace policy (`agent_enabled`, default FALSE). It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_opencode_run` is handoff-bound, accepts no free-form prompt or path, resolves the model against the admin-enabled global allowlist plus default (`model_not_enabled`/`model_unavailable` for disallowed selectors, `model_policy_unconfigured` until a policy is saved), and fails closed when disabled. There is no arbitrary command endpoint and the private SDK adapter is not host-published.
@@ -36,7 +36,7 @@ An ignored file can still be readable if it is not excluded by bridge policy. Ne
 
 ## Search-specific bounds
 
-Globs filter a safe inventory and cannot resolve arbitrary files. Search cursors are HMAC signed and bound to workspace, root identity, policy, query and observed file metadata. A stale cursor requires restarting; a valid cursor is not a long-lived content snapshot. Queries run over redacted text and regex matching has a timeout. Compilation, filesystem latency and other in-process operations are not a hardened resource sandbox; stronger multi-user isolation requires OS-level limits and a different authorization model. `.gitignore`/`.ignore` never control bridge access.
+Globs filter a safe inventory and cannot resolve arbitrary files. Search cursors are HMAC signed and bound to workspace, policy, query and observed file metadata. A stale cursor requires restarting; a valid cursor is not a long-lived content snapshot. Queries run over redacted text and regex matching has a timeout. Compilation, filesystem latency and other in-process operations are not a hardened resource sandbox; stronger multi-user isolation requires OS-level limits and a different authorization model. `.gitignore`/`.ignore` never control bridge access.
 
 ## Redaction is not a DLP guarantee
 
@@ -66,7 +66,17 @@ The SQLite quota is a preventive allocation gate, not an OS disk quota; WAL/jour
 
 ## Deployment rule
 
-Never tunnel or reverse-proxy the admin listener. Never use an admin token as a bridge token. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus their handoff directories. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
+Never tunnel the admin listener. Never use an admin token as a bridge token. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus their handoff directories. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
+
+The admin listener is loopback-only by default. Setting `WB_ADMIN_ALLOWED_HOSTS`
+(admin only; MCP is unaffected) is the sole opt-in remote-admin path: a
+comma-separated list of bare hostnames/IPs (no ports, schemes or wildcards)
+that widens only the admin listener to `0.0.0.0` and allows those `Host` values
+(`http` + `https` origins). Empty (default) keeps loopback-only and fails
+closed on invalid values. Prefer SSH port-forwarding or VPN; plain HTTP bears
+the admin token in clear, so use TLS termination and firewall rules when remote
+is unavoidable. Docker additionally requires republishing the admin host port
+beyond `127.0.0.1` to reach LAN.
 
 A disabled mapping retains its history. Token rotation revokes the old token for subsequent calls. Neither action erases copies already returned to ChatGPT, cancels completed reads, or necessarily interrupts work already holding the service lock.
 
@@ -181,6 +191,7 @@ Mount only intended projects under a dedicated parent; no home/root binds. The
 optional read-only source recipe in DOCKER.md is a separate hardening choice and
 must be tested on the target filesystem; cross-device traversal stays denied.
 Outbound network access is not disabled by this Compose file. Image pixel secrets
-are still not redacted. Native-to-container device/inode identity changes are not
-automatically trusted; preserve the old state and use a reviewed migration or fresh
-Docker mappings. No security guarantee is inferred merely from containerization.
+are still not redacted. The same configured path remains usable after a
+reboot/remount or native-to-container device/inode change; each request
+re-validates the current root and still denies symlink, cross-device and
+exclusion escapes. No security guarantee is inferred merely from containerization.

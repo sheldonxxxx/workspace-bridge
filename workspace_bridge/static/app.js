@@ -8,8 +8,11 @@
 let currentWorkspace = null;
 let config = {};
 let bridgeState = {};
-let settings = {model_policy: {configured: false, enabled: [], default: null, enabled_count: 0}};
+let settings = {model_policy: {configured: false, enabled: [], default: null, enabled_count: 0}, runtime_policies: {}};
 let globalModels = [];
+let modelRuntime = "opencode";
+let discoveryWorkspaceId = null;
+let allWorkspaces = [];
 let sessionsOffset = 0;
 const SESSIONS_PAGE = 25;
 const $ = (id) => document.getElementById(id);
@@ -47,21 +50,191 @@ function renderRuntime(status) {
   const label = !runtime.configured ? "Not configured" : runtime.locked ? "Locked" : runtime.healthy ? "Healthy" : "Unavailable";
   pill.textContent = label;
   pill.className = runtime.configured && runtime.healthy ? "pill enabled" : "pill";
-  $("opencode-endpoint").textContent = runtime.configured ? "Bridge → private SDK adapter → host OpenCode server" : "Set WB_OPENCODE_RUNTIME_URL to connect the private adapter.";
+  $("opencode-endpoint").textContent = runtime.configured ? "Adapter connected · host OpenCode" : "Adapter not configured";
   const parts = [];
   if (runtime.version) parts.push(`OpenCode ${runtime.version}`);
   if (runtime.adapter_version) parts.push(`adapter ${runtime.adapter_version}`);
-  if (runtime.locked) parts.push("Adapter locked: set WB_RUNTIME_TOKEN (bridge and adapter) to unlock agent operations.");
+  if (runtime.locked) parts.push("Adapter locked");
   if (runtime.configured && !runtime.healthy && runtime.detail) parts.push(runtime.detail);
-  if (!runtime.configured) parts.push("Agent execution stays disabled until the local admin enables it per workspace.");
+  if (!runtime.configured) parts.push("Agent runs are off by default");
   $("opencode-meta").textContent = parts.join(" · ");
   $("discord-status").textContent = runtime.discord_configured
-    ? "Discord notifications: configured. Waiting and completion notices are sent with safe metadata only."
-    : "Discord notifications: not configured (optional). No webhook secret is exposed here.";
+    ? "Discord notifications on"
+    : "Discord notifications off";
   const policy = settings.model_policy || {configured: false, enabled: [], default: null, enabled_count: 0};
   $("policy-status").textContent = policy.configured
-    ? `Policy: ${policy.enabled_count} enabled model(s) · default ${policy.default}. Omit the model to use the default; explicit models must be enabled and available.`
-    : "No model policy saved yet: new OpenCode runs are rejected until you enable at least one model and a default.";
+    ? `Policy: ${policy.enabled_count} enabled · default ${policy.default}`
+    : "Policy: not configured · choose an enabled model and default";
+  const runtimes = (status.runtimes && status.runtimes.runtimes) || {};
+  const pi = runtimes.pi || {};
+  const piPolicies = status.runtime_policies || settings.runtime_policies || {};
+  const piPolicy = piPolicies.pi || {configured: false, enabled: [], default: null, enabled_count: 0};
+  if ($("pi-status")) {
+    const piPill = $("pi-status");
+    const piLabel = !pi.configured ? "Not configured" : pi.locked ? "Locked" : pi.healthy ? "Healthy" : "Unavailable";
+    piPill.textContent = piLabel;
+    piPill.className = pi.configured && pi.healthy ? "pill enabled" : "pill";
+  }
+  if ($("pi-endpoint")) $("pi-endpoint").textContent = pi.configured ? "Adapter connected · host Pi" : "Pi adapter not configured";
+  if ($("pi-meta")) {
+    const piParts = [];
+    if (pi.version) piParts.push(`Pi ${pi.version}`);
+    if (pi.adapter_version) piParts.push(`adapter ${pi.adapter_version}`);
+    if (pi.locked) piParts.push("Adapter locked");
+    if (pi.configured && !pi.healthy && pi.detail) piParts.push(pi.detail);
+    if (!pi.configured) piParts.push("Pi runs are off by default");
+    $("pi-meta").textContent = piParts.join(" · ");
+  }
+  if ($("pi-policy-status")) $("pi-policy-status").textContent = piPolicy.configured
+    ? `Policy: ${piPolicy.enabled_count} enabled · default ${piPolicy.default}`
+    : "Policy: not configured · choose an enabled model and default";
+  const piPerms = (status.runtime_permissions && status.runtime_permissions.pi)
+    || (settings.runtime_permissions && settings.runtime_permissions.pi)
+    || null;
+  if ($("pi-permission-status")) {
+    let permText;
+    if (!piPerms) {
+      permText = "Permissions: loading…";
+    } else if (piPerms.enabled) {
+      permText =
+        `Permissions: Approval mode enabled · rev ${String(piPerms.policy_revision || "").slice(0, 12)} · new sessions only`;
+    } else {
+      permText = "Permissions: Read-only · new sessions only";
+    }
+    // Deployed adapter readiness comes from bounded runtime diagnostics
+    // (never paths or policy bodies): writable sessions need an adapter
+    // that advertises both permission capabilities.
+    const piHealth = (pi && pi.health) || {};
+    if ("permissions_supported" in piHealth) {
+      permText += piHealth.permissions_supported ? " · adapter ready" : " · adapter update required";
+    }
+    $("pi-permission-status").textContent = permText;
+  }
+}
+
+// Pi file permission policy lives in a dedicated <dialog>: structured
+// controls only, never raw JSON. Draft state is kept in module vars so
+// Cancel/close discards it; only Save posts to the server.
+const PI_PERM_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
+let piPermCurrent = null;
+let piPermDraft = null;
+function piPermDraftFrom(policy) {
+  return {
+    enabled: Boolean(policy.enabled),
+    tools: {...policy.tools},
+    protected_patterns: [...(policy.protected_patterns || [])],
+    protected_template_exceptions: [...(policy.protected_template_exceptions || [])],
+    allow_session_always: Boolean(policy.allow_session_always),
+  };
+}
+function renderPiPermissions() {
+  const draft = piPermDraft;
+  if (!draft) return;
+  $("pi-perm-enabled").checked = draft.enabled;
+  const toolsBox = $("pi-perm-tools");
+  toolsBox.replaceChildren();
+  const tableTitle = node("p", "Per-tool mode (Allow / Ask / Deny). When disabled above, edit/write stay unavailable; the draft below is preserved but inactive.", "muted");
+  toolsBox.append(tableTitle);
+  for (const tool of PI_PERM_TOOLS) {
+    const label = node("label", `${tool}`);
+    const select = node("select");
+    select.setAttribute("aria-label", `Pi ${tool} mode`);
+    select.setAttribute("data-pi-perm-tool", tool);
+    for (const mode of ["allow", "ask", "deny"]) {
+      const option = node("option", mode[0].toUpperCase() + mode.slice(1));
+      option.value = mode;
+      select.append(option);
+    }
+    select.value = draft.tools[tool] || "deny";
+    if (!draft.enabled && (tool === "edit" || tool === "write")) {
+      label.append(node("span", " (inactive while disabled)", "muted"));
+    }
+    select.onchange = () => { draft.tools[tool] = select.value; };
+    label.append(select);
+    toolsBox.append(label);
+  }
+  $("pi-perm-always").checked = draft.allow_session_always;
+  $("pi-perm-protected").value = draft.protected_patterns.join("\n");
+  $("pi-perm-exceptions").value = draft.protected_template_exceptions.join("\n");
+  const invariants = $("pi-perm-invariants");
+  invariants.replaceChildren();
+  for (const text of (piPermCurrent && piPermCurrent.fixed_invariants) || []) {
+    invariants.append(node("p", text, "hint"));
+  }
+  if (piPermCurrent) {
+    $("pi-perm-revision").textContent =
+      `Revision ${String(piPermCurrent.policy_revision || "").slice(0, 12)} · ${piPermCurrent.session_note || "Applies to new Pi sessions only."}`;
+  }
+}
+async function loadPiPermissions() {
+  const data = await api("/api/runtimes/pi/permission-policy");
+  piPermCurrent = data;
+  piPermDraft = piPermDraftFrom(data.policy);
+  renderPiPermissions();
+}
+async function openPiPermissions() {
+  try {
+    await loadPiPermissions();
+  } catch (e) { message(e.message); return; }
+  const dialog = $("pi-permissions-dialog");
+  if (dialog && typeof dialog.showModal === "function") dialog.showModal();
+  else message("This browser does not support the permission management dialog.");
+}
+function piPermDangerSummary(draft, current) {
+  const lines = [];
+  const cur = current ? current.policy : null;
+  if (cur) {
+    if (!cur.enabled && draft.enabled) lines.push("Enable writable tools (edit/write) for NEW Pi sessions.");
+    if (cur.enabled && !draft.enabled) lines.push("Disable writable tools; NEW Pi sessions become read-only.");
+    for (const tool of PI_PERM_TOOLS) {
+      if (draft.tools[tool] !== cur.tools[tool]) {
+        lines.push(`Tool ${tool}: ${cur.tools[tool]} -> ${draft.tools[tool]}.`);
+      }
+    }
+    const removed = (cur.protected_patterns || []).filter((p) => !draft.protected_patterns.includes(p));
+    for (const p of removed) lines.push(`Remove protected pattern: ${p}.`);
+    const added = draft.protected_patterns.filter((p) => !(cur.protected_patterns || []).includes(p));
+    for (const p of added) lines.push(`Add protected pattern: ${p}.`);
+    if (Boolean(cur.allow_session_always) !== Boolean(draft.allow_session_always)) {
+      lines.push(draft.allow_session_always
+        ? "Offer “Always allow exact target” again."
+        : "Stop offering “Always allow exact target” (once/reject only).");
+    }
+  }
+  return lines;
+}
+async function savePiPermissions() {
+  if (!piPermDraft) return;
+  const draft = piPermDraft;
+  draft.enabled = $("pi-perm-enabled").checked;
+  draft.allow_session_always = $("pi-perm-always").checked;
+  draft.protected_patterns = $("pi-perm-protected").value.split("\n").map((x) => x.trim()).filter(Boolean);
+  draft.protected_template_exceptions = $("pi-perm-exceptions").value.split("\n").map((x) => x.trim()).filter(Boolean);
+  for (const tool of PI_PERM_TOOLS) {
+    const select = document.querySelector(`[data-pi-perm-tool="${tool}"]`);
+    if (select && select.value) draft.tools[tool] = select.value;
+  }
+  const summary = piPermDangerSummary(draft, piPermCurrent);
+  const warning = "Pi runs natively with your macOS user authority; this is not a sandbox.\n" +
+    "Policy changes apply to NEW Pi sessions only; active sessions keep their snapshot.\n" +
+    (summary.length ? "Changes:\n- " + summary.join("\n- ") : "No changes compared to the current policy.");
+  if (!confirm(`Save Pi permission policy?\n\n${warning}`)) return;
+  const body = {
+    version: 1,
+    enabled: draft.enabled,
+    tools: draft.tools,
+    protected_patterns: draft.protected_patterns,
+    protected_template_exceptions: draft.protected_template_exceptions,
+    allow_session_always: draft.allow_session_always,
+  };
+  const saved = await api("/api/runtimes/pi/permission-policy", "POST", body);
+  piPermCurrent = saved;
+  piPermDraft = piPermDraftFrom(saved.policy);
+  renderPiPermissions();
+  const dialog = $("pi-permissions-dialog");
+  if (dialog && typeof dialog.close === "function") dialog.close();
+  await refresh();
+  message(`Pi permission policy saved (rev ${String(saved.policy_revision || "").slice(0, 12)}). New Pi sessions only.`);
 }
 
 // Model management lives in a lazily loaded <dialog>: the main page shows
@@ -111,27 +284,72 @@ function renderModelPolicy() {
   if (!select.value) draftDefault = null;
 }
 
-async function openModels() {
+async function openModels(runtime) {
+  modelRuntime = runtime || "opencode";
   try {
     await loadModels();
   } catch (e) { message(e.message); }
-  const policy = settings.model_policy || {enabled: [], default: null};
+  const policies = settings.runtime_policies || {};
+  const policy = modelRuntime === "opencode"
+    ? (settings.model_policy || {enabled: [], default: null})
+    : (policies[modelRuntime] || {enabled: [], default: null});
   draftEnabled = new Set(policy.enabled || []);
   draftDefault = policy.default || null;
   if ($("model-filter")) $("model-filter").value = "";
+  $("models-runtime-eyebrow").textContent = modelRuntime === "opencode" ? "OpenCode runtime" : "Pi runtime";
+  $("models-hint").textContent = modelRuntime === "opencode"
+    ? "Global discovery: identical for every workspace."
+    : "Workspace-bound discovery: models are listed through the selected workspace. The saved policy stays runtime-global.";
+  const discoveryRow = $("discovery-workspace-row");
+  if (modelRuntime === "opencode") {
+    discoveryRow.hidden = true;
+  } else {
+    discoveryRow.hidden = false;
+    renderDiscoveryWorkspaces();
+  }
+  $("load-models").textContent = modelRuntime === "opencode" ? "Refresh global models" : "Refresh Pi models";
   renderModelPolicy();
   const dialog = $("models-dialog");
   if (dialog && typeof dialog.showModal === "function") dialog.showModal();
   else message("This browser does not support the model management dialog.");
 }
 
+function renderDiscoveryWorkspaces() {
+  const select = $("discovery-workspace");
+  select.replaceChildren();
+  const enabled = allWorkspaces.filter((w) => w.enabled);
+  if (currentWorkspace && enabled.some((w) => w.id === currentWorkspace.id)) discoveryWorkspaceId = currentWorkspace.id;
+  if (!discoveryWorkspaceId || !enabled.some((w) => w.id === discoveryWorkspaceId)) discoveryWorkspaceId = enabled.length ? enabled[0].id : null;
+  if (!enabled.length) {
+    const option = node("option", "No enabled workspace"); option.value = "";
+    select.append(option);
+  }
+  for (const w of enabled) {
+    const option = node("option", w.name); option.value = w.id;
+    select.append(option);
+  }
+  select.value = discoveryWorkspaceId || "";
+  if (!select.value) discoveryWorkspaceId = null;
+}
+
 async function loadModels() {
-  const data = await api("/api/opencode/models?limit=100");
+  let url = `/api/runtimes/${modelRuntime}/models?limit=100`;
+  if (modelRuntime !== "opencode") {
+    const wsId = discoveryWorkspaceId || (currentWorkspace && currentWorkspace.id);
+    if (!wsId) throw new Error("Select an enabled discovery workspace for Pi models.");
+    url += `&workspace_id=${encodeURIComponent(wsId)}`;
+  }
+  const data = await api(url);
   globalModels = data.models || [];
-  if (data.policy) settings.model_policy = data.policy;
+  if (data.policy) {
+    if (modelRuntime === "opencode") settings.model_policy = data.policy;
+    else settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: data.policy};
+  }
   renderModelPolicy();
   renderRuntime(config);
-  if (!globalModels.length) message("No models are available in the current global OpenCode runtime.");
+  if (!globalModels.length) message(modelRuntime === "opencode"
+    ? "No models are available in the current global OpenCode runtime."
+    : "No models are available through the selected Pi discovery workspace.");
 }
 
 async function saveModelPolicy() {
@@ -139,9 +357,16 @@ async function saveModelPolicy() {
   const def = $("policy-default").value || null;
   if (!enabled.length) { message("Enable at least one model before saving."); return; }
   if (!def || !draftEnabled.has(def)) { message("Choose the mandatory default among the enabled models."); return; }
-  if (!confirm(`Save global model policy with ${enabled.length} enabled model(s) and mandatory default ${def}? Runs without a model use the default; explicit models must be enabled.`)) return;
-  const saved = await api("/api/settings", "POST", {enabled, default: def});
-  settings = {model_policy: saved};
+  const body = {enabled, default: def};
+  if (modelRuntime !== "opencode") {
+    const wsId = $("discovery-workspace").value || discoveryWorkspaceId;
+    if (!wsId) { message("Select an enabled discovery workspace before saving the Pi policy."); return; }
+    body.workspace_id = wsId;
+  }
+  if (!confirm(`Save ${modelRuntime} model policy with ${enabled.length} enabled model(s) and mandatory default ${def}? Runs without a model use the default; explicit models must be enabled.`)) return;
+  const saved = await api(`/api/runtimes/${modelRuntime}/model-policy`, "POST", body);
+  if (modelRuntime === "opencode") settings.model_policy = saved;
+  else settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: saved};
   draftEnabled = new Set(saved.enabled || []);
   draftDefault = saved.default || null;
   const dialog = $("models-dialog");
@@ -152,9 +377,10 @@ async function saveModelPolicy() {
 
 function runRow(ws, run) {
   const row = node("div", undefined, "job");
-  const title = node("h3", `${run.state} · ${run.model || "OpenCode default model"}`);
-  row.append(title, node("div", `Run ${run.run_id} · Session ${run.session_id || "—"} · Job ${run.job_id} · Request ${run.request_id}`, "path"));
-  if (run.session_reused) row.append(node("div", `Reused OpenCode session · Continued from ${run.continue_from_run_id || run.parent_run_id || "—"}`, "muted"));
+  const runtimeLabel = run.runtime || "opencode";
+  const title = node("h3", `${run.state} · ${run.model || "Default model"} · ${runtimeLabel}`);
+  row.append(title, node("div", `Run ${run.run_id} · Runtime ${runtimeLabel} · Session ${run.session_id || "—"} · Job ${run.job_id} · Request ${run.request_id}`, "path"));
+  if (run.session_reused) row.append(node("div", `Reused ${runtimeLabel} session · Continued from ${run.continue_from_run_id || run.parent_run_id || "—"}`, "muted"));
   const times = [`created ${run.created ? new Date(run.created).toLocaleString() : "—"}`];
   if (run.started) times.push(`started ${new Date(run.started).toLocaleString()}`);
   if (run.finished) times.push(`finished ${new Date(run.finished).toLocaleString()}`);
@@ -171,7 +397,7 @@ function runRow(ws, run) {
 }
 
 async function stopRun(runId) {
-  if (!confirm("Interrupt only this recorded OpenCode session? No process is killed directly.")) return;
+  if (!confirm("Interrupt only this recorded session? No process is killed directly.")) return;
   const result = await api(`/api/runs/${runId}/stop`, "POST");
   message(result.cancelled ? "Session interrupted; run marked cancelled." : `Run state unchanged (${result.state}).`);
   await refresh(); if (currentWorkspace) await jobs(currentWorkspace);
@@ -180,6 +406,7 @@ async function stopRun(runId) {
 function sessionRow(run) {
   const row = node("tr");
   row.append(node("td", run.state || "—"));
+  row.append(node("td", run.runtime || "opencode"));
   row.append(node("td", run.workspace_name || run.workspace_id || "—"));
   const handoffCell = node("td");
   handoffCell.append(node("div", run.handoff_title || run.job_id || "—"));
@@ -213,9 +440,9 @@ function sessionRow(run) {
 
 async function loadSessions(reset) {
   if (reset) { sessionsOffset = 0; $("sessions").replaceChildren(); }
-  const data = await api(`/api/opencode/sessions?${new URLSearchParams({offset: String(sessionsOffset), limit: String(SESSIONS_PAGE)})}`);
-  $("sessions-count").textContent = `Bridge-owned · all workspaces · ${data.runs.length} shown`;
-  if (reset && !data.runs.length) { const empty = node("tr"); const cell = node("td", "No Bridge-owned OpenCode sessions yet.", "muted"); cell.colSpan = 9; empty.append(cell); $("sessions").append(empty); }
+  const data = await api(`/api/sessions?${new URLSearchParams({offset: String(sessionsOffset), limit: String(SESSIONS_PAGE)})}`);
+  $("sessions-count").textContent = `${data.runs.length} shown`;
+  if (reset && !data.runs.length) { const empty = node("tr"); const cell = node("td", "No Bridge-owned agent sessions yet.", "muted"); cell.colSpan = 10; empty.append(cell); $("sessions").append(empty); }
   for (const run of data.runs) $("sessions").append(sessionRow(run));
   sessionsOffset += data.runs.length;
   $("more-sessions").disabled = data.next_offset === null || data.next_offset === undefined;
@@ -243,7 +470,7 @@ async function requestView(ws, runId) {
 
 async function respond(runId, requestId, decision) {
   const warning = decision === "always"
-    ? "Approve OpenCode's EXACT proposed pattern for this session? Bridge never broadens it. Review the scope above first."
+    ? "Approve the runtime's EXACT proposed pattern for this session? Bridge never broadens it. Review the scope above first."
     : decision === "once" ? "Approve only this request?" : "Reject this request?";
   if (!confirm(warning)) return;
   const result = await api(`/api/runs/${runId}/requests/${requestId}`, "POST", {decision});
@@ -260,21 +487,23 @@ async function jobs(ws) {
   for (const j of data.handoffs) {
     const row = node("div", undefined, "job"); row.append(node("h3", `${j.title} · ${j.legacy_handoff ? "legacy" : j.state === "prepared" ? "published" : j.state}`), node("div", j.path, "path"));
     const actions = node("div", undefined, "actions");
-    actions.append(button("Copy OpenCode prompt", async () => { try { await navigator.clipboard.writeText(j.copy_prompt); message("Handoff prompt copied. Paste it into OpenCode yourself."); } catch { show("Copy this prompt", j.copy_prompt); } }));
+    actions.append(button("Copy agent prompt", async () => { try { await navigator.clipboard.writeText(j.copy_prompt); message("Handoff prompt copied. Paste it into the agent yourself."); } catch { show("Copy this prompt", j.copy_prompt); } }));
     for (const [label, doc] of [["Plan", "TASK.md"], ["Context", "CONTEXT.md"], ["Acceptance", "ACCEPTANCE.md"]]) {
       actions.append(button(label, async () => { const result = await api(`/api/workspaces/${ws.id}/document?${new URLSearchParams({job_id:j.id, document:doc})}`); show(`${j.title} · ${label}`, result); }));
     }
     row.append(actions); $("jobs").append(row);
   }
   $("jobs").append(node("h3", "Runs"));
-  if (!runs.runs.length) $("jobs").append(node("p", "No OpenCode runs yet. Enable agent execution for this workspace, then ask ChatGPT to start the prepared handoff.", "muted"));
+  if (!runs.runs.length) $("jobs").append(node("p", "No agent runs yet. Enable agent execution for this workspace, then ask ChatGPT to start the prepared handoff.", "muted"));
   for (const run of runs.runs) $("jobs").append(runRow(ws, run));
   if (data.next_offset !== null) $("jobs").append(node("p", "Showing the most recent 40 handoffs. Use the paginated MCP tool for older entries.", "muted"));
 }
 
 async function refresh() {
   const [data, history, status, currentSettings] = await Promise.all([api("/api/workspaces"), api("/api/events"), api("/api/status"), api("/api/settings")]);
-  config = status; bridgeState = status.bridge; settings = currentSettings;
+  config = status; bridgeState = status.bridge;
+  settings = {...currentSettings, runtime_policies: status.runtime_policies || {}};
+  allWorkspaces = data.workspaces || [];
   renderRuntime(status);
   $("bridge-status").textContent = !bridgeState.configured ? "Not configured" : bridgeState.enabled ? "Enabled" : "Paused";
   $("bridge-pause").textContent = bridgeState.enabled ? "Pause all MCP access" : "Enable MCP access";
@@ -285,22 +514,23 @@ async function refresh() {
   if (!data.workspaces.length) $("workspaces").append(node("p", "No projects are exposed. Add a workspace below.", "muted"));
   for (const ws of data.workspaces) {
     const row = node("div", undefined, "workspace"); const title = node("h3", ws.name); title.append(node("span", ws.enabled ? "Enabled" : "Disabled", ws.enabled ? "enabled" : "disabled"));
-    row.append(title, node("div", ws.root, "path"), node("div", `Workspace ID: ${ws.id} · Write scope: ${ws.write_scope} · Agent execution: ${ws.agent_enabled ? "enabled" : "disabled"}`, "path"));
+    row.append(title, node("div", ws.root, "path"), node("div", `Write: ${ws.write_scope} · Agent: ${ws.agent_enabled ? "enabled" : "disabled"}`, "workspace-meta"));
     const actions = node("div", undefined, "actions");
     // Policy controls first: workspace access immediately followed by the agent toggle.
     actions.append(button(ws.enabled ? "Disable access" : "Enable access", () => { if (ws.enabled || confirm("Expose this mapping to every chat using the shared bridge connection?")) return manage(ws.id, ws.enabled ? "disable" : "enable"); }, ws.enabled ? "danger" : "secondary"));
     actions.append(button(ws.agent_enabled ? "Disable agent" : "Enable agent", async () => {
       const enabled = !ws.agent_enabled;
       const warning = enabled
-        ? "Enable OpenCode agent execution for this workspace? Any holder of the shared bridge credential can then start bounded runs for prepared handoffs here. Runs can read/write files under the workspace with the host OpenCode server's authority and may request permissions. This is independent of write permission and default OFF."
-        : "Disable OpenCode agent execution for this workspace? Existing runs are not stopped automatically.";
+        ? "Enable agent execution for this workspace? Any holder of the shared bridge credential can then start bounded runs for prepared handoffs here. Runs can read/write files under the workspace with the host runtime server's authority and may request permissions. This is independent of write permission and default OFF."
+        : "Disable agent execution for this workspace? Existing runs are not stopped automatically.";
       if (!confirm(warning)) return;
       await api(`/api/workspaces/${ws.id}`, "POST", {operation: "set_agent_enabled", agent_enabled: enabled});
       await refresh(); message(`Agent execution ${enabled ? "enabled" : "disabled"}. It is independent of write scope.`);
     }, ws.agent_enabled ? "danger" : "secondary"));
-    actions.append(button("Handoffs & runs", () => jobs(ws)), button("Copy workspace ID", async () => { try { await navigator.clipboard.writeText(ws.id); message("Workspace ID copied."); } catch { show("Workspace ID", ws.id); } }));
-    const details = node("details"); details.append(node("summary", "Exclusions & policy"));
-    details.append(node("p", "Built-in secret, dependency and build exclusions cannot be removed. Extra patterns are administrator-owned; repository ignore files do not control access.", "muted"));
+    actions.append(button("Handoffs & runs", () => jobs(ws)));
+    const details = node("details"); details.append(node("summary", "Settings"));
+    details.append(node("p", "Built-in exclusions stay enforced. Extra patterns apply to future browsing.", "muted"));
+    details.append(button("Copy workspace ID", async () => { try { await navigator.clipboard.writeText(ws.id); message("Workspace ID copied."); } catch { show("Workspace ID", ws.id); } }));
     const area = node("textarea"); area.rows = 3; area.value = JSON.parse(ws.excludes).join("\n"); details.append(area, button("Save exclusions", () => { if (confirm("Change which files future browsing can access?")) return manage(ws.id, "set_excludes", {excludes: area.value.split("\n").map(x=>x.trim()).filter(Boolean)}); }));
     const policyLabel = node("label", "Write permission");
     const select = node("select"); select.setAttribute("aria-label", `Write permission for ${ws.name}`);
@@ -335,7 +565,7 @@ $("login-form").onsubmit = async (event) => {
     const r = await fetch("/api/login", {method: "POST", credentials: "same-origin", headers: {"Authorization": `Bearer ${token}`}});
     if (!r.ok) { const value = await r.json(); throw new Error(value.error || `HTTP ${r.status}`); }
     config = await api("/api/status");
-    $("status-line").textContent = `Version ${config.version} · ${config.listen_mode === "docker-published-loopback" ? "Docker · host loopback only" : "Loopback-only"} · General file tools with per-workspace write and agent policies`;
+    $("status-line").textContent = `v${config.version} · ${config.listen_mode === "docker-published-loopback" ? "Docker loopback" : "Loopback only"}`;
     $("parents").textContent = `Approved project parents: ${config.allowed_parents.join(", ")}`;
     await refresh();
     $("boot").hidden = true;
@@ -350,7 +580,7 @@ async function tryRestoreSession() {
     const r = await fetch("/api/status", {credentials: "same-origin"});
     if (r.status !== 200) { $("boot").hidden = true; $("login").hidden = false; return; }
     config = await r.json();
-    $("status-line").textContent = `Version ${config.version} · ${config.listen_mode === "docker-published-loopback" ? "Docker · host loopback only" : "Loopback-only"} · General file tools with per-workspace write and agent policies`;
+    $("status-line").textContent = `v${config.version} · ${config.listen_mode === "docker-published-loopback" ? "Docker loopback" : "Loopback only"}`;
     $("parents").textContent = `Approved project parents: ${config.allowed_parents.join(", ")}`;
     await refresh();
     $("boot").hidden = true;
@@ -367,11 +597,31 @@ $("logout").onclick = async () => {
 };
 $("close-output").onclick = () => { $("output-panel").hidden = true; $("output").textContent = ""; };
 $("refresh").onclick = () => refresh().catch(e=>message(e.message));
-$("open-models").onclick = () => openModels().catch(e=>message(e.message));
+$("open-models").onclick = () => openModels("opencode").catch(e=>message(e.message));
+$("open-pi-models").onclick = () => openModels("pi").catch(e=>message(e.message));
+$("open-pi-permissions").onclick = () => openPiPermissions().catch(e=>message(e.message));
+$("pi-perm-reload").onclick = () => loadPiPermissions().catch(e=>message(e.message));
+$("pi-perm-restore").onclick = () => {
+  if (!piPermCurrent) return;
+  piPermDraft = piPermDraftFrom({
+    version: 1, enabled: false,
+    tools: {read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask"},
+    protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
+    protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
+    allow_session_always: true,
+  });
+  renderPiPermissions();
+  message("Safe defaults loaded in the draft. Press “Save permission policy” to apply.");
+};
+$("pi-perm-save").onclick = () => savePiPermissions().catch(e=>message(e.message));
+$("pi-perm-cancel").onclick = () => { const dialog = $("pi-permissions-dialog"); if (dialog && typeof dialog.close === "function") dialog.close(); };
+$("pi-perm-enabled").onchange = () => { if (piPermDraft) { piPermDraft.enabled = $("pi-perm-enabled").checked; renderPiPermissions(); } };
+$("pi-perm-always").onchange = () => { if (piPermDraft) piPermDraft.allow_session_always = $("pi-perm-always").checked; };
 $("load-models").onclick = () => loadModels().catch(e=>message(e.message));
 $("save-policy").onclick = () => saveModelPolicy().catch(e=>message(e.message));
 $("cancel-policy").onclick = () => { const dialog = $("models-dialog"); if (dialog && typeof dialog.close === "function") dialog.close(); };
 $("model-filter").oninput = () => renderModelPolicy();
+$("discovery-workspace").onchange = (event) => { discoveryWorkspaceId = event.target.value || null; loadModels().catch(e=>message(e.message)); };
 $("policy-default").onchange = (event) => { draftDefault = event.target.value || null; };
 $("refresh-sessions").onclick = () => loadSessions(true).catch(e=>message(e.message));
 $("more-sessions").onclick = () => loadSessions(false).catch(e=>message(e.message));

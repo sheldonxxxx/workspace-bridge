@@ -1,3 +1,361 @@
+# Unreleased — canonical runtime-id grammar for registry and cursor keys
+
+- Package-owned canonical runtime identity
+  (`^[a-z0-9][a-z0-9_-]{0,31}$`, shared from workspace_bridge.runtime):
+  RuntimeRegistry.register() rejects noncanonical ids with
+  invalid_arguments even when the explicit key matches, and the MCP
+  RuntimeID schema uses the same constant so the two can never drift.
+- Cursor/instance setting keys are lossless suffixes of the exact
+  configured id (OpenCode keeps legacy keys); invalid ids outside a
+  registered path fail closed instead of normalizing to a colliding key.
+- Historical persisted rows are unaffected (persisted ids are never
+  re-validated). No adapter, policy, routing, UI, or skill changes.
+
+# Unreleased — 3A3 audit corrections (runtime-correct neutral workflow)
+
+- Native Pi adapter maps AssistantMessage stopReason to completion evidence:
+  stop/length with a numeric timestamp produce completed; toolUse/pending/
+  deferred/error/aborted/unknown/missing stay incomplete. Fail-closed for
+  unknown future reasons; reasoning, tool args, and stopReason stay hidden.
+  Fake-child fixture uses a realistic stopReason:"stop" millisecond
+  timestamp and the lifecycle test asserts the completed timestamp.
+- Completion for runtimes without event polling additionally requires a
+  provably idle session_status; busy/unknown/unavailable leaves the run
+  active/retryable. Applied in _probe_completion (sweep + read) and restart
+  reconciliation. OpenCode eventful behavior unchanged.
+- Event-stream cursor/instance settings are per-runtime (OpenCode keeps
+  legacy runtime_instance/runtime_cursor; others use runtime-scoped keys);
+  event_polling=false starts no event pump and performs no event poll.
+- Generic admin /api/runs/* routes and the workspace runs listing are now
+  runtime-neutral (persisted-runtime routing / cross-runtime view);
+  /api/opencode/sessions stays OpenCode-only.
+- Historical rows from a temporarily unconfigured runtime stay readable
+  from persisted state (run/request views, terminal transcript snapshot);
+  cancel/respond/start/discovery still fail closed with no reroute.
+- Tests: adapter stopReason matrix, Python idle/cursor/admin/history
+  regression tests (tests/test_3a3_corrections.py), full suite green.
+
+# Unreleased — runtime-neutral agent tools and Pi model policy (3A3)
+
+- New runtime-neutral MCP tools: `list_agent_models`, `start_agent_run`,
+  `list_agent_runs`, `read_agent_run`, `read_agent_request`,
+  `respond_agent_permission`, `cancel_agent_run`. List/start select a runtime
+  explicitly; per-run tools route solely by the persisted run runtime.
+- Legacy `list_opencode_*`/`start_opencode_run`/`read_opencode_*`/
+  `respond_opencode_permission`/`cancel_opencode_run` stay as OpenCode-only
+  compatibility aliases: lists filter to `runtime="opencode"` rows and
+  per-run paths fail closed (`runtime_mismatch`) on other runtimes.
+- Run `request_id` idempotency is runtime-safe: the same workspace
+  `request_id` never replays a run owned by another runtime, for fresh
+  starts and continuations alike.
+- Model policy stays global per runtime (`model_policy` for OpenCode,
+  `model_policy:pi` for Pi). Saving a Pi policy requires an explicit enabled
+  workspace as discovery context; every Pi run revalidates against its own
+  workspace. `list_agent_models` reports runtime, discovery scope,
+  `runtime_global` policy scope, policy, and workspace id.
+- Local admin adds `GET /api/runtimes/{runtime}/models`,
+  `GET|POST /api/runtimes/{runtime}/model-policy`, and neutral
+  `GET /api/sessions`; `/api/settings`, `/api/opencode/models`, and
+  `/api/opencode/sessions` stay compatible. `/api/status` adds
+  `runtime_policies` without changing existing fields.
+- Manager shows a Pi runtime/policy card and manages Pi models through an
+  explicit discovery workspace; run/session rows are runtime-aware and the
+  sessions table uses the neutral endpoint. Project-lead skill 1.7.0 prefers
+  the neutral workflow with OpenCode as the silent/default runtime.
+- Pi runs complete through status/message polling with `event_polling=false`
+  and no events; permission/question resync stays capability-gated.
+- Network docs: OrbStack 29.4.0 verified container
+  `host.docker.internal` → native `127.0.0.1`-bound adapter; Docker Desktop
+  must be smoke-tested; never broaden to `0.0.0.0`/LAN.
+- Tests: new `tests/test_3a3.py` (18 tests); full suite green.
+
+# Unreleased — live-compatible question polling fallback (adapter 0.1.10)
+
+- Post-restart live finding: completion polling recovered a smoke run
+  (`reason=background_reconcile`) and permission polling reported ok, but
+  question polling stayed `degraded`/`question_list_failed`/
+  `runtime_unavailable` — the deployed native server does not serve the V2
+  session-scoped question snapshot the 0.1.9 adapter used exclusively.
+- Verified against installed `@opencode-ai/sdk` 1.18.31 (no guessing):
+  the legacy `Question.list({directory?, workspace?})` →
+  `GET /question` (200 `Array<QuestionRequest>`) where
+  `QuestionRequest = {id, sessionID, questions, tool?: {messageID,
+  callID}}`. Every item carries its exact owning `sessionID`, so strict
+  exact-session filtering is explicit and reliable — the safety condition
+  for using the global list is met.
+- Adapter 0.1.10: `listPendingQuestions` keeps V2 primary (a successful V2
+  response, even empty, never consults V1) and falls back to the verified
+  V1 surface only on explicit unsupported/not-found signals (missing
+  method, 404/405/501, "not supported by this version"; 405 newly
+  recognized alongside the permission path). Generic transport/5xx failures
+  still fail closed with no fallback. V1 rows normalize through a
+  dedicated `normalizeQuestionV1Request` (ids/counts/call refs only) with
+  the same strict session binding; `lastQuestionSource` (v2|v1) is exposed
+  in the `question_list` log and the `GET /sessions/:id/questions`
+  response. Health/wire output changed, so the adapter version bumps
+  0.1.9 → 0.1.10.
+- Bridge: `question_sync` diagnostics now expose `source` (v1/v2) wherever
+  reported; question recovery semantics are otherwise unchanged.
+- Tests: adapter fallback matrix (V2-empty/V2-request never touch V1;
+  404/405/501/not-supported/missing-method fall back; multi-session and
+  malformed V1 rows filtered; generic V2 and malformed V1 failures stay
+  closed; source propagation incl. HTTP route) plus Python source
+  reporting/transport tests, fallback-path discovery tests, and an opt-in
+  live fresh-session question diagnostic
+  (`tests/test_opencode_live.py::test_live_question_snapshot_reports_compatible_source`).
+
+# Unreleased — polling-authoritative reconciliation over broken SSE (adapter 0.1.9)
+
+- Root cause, demonstrated live: `curl -N` against the native OpenCode
+  event endpoint receives `server.connected`/`server.heartbeat` but no
+  lifecycle/message/permission/session events while a real session runs —
+  ruling out the bridge, TUI ownership and handlers. Permission recovery
+  polled every 60s and completion every 20s, but both sweeps ran only after
+  the 25s event long poll returned inside `_pump_loop`, coupling
+  reconciliation latency to an event stream that never delivers.
+- The bridge now treats OpenCode SSE as optional best-effort acceleration.
+  A dedicated `opencode-reconcile-poll` loop (lifecycle-owned alongside the
+  event pump, neither able to terminate the other) converges permission
+  (~4s), question (~4s) and completion (~7s) state from authoritative
+  pollable/durable surfaces while runs are active, sharing one
+  starting/running enumeration per sweep (max 50 distinct sessions) without
+  merging failure semantics. No active runs means no polling; terminal runs
+  leave sweeps immediately. `read_opencode_run` keeps its immediate
+  permission/question resync plus completion self-heal.
+- Questions use the verified official V2 session-scoped surface only
+  (installed `@opencode-ai/sdk` 1.18.31:
+  `client.v2.session.question.list` →
+  `GET /api/session/{sessionID}/question`, 200 `{data:
+  Array<QuestionV2Request>}`), with strict exact-session binding, dedupe by
+  request id and `waiting_question` persistence mirroring permissions. Only
+  request ids, counts and call references cross the boundary — never
+  question bodies/options/answers. The unverified V1 global question
+  listing is deliberately not consulted.
+- Adapter 0.1.9: EventHub classifies raw frames before normalization and
+  exposes bounded `rawEventCount`/`controlEventCount`/`functionalEventCount`
+  plus `lastRawEventAt`/`lastFunctionalEventAt` in hub health (counters and
+  timestamps only, never contents; per-heartbeat logging stays off, one
+  DEBUG aggregate per 100 raw frames). New `GET
+  /sessions/:id/questions` route with `question_list` operational logs.
+  Health/wire output changed, so the adapter version bumps 0.1.8 → 0.1.9.
+- Bridge-level `event_stream.functional_status`: `degraded`
+  (`no_functional_events`) while runs are active on subscribed transport
+  with no functional event for 45s; `unknown` with no active runs or
+  unsubscribed transport (never mislabeled healthy). Diagnostic only —
+  polling correctness never blocks — with one WARNING on degrade and one
+  INFO on recovery. Startup adapter unavailability backs off safely (DEBUG
+  in the first 30s, throttled WARNINGs after) with no false terminal
+  states.
+- Operational log allowlists add `completion_probe`,
+  `completion_reconcile`, `question_resync`, `event_stream_health`
+  (bridge) and `question_list`, `eventhub_counts` plus
+  `raw/control/functional_event_count` (adapter).
+- Tests: `tests/test_polling_authoritative.py` (event-dead permission,
+  completion and question convergence via the sweep; 25s-blocked pump
+  independence; cadence/cap contract; idle-quietness incl. terminal
+  disappearance; unavailable retry/recovery; heartbeat-only degraded health
+  without blocking; recovery and once-only transitions; loop lifecycle and
+  cadence independence; question transport shape/fail-closure) and
+  `runtime/opencode-adapter/test/polling-authoritative.test.mjs`
+  (V2 question snapshot semantics, counter classification, DEBUG
+  aggregate hygiene, questions HTTP route). `docs/OPERATIONS.md`
+  documents cadences, caps, evidence rules and worst-case latency.
+
+# Unreleased — live completion recovery without restart
+
+- Root cause, demonstrated live: an OpenCode job finished in the attached
+  UI while Bridge kept showing `running`; only a bridge restart (via
+  `restart_reconcile`) marked it completed. The orchestrator completed a
+  run only from the transitional `session.idle` event, ignored
+  `session.status` entirely, never probed completion on `read_opencode_run`,
+  and ran no normal-operation completion sweep — so a missed idle left the
+  run stale until restart.
+- Verified against installed `@opencode-ai/sdk` 1.18.31: the event union
+  exposes `session.status` (`{sessionID, status: idle|busy|retry}`),
+  `session.idle` (`{sessionID}`) and `session.error`; there are no
+  `session.execution.succeeded/failed/interrupted` (or equivalent newer
+  execution-completion) events in this build, so nothing new had to be
+  normalized. Session status is in-memory/transitional (an absent map entry
+  reads as idle; `GET /session/status` can lag on busy after messages
+  already hold a completed assistant response), so status alone never
+  proves completion.
+- Bridge now treats live events as latency hints and durable completed
+  assistant messages as completion evidence: one canonical bounded probe
+  (`starting`/`running` only, prompt acceptance proven, no pending
+  requests, binding revalidated, messages scoped to the run floor) completes
+  the run with `reason=read_reconcile` / `background_reconcile` /
+  `status_idle` / `idle`. `session.status` idle triggers the same probe;
+  busy/retry change nothing, and busy lag cannot block durable evidence
+  (the probe never consults status). Completion evidence means the latest
+  in-scope assistant message is completed/non-error, so an earlier
+  completed turn cannot finish a still-active later turn; continuation
+  floor isolation is unchanged. Read/background probes never orphan (reads
+  keep their fail-closed degraded semantics); event-driven finalization
+  keeps the existing verified missing/mismatch orphan behavior.
+- A bounded background sweep (every 20s, max 50 sessions/sweep, one probe
+  per distinct session) recovers missed completions with no read and no
+  restart; restarted in-flight runs stay eligible for it after startup
+  reconciliation stops retrying. Operational logs add `completion_probe`
+  (DEBUG for ordinary no-final probes, INFO on recovery) and
+  `completion_reconcile` with run/session ids, reason and message count
+  only — never response text. A restart is no longer required to recover a
+  missed completion event.
+- Tests: `tests/test_completion_reconcile.py` covers read and background
+  self-heal with no idle delivered, status-idle hint semantics, busy-lag
+  completion, waiting/floor isolation, latest-turn selection, exactly-once
+  notification, runtime-unavailable retryability, restart-then-sweep
+  eligibility, and log hygiene. Permission/cancel/pre-start tests in
+  `tests/test_opencode_runs.py` now script transcripts without durable
+  completion evidence (new `hold_open` helper) so they isolate the behavior
+  they assert; no assertion was relaxed.
+
+# Unreleased — V2 permission generation alignment (adapter 0.1.8)
+
+- Root cause, demonstrated by live logs: the 0.1.5/0.1.6 V1 listing was
+  healthy but was the wrong permission generation for current TUI requests.
+  A deployed run stopped on a real OpenCode permission prompt while Bridge
+  resyncs repeatedly reported successful `matched=0`: the Bridge listened
+  (`permission.asked`/`permission.updated`), listed (`GET /permission`) and
+  replied (`POST /session/:id/permissions/:permissionID`) only on V1
+  surfaces while the live request lived on the V2 surface.
+- Verified against installed `@opencode-ai/sdk` 1.18.31 (no guessing, no
+  private endpoints): V2 ask/reply events `permission.v2.asked`
+  (`{id, sessionID, action, resources, save?, metadata?, source?}`) /
+  `permission.v2.replied` (`{sessionID, requestID, reply}`); V2
+  session-scoped snapshot `client.v2.session.permission.list` →
+  `GET /api/session/{sessionID}/permission` (200 `{data: [...]}`); V2
+  session-scoped reply `client.v2.session.permission.reply` →
+  `POST /api/session/{sessionID}/permission/{requestID}/reply` (body
+  `{reply: once|always|reject}`, 204). V1 (`permission.asked`,
+  `GET /permission`, deprecated session permissions reply) is retained as
+  compatibility fallback/alias.
+- Adapter 0.1.8: dedicated V2 normalizer (`resources` → requested targets,
+  `save` → exact always scope, never synthesized; `source.callID`
+  preserved); `permission.v2.asked`/`permission.v2.replied` normalize to the
+  existing internal ask/reply flow with `generation: "v2"`; the V2 snapshot
+  is the primary recovery source (a successful empty V2 snapshot never
+  consults V1; V1 is used only on missing method, 404/501, or the client's
+  explicit "not supported by this version"); replies route explicitly on
+  the persisted generation (`generation: "v2"` in the reply body selects
+  the V2 endpoint, anything else keeps V1). Operational logs add
+  `generation`/`source` (allowlisted) with session/request ids and matched
+  counts only — never paths, scopes, resources or metadata.
+- Bridge: `agent_requests.generation` (`'v1'|'v2'`, default `'v1'`,
+  backward-compatible migration) is persisted on every ask and threaded
+  through resync into reply routing — never inferred from request-id
+  formatting. Legacy rows keep working as V1; unknown generations fail
+  closed. `once`/`always`/`reject` semantics, exact always scope, strict
+  session scoping (child-session asks never attach to a root run), dedupe
+  by OpenCode request id, and same-session resume are unchanged.
+- Tests: V2 pending-recovery while the legacy surface is empty, V2 live
+  event without resync, V2 once reply on the V2 endpoint only, V2 empty
+  snapshot inventing nothing, V1 fallback only on unsupported, wrong-session
+  discard, event+snapshot dedupe, and log hygiene (Python + adapter). An
+  opt-in live diagnostic (`tests/test_opencode_live.py`,
+  `WB_LIVE_OPENCODE=1`) observes the V2 snapshot/event path read-only: it
+  never changes permission policy and never replies.
+- Live revalidation is still required after rebuilding and restarting
+  (see below). Manual steps: 1) rebuild/restart bridge + adapter
+  (`adapter_version` 0.1.8 in `/health`); 2) start a run whose handoff
+  needs a permission-gated tool; 3) when the TUI shows the prompt,
+  `read_opencode_run` must report `waiting_permission` with
+  `pending_request_count=1` and `permission_sync` `ok/matched=1/source=v2`
+  instead of repeated `matched=0`; 4) answer once via the Bridge and
+  confirm the same session resumes. Do not auto-approve and do not use
+  `/tmp` merely to force `external_directory`.
+
+# Unreleased — safe operational container logging (adapter 0.1.7)
+
+- Bridge and adapter now emit one-line JSON operational logs suitable for
+  `docker compose logs -f bridge opencode-adapter` (existing json-file
+  rotation unchanged). Bridge covers `bridge_ready`, `run_created`,
+  `dispatch_started`/`dispatch_failed`, `run_state` transitions
+  (waiting_permission, waiting_question, running, completed, failed,
+  cancelled, orphaned), `permission_asked`/`permission_replied`,
+  `permission_resync` (`ok` with matched count vs `degraded` with sanitized
+  code), `event_pump_error`/`event_rejected`, and startup
+  `reconcile_start`/`reconcile_result`/`startup_reconcile`. The adapter (0.1.7)
+  covers `adapter_ready`, `eventhub_transition`/`eventhub_error`, and
+  `permission_list`/`permission_event`. `WB_LOG_LEVEL` (DEBUG/INFO/WARNING/
+  ERROR, default INFO) configures both services; invalid values fail fast at
+  bridge startup while the adapter falls back to INFO. Uvicorn access logs
+  stay disabled. All records carry bounded scalar IDs/state/codes/counts
+  only — never prompts, response text, paths, permission scopes/metadata,
+  credentials, or raw error bodies — and logging failures can never change
+  run state. SQLite audit events and run/permission semantics are unchanged.
+
+# Unreleased — permission-recovery observability (corrects 0.1.5)
+
+- Supersedes the 0.1.5 wording that implied missed asks are always
+  recovered. Live validation showed a real `external_directory` ask
+  (bash writing outside the project, e.g. `/tmp` scratch) staying
+  invisible: the run stayed `running` with `pending_request_count=0`.
+  The likely upstream cause is `GET /permission` failing its entire
+  response encoding when one pending request carries an undefined
+  metadata object (open upstream issue, 2026-07-26); the 0.1.5 adapter
+  additionally swallowed every listing failure, so the cause was
+  invisible in `read_opencode_run`.
+- Permission resync failures are now observable but non-terminal
+  (adapter 0.1.6). `_resync_permissions` no longer swallows
+  `BridgeError`: a list/binding failure records a bounded sanitized
+  `permission_sync` diagnostic (`degraded` with `permission_list_failed`
+  or `session_binding`) while the run stays active with
+  `pending_request_count=0` and no approval fabricated, approved,
+  rejected, resolved, or broadened. A successful listing records
+  `ok` with a matched count, so a successful empty list is
+  distinguishable from a failed listing; absence from a successful list
+  still never resolves a persisted wait. A later successful resync
+  containing the exact session ask recovers it idempotently into
+  `waiting_permission` and replaces the transient diagnostic.
+- Adapter `EventHub` tracks sanitized subscription health
+  (`starting`/`subscribed`/`reconnecting` with transition count,
+  last-transition time, and consecutive-failure count; no event
+  contents or secrets), exposed via `GET /health` as `event_stream`
+  and parsed by the Python runtime health/`runtime_status`. A new run
+  started while the stream is not confirmed subscribed is marked
+  degraded (`event_stream_not_subscribed`) with one bounded probe at
+  start — no tight poll, no start failure. Upstream HTTP 400 from the
+  adapter now maps to `RuntimeRejected` (a rejection, never `[]`).
+- Reconnect/cursor: only observed (forwarded) events advance the
+  adapter cursor, so reconnect never skips buffered events. The
+  installed `@opencode-ai/sdk` 1.18.31 event-subscribe surface takes
+  only directory/workspace with no cursor/last-event-id parameter, so
+  gaps across a disconnected upstream stream cannot be replayed; the
+  bounded in-adapter ring buffer replays only what it observed. No
+  second recovery source was added: sibling generated surfaces
+  (session-scoped `/api/session/{id}/permission`, location-scoped
+  `/api/permission/request`) are unverified against the installed
+  native server, so remote recovery remains best-effort while upstream
+  listing is broken. No TUI scraping, internal DB/state reads, private
+  endpoints, scope inference, auto-approval, or permission-policy
+  change. Live revalidation against a real OpenCode server with a real
+  external-directory ask is still required; unit coverage alone does
+  not prove the live path.
+
+# Unreleased — missed permission-ask recovery
+
+- A missed `permission.asked` event no longer leaves a run falsely `running`
+  forever. The adapter (0.1.5) adds a narrow session-scoped pending-permission
+  read (`GET /sessions/:id/permissions?directory=...` over the official
+  `@opencode-ai/sdk` 1.18.31 `permission.list` / `GET /permission` surface,
+  which returns `PermissionV1.Request` items with `sessionID`); listed
+  requests normalize through the same canonical mapping as live events
+  (`requested_patterns` separately reviewable, `pattern` exactly OpenCode's
+  proposed always scope, bounded/sanitized metadata, no secret persistence).
+  `read_opencode_run` resyncs an active run before reporting state, restart
+  reconciliation resyncs before inspecting persisted waits, and a bounded
+  background sweep (at most one listing per distinct starting/running
+  session every 60s) recovers notifications without a status poll. Recovery
+  is idempotent, strictly session-scoped, and fail-closed: list errors or
+  malformed responses never become an empty success, and absence from the
+  listing never auto-resolves an already persisted request. Responding once /
+  always / reject on a recovered request works exactly as on an
+  event-captured one and resumes the same session. No permission policy,
+  auto-approval, or unrelated surface changes. Known upstream limitation:
+  OpenCode v1 `GET /permission` may itself fail encoding when a pending
+  request metadata object contains undefined; that failure stays retryable
+  and pending permissions are not durable across an OpenCode server restart.
+
 # v0.8.4 — safe OpenCode session continuation for follow-up runs
 
 - `start_opencode_run` accepts an optional `continue_from_run_id`: a new

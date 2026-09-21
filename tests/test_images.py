@@ -135,8 +135,10 @@ def test_admin_exclusions_root_change_and_disabled_mapping(env):
     with pytest.raises(BridgeError): read(env)
     env["service"].manage_workspace(env["id"], "enable")
     env["root"].rename(env["root"].with_name("old-root")); env["root"].mkdir()
+    # Same configured path with a fresh empty directory stays usable: the
+    # previous image is simply gone, not a root_changed failure.
     with pytest.raises(BridgeError) as exc: read(env)
-    assert exc.value.code == "root_changed"
+    assert exc.value.code == "not_found"
 
 
 def test_stale_hash_rejected_before_decode(env, monkeypatch):
@@ -375,14 +377,14 @@ def test_image_read_never_changes_migration_or_writing(env, payload):
 
 def test_skill_and_capabilities_describe_image_boundary(env):
     skill = read_project_lead_skill()
-    assert skill["version"] == "1.6.1"
+    assert skill["version"] == "1.8.0"
     for fragment in ("native image", "visible secrets", "first frame", "text-only", "actually"):
         assert fragment in skill["content"]
     info = env["service"].info(env["service"].workspace(env["id"]))
     assert info["image_reading"]["formats"] == ["PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF"]
     assert info["limits"]["max_file_bytes"] == MAX_FILE
     assert info["image_reading"]["max_input_bytes"] == MAX_INPUT_BYTES
-    assert len(TOOLS) == 19
+    assert len(TOOLS) == 26
     schema = TOOLS["read_file"][0].model_json_schema()
     assert schema["properties"]["representation"]["default"] == "auto"
     assert "representation" not in schema["required"]

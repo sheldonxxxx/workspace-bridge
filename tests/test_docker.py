@@ -328,6 +328,27 @@ def test_adapter_dockerfile_cached_lockfile_layer():
     assert 'USER node' in text and '--omit=dev' in text
 
 
+def test_adapter_dockerfile_copies_every_local_module():
+    """The adapter Dockerfile uses an explicit COPY allowlist: every relative
+    .mjs import of the shipped entry modules must be listed, otherwise the
+    container crashes with ERR_MODULE_NOT_FOUND after a rebuild/restart."""
+    import re
+    adapter_dir = ROOT/'runtime/opencode-adapter'
+    text = (adapter_dir/'Dockerfile').read_text()
+    copied = set()
+    for line in text.splitlines():
+        match = re.match(r'COPY\s+(.+?)\s+\./$', line.strip())
+        if match:
+            copied.update(match.group(1).split())
+    entry_modules = ['adapter.mjs', 'server.mjs', 'sdk-runtime.mjs']
+    for module in entry_modules:
+        assert module in copied, module
+        source = (adapter_dir/module).read_text()
+        for imported in re.findall(r'''from\s+["']\./([^"']+)["']''', source):
+            assert imported in copied, f"{module} imports ./{imported} which is not COPYed"
+            assert (adapter_dir/imported).exists(), imported
+
+
 def test_setup_generates_private_config_no_source_changes(tmp_path,monkeypatch):
     # Simulated uid only for host setup logic; actual OS ownership remains unchanged.
     uid=os.getuid() or 1001
@@ -386,5 +407,202 @@ def test_health_unavailable(monkeypatch):
 def test_no_skill_or_remote_schema_expansion():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==19 and SKILL_VERSION=='1.6.1'
+    assert len(TOOLS)==26 and SKILL_VERSION=='1.8.0'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
+
+
+def test_admin_allowed_hosts_parse_empty(monkeypatch):
+    from workspace_bridge.cli import admin_allowed_hosts_from_env, parse_admin_allowed_hosts
+    assert parse_admin_allowed_hosts('') == ()
+    assert parse_admin_allowed_hosts('   ') == ()
+    monkeypatch.delenv('WB_ADMIN_ALLOWED_HOSTS', raising=False)
+    assert admin_allowed_hosts_from_env() == ()
+
+
+def test_admin_allowed_hosts_parse_valid(monkeypatch):
+    from workspace_bridge.cli import admin_allowed_hosts_from_env
+    monkeypatch.setenv('WB_ADMIN_ALLOWED_HOSTS', 'Admin.lan, 192.168.1.10,ADMIN.LAN')
+    assert admin_allowed_hosts_from_env() == ('admin.lan', '192.168.1.10')
+
+
+@pytest.mark.parametrize('raw', [
+    'evil.example:8766', 'http://evil.example', 'https://evil.example:8766/x',
+    '*.example.com', 'a/b', 'a@b', 'a b', 'a[b]', 'ex_ample!.com',
+    '.leading-dot', 'trailing-dot.', '-leading', 'double..dot', 'with:colon',
+])
+def test_admin_allowed_hosts_reject_invalid(raw):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    with pytest.raises(BridgeError):
+        parse_admin_allowed_hosts(raw)
+
+
+def test_admin_allowed_hosts_max_entries():
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    with pytest.raises(BridgeError):
+        parse_admin_allowed_hosts(','.join(f'h{i}.lan' for i in range(21)))
+
+
+def test_boundary_extra_hosts_admin_only():
+    boundary = Boundary(None, 8766, public_port=8876, extra_hosts=('admin.lan',))
+    assert 'admin.lan:8766' in boundary.hosts and 'admin.lan:8876' in boundary.hosts
+    assert 'http://admin.lan:8766' in boundary.origins
+    assert 'https://admin.lan:8766' in boundary.origins
+    # Loopback stays http-only; MCP default boundary has no extra hosts.
+    assert 'https://127.0.0.1:8766' not in boundary.origins
+    mcp = Boundary(None, 8765, public_port=8875)
+    assert 'admin.lan:8765' not in mcp.hosts
+
+
+@pytest.mark.parametrize('host', ['admin.lan:8766', 'admin.lan:8876'])
+async def test_admin_allows_configured_host(env, host):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     public_port=8876, container_mode=False, extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://' + host) as client:
+        r = await client.get('/api/status', headers={'Authorization': 'Bearer ' + token})
+        assert r.status_code == 200
+        assert r.json()['admin_allowed_hosts'] == ['admin.lan']
+        assert 'remote-admin' in r.json()['listen_mode']
+
+
+async def test_admin_https_origin_allowed_for_extra_host(env):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://admin.lan:8766') as client:
+        r = await client.get('/api/status', headers={
+            'Authorization': 'Bearer ' + token, 'Origin': 'https://admin.lan:8766'})
+        assert r.status_code == 200
+
+
+@pytest.mark.parametrize('headers', [
+    {'Host': 'evil.example:8766'}, {'Host': 'admin.lan:9999'},
+    {'Origin': 'http://evil.example'}, {'Origin': 'https://127.0.0.1:8766'},
+])
+async def test_admin_still_rejects_untrusted_with_allowlist(env, headers):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://admin.lan:8766') as client:
+        r = await client.get('/api/status', headers={
+            **headers, 'Authorization': 'Bearer ' + token})
+        assert r.status_code == 403
+
+
+def test_resolve_bind_hosts():
+    from workspace_bridge.cli import resolve_bind_hosts
+    assert resolve_bind_hosts(False, ()) == ('127.0.0.1', '127.0.0.1')
+    assert resolve_bind_hosts(False, ('admin.lan',)) == ('127.0.0.1', '0.0.0.0')
+    assert resolve_bind_hosts(True, ()) == ('0.0.0.0', '0.0.0.0')
+    assert resolve_bind_hosts(True, ('admin.lan',)) == ('0.0.0.0', '0.0.0.0')
+
+
+def test_entrypoint_rejects_bad_allowed_hosts(tmp_path, monkeypatch):
+    import workspace_bridge.docker_entrypoint as entry
+    parent = tmp_path / 'projects'
+    parent.mkdir()
+    monkeypatch.setattr(os, 'getuid', lambda: 1001)
+    monkeypatch.setenv('WB_PROJECTS_DIR', str(parent))
+    monkeypatch.setenv('WB_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('WB_ADMIN_ALLOWED_HOSTS', 'bad:host')
+    with pytest.raises(SystemExit) as exc:
+        entry.main(['serve'])
+    assert exc.value.code == 1
+
+
+def test_compose_admin_loopback_and_allowlist_passthrough():
+    cfg = yaml.safe_load((ROOT / 'compose.yaml').read_text())
+    svc = cfg['services']['bridge']
+    assert all(p.startswith('127.0.0.1:') for p in svc['ports'])
+    assert 'WB_ADMIN_ALLOWED_HOSTS' in svc['environment']
+
+
+@pytest.mark.parametrize('host', ['admin.lan', 'admin.lan:443', 'ADMIN.LAN'])
+async def test_admin_allows_proxy_host_forms(env, host):
+    """TLS-terminating nginx sends bare Host or :443, not the internal port."""
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://127.0.0.1:8766') as client:
+        r = await client.get('/api/status', headers={
+            'Host': host, 'Authorization': 'Bearer ' + token})
+        assert r.status_code == 200
+
+
+@pytest.mark.parametrize('origin', [
+    'https://admin.lan', 'https://admin.lan:443', 'http://admin.lan',
+])
+async def test_admin_allows_proxy_origins(env, origin):
+    """Browsers behind https://<name> send Origin without the internal port."""
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://127.0.0.1:8766') as client:
+        r = await client.get('/api/status', headers={
+            'Host': 'admin.lan', 'Origin': origin,
+            'Authorization': 'Bearer ' + token})
+        assert r.status_code == 200
+
+
+async def test_admin_proxy_host_and_origin_together(env):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.example.com')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://127.0.0.1:8766') as client:
+        r = await client.get('/api/status', headers={
+            'Host': 'admin.example.com', 'Origin': 'https://admin.example.com',
+            'Authorization': 'Bearer ' + token})
+        assert r.status_code == 200
+
+
+@pytest.mark.parametrize('headers', [
+    {'Host': 'admin.lan:9999'},
+    {'Host': 'admin.lan:8766', 'Origin': 'https://evil.example'},
+    {'Host': 'evil.example', 'Origin': 'https://evil.example'},
+])
+async def test_admin_proxy_still_rejects_wrong_port_and_evil(env, headers):
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://127.0.0.1:8766') as client:
+        r = await client.get('/api/status', headers={
+            **headers, 'Authorization': 'Bearer ' + token})
+        assert r.status_code == 403
+
+
+async def test_boundary_reject_logs_host_and_reason(env, caplog):
+    import logging
+    from workspace_bridge.cli import parse_admin_allowed_hosts
+    extra = parse_admin_allowed_hosts('admin.lan')
+    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+                     extra_hosts=extra)
+    token = (env['state'] / 'admin-token').read_text().strip()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url='http://127.0.0.1:8766') as client:
+        with caplog.at_level(logging.WARNING, logger="workspace_bridge.boundary"):
+            r = await client.get('/api/status', headers={
+                'Host': 'someone-else.example', 'Authorization': 'Bearer ' + token})
+        assert r.status_code == 403
+        assert any("reason=untrusted-host" in rec.message and "someone-else.example" in rec.message
+                   for rec in caplog.records)

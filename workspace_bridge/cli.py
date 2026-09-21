@@ -9,13 +9,68 @@ import secrets
 import sys
 
 import uvicorn
+from . import __version__
 from .api import make_admin, make_mcp
 from .notifications import notifier_from_environment
-from .runtime import runtime_from_environment
+from .oplog import configure_operational_logging, emit
+from .registry import runtime_registry_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
+import logging
+_ops_log = logging.getLogger("workspace_bridge.ops")
 
 DEFAULT_STATE = Path.home() / ".local" / "state" / "workspace-bridge"
+
+ADMIN_ALLOWED_HOSTS_ENV = "WB_ADMIN_ALLOWED_HOSTS"
+MAX_ADMIN_ALLOWED_HOSTS = 20
+
+
+def parse_admin_allowed_hosts(raw: str) -> tuple[str, ...]:
+    """Parse WB_ADMIN_ALLOWED_HOSTS into validated bare hostnames/IPs.
+
+    Comma-separated, case-insensitive, no ports/schemes/wildcards. Empty
+    string means loopback-only (default, fail-closed). Raises BridgeError on
+    any invalid entry rather than silently ignoring it.
+    """
+    if not isinstance(raw, str):
+        raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} must be a comma-separated string")
+    if not raw.strip():
+        return ()
+    seen: list[str] = []
+    for part in raw.split(","):
+        name = part.strip().lower()
+        if not name:
+            continue
+        if len(seen) >= MAX_ADMIN_ALLOWED_HOSTS:
+            raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} accepts at most {MAX_ADMIN_ALLOWED_HOSTS} hosts")
+        if (len(name) > 253 or "/" in name or "\\" in name or "@" in name
+                or " " in name or "\t" in name or "*" in name or "://" in name
+                or ":" in name or "#" in name or "?" in name or "&" in name
+                or "=" in name or "[" in name or "]" in name):
+            raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} entry {name!r} must be a bare hostname/IP without port, scheme or wildcard (IPv4/hostname only)")
+        if any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} entry {name!r} contains control characters")
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyz0123456789.-_")
+        if any(c not in allowed_chars for c in name):
+            raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} entry {name!r} uses invalid characters")
+        if name.startswith((".", "-", "_")) or name.endswith((".", "-", "_")) or ".." in name:
+            raise BridgeError(f"{ADMIN_ALLOWED_HOSTS_ENV} entry {name!r} is not a valid hostname/IP")
+        if name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
+def admin_allowed_hosts_from_env(environ: dict | None = None) -> tuple[str, ...]:
+    env = environ if environ is not None else os.environ
+    return parse_admin_allowed_hosts(env.get(ADMIN_ALLOWED_HOSTS_ENV, ""))
+
+
+def resolve_bind_hosts(container_mode: bool, extra_admin_hosts: tuple[str, ...]) -> tuple[str, str]:
+    """Return (mcp_bind, admin_bind). MCP stays loopback natively; the admin
+    listener widens to 0.0.0.0 only when explicitly allowed hosts exist."""
+    mcp_bind = "0.0.0.0" if container_mode else "127.0.0.1"
+    admin_bind = "0.0.0.0" if (container_mode or extra_admin_hosts) else "127.0.0.1"
+    return mcp_bind, admin_bind
 
 
 def initialize(state: Path, parents: list[str], mcp_port: int, admin_port: int) -> dict:
@@ -64,17 +119,38 @@ def load_config(state: Path) -> dict:
 
 
 async def serve(service: Service, config: dict, *, container_mode: bool = False,
-                mcp_public_port: int | None = None, admin_public_port: int | None = None):
+                mcp_public_port: int | None = None, admin_public_port: int | None = None,
+                extra_admin_hosts: tuple[str, ...] | None = None):
     # Only explicit local startup configuration broadens the bind address.
-    # Native CLI startup retains loopback binding by default.
-    bind_host = "0.0.0.0" if container_mode else "127.0.0.1"
+    # Native CLI startup retains loopback binding by default; setting
+    # WB_ADMIN_ALLOWED_HOSTS widens only the admin listener to 0.0.0.0 so the
+    # explicitly allowed Host values can actually connect. MCP stays loopback.
+    if extra_admin_hosts is None:
+        extra_admin_hosts = admin_allowed_hosts_from_env()
+    mcp_bind, admin_bind = resolve_bind_hosts(container_mode, extra_admin_hosts)
+    # Operational logs use the configured WB_LOG_LEVEL; Uvicorn's own access
+    # logs stay disabled and its internal level stays warning (no noisy
+    # request logs just to create output).
+    configure_operational_logging()
+    try:
+        total = enabled = 0
+        for ws in service.list_workspaces():
+            total += 1
+            if ws.get("enabled"):
+                enabled += 1
+    except Exception:  # noqa: BLE001 - counts are best-effort only
+        total = enabled = 0
+    emit(_ops_log, "INFO", "bridge", "bridge_ready", version=__version__,
+         runtime_configured=service.orchestrator.configured,
+         workspace_count=total, enabled_count=enabled)
     configs = [
         uvicorn.Config(make_mcp(service, config["mcp_port"], public_port=mcp_public_port,
-                                container_mode=container_mode), host=bind_host, port=config["mcp_port"],
+                                container_mode=container_mode), host=mcp_bind, port=config["mcp_port"],
                        access_log=False, proxy_headers=False, log_level="warning"),
         uvicorn.Config(make_admin(service, config["admin_token_hash"], config["admin_port"],
                                  public_port=admin_public_port, public_mcp_port=mcp_public_port,
-                                 container_mode=container_mode), host=bind_host, port=config["admin_port"],
+                                 container_mode=container_mode,
+                                 extra_hosts=extra_admin_hosts), host=admin_bind, port=config["admin_port"],
                        access_log=False, proxy_headers=False, log_level="warning"),
     ]
     servers = [uvicorn.Server(c) for c in configs]
@@ -116,6 +192,9 @@ def main(argv: list[str] | None = None):
     state = args.state.expanduser().resolve()
     os.umask(0o077)
     try:
+        # Fail fast on an invalid WB_LOG_LEVEL before any service work; serve()
+        # re-resolves it when listeners start.
+        configure_operational_logging()
         if args.command == "init":
             config = initialize(state, args.allow_parent, args.mcp_port, args.admin_port)
             print(f"Initialized {state}\nLocal management: http://127.0.0.1:{config['admin_port']}/")
@@ -135,8 +214,13 @@ def main(argv: list[str] | None = None):
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise BridgeError("A bridge process already owns this state directory; rotate online in the local manager") from None
+            # The serve path builds the full multi-runtime registry from
+            # environment (OpenCode + optional Pi) so every configured
+            # backend gets its own orchestrator. Direct/test callers keep
+            # the runtime= compatibility path via runtime_from_environment.
             service = Service(state, config, recover_incomplete=args.command == "serve",
-                              runtime=runtime_from_environment(), notifier=notifier_from_environment())
+                              registry=runtime_registry_from_environment(),
+                              notifier=notifier_from_environment())
             try:
                 if args.command == "rotate-bridge-token":
                     result = service.manage_bridge("rotate_token")
@@ -155,14 +239,20 @@ def main(argv: list[str] | None = None):
                     print(json.dumps({"config": "ok", "workspaces": report,
                         "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked",
                         "opencode": service.orchestrator.runtime_status(),
-                        "model_policy": service.orchestrator.model_policy_status()}, indent=2))
+                        "model_policy": service.orchestrator.model_policy_status(),
+                        "runtimes": service.runtime_diagnostics(),
+                        "admin_allowed_hosts": list(admin_allowed_hosts_from_env())}, indent=2))
                 else:
+                    extra_admin_hosts = admin_allowed_hosts_from_env()
                     print(f"MCP: http://127.0.0.1:{config['mcp_port']}/mcp | Local admin: http://127.0.0.1:{config['admin_port']}/")
+                    if extra_admin_hosts:
+                        print(f"WARNING: {ADMIN_ALLOWED_HOSTS_ENV}={','.join(extra_admin_hosts)} widens the admin listener to 0.0.0.0 with those Host values allowed. Prefer SSH port-forwarding or VPN; HTTP bears the admin token in clear. Never tunnel the manager.", file=sys.stderr)
                     if args.container:
                         print("Container bind: 0.0.0.0; publish both ports on host 127.0.0.1 ONLY. Do not tunnel management.")
                         print(f"Host MCP: http://127.0.0.1:{args.mcp_public_port}/mcp | Host admin: http://127.0.0.1:{args.admin_public_port}/")
                     asyncio.run(serve(service, config, container_mode=args.container,
-                                      mcp_public_port=args.mcp_public_port, admin_public_port=args.admin_public_port))
+                                      mcp_public_port=args.mcp_public_port, admin_public_port=args.admin_public_port,
+                                      extra_admin_hosts=extra_admin_hosts))
             finally:
                 service.close()
         finally:

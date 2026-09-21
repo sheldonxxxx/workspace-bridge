@@ -48,16 +48,20 @@ def test_oversize(env):
         with pytest.raises(BridgeError): safe.read("large.txt")
 
 def test_root_replaced(env):
+    # Same configured path stays usable after a remount-like replacement
+    # with a fresh directory: historical device/inode must not gate access.
     s = env["service"]; ws = s.workspace(env["id"])
     env["root"].rename(env["parent"] / "old")
     env["root"].mkdir()
-    with pytest.raises(BridgeError, match="replaced"): s.info(ws)
+    info = s.info(ws)
+    assert info["id"] == env["id"]
 
 def test_root_symlink_replaced(env):
     s = env["service"]; ws = s.workspace(env["id"])
     env["root"].rename(env["parent"] / "old")
     env["root"].symlink_to(env["parent"] / "old", target_is_directory=True)
-    with pytest.raises(BridgeError): s.info(ws)
+    with pytest.raises(BridgeError) as exc: s.info(ws)
+    assert exc.value.code != "root_changed"
 
 def test_handoff_symlink_never_writes_outside(env):
     external = env["tmp"] / "outside"; external.mkdir()

@@ -1,16 +1,280 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Workspace Bridge</title><link rel="stylesheet" href="/static/app.css"><script>(function(){try{var t=localStorage.getItem("wb-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t)}catch(e){}})();</script><script src="/static/app.js" defer></script></head>
-<body><header><div class="brand"><span class="mark">W↔</span><div><strong>Workspace Bridge</strong><small>LOCAL CONTROL · v0.8 · OPT-IN AGENT</small></div></div><button type="button" id="theme-toggle" class="secondary" aria-label="Toggle dark mode">◐ Dark</button></header>
-<main><section id="boot" class="panel narrow"><p class="eyebrow">LOCAL ADMINISTRATION</p><h1>Checking local session…</h1><p class="muted">Validating the local session cookie. Nothing is shown until the restore resolves.</p></section>
-<section id="login" class="panel narrow" hidden><p class="eyebrow">LOCAL ADMINISTRATION</p><h1>Your projects.<br>Your boundary.</h1><p>Map a project, publish a handoff, optionally run the local agent, and review the work. Your coding agent stays under your control.</p><form id="login-form"><label>Admin token<input id="admin-token" type="password" autocomplete="off" placeholder="From workspace-bridge show-admin-token" required></label><button>Unlock workspace manager</button></form><p class="muted">The token is exchanged once for a local HttpOnly session cookie. It is not stored in browser JS storage. Never put the admin token in ChatGPT or a tunnel profile.</p></section>
-<section id="dashboard" hidden><div class="headline"><div><p class="eyebrow">LOCAL WORKSPACE CONTROL</p><h1>Plan here. Build there. Review together.</h1><p id="status-line"></p></div><button class="secondary" id="logout">Lock manager</button></div>
-<div class="stats"><div class="panel"><small>WORKSPACES</small><strong id="workspace-count">0</strong><span>Explicit mappings only</span></div><div class="panel"><small>WRITE PERMISSION</small><strong>Per workspace</strong><span>Handoff-only by default</span></div><div class="panel"><small>AGENT EXECUTION</small><strong>Opt-in</strong><span>Per workspace, default off</span></div></div>
-<section class="panel" id="opencode-panel"><div class="section-title"><h2>OpenCode runtime</h2><span id="opencode-status" class="pill">Checking…</span></div><p class="muted">The OpenCode server runs natively on the host and is managed by you. Workspace Bridge only orchestrates it. The runtime URL and provider credentials never pass through MCP or this page.</p><div class="layout"><div><p class="path" id="opencode-endpoint"></p><p class="muted" id="opencode-meta"></p><p class="muted" id="policy-status"></p><div class="actions"><button type="button" id="open-models" class="secondary">Manage models</button></div></div><div><p class="muted">Global policy: at least one enabled model plus one mandatory default. Omit the model to use the default; explicit models must be enabled and available. MCP cannot change the policy. Disabled models stay visible but cannot start new runs. Existing runs are never stopped by a policy change.</p></div></div><dialog id="models-dialog" aria-label="Global OpenCode model policy"><form method="dialog"><h2>Global model policy</h2><p class="muted">Enable models and choose the mandatory default. Saving is atomic; cancelling discards unsaved changes.</p><label>Filter models<input id="model-filter" type="search" placeholder="Filter by provider or model" autocomplete="off"></label><div id="model-policy"></div><label>Default model<select id="policy-default" aria-label="Default model"></select></label><div class="actions"><button type="button" id="load-models" class="secondary">Refresh global models</button><button type="button" id="save-policy" class="secondary">Save model policy</button><button type="button" id="cancel-policy" class="secondary">Cancel</button></div></form></dialog><p class="muted" id="discord-status"></p></section>
-<section class="panel" id="bridge-panel"><div class="section-title"><h2>One tunnel. All your workspaces.</h2><span id="bridge-status" class="pill">Not configured</span></div><p class="path" id="shared-endpoint"></p><p class="muted">One ChatGPT connection and one bridge token. Only enabled mappings are discoverable. Every project tool requires an explicit workspace ID; there is no shared active-workspace state.</p><div class="actions"><button type="button" id="bridge-profile" class="secondary">Tunnel setup</button><button type="button" id="bridge-rotate" class="secondary">Create bridge token</button><button type="button" id="bridge-pause" class="danger">Pause all MCP access</button></div><p class="muted">The shared token can access every enabled mapping. Workspace IDs prevent path escape, not access between chats using the same connection.</p></section>
-<div class="layout"><section class="panel"><div class="section-title"><h2>Workspace mappings</h2><button class="secondary" id="refresh">Refresh</button></div><p class="muted">All mappings share /mcp. New mappings start disabled and handoff-write-only. Enabling one grants access through the shared connection; only this local manager can broaden write permissions or enable agent execution.</p><div id="workspaces"></div><details><summary>Add a workspace</summary><form id="add-form"><label>Name<input name="name" placeholder="RapidRAW" required maxlength="80"></label><label>Project directory<input name="root" placeholder="/Users/you/Projects/RapidRAW" required></label><label>Additional exclusions (one glob per line)<textarea name="excludes" rows="3" placeholder="private/**&#10;fixtures/large/**"></textarea></label><p id="parents" class="muted"></p><button>Add disabled mapping</button></form></details></section>
-<aside class="panel"><p class="eyebrow">THE HANDOFF LOOP</p><h2>A deliberate boundary.</h2><div class="step"><b>01</b><div><strong>ChatGPT reads & plans</strong><p>Only files exposed by the selected workspace policy.</p></div></div><div class="step"><b>02</b><div><strong>You dispatch the handoff</strong><p>Start an OpenCode run when agent execution is enabled, or copy the manual prompt as fallback.</p></div></div><div class="step"><b>03</b><div><strong>ChatGPT reviews the changes</strong><p>It reads the run result and current code, then gives findings or a corrective handoff.</p></div></div><div class="notice">Tunnel connectivity is not monitored here. Check <code>tunnel-client doctor</code> and its own <code>/ui</code>. This management page must stay local.</div></aside></div>
-<section class="panel" id="jobs-panel" hidden><div class="section-title"><h2 id="jobs-title">Handoffs & runs</h2><span class="pill">Handoff state · independent run state</span></div><div id="jobs"></div></section>
-<section class="panel" id="sessions-panel"><div class="section-title"><h2>OpenCode sessions</h2><span class="pill" id="sessions-count">Bridge-owned · all workspaces</span><button class="secondary" id="refresh-sessions">Refresh</button></div><p class="muted">Only sessions started by this bridge are listed. Sessions created directly in the native OpenCode server are out of scope.</p><div class="table-wrap"><table aria-label="OpenCode sessions"><thead><tr><th>State</th><th>Workspace</th><th>Handoff</th><th>Model</th><th>Session</th><th>Timing</th><th>Pending/Attention</th><th>Notification</th><th>Actions</th></tr></thead><tbody id="sessions"></tbody></table></div><div class="actions"><button type="button" id="more-sessions" class="secondary">Load more</button></div></section>
-<section class="panel"><div class="section-title"><h2>Recent access & changes</h2><small>No content or secrets logged</small></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Workspace</th><th>Operation</th><th>Outcome</th></tr></thead><tbody id="events"></tbody></table></div></section>
-</section><section class="panel" id="output-panel" hidden><div class="section-title"><h2 id="output-title">Details</h2><button class="secondary" id="close-output">Close & clear</button></div><pre id="output"></pre></section><div id="message" role="status" aria-live="polite"></div></main><footer>Loopback administration · Explicit workspace boundaries · Opt-in agent execution</footer></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Workspace Bridge · Control room</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem("wb-theme");
+        if (theme === "dark" || theme === "light") document.documentElement.setAttribute("data-theme", theme);
+      } catch (error) {}
+    }());
+  </script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" aria-label="Workspace Bridge">
+      <span class="mark" aria-hidden="true">WB</span>
+      <div>
+        <strong>Workspace Bridge</strong>
+        <small>Local control plane</small>
+      </div>
+    </div>
+    <nav class="topbar-status" role="status" aria-label="Live bridge status">
+      <div class="topbar-signal">
+        <span class="topbar-signal-label">Mappings</span>
+        <strong id="workspace-count" class="topbar-signal-value">0</strong>
+      </div>
+      <div class="topbar-signal">
+        <span class="topbar-signal-label">MCP</span>
+        <span id="bridge-status" class="pill signal-value">Not configured</span>
+      </div>
+      <div class="topbar-signal">
+        <span class="topbar-signal-label">OpenCode</span>
+        <span id="opencode-status" class="pill signal-value">Checking…</span>
+      </div>
+    </nav>
+    <div class="topbar-actions">
+      <span id="status-line" class="statusline"></span>
+      <button type="button" id="theme-toggle" class="secondary theme-toggle" aria-label="Toggle dark mode">◐ Dark</button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <section id="boot" class="panel narrow loading-panel">
+      <span class="eyebrow">Workspace Bridge</span>
+      <h1>Checking local session…</h1>
+      <p class="hint">Validating the session cookie.</p>
+    </section>
+
+    <section id="login" class="panel narrow" hidden>
+      <div class="auth-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <span class="eyebrow">Local administrator</span>
+      <h1>Unlock the bridge</h1>
+      <p>Open the control room to manage project access, connections, and runs.</p>
+      <form id="login-form">
+        <label>Admin token
+          <input id="admin-token" type="password" autocomplete="off" placeholder="From workspace-bridge show-admin-token" required>
+        </label>
+        <button>Open console</button>
+      </form>
+      <p class="hint">The token is exchanged once for a session cookie.</p>
+    </section>
+
+    <section id="dashboard" hidden class="dashboard-layout">
+      <aside class="sidebar" aria-label="Console navigation">
+        <div class="side-identity">
+          <span class="side-kicker">Control room</span>
+          <strong>Bridge console</strong>
+        </div>
+        <nav class="side-nav" aria-label="Sections">
+          <a href="#workspaces-panel">Workspaces</a>
+          <a href="#jobs-panel">Handoffs</a>
+          <a href="#sessions-panel">Sessions</a>
+          <a href="#system-panel">System</a>
+          <a href="#activity-panel">Activity</a>
+        </nav>
+        <div class="side-status">
+          <span class="side-kicker">Connection</span>
+          <strong>Local only</strong>
+          <span class="side-status-line"><i aria-hidden="true"></i>Admin listener</span>
+        </div>
+        <button type="button" id="logout" class="sidebar-lock secondary">Lock console</button>
+      </aside>
+
+      <div class="dashboard-main">
+        <div class="page-head">
+          <div>
+            <span class="eyebrow">Local control room</span>
+            <h1>Workspace access</h1>
+            <p id="status-dup" class="lede">Choose what this bridge can expose.</p>
+          </div>
+          <button type="button" id="refresh" class="secondary refresh-button">Refresh</button>
+        </div>
+
+        <section class="panel primary-panel" id="workspaces-panel">
+          <div class="section-title">
+            <div>
+              <h2>Workspaces</h2>
+              <p class="section-note">Mappings are disabled until you turn them on.</p>
+            </div>
+          </div>
+          <div id="workspaces" class="workspace-list"></div>
+          <details class="add-drawer">
+            <summary><span class="summary-main"><span class="summary-plus" aria-hidden="true">+</span>Add a workspace</span><span class="summary-note">Starts disabled</span></summary>
+            <form id="add-form">
+              <label>Name
+                <input name="name" placeholder="RapidRAW" required maxlength="80">
+              </label>
+              <label>Project directory
+                <input name="root" placeholder="/Users/you/Projects/RapidRAW" required>
+              </label>
+              <label>Extra exclusions
+                <textarea name="excludes" rows="3" placeholder="private/**&#10;fixtures/large/**"></textarea>
+              </label>
+              <p id="parents" class="hint"></p>
+              <button>Add disabled mapping</button>
+            </form>
+          </details>
+        </section>
+
+        <section class="panel contextual-panel" id="jobs-panel" hidden>
+          <div class="section-title">
+            <div>
+              <span class="eyebrow">Selected workspace</span>
+              <h2 id="jobs-title">Handoffs &amp; runs</h2>
+            </div>
+            <span class="context-mark" aria-hidden="true">↳</span>
+          </div>
+          <div id="jobs"></div>
+        </section>
+
+        <section class="panel" id="sessions-panel">
+          <div class="section-title">
+            <div>
+              <h2>Agent sessions</h2>
+              <p class="section-note">Bridge-owned activity across runtimes.</p>
+            </div>
+            <div class="section-actions">
+              <span class="pill" id="sessions-count">Bridge-owned</span>
+              <button type="button" id="refresh-sessions" class="secondary">Refresh</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table aria-label="Agent sessions">
+              <thead><tr><th>State</th><th>Runtime</th><th>Workspace</th><th>Handoff</th><th>Model</th><th>Session</th><th>Timing</th><th>Pending/Attention</th><th>Notification</th><th>Actions</th></tr></thead>
+              <tbody id="sessions"></tbody>
+            </table>
+          </div>
+          <div class="actions table-actions"><button type="button" id="more-sessions" class="secondary">Load more</button></div>
+        </section>
+
+        <section class="system-area" id="system-panel">
+          <div class="section-title">
+            <div>
+              <h2>System</h2>
+              <p class="section-note">Advanced controls stay out of the main flow.</p>
+            </div>
+          </div>
+          <div class="system-grid">
+            <section class="system-card" id="opencode-panel">
+              <div class="section-title"><h3>OpenCode runtime</h3><span class="system-glyph" aria-hidden="true">◎</span></div>
+              <p class="path" id="opencode-endpoint"></p>
+              <p class="hint" id="opencode-meta"></p>
+              <p class="hint" id="policy-status"></p>
+              <div class="actions"><button type="button" id="open-models" class="secondary">Manage models</button></div>
+              <details>
+                <summary>Policy rules</summary>
+                <p class="hint">At least one enabled model plus a mandatory default.</p>
+              </details>
+              <p class="hint" id="discord-status"></p>
+              <dialog id="models-dialog" aria-label="Runtime model policy">
+                <form method="dialog">
+                  <span class="eyebrow" id="models-runtime-eyebrow">OpenCode runtime</span>
+                  <h2>Model policy</h2>
+                  <p class="hint" id="models-hint">Choose available models and one default.</p>
+                  <label id="discovery-workspace-row" hidden>Discovery workspace<select id="discovery-workspace" aria-label="Discovery workspace"></select></label>
+                  <label>Filter models
+                    <input id="model-filter" type="search" placeholder="Filter by provider or model" autocomplete="off">
+                  </label>
+                  <div id="model-policy"></div>
+                  <label>Default model<select id="policy-default" aria-label="Default model"></select></label>
+                  <div class="actions">
+                    <button type="button" id="load-models" class="secondary">Refresh global models</button>
+                    <button type="button" id="save-policy">Save model policy</button>
+                    <button type="button" id="cancel-policy" class="secondary">Cancel</button>
+                  </div>
+                </form>
+              </dialog>
+            </section>
+
+            <section class="system-card" id="pi-panel">
+              <div class="section-title"><h3>Pi runtime</h3><span id="pi-status" class="pill signal-value">Checking…</span><span class="system-glyph" aria-hidden="true">◍</span></div>
+              <p class="path" id="pi-endpoint"></p>
+              <p class="hint" id="pi-meta"></p>
+              <p class="hint" id="pi-policy-status"></p>
+              <p class="hint" id="pi-permission-status"></p>
+              <div class="actions">
+                <button type="button" id="open-pi-models" class="secondary">Manage Pi models</button>
+                <button type="button" id="open-pi-permissions" class="secondary">Manage permissions</button>
+              </div>
+              <details>
+                <summary>Policy rules</summary>
+                <p class="hint">Runtime-global policy; discovery uses the selected workspace.</p>
+              </details>
+              <dialog id="pi-permissions-dialog" aria-label="Pi permission policy">
+                <form method="dialog">
+                  <span class="eyebrow">Pi runtime</span>
+                  <h2>Pi file permissions</h2>
+                  <p class="hint" id="pi-perm-revision"></p>
+                  <label id="pi-perm-enabled-row"><input id="pi-perm-enabled" type="checkbox"> Enable Pi writable tools (edit/write)</label>
+                  <p class="hint" id="pi-perm-warning">Warning: Pi runs natively with your macOS user authority. This is not a sandbox: approved edits and writes act directly on workspace files.</p>
+                  <p class="hint" id="pi-perm-session-note">Policy changes apply to NEW Pi sessions only. Active sessions keep the snapshot they were created with.</p>
+                  <div id="pi-perm-tools"></div>
+                  <label id="pi-perm-always-row"><input id="pi-perm-always" type="checkbox"> Offer “Always allow exact target” for this session</label>
+                  <label>Protected path patterns (one workspace-relative glob per line)
+                    <textarea id="pi-perm-protected" rows="4" placeholder=".git/**&#10;.env"></textarea>
+                  </label>
+                  <label>Template exception patterns (one per line)
+                    <textarea id="pi-perm-exceptions" rows="3" placeholder=".env.example"></textarea>
+                  </label>
+                  <details>
+                    <summary>Fixed safety invariants (not configurable)</summary>
+                    <div id="pi-perm-invariants"></div>
+                  </details>
+                  <div class="actions">
+                    <button type="button" id="pi-perm-reload" class="secondary">Reload current policy</button>
+                    <button type="button" id="pi-perm-restore" class="secondary">Restore safe defaults</button>
+                    <button type="button" id="pi-perm-save">Save permission policy</button>
+                    <button type="button" id="pi-perm-cancel" class="secondary">Cancel</button>
+                  </div>
+                </form>
+              </dialog>
+            </section>
+
+            <section class="system-card" id="bridge-panel">
+              <div class="section-title"><h3>Tunnel connection</h3><span class="system-glyph" aria-hidden="true">⌁</span></div>
+              <p class="path" id="shared-endpoint"></p>
+              <div class="actions">
+                <button type="button" id="bridge-profile" class="secondary">Tunnel setup</button>
+                <button type="button" id="bridge-rotate" class="secondary">Create bridge token</button>
+                <button type="button" id="bridge-pause" class="danger">Pause all MCP access</button>
+              </div>
+              <details>
+                <summary>Access model</summary>
+                <p class="hint">One tunnel and token serve all enabled mappings. Every tool call names its workspace.</p>
+              </details>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel activity-panel" id="activity-panel">
+          <div class="section-title">
+            <div>
+              <h2>Recent activity</h2>
+              <p class="section-note">Access and configuration changes. File content is never logged.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table aria-label="Recent activity">
+              <thead><tr><th>Time</th><th>Workspace</th><th>Operation</th><th>Outcome</th></tr></thead>
+              <tbody id="events"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="panel output-panel" id="output-panel" hidden>
+      <div class="section-title"><h2 id="output-title">Details</h2><button type="button" class="secondary" id="close-output">Close</button></div>
+      <pre id="output"></pre>
+    </section>
+    <div id="message" role="status" aria-live="polite"></div>
+  </main>
+</body>
+</html>

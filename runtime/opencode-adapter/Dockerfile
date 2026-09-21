@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --no-audit --no-fund
-COPY sdk-runtime.mjs server.mjs adapter.mjs ./
+COPY sdk-runtime.mjs server.mjs adapter.mjs oplog.mjs ./
 USER node
 EXPOSE 8770
 CMD ["node", "adapter.mjs"]

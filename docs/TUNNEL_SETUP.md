@@ -75,7 +75,7 @@ Adding workspaces afterward only changes local mappings; no new tunnel/app, extr
 
 - **401:** gateway unconfigured/paused, invalid/rotated token, or missing runtime/discovery header. Use `X-Bridge-Token`, not the removed workspace header.
 - **404:** old `/mcp/ws_...` URL; use `/mcp`.
-- **Workspace unavailable/tool error:** wrong ID, disabled mapping or invalid root identity. Discovery contains only enabled mappings; do not auto-select another project as a fallback.
+- **Workspace unavailable/tool error:** wrong ID, disabled mapping or unavailable workspace root. Discovery contains only enabled mappings; do not auto-select another project as a fallback.
 - **403:** incorrect Host/Origin or duplicated security headers. Keep the exact loopback target; do not allow arbitrary origins or tunnel the manager to work around this.
 - **Unknown arguments/tool names:** stale v0.1 cached schemas. Refresh discovery; every project call now requires `workspace_id`.
 - **Protocol error:** compare advertised versions and required per-request metadata. Unknown protocol versions are rejected rather than guessed.

@@ -37,7 +37,7 @@ def mcp_value(response):
 
 def test_new_tool_schemas_and_annotations(agent_env):
     assert OPENCODE_TOOLS <= set(TOOLS)
-    assert len(TOOLS) == 19
+    assert len(TOOLS) == 26
     for name in OPENCODE_TOOLS:
         schema = TOOLS[name][0].model_json_schema()
         assert schema["additionalProperties"] is False
@@ -178,11 +178,16 @@ async def test_manager_ui_exposes_runs_and_permission_controls(agent_env):
             base_url="http://127.0.0.1:8766", headers={"Authorization": "Bearer " + token}) as client:
         js = (await client.get("/static/app.js")).text
         html = (await client.get("/")).text
-    for fragment in ("OpenCode runtime", "Manage models", "models-dialog", "policy-default",
-                      "Default model", "Save model policy",
-                      "View details", "Stop", "Approve once", "Approve always", "Reject", "Run details",
-                      "OpenCode sessions", "Checking local session", "Refresh global models"):
+    for fragment in ("OpenCode runtime", "Pi runtime", "Manage models", "Manage Pi models",
+                       "models-dialog", "policy-default", "discovery-workspace",
+                       "Default model", "Save model policy",
+                       "View details", "Stop", "Approve once", "Approve always", "Reject", "Run details",
+                       "Agent sessions", "Checking local session", "Refresh global models"):
         assert fragment in js or fragment in html, fragment
+    # Pi discovery uses an explicit workspace picker; OpenCode stays global.
+    assert 'id="discovery-workspace"' in html
+    assert "renderDiscoveryWorkspaces" in js
+    assert "/api/runtimes/" in js
     # Compact summary on the main page; full management lives in the modal.
     assert "Policy:" in js
     assert 'id="policy-status"' in html
@@ -195,8 +200,9 @@ async def test_manager_ui_exposes_runs_and_permission_controls(agent_env):
     # Cancel discards drafts: the cancel handler closes without posting.
     cancel_segment = js.split("cancel-policy", 1)[1][:400]
     assert "close(" in cancel_segment and "api(" not in cancel_segment
-    # Save posts enabled[] + default atomically.
-    assert '"/api/settings", "POST", {enabled, default: def}' in js
+    # Save posts enabled[] + default atomically to the runtime policy endpoint.
+    assert "`/api/runtimes/${modelRuntime}/model-policy`, \"POST\", body" in js
+    assert "openModels(\"opencode\")" in js or 'openModels("opencode")' in js
     assert "Enable agent" in js or "Disable agent" in js, "Agent toggle button"
     assert "model-workspace" not in js and "model-workspace" not in html, "No workspace model picker"
     assert "List models for a workspace" not in js, "No per-workspace model UX"
@@ -221,41 +227,46 @@ async def test_manager_ui_exposes_runs_and_permission_controls(agent_env):
     assert 'id="dashboard" hidden' in html
     assert "Save agent policy" not in js, "Old checkbox UI removed"
     assert "Agent execution (OpenCode)" not in js or "Agent execution (OpenCode)" not in html, "Old checkbox label removed"
-    # Global OpenCode sessions overview is a real table, not stacked cards.
-    assert "<table" in html and 'aria-label="OpenCode sessions"' in html
+    # Global agent sessions overview is a real table, not stacked cards.
+    assert "<table" in html and 'aria-label="Agent sessions"' in html
     assert "<thead>" in html and '<tbody id="sessions">' in html
-    for column in ("State", "Workspace", "Handoff", "Model", "Session", "Timing",
+    for column in ("State", "Runtime", "Workspace", "Handoff", "Model", "Session", "Timing",
                    "Pending/Attention", "Notification", "Actions"):
         assert f"<th>{column}</th>" in html, column
     assert '<div id="sessions">' not in html
     session_fn = js.split("function sessionRow", 1)[1].split("async function loadSessions", 1)[0]
     assert 'node("tr")' in session_fn
-    assert session_fn.count('node("td"') >= 9
+    assert session_fn.count('node("td"') >= 10
     assert 'node("div", undefined, "job")' not in session_fn
     assert '"job"' not in session_fn, "Global session rows must not use .job cards"
     assert "View details" in session_fn
     assert "Stop" in session_fn and "run.active" in session_fn
     assert "pending_request_count" in session_fn or "pending" in session_fn
     assert "needs attention" in session_fn
+    assert "run.runtime" in session_fn, "Global session rows must display the run runtime"
     assert 'node("td", undefined, "actions")' not in session_fn, "Actions td must remain a normal table cell"
     assert 'node("div", undefined, "actions")' in session_fn, "Actions buttons must use a nested .actions wrapper"
     assert "actionsCell.append(actions)" in session_fn, "Actions wrapper must be nested inside the td"
     assert "row.append(actionsCell)" in session_fn, "Actions td must be appended to the row"
-    assert "colSpan" in js and "No Bridge-owned OpenCode sessions yet." in js
+    assert "colSpan" in js and "No Bridge-owned agent sessions yet." in js
     loader_fn = js.split("async function loadSessions", 1)[1].split("async function requestView", 1)[0]
     assert "$(\"sessions\").replaceChildren()" in loader_fn
     assert "$(\"sessions\").append(sessionRow(run))" in loader_fn
+    assert '"/api/sessions?' in loader_fn or "`/api/sessions?" in loader_fn, "Sessions table uses the neutral endpoint"
     # Continued/reused runs are visibly distinguished from the summary fields,
     # using text nodes only and without adding table columns.
     assert "session_reused" in session_fn
     assert "continue_from_run_id" in session_fn
     assert "Continued from" in session_fn
     assert "reused" in session_fn
-    assert session_fn.count('node("td"') >= 9, "Sessions table keeps its nine columns"
+    assert session_fn.count('node("td"') >= 10, "Sessions table keeps its ten columns"
     run_fn = js.split("function runRow", 1)[1].split("async function stopRun", 1)[0]
     assert "session_reused" in run_fn
     assert "continue_from_run_id" in run_fn
-    assert "Reused OpenCode session" in run_fn
+    assert "Reused " in run_fn and " session" in run_fn
+    assert "Reused OpenCode session" not in run_fn, "Run rows use runtime-aware wording"
+    assert "OpenCode default model" not in run_fn, "Run rows use runtime-aware model wording"
+    assert "run.runtime" in run_fn, "Run rows must display the run runtime"
     assert "Continued from" in run_fn
 
 

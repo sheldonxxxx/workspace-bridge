@@ -56,23 +56,30 @@ Optional `context_hashes` check named files at publication; they are not a basel
 Return the actual `copy_prompt` and absolute handoff path for manual dispatch; the
 user will paste the agent reply into ChatGPT when an automated run is not used.
 
-When the agent policy allows it, `list_opencode_models` shows the GLOBAL
-enabled list and default; `start_opencode_run` resolves the model on the
-server. Never invent a selector. Runs are handoff-bound, idempotent per
-`request_id`, and fail closed without a policy. Model choice (the enabled
-list is the boundary; intent is yours): silent user → default; an explicit
-ENABLED request → may use it; a category ("free/cheap") → may match a
-clearly satisfying enabled model, stating the selector; a self-initiated
-non-default → ask first; never silently switch after failure or quota;
-never use a disabled model. Reuse the session when a small corrective follow-up
-shares workspace, model, task and permission scope: prefer
-`start_opencode_run(... continue_from_run_id=<completed run>)`, a new Bridge
-run inheriting session context including session-scoped approvals. Use a fresh
-session when the model changes, the prior run did not complete, the permission
-scope changes, clean context is requested, or validation fails; a requested
-continuation never silently becomes a fresh session.
+When the agent policy allows it, prefer the runtime-neutral workflow:
+`list_agent_models(runtime)` shows that runtime's enabled list and default;
+`start_agent_run(runtime, ...)` resolves the model on the server. Never invent
+a selector. Runs are handoff-bound, idempotent per `request_id` within the
+selected runtime, and fail closed without a policy. Runtime choice: an explicit
+user request for an available runtime → use it; a silent user → OpenCode
+(current behavior); never silently switch runtimes after failure or quota; a
+self-initiated switch away from the user's/current/default runtime → ask first.
+Model choice (the enabled list is the boundary; intent is yours): silent user →
+that runtime's default; an explicit ENABLED request → may use it; a category
+("free/cheap") → may match a clearly satisfying enabled model, stating the
+selector; a self-initiated non-default → ask first; never silently switch after
+failure or quota; never use a disabled model. Reuse the session when
+a small corrective follow-up shares workspace, runtime, model, task and
+permission scope: prefer `start_agent_run(... continue_from_run_id=<completed run>)`,
+a new Bridge run inheriting session context including session-scoped approvals.
+A runtime change always requires a fresh session. Use a fresh session when the
+model changes, the prior run did not complete, the permission scope changes,
+clean context is requested, or validation fails; a requested continuation never
+silently becomes a fresh session.
+Legacy `list_opencode_models`/`start_opencode_run` remain OpenCode-only
+compatibility paths, not the preferred workflow.
 
-Tell OpenCode to stop rather than guess through contradictions, expand scope, or
+Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks. Never weaken tests or invent
 success. It replies with a summary, affected paths, actual check commands/outcomes,
 failures or unrun checks, and risks/blockers. No special report files or JSON schema.
@@ -80,13 +87,20 @@ failures or unrun checks, and risks/blockers. No special report files or JSON sc
 ## Permission loop
 `external_directory` and similar actions may be an `ask`, not a denial. A run in
 `waiting_permission` is a resumable, non-terminal wait; it does not end the session.
-Read the pending request with `read_opencode_run`/`read_opencode_request`: kind,
+Read the pending request with `read_agent_run`/`read_agent_request`: kind,
 action/tool, requested resource, metadata, and the exact proposed approval
 pattern. When the user asks you to decide, call
-`respond_opencode_permission` with `once`, `always`, or `reject`.
-- `once` approves only this request; `always` approves OpenCode's exact proposed
+`respond_agent_permission` with `once`, `always`, or `reject`.
+- `once` approves only this request; `always` approves the runtime's exact proposed
   pattern and must never be broadened; `reject` refuses. A policy denial is not
-  remotely approvable.
+  remotely approvable. Runtimes without permission support fail closed.
+  Pi file permissions are web-admin configured (master enable, allow/ask/deny
+  per file tool, protected patterns, session-always toggle); each Pi session
+  carries an immutable policy snapshot plus revision, so a policy change
+  applies to NEW sessions only and continuation across a policy change is
+  refused. An ask suspends the exact tool call and resumes it on approval;
+  `always` is exact-resource and session-local only. Pi has no bash and no
+  sandbox claim: it runs natively with the user's macOS authority.
 - Review `always` against the handoff and the user's intent. Surface ambiguous,
   overly broad or sensitive scopes instead of guessing; if no scope is available,
   `always` fails closed.
@@ -97,7 +111,7 @@ permission scope, else start fresh.
 ## Audit using normal tools
 Treat the run result and any manual reply as claims and inspection guides, not proof.
 Read the original plan with `read_handoff`, then the final result with
-`read_opencode_run`. Inspect current implementation, callers, configuration and tests
+`read_agent_run` (or `read_opencode_run` on the legacy compatibility path). Inspect current implementation, callers, configuration and tests
 with general tools. Check every acceptance criterion and plausible regressions beyond
 the claimed file list.
 

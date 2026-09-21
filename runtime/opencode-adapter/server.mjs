@@ -58,9 +58,17 @@ function timingSafeEqualStrings(expected, provided) {
 }
 
 export function createAdapterServer({ runtime, hub, token, serverConfigured, instance,
-                                     adapterVersion, bodyLimit = DEFAULT_BODY_LIMIT }) {
+                                     adapterVersion, bodyLimit = DEFAULT_BODY_LIMIT, onLog = null }) {
   const locked = !token;
   const configuredToken = typeof token === "string" ? token : "";
+
+  function oplog(level, event, fields) {
+    try {
+      if (typeof onLog === "function") onLog(level, "adapter", event, fields);
+    } catch {
+      // Logging must never break request handling.
+    }
+  }
 
   // Fail closed: a missing WB_RUNTIME_TOKEN never means "allow".
   function authorized(req) {
@@ -98,10 +106,19 @@ export function createAdapterServer({ runtime, hub, token, serverConfigured, ins
         if (lockedHealth) return send(res, 200, lockedHealth);
         const health = runtime ? await runtime.health()
           : { ok: false, error: "not_configured", server_configured: false };
+        // Sanitized event-stream health only: status/transitions/timing,
+        // never event contents or secrets.
+        let eventStream = null;
+        try {
+          eventStream = hub && typeof hub.health === "function" ? hub.health() : null;
+        } catch {
+          eventStream = null;
+        }
         return send(res, 200, {
           ...health, locked: false, token_configured: true,
           server_configured: serverConfigured, adapter_version: adapterVersion,
           instance, cursor: hub ? hub.cursor : 0,
+          event_stream: eventStream,
         });
       }
       if (!authorized(req)) {
@@ -160,10 +177,89 @@ export function createAdapterServer({ runtime, hub, token, serverConfigured, ins
           const directory = url.searchParams.get("directory") || "";
           return send(res, 200, { status: await runtime.sessionStatus(directory, sessionId) });
         }
+        if (req.method === "GET" && segments[2] === "permissions" && segments.length === 3) {
+          // Narrow, session-scoped pending-permission read for missed-ask
+          // recovery. The runtime tries the V2 session-scoped snapshot
+          // first (GET /api/session/{sessionID}/permission) and falls back
+          // to the V1 global listing (GET /permission) only when V2 is
+          // unavailable/unsupported. Errors propagate (fail closed); they
+          // are never converted to an empty list.
+          const directory = url.searchParams.get("directory") || "";
+          try {
+            const permissions = await runtime.listPendingPermissions(directory, sessionId);
+            // Success: generation/source + session_id + matched count only,
+            // never permission objects/patterns/resources/metadata.
+            const source = runtime && typeof runtime.lastPermissionSource === "string"
+              ? runtime.lastPermissionSource : null;
+            oplog("INFO", "permission_list", {
+              generation: source || undefined, source: source || undefined,
+              session_id: sessionId, status: "ok",
+              matched: Array.isArray(permissions) ? permissions.length : 0,
+            });
+            return send(res, 200, { permissions });
+          } catch (error) {
+            // Failure: sanitized status/code only, never raw error/body.
+            const code = error && typeof error.code === "string" && error.code
+              ? String(error.code).replace(/[^A-Za-z0-9_]/g, "_").slice(0, 80)
+              : "permission_list_failed";
+            oplog("WARNING", "permission_list", {
+              session_id: sessionId, status: "degraded", code,
+            });
+            throw error;
+          }
+        }
+        if (req.method === "GET" && segments[2] === "questions" && segments.length === 3) {
+          // Narrow, session-scoped pending-question read for missed-ask
+          // recovery. The runtime tries the V2 session-scoped snapshot
+          // first (GET /api/session/{sessionID}/question) and falls back
+          // to the verified V1 global listing (GET /question, strictly
+          // filtered by exact sessionID) only when V2 is
+          // unavailable/unsupported. Errors propagate (fail closed); they
+          // are never converted to an empty list.
+          const directory = url.searchParams.get("directory") || "";
+          try {
+            const questions = await runtime.listPendingQuestions(directory, sessionId);
+            // Success: generation/source + session_id + matched count only,
+            // never question bodies/options/answers.
+            const source = runtime && typeof runtime.lastQuestionSource === "string"
+              ? runtime.lastQuestionSource : null;
+            oplog("INFO", "question_list", {
+              generation: source || undefined, source: source || undefined,
+              session_id: sessionId, status: "ok",
+              matched: Array.isArray(questions) ? questions.length : 0,
+            });
+            return send(res, 200, { questions, source });
+          } catch (error) {
+            const code = error && typeof error.code === "string" && error.code
+              ? String(error.code).replace(/[^A-Za-z0-9_]/g, "_").slice(0, 80)
+              : "question_list_failed";
+            oplog("WARNING", "question_list", {
+              session_id: sessionId, status: "degraded", code,
+            });
+            throw error;
+          }
+        }
         if (req.method === "POST" && segments[2] === "permissions" && segments[3]) {
           const body = await readBody(req, bodyLimit);
+          const decision = String(body.response || "");
+          // Wire endpoint selection is explicit: the Bridge persists the
+          // permission generation with the request and sends it back here.
+          // "v2" uses POST /api/session/{sessionID}/permission/{requestID}/reply;
+          // absent keeps the V1 reply route for backward compatibility. An
+          // explicitly unknown generation fails closed. The generation is
+          // never inferred from request-id formatting.
+          const rawGeneration = body.generation;
+          if (rawGeneration !== undefined && rawGeneration !== "v1" && rawGeneration !== "v2") {
+            throw new SdkError("Unknown permission generation for reply routing", 400, "rejected");
+          }
+          const generation = rawGeneration === "v2" ? "v2" : "v1";
           const ok = await runtime.respondPermission(String(body.directory || ""), sessionId, segments[3],
-                                                     String(body.response || ""));
+                                                     decision, generation);
+          // Forwarded reply: generation + session_id/request_id/decision only.
+          oplog("INFO", "permission_event", {
+            generation, session_id: sessionId, request_id: segments[3], decision,
+            source: "reply",
+          });
           return send(res, 200, { ok });
         }
       }

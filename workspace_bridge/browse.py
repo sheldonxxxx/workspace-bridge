@@ -133,7 +133,7 @@ class Browser:
             raise BridgeError("Invalid regular expression", "invalid_regex") from None
         total_bytes, files_read = 0, 0
         matches, skipped_files = [], []
-        scope = digest(packed({"workspace_id": ws["id"], "root_identity": [ws["dev"], ws["ino"]],
+        scope = digest(packed({"workspace_id": ws["id"],
                                "policy": ws["excludes"], "pattern": pattern, "path": path,
                                "include": include, "fixed_strings": fixed_strings,
                                "case_sensitive": case_sensitive, "context_lines": context_lines}))

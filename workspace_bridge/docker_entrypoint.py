@@ -12,7 +12,8 @@ from pathlib import Path
 import stat
 import sys
 
-from .cli import initialize, load_config, main as cli_main
+from .cli import initialize, load_config, main as cli_main, admin_allowed_hosts_from_env
+from .oplog import log_level_from_env
 from .security import BridgeError, open_absolute_dir
 
 INTERNAL_MCP_PORT = 8765
@@ -89,6 +90,10 @@ def main(argv: list[str] | None = None):
         if mcp_port == admin_port:
             raise BridgeError("Published MCP and management ports must differ")
         if args == ['serve']:
+            # Fail fast on an invalid opt-in remote-admin allowlist or log level;
+            # serve() re-reads both. Diagnostic commands stay available.
+            admin_allowed_hosts_from_env()
+            log_level_from_env()
             bootstrap(state, parent)
             cli_main(['--state', str(state), 'serve', '--container',
                       '--mcp-public-port', str(mcp_port), '--admin-public-port', str(admin_port)])
