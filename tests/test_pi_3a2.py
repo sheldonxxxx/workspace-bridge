@@ -134,8 +134,10 @@ def test_pi_health_models_and_session_calls(monkeypatch):
     assert health == {"ok": True, "version": "0.86.1", "adapter_version": "0.1.0",
                       "locked": False, "instance": "pi-1", "status": "ok",
                       "deployed_capabilities": {"pending_snapshot": False,
-                                                "permission_response": False},
-                      "permissions_supported": False}
+                                                "permission_response": False,
+                                                "execution_history": False},
+                      "permissions_supported": False,
+                      "execution_supported": False}
     blob = json.dumps(health)
     assert "token" not in blob.lower() and "/projects" not in blob and "sessions" not in blob
     models = runtime.list_models("/projects/alpha")
@@ -519,12 +521,14 @@ def test_pi_policy_isolated_and_unconfigured(tmp_path):
 
 
 def test_no_new_public_mcp_tools_in_3a2():
-    # 3A2 pinned zero new public tools; 3A3 adds exactly the seven neutral
-    # agent tools alongside the unchanged OpenCode compatibility surface.
+    # 3A2 pinned zero new public tools; 3A3 adds the seven neutral agent
+    # tools and 3C1 adds the two execution-audit tools alongside the
+    # unchanged OpenCode compatibility surface.
     from workspace_bridge.service import NEUTRAL_AGENT_TOOLS
     assert NEUTRAL_AGENT_TOOLS == {"list_agent_models", "start_agent_run", "list_agent_runs",
                                    "read_agent_run", "read_agent_request",
-                                   "respond_agent_permission", "cancel_agent_run"}
+                                   "respond_agent_permission", "cancel_agent_run",
+                                   "list_agent_executions", "read_agent_execution"}
     assert NEUTRAL_AGENT_TOOLS <= set(TOOLS)
     assert "set_model_policy" not in TOOLS
     for name in TOOLS:

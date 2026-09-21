@@ -113,7 +113,7 @@ test("agent dir rejects physical target when ~/.pi/agent itself is a symlink", (
   assert.deepEqual(fs.readdirSync(physical), []);
 });
 
-test("spawn argv is read-only, untrusted, extension-free, and shell-free", () => {
+test("legacy spawn argv is read-only, untrusted, extension-free, and shell-free", () => {
   assert.deepEqual(piRpcArgv(), ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"]);
 });
 

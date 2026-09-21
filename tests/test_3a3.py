@@ -91,7 +91,8 @@ def call(dual_env, tool, **args):
 def test_neutral_tools_present_with_workspace_scope():
     assert NEUTRAL_AGENT_TOOLS == {"list_agent_models", "start_agent_run", "list_agent_runs",
                                    "read_agent_run", "read_agent_request",
-                                   "respond_agent_permission", "cancel_agent_run"}
+                                   "respond_agent_permission", "cancel_agent_run",
+                                   "list_agent_executions", "read_agent_execution"}
     assert NEUTRAL_AGENT_TOOLS <= set(TOOLS)
     for name in NEUTRAL_AGENT_TOOLS:
         schema = TOOLS[name][0].model_json_schema()
@@ -576,12 +577,13 @@ def test_ui_has_pi_card_workspace_picker_and_neutral_labels():
 
 def test_skill_prefers_neutral_workflow_and_pins_version():
     from workspace_bridge.embedded_skill import SKILL_VERSION, read_project_lead_skill
-    assert SKILL_VERSION == "1.8.0"
+    assert SKILL_VERSION == "2.0.0"
     content = read_project_lead_skill()["content"]
     for fragment in ("list_agent_models", "start_agent_run", "read_agent_run",
                      "respond_agent_permission", "silent", "OpenCode",
                      "ask first", "fresh session", "web-admin configured",
-                     "immutable policy snapshot", "no bash"):
+                     "immutable policy snapshot", "bash",
+                     "execution_audit", "list_agent_executions"):
         assert fragment in content, fragment
 
 

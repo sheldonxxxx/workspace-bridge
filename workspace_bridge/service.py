@@ -48,7 +48,7 @@ OPENCODE_TOOLS = frozenset({
 NEUTRAL_AGENT_TOOLS = frozenset({
     "list_agent_models", "start_agent_run", "list_agent_runs",
     "read_agent_run", "read_agent_request", "respond_agent_permission",
-    "cancel_agent_run",
+    "cancel_agent_run", "list_agent_executions", "read_agent_execution",
 })
 
 
@@ -203,6 +203,53 @@ class Service:
                 "ON agent_runs(runtime, session) "
                 "WHERE state IN ('starting','running','waiting_permission','waiting_question') "
                 "AND session IS NOT NULL AND session <> ''")
+        # 3C1: persisted execution ledger + run audit/fingerprint metadata.
+        # agent_executions.seq stores the STABLE start cursor (global
+        # update-sequence value at the tool's start) for deterministic
+        # ordering; the moving update cursor lives only in
+        # agent_runs.execution_cursor. Historical rows hold start
+        # ordinals, which compare conservatively below any update-space
+        # floor and are therefore never misattributed to continued runs.
+        # Migration-safe: ADD COLUMN with defaults backfills historical rows
+        # to not_recorded/empty without rewriting evidence. Fresh databases
+        # carry the new columns via ALTER on first open (CREATE TABLE above
+        # stays minimal for compatibility; columns are added idempotently
+        # here). agent_executions holds one logical record per toolCallId
+        # per Bridge run (UNIQUE(run, tool_call_id), idempotent upsert).
+        run_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_runs)")}
+        for _ddl in (
+            "ALTER TABLE agent_runs ADD COLUMN execution_floor INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE agent_runs ADD COLUMN execution_cursor INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE agent_runs ADD COLUMN execution_audit_status TEXT NOT NULL DEFAULT 'not_recorded'",
+            "ALTER TABLE agent_runs ADD COLUMN execution_audit_error TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE agent_runs ADD COLUMN enforcement_fingerprint TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE agent_runs ADD COLUMN adapter_version TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE agent_runs ADD COLUMN pi_version TEXT NOT NULL DEFAULT ''",
+        ):
+            _col = _ddl.split("ADD COLUMN ")[1].split(" ")[0]
+            if _col not in run_columns:
+                with self.db:
+                    self.db.execute(_ddl)
+                run_columns.add(_col)
+        with self.db:
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS agent_executions ("
+                "id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id), "
+                "workspace TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'pi', "
+                "session TEXT NOT NULL, tool_call_id TEXT NOT NULL, "
+                "seq INTEGER NOT NULL, tool TEXT NOT NULL, state TEXT NOT NULL, "
+                "started TEXT, ended TEXT, duration_ms INTEGER, "
+                "input_summary TEXT NOT NULL DEFAULT '{}', "
+                "result_summary TEXT NOT NULL DEFAULT '{}', "
+                "is_error INTEGER NOT NULL DEFAULT 0, "
+                "permission_effect TEXT NOT NULL DEFAULT '', "
+                "permission_decision TEXT NOT NULL DEFAULT '', "
+                "truncated INTEGER NOT NULL DEFAULT 0, "
+                "created TEXT NOT NULL, updated TEXT NOT NULL, "
+                "UNIQUE(run, tool_call_id))")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS ix_agent_executions_run_seq "
+                "ON agent_executions(run, seq)")
         # Fail closed on the first v0.2 open of a v0.1 database. Existing mappings
         # were authorized for separate credentials, not a shared credential.
         with self.db:
@@ -388,6 +435,85 @@ class Service:
                 raise
             return self.persisted_run_view(ws, run_id)
 
+    # ------------------------------- persisted execution audit (3C1)
+    def list_agent_executions(self, ws: dict, run_id: str,
+                              offset: int = 0, limit: int = 50) -> dict:
+        """Persisted-only execution list for ChatGPT audit (no backend calls).
+
+        The run owns runtime/session; completed-record reads require no
+        backend call. List returns bounded summaries only (no output body
+        or raw source content).
+        """
+        from .pi_executions import summary_record
+        run = self._persisted_run_row(ws, run_id)
+        offset = max(0, int(offset or 0))
+        limit = max(1, min(int(limit or 50), 50))
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT tool_call_id, seq, tool, state, started, ended, duration_ms,"
+                "input_summary, result_summary, is_error, permission_effect,"
+                "permission_decision, truncated FROM agent_executions "
+                "WHERE workspace=? AND run=? ORDER BY seq LIMIT ? OFFSET ?",
+                (ws["id"], run_id, limit + 1, offset)).fetchall()
+        page = [dict(r) for r in rows[:limit]]
+        summaries = []
+        for row in page:
+            summaries.append(summary_record({
+                "tool_call_id": row["tool_call_id"], "seq": row["seq"],
+                "tool": row["tool"], "state": row["state"],
+                "started": row["started"], "ended": row["ended"],
+                "duration_ms": row["duration_ms"],
+                "input_summary": row["input_summary"],
+                "result_summary": row["result_summary"],
+                "is_error": row["is_error"],
+                "permission_effect": row["permission_effect"],
+                "permission_decision": row["permission_decision"],
+                "truncated": row["truncated"],
+            }))
+        return {"workspace_id": ws["id"], "run_id": run_id,
+                "runtime": run.get("runtime") or "opencode",
+                "executions": summaries,
+                "next_offset": offset + limit if len(rows) > limit else None}
+
+    def read_agent_execution(self, ws: dict, run_id: str, execution_id: str) -> dict:
+        """Persisted-only execution detail (no backend calls).
+
+        Returns bounded sanitized input/result evidence including bash
+        output preview when present, but never reasoning, environment,
+        runtime tokens, or fullOutputPath.
+        """
+        from .pi_executions import detail_record
+        run = self._persisted_run_row(ws, run_id)
+        if not isinstance(execution_id, str) or not execution_id:
+            from .security import BridgeError as _BridgeError
+            raise _BridgeError("Execution not found in this workspace", "not_found")
+        with self.lock:
+            row = self.db.execute(
+                "SELECT tool_call_id, seq, tool, state, started, ended, duration_ms,"
+                "input_summary, result_summary, is_error, permission_effect,"
+                "permission_decision, truncated FROM agent_executions "
+                "WHERE workspace=? AND run=? AND tool_call_id=?",
+                (ws["id"], run_id, execution_id[:200])).fetchone()
+        if not row:
+            from .security import BridgeError as _BridgeError
+            raise _BridgeError("Execution not found in this workspace", "not_found")
+        detail = detail_record({
+            "tool_call_id": row["tool_call_id"], "seq": row["seq"],
+            "tool": row["tool"], "state": row["state"],
+            "started": row["started"], "ended": row["ended"],
+            "duration_ms": row["duration_ms"],
+            "input_summary": row["input_summary"],
+            "result_summary": row["result_summary"],
+            "is_error": row["is_error"],
+            "permission_effect": row["permission_effect"],
+            "permission_decision": row["permission_decision"],
+            "truncated": row["truncated"],
+        })
+        detail["workspace_id"] = ws["id"]
+        detail["run_id"] = run_id
+        detail["runtime"] = run.get("runtime") or "opencode"
+        return detail
+
     def list_all_agent_runs(self, offset: int = 0, limit: int = 25,
                             runtime: str | None = None) -> dict:
         """Neutral global overview across workspaces and runtimes.
@@ -512,10 +638,34 @@ class Service:
                 "resolved,generation FROM agent_requests WHERE run=? ORDER BY created",
                 (run["id"],)).fetchall()]
         view = neutral_run_summary(run)
+        from .pi_executions import audit_counts as _audit_counts
+        try:
+            with self.lock:
+                _exec_rows = [dict(r) for r in self.db.execute(
+                    "SELECT tool, is_error FROM agent_executions WHERE run=?",
+                    (run["id"],)).fetchall()]
+        except Exception:  # noqa: BLE001
+            _exec_rows = []
+        _counts = _audit_counts([{"tool": r.get("tool"), "is_error": bool(r.get("is_error"))}
+                                for r in _exec_rows])
+        _audit_status = run.get("execution_audit_status") or "not_recorded"
+        if _audit_status not in ("pending", "complete", "incomplete", "not_recorded"):
+            _audit_status = "not_recorded"
+        if (run.get("runtime") or "") != "pi":
+            _audit_status = "not_recorded"
         view.update({
             "pending_request_count": int(pending), "idempotent_replay": False,
             "permission_sync": None, "question_sync": None,
             "agent_evidence": "unverified",
+            "execution_audit": {
+                "status": _audit_status, "counts": _counts,
+                "incomplete_reason": str(run.get("execution_audit_error") or "")[:200]
+                if _audit_status == "incomplete" else "",
+                "enforcement_fingerprint": str(run.get("enforcement_fingerprint") or "")[:64],
+                "adapter_version": str(run.get("adapter_version") or "")[:40],
+                "pi_version": str(run.get("pi_version") or "")[:80],
+                "permission_revision": str(run.get("permission_revision") or "")[:64],
+            },
             "error": ({"code": run["error_code"], "message": run["error_message"]}
                       if run["error_code"] or run["error_message"] else None),
         })
@@ -602,6 +752,16 @@ class Service:
         run, ws = self._admin_run_workspace(run_id)
         return self.orchestrator_for_run(run["id"], ws["id"]).respond_permission(
             ws, run_id, request_id, decision)
+
+    def admin_list_agent_executions(self, run_id: str, offset: int = 0, limit: int = 50) -> dict:
+        """Admin execution timeline (persisted-only, safe DOM/textContent client-side)."""
+        run, ws = self._admin_run_workspace(run_id)
+        return self.list_agent_executions(ws, run_id, offset=offset, limit=limit)
+
+    def admin_read_agent_execution(self, run_id: str, execution_id: str) -> dict:
+        """Admin execution detail (persisted-only, bounded/truncated output)."""
+        run, ws = self._admin_run_workspace(run_id)
+        return self.read_agent_execution(ws, run_id, execution_id)
 
     def close(self):
         # Stop every orchestrator exactly once, then close registry runtimes
@@ -1027,6 +1187,8 @@ class Service:
                 "read_agent_request": self.read_agent_request,
                 "respond_agent_permission": self.respond_agent_permission,
                 "cancel_agent_run": self.cancel_agent_run,
+                "list_agent_executions": self.list_agent_executions,
+                "read_agent_execution": self.read_agent_execution,
             }
             if name not in methods and name != "prepare_handoff":
                 raise BridgeError("Unknown tool", "unknown_tool")

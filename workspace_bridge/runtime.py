@@ -129,6 +129,13 @@ class SessionInfo:
     id: str
     directory: str
     title: str = ""
+    # Pi 3C1 enforcement/audit metadata (empty for OpenCode/legacy).
+    # Persisted with the run: fingerprint(s), adapter/Pi versions and
+    # permission revision identify the enforcement build without paths.
+    enforcement_fingerprint: str = ""
+    adapter_version: str = ""
+    pi_version: str = ""
+    policy_revision: str = ""
 
 
 @dataclass
@@ -171,6 +178,8 @@ class RuntimeCapabilities:
     ``False`` and fail closed (``runtime_unsupported``), never silently fall
     back. Deliberately unsupported today: ``question_response`` (the
     installed API exposes no question reply) and ``session_branching``.
+    ``execution_history`` is the clean execution-history capability:
+    Pi implements it, OpenCode remains unsupported and unchanged.
     """
 
     model_discovery: bool = True
@@ -182,6 +191,7 @@ class RuntimeCapabilities:
     question_detection: bool = True
     question_response: bool = False
     session_branching: bool = False
+    execution_history: bool = False
 
 
 @dataclass
@@ -423,6 +433,16 @@ class AgentRuntime:
     def poll_events(self, cursor: int, timeout: float = 25.0) -> tuple[list[RuntimeEvent], int]:
         raise NotImplementedError
 
+    def read_executions(self, directory: str, session_id: str, *,
+                        after: int = 0, limit: int = 50) -> dict:
+        """Clean execution-history journal read (3C1).
+
+        Pi implements it via the token-authenticated exact-session
+        endpoint; OpenCode remains unsupported and unchanged
+        (RuntimeUnsupported, no HTTP call).
+        """
+        raise NotImplementedError
+
     def close(self) -> None:
         return None
 
@@ -439,6 +459,11 @@ class OpenCodeRuntime(AgentRuntime):
     @property
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities()
+
+    def read_executions(self, directory: str, session_id: str, *,
+                        after: int = 0, limit: int = 50) -> dict:
+        """OpenCode has no execution history (unchanged)."""
+        raise RuntimeUnsupported("OpenCode runtime does not support execution history")
 
 
 class HttpOpenCodeRuntime(OpenCodeRuntime):
@@ -860,10 +885,11 @@ class HttpPiRuntime(AgentRuntime):
     name = "http-pi-adapter"
 
     # Static client contract (network-free): the Bridge client implements
-    # the permission snapshot/reply calls. Whether the CONNECTED adapter
-    # actually serves them is a separate deployed capability, probed via
-    # /health (see health()/permissions_supported): static True here never
-    # proves an old adapter supports 3B1.
+    # the permission snapshot/reply + execution-history calls. Whether the
+    # CONNECTED adapter actually serves them is a separate deployed
+    # capability, probed via /health (see health()/permissions_supported
+    # and execution_supported): static True here never proves an old
+    # adapter supports the surface.
     PI_CAPABILITIES = RuntimeCapabilities(
         model_discovery=True,
         session_reuse=True,
@@ -874,6 +900,7 @@ class HttpPiRuntime(AgentRuntime):
         question_detection=False,
         question_response=False,
         session_branching=False,
+        execution_history=True,
     )
 
     def __init__(self, base_url: str, token: str = "", *,
@@ -941,17 +968,19 @@ class HttpPiRuntime(AgentRuntime):
         if not isinstance(value, dict):
             raise RuntimeUnavailable("Pi runtime health response was invalid")
         # Generic bounded fields only: never paths, tokens, or adapter internals.
-        # deployed_capabilities mirrors the adapter-advertised 3B1 permission
-        # surface (both default False for pre-3B1 adapters that omit the
-        # block); permissions_supported derives from it. No version-string
-        # comparison is used anywhere.
+        # deployed_capabilities mirrors the adapter-advertised permission +
+        # execution-history surface (all default False for old adapters that
+        # omit the block); permissions_supported and execution_supported
+        # derive from it. No version-string comparison is used anywhere.
         raw_caps = value.get("capabilities")
         caps = raw_caps if isinstance(raw_caps, dict) else {}
         # Strict booleans only: truthy non-booleans (e.g. "yes") never
         # count as deployed support.
         deployed = {"pending_snapshot": caps.get("pending_snapshot") is True,
-                    "permission_response": caps.get("permission_response") is True}
-        return {"ok": bool(value.get("ok")),
+                    "permission_response": caps.get("permission_response") is True,
+                    "execution_history": caps.get("execution_history") is True}
+        fingerprint = value.get("enforcement_fingerprint")
+        out: dict[str, Any] = {"ok": bool(value.get("ok")),
                 "version": _bounded(value.get("pi_version"), 80),
                 "adapter_version": _bounded(value.get("adapter_version"), 40),
                 "locked": bool(value.get("locked")),
@@ -959,14 +988,18 @@ class HttpPiRuntime(AgentRuntime):
                 "status": _bounded(value.get("status"), 40),
                 "deployed_capabilities": deployed,
                 "permissions_supported": bool(deployed["pending_snapshot"]
-                                              and deployed["permission_response"])}
+                                              and deployed["permission_response"]),
+                "execution_supported": bool(deployed["execution_history"])}
+        if isinstance(fingerprint, str) and len(fingerprint) == 64:
+            out["enforcement_fingerprint"] = fingerprint
+        return out
 
     def _deployed_permissions_supported(self) -> bool:
-        """Whether the CONNECTED adapter serves the 3B1 permission surface.
+        """Whether the CONNECTED adapter serves the permission surface.
 
         Probes current adapter /health; any probe failure or missing
         capability fails closed to False. Old adapters (no capabilities
-        block) are never treated as writable.
+        block) are never treated as permission-capable.
         """
         try:
             return bool(self.health().get("permissions_supported"))
@@ -976,6 +1009,20 @@ class HttpPiRuntime(AgentRuntime):
     def _require_permissions_supported(self) -> None:
         if not self._deployed_permissions_supported():
             raise RuntimeUnsupported("Pi adapter does not support permission endpoints")
+
+    def _deployed_execution_supported(self) -> bool:
+        """Whether the CONNECTED adapter serves execution history.
+
+        Distinct from the static client capability: probed via /health.
+        """
+        try:
+            return bool(self.health().get("execution_supported"))
+        except (RuntimeUnavailable, RuntimeRejected, RuntimeUnsupported):
+            return False
+
+    def _require_execution_supported(self) -> None:
+        if not self._deployed_execution_supported():
+            raise RuntimeUnsupported("Pi adapter does not support execution history")
 
     def list_models(self, directory: str | None = None) -> list[ModelInfo]:
         # Workspace-scoped discovery: the adapter resolves Pi configuration
@@ -1003,10 +1050,10 @@ class HttpPiRuntime(AgentRuntime):
 
     def create_session(self, directory: str, title: str,
                        options: dict | None = None) -> SessionInfo:
-        # 3B1: Bridge is the source of truth for the configured Pi
-        # permission policy. The exact policy snapshot + revision travel in
-        # the internal session-creation body (never MCP). options carries
-        # {"permission_policy": {...}, "policy_revision": "..."} for Pi only.
+        # 3C1: Bridge is the source of truth for the configured Pi
+        # permission policy (v3). The exact policy snapshot + revision
+        # travel in the internal session-creation body (never MCP). options
+        # carries {"permission_policy": {...}, "policy_revision": "..."}.
         body: dict[str, Any] = {"directory": directory, "title": title}
         if options:
             snapshot = options.get("permission_policy")
@@ -1014,28 +1061,41 @@ class HttpPiRuntime(AgentRuntime):
             if isinstance(snapshot, dict) and isinstance(revision, str) and revision:
                 body["permission_policy"] = snapshot
                 body["policy_revision"] = revision
-        # A writable policy snapshot requires deployed adapter support
-        # BEFORE any session exists: old adapters get RuntimeUnsupported
-        # and no session is created (never a silent read-only fallback).
-        # Disabled/read-only snapshots and legacy no-policy creation stay
-        # compatible with pre-3B1 adapters.
-        if isinstance(body.get("permission_policy"), dict) \
-                and body["permission_policy"].get("enabled") is True:
+        # Every managed v3 session loads the trusted permission extension
+        # and requires BOTH deployed permission and execution-history
+        # support BEFORE any session exists, so normal sessions cannot
+        # silently run unaudited. Old adapters get RuntimeUnsupported and
+        # no session is created (never a silent unmanaged fallback). Only
+        # legacy no-policy creation stays compatible and reports
+        # not_recorded downstream.
+        if isinstance(body.get("permission_policy"), dict):
             self._require_permissions_supported()
+            self._require_execution_supported()
         value = self._request("POST", "/sessions", body=body)
         session = value.get("session") if isinstance(value, dict) else None
         if not isinstance(session, dict) or not session.get("id"):
             raise RuntimeUnavailable("Pi session creation returned no session id")
+        fingerprint = session.get("enforcement_fingerprint")
+        if not isinstance(fingerprint, str):
+            fingerprint = value.get("enforcement_fingerprint") if isinstance(value, dict) else ""
+        if not isinstance(fingerprint, str):
+            fingerprint = ""
         return SessionInfo(id=_bounded(session["id"], 200),
                            directory=_bounded(session.get("directory"), 1024),
-                           title=_bounded(session.get("title"), 200))
+                           title=_bounded(session.get("title"), 200),
+                           enforcement_fingerprint=fingerprint[:64] if len(fingerprint) == 64 else "",
+                           adapter_version=_bounded(session.get("adapter_version")
+                                                    or (value.get("adapter_version") if isinstance(value, dict) else ""), 40),
+                           pi_version=_bounded(session.get("pi_version")
+                                               or (value.get("pi_version") if isinstance(value, dict) else ""), 80),
+                           policy_revision=_bounded(session.get("policy_revision") or "", 64))
 
     # Deployed capability negotiation (see _require_permissions_supported):
     # permission list/respond require the connected adapter to advertise
-    # both 3B1 capabilities. Anything older fails cleanly with
+    # both permission capabilities. Anything older fails cleanly with
     # RuntimeUnsupported before touching the permission endpoints, so an
-    # old adapter is never treated as writable and absence from a snapshot
-    # never resolves a persisted request.
+    # old adapter is never treated as permission-capable and absence from
+    # a snapshot never resolves a persisted request.
 
     def get_session(self, directory: str, session_id: str) -> SessionInfo | None:
         try:
@@ -1116,7 +1176,7 @@ class HttpPiRuntime(AgentRuntime):
     def list_pending_permissions(self, directory: str, session_id: str) -> list[RuntimeInteraction]:
         """Exact-session pending permission snapshot from the Pi adapter.
 
-        Requires deployed 3B1 adapter support first (old adapters fail
+        Requires deployed adapter support first (old adapters fail
         cleanly with RuntimeUnsupported, never an empty claim). Fail
         closed (raise) on transport/API failures; absence from a
         successful list never resolves an already persisted request.
@@ -1187,6 +1247,26 @@ class HttpPiRuntime(AgentRuntime):
             f"/sessions/{urllib.parse.quote(session_id)}/permissions/{urllib.parse.quote(permission_id)}/respond",
             body={"directory": directory, "response": response})
         return bool(value.get("ok")) if isinstance(value, dict) else False
+
+    def read_executions(self, directory: str, session_id: str, *,
+                        after: int = 0, limit: int = 50) -> dict:
+        """Exact-session execution journal read (3C1).
+
+        Token-authenticated GET /sessions/:id/executions. Returns bounded
+        normalized updates plus next/head/oldest cursor evidence. Poll
+        failures raise (never imply no executions); evicted history
+        reports audit_gap/cursor_too_old, never silent completeness.
+        """
+        self._require_execution_supported()
+        if not session_id:
+            raise RuntimeUnavailable("Pi execution read required a session id")
+        value = self._request(
+            "GET", f"/sessions/{urllib.parse.quote(session_id)}/executions",
+            query={"directory": directory, "after": max(0, int(after)),
+                   "limit": max(1, min(int(limit), 100))})
+        if not isinstance(value, dict) or not isinstance(value.get("updates"), list):
+            raise RuntimeUnavailable("Pi execution list was invalid")
+        return value
 
 
 def coerce_runtime_event(raw: Any) -> RuntimeEvent | None:

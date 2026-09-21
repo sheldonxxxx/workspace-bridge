@@ -37,7 +37,7 @@ def mcp_value(response):
 
 def test_new_tool_schemas_and_annotations(agent_env):
     assert OPENCODE_TOOLS <= set(TOOLS)
-    assert len(TOOLS) == 26
+    assert len(TOOLS) == 28
     for name in OPENCODE_TOOLS:
         schema = TOOLS[name][0].model_json_schema()
         assert schema["additionalProperties"] is False

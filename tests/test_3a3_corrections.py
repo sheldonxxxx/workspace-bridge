@@ -539,8 +539,14 @@ def test_real_pi_transport_completion_uses_adapter_evidence(monkeypatch, tmp_pat
         url, method = record["url"], record["method"]
         base = url.split("?")[0]
         if method == "GET" and base.endswith("/health"):
-            return _FakeHTTP({"ok": True, "pi_version": "0.86.1", "adapter_version": "0.1.0",
-                              "locked": False, "instance": "pi-e2e", "status": "ok"})
+            return _FakeHTTP({"ok": True, "pi_version": "0.86.1", "adapter_version": "0.2.0",
+                              "locked": False, "instance": "pi-e2e", "status": "ok",
+                              "capabilities": {"pending_snapshot": True,
+                                               "permission_response": True,
+                                               "execution_history": True}})
+        if method == "GET" and "/executions" in base:
+            return _FakeHTTP({"updates": [], "next": 0, "head": 0, "oldest": 1,
+                              "audit_gap": False, "cursor_too_old": False})
         if method == "GET" and base.endswith("/models"):
             assert "directory=" in url
             return _FakeHTTP({"models": [{"provider": "pi", "id": "default",

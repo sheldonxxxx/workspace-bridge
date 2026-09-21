@@ -1,6 +1,7 @@
 ---
 name: project-lead
-description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, resumable permission decisions, and current-source review; use general file tools within administrator-controlled write and agent policies.
+description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, resumable permission decisions, execution-evidence audit, and current-source review; use general file tools within administrator-controlled write and agent policies.
+version: 2.0.0
 ---
 
 # Project lead
@@ -94,13 +95,24 @@ pattern. When the user asks you to decide, call
 - `once` approves only this request; `always` approves the runtime's exact proposed
   pattern and must never be broadened; `reject` refuses. A policy denial is not
   remotely approvable. Runtimes without permission support fail closed.
-  Pi file permissions are web-admin configured (master enable, allow/ask/deny
-  per file tool, protected patterns, session-always toggle); each Pi session
-  carries an immutable policy snapshot plus revision, so a policy change
-  applies to NEW sessions only and continuation across a policy change is
-  refused. An ask suspends the exact tool call and resumes it on approval;
-  `always` is exact-resource and session-local only. Pi has no bash and no
-  sandbox claim: it runs natively with the user's macOS authority.
+  Pi permissions are web-admin configured (writable-tool switch,
+  allow/ask/deny per file tool, protected patterns, session-always
+  toggle, external scope: default outside-workspace mode plus absolute
+  host root overrides, safe default deny; shell execution Deny/Ask/Allow
+  over the Pi built-in bash tool only, no powershell, no command rules,
+  default deny). Each Pi session carries an immutable policy snapshot
+  plus revision, so a change applies to NEW sessions only and
+  continuation across a change is refused. The trusted extension loads in
+  every managed session, so read/search/list policy holds even in
+  read-only mode; the switches only expose edit/write/bash. A file ask
+  suspends the exact call; `always` is exact-resource (canonical absolute
+  target outside the workspace) and session-local. A shell ask shows the
+  exact bounded command + verified timeout; once approves the exact call,
+  always stays session-local and exact-command scoped, reject blocks it.
+  Shell Allow runs with native macOS-user authority and can bypass
+  structured file scope. Pi has no sandbox claim: it runs natively with
+  the user's macOS authority. There are no fixed project-specific denies;
+  enforcement is identified by fingerprint, not by blocking normal edits.
 - Review `always` against the handoff and the user's intent. Surface ambiguous,
   overly broad or sensitive scopes instead of guessing; if no scope is available,
   `always` fails closed.
@@ -114,6 +126,20 @@ Read the original plan with `read_handoff`, then the final result with
 `read_agent_run` (or `read_opencode_run` on the legacy compatibility path). Inspect current implementation, callers, configuration and tests
 with general tools. Check every acceptance criterion and plausible regressions beyond
 the claimed file list.
+
+### Execution-evidence review (completed Pi coding runs, skill 2.0.0)
+Bridge proves what Pi invoked/reported, not that a test result is
+semantically correct. For completed Pi runs:
+- inspect `execution_audit` in `read_agent_run` first (status, counts
+  total/failed/shell/mutating, incomplete/gap indicator, enforcement
+  fingerprint);
+- list executions with `list_agent_executions`;
+- read every failed execution and every material bash/edit/write detail
+  with `read_agent_execution` before accepting the agent's claims;
+- still inspect current source/tests independently with general tools.
+If audit is incomplete, say so explicitly (status + reason) and treat
+claims as unaudited for the missing span. If audit is not_recorded
+(historical/legacy), say so and rely on source inspection alone.
 
 Explain findings with severity, file/line evidence and required corrections. Separate
 observed code from agent-reported tests. Live reads are not a baseline. Do not infer

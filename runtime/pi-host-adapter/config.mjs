@@ -145,7 +145,10 @@ export function checkPiBinary(binary, timeoutMs = PI_VERSION_TIMEOUT_MS) {
   }
 }
 
-// Build the exact argv for a read-only Pi RPC child. No shell is ever used.
+// Legacy read-only argv without the trusted extension. Kept only for the
+// legacy no-policy session-creation compatibility path; normal v2 sessions
+// (read-only or writable) always use piRpcArgvFor(), which adds the
+// package-owned trusted extension. No shell is ever used.
 // --no-approve overrides project trust for the run and --no-extensions
 // disables extension discovery, so project-local resources cannot enable
 // extensions inside this milestone's read-only spike.
@@ -176,17 +179,23 @@ export function isTrustedExtensionUsable(candidate) {
   }
 }
 
-// Centralized spawn contract (3B1):
-// - writable=false: read-only argv (current behavior, no extension).
-// - writable=true: read/grep/find/ls/edit/write plus exactly one
-//   package-owned trusted extension. No bash in either mode. Throws when
-//   writable mode requires the trusted extension but it is missing.
-export function piRpcArgvFor({ writable = false } = {}) {
-  if (!writable) return piRpcArgv();
+// Centralized spawn contract (3C1, v3):
+// - writable=false: read/grep/find/ls plus exactly one package-owned
+//   trusted extension (read policy is enforced in read-only mode too).
+// - writable=true: + edit/write.
+// - shellMode != deny: + bash (Pi built-in bash only, no powershell).
+//   deny removes bash; ask keeps bash with suspended-call approval;
+//   allow keeps bash without prompt. No command rules. Throws when the
+//   trusted extension is missing.
+// - piRpcArgv() stays as the legacy no-extension read-only argv, used only
+//   for the legacy no-policy compatibility path.
+export function piRpcArgvFor({ writable = false, shellMode = "deny" } = {}) {
   const extension = trustedExtensionPath();
   if (!isTrustedExtensionUsable(extension)) {
     throw new Error("Trusted permission extension is unavailable");
   }
-  return ["--mode", "rpc", "--tools", WRITABLE_TOOLS.join(","),
+  const tools = [...(writable ? WRITABLE_TOOLS : READONLY_TOOLS)];
+  if (shellMode !== "deny") tools.push("bash");
+  return ["--mode", "rpc", "--tools", tools.join(","),
     "--no-approve", "--no-extensions", "-e", extension];
 }

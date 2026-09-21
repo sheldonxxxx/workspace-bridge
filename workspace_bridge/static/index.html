@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Workspace Bridge · Control room</title>
+  <title>Workspace Bridge</title>
   <link rel="stylesheet" href="/static/app.css">
   <script>
     (function () {
@@ -17,12 +17,13 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#page-title">Skip to content</a>
   <header class="topbar">
     <div class="brand" aria-label="Workspace Bridge">
       <span class="mark" aria-hidden="true">WB</span>
       <div>
         <strong>Workspace Bridge</strong>
-        <small>Local control plane</small>
+        <small>Your projects, connected</small>
       </div>
     </div>
     <nav class="topbar-status" role="status" aria-label="Live bridge status">
@@ -69,8 +70,8 @@
     <section id="dashboard" hidden class="dashboard-layout">
       <aside class="sidebar" aria-label="Console navigation">
         <div class="side-identity">
-          <span class="side-kicker">Control room</span>
-          <strong>Bridge console</strong>
+          <span class="side-kicker">Workspace</span>
+          <strong>Your bridge</strong>
         </div>
         <nav class="side-nav" aria-label="Sections">
           <a href="#workspaces-panel">Workspaces</a>
@@ -90,35 +91,36 @@
       <div class="dashboard-main">
         <div class="page-head">
           <div>
-            <span class="eyebrow">Local control room</span>
-            <h1>Workspace access</h1>
-            <p id="status-dup" class="lede">Choose what this bridge can expose.</p>
+            <span class="eyebrow">Workspace Bridge</span>
+            <h1 id="page-title" tabindex="-1">Workspaces</h1>
+            <p id="status-dup" class="lede">Manage the projects your agents can access.</p>
           </div>
           <button type="button" id="refresh" class="secondary refresh-button">Refresh</button>
         </div>
 
         <section class="panel primary-panel" id="workspaces-panel">
+          <div class="workspace-toolbar"><label class="search-label" for="workspace-search">Find a workspace<input id="workspace-search" type="search" placeholder="Search by name or directory"></label><button type="button" id="add-workspace">+ Add workspace</button></div><p id="search-empty" class="empty-state" hidden>No matching workspaces. Try another name or directory.</p>
           <div class="section-title">
             <div>
               <h2>Workspaces</h2>
-              <p class="section-note">Mappings are disabled until you turn them on.</p>
+              <p class="section-note">Only enabled workspaces are available through the bridge.</p>
             </div>
           </div>
           <div id="workspaces" class="workspace-list"></div>
-          <details class="add-drawer">
+          <details class="add-drawer" id="add-workspace-drawer">
             <summary><span class="summary-main"><span class="summary-plus" aria-hidden="true">+</span>Add a workspace</span><span class="summary-note">Starts disabled</span></summary>
             <form id="add-form">
               <label>Name
-                <input name="name" placeholder="RapidRAW" required maxlength="80">
+                <input name="name" placeholder="My project" required maxlength="80">
               </label>
               <label>Project directory
-                <input name="root" placeholder="/Users/you/Projects/RapidRAW" required>
+                <input name="root" placeholder="/Users/you/Projects/my-project" required>
               </label>
               <label>Extra exclusions
                 <textarea name="excludes" rows="3" placeholder="private/**&#10;fixtures/large/**"></textarea>
               </label>
               <p id="parents" class="hint"></p>
-              <button>Add disabled mapping</button>
+              <button>Add workspace</button>
             </form>
           </details>
         </section>
@@ -131,7 +133,7 @@
             </div>
             <span class="context-mark" aria-hidden="true">↳</span>
           </div>
-          <div id="jobs"></div>
+          <div id="jobs"><p class="empty-state">Choose a workspace to view its handoffs and runs.</p><button type="button" id="choose-workspace" class="secondary">Browse workspaces</button></div>
         </section>
 
         <section class="panel" id="sessions-panel">
@@ -158,7 +160,7 @@
           <div class="section-title">
             <div>
               <h2>System</h2>
-              <p class="section-note">Advanced controls stay out of the main flow.</p>
+              <p class="section-note">Connections, models, and permissions for your bridge.</p>
             </div>
           </div>
           <div class="system-grid">
@@ -212,11 +214,38 @@
                   <span class="eyebrow">Pi runtime</span>
                   <h2>Pi file permissions</h2>
                   <p class="hint" id="pi-perm-revision"></p>
-                  <label id="pi-perm-enabled-row"><input id="pi-perm-enabled" type="checkbox"> Enable Pi writable tools (edit/write)</label>
-                  <p class="hint" id="pi-perm-warning">Warning: Pi runs natively with your macOS user authority. This is not a sandbox: approved edits and writes act directly on workspace files.</p>
+                  <label id="pi-perm-enabled-row"><input id="pi-perm-enabled" type="checkbox"> Expose Pi writable tools (edit/write) — read policy is always enforced</label>
+                  <p class="hint" id="pi-perm-warning">Warning: Pi runs natively with your macOS user authority. This is not a sandbox: approved edits and writes act directly on workspace files. Read, search, and list tools are policy-enforced in every session; the switch above only exposes edit/write.</p>
                   <p class="hint" id="pi-perm-session-note">Policy changes apply to NEW Pi sessions only. Active sessions keep the snapshot they were created with.</p>
                   <div id="pi-perm-tools"></div>
+                  <fieldset id="pi-perm-external">
+                    <legend>External file access (outside the workspace)</legend>
+                    <p class="hint">Outside-workspace access follows this policy, not a fixed deny. The most-specific matching root overrides the default below; unmatched paths use the default. Paths are syntax-checked here and canonicalized by the native adapter when a NEW session starts.</p>
+                    <label>Default outside-workspace mode
+                      <select id="pi-perm-external-default" aria-label="Default outside-workspace mode">
+                        <option value="deny">Deny</option>
+                        <option value="ask">Ask</option>
+                        <option value="allow">Allow</option>
+                      </select>
+                    </label>
+                    <div id="pi-perm-roots"></div>
+                    <div class="actions">
+                      <button type="button" id="pi-perm-add-root" class="secondary">Add external root</button>
+                    </div>
+                    <p class="hint" id="pi-perm-external-warning" hidden></p>
+                  </fieldset>
                   <label id="pi-perm-always-row"><input id="pi-perm-always" type="checkbox"> Offer “Always allow exact target” for this session</label>
+                  <fieldset id="pi-perm-shell-field">
+                    <legend>Shell execution (Pi built-in bash only; no powershell, no command rules)</legend>
+                    <label>Shell execution
+                      <select id="pi-perm-shell" aria-label="Shell execution mode">
+                        <option value="deny">Deny</option>
+                        <option value="ask">Ask</option>
+                        <option value="allow">Allow</option>
+                      </select>
+                    </label>
+                    <p class="hint" id="pi-perm-shell-warning" hidden></p>
+                  </fieldset>
                   <label>Protected path patterns (one workspace-relative glob per line)
                     <textarea id="pi-perm-protected" rows="4" placeholder=".git/**&#10;.env"></textarea>
                   </label>

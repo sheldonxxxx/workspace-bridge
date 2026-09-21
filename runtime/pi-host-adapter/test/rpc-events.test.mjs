@@ -86,7 +86,7 @@ test("write failure resolves false so pending is never removed unconfirmed", asy
   assert.equal(await rpc.writeUiResponse({ id: "u2", cancelled: true }), false);
 });
 
-test("tool start events are normalized to path-only metadata", async () => {
+test("tool start events are normalized to path-only metadata plus separate audit", async () => {
   const bag = createFakeSpawn();
   const seen = [];
   const rpc = makeRpc(bag, { onEvent: (message) => { seen.push(message); } });
@@ -95,20 +95,26 @@ test("tool start events are normalized to path-only metadata", async () => {
   child.respond({ type: "tool_execution_start", toolCallId: "c1", toolName: "write",
     args: { path: "notes.txt", content: secret } });
   child.respond({ type: "tool_execution_start", toolCallId: "c2", toolName: "grep",
-    args: { pattern: secret, path: "sub" } });
+    args: { pattern: "benign-search", path: "sub" } });
   child.respond({ type: "tool_execution_start", toolCallId: "c3", toolName: "bash",
     args: { command: "rm -rf /" } });
   child.respond({ type: "tool_execution_end", toolCallId: "c1", toolName: "write",
     result: { content: secret } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(seen.length, 4);
-  assert.deepEqual(seen[0],
-    { type: "tool_execution_start", toolCallId: "c1", toolName: "write", input: { path: "notes.txt" } });
-  assert.deepEqual(seen[1],
-    { type: "tool_execution_start", toolCallId: "c2", toolName: "grep", input: { path: "sub" } });
-  assert.deepEqual(seen[2],
-    { type: "tool_execution_start", toolCallId: "c3", toolName: "bash", input: {} });
-  assert.deepEqual(seen[3], { type: "tool_execution_end", toolCallId: "c1" });
+  // Permission metadata stays path-only.
+  assert.deepEqual(seen[0].input, { path: "notes.txt" });
+  assert.deepEqual(seen[1].input, { path: "sub" });
+  assert.deepEqual(seen[2].input, {});
+  // Separate audit path carries bounded evidence, never raw secrets.
+  assert.equal(seen[0].auditInput.target, "notes.txt");
+  assert.ok(seen[0].auditInput.content_sha256?.match(/^[0-9a-f]{64}$/));
+  assert.ok(!JSON.stringify(seen[0].auditInput).includes("sk-secret"));
+  assert.ok(!JSON.stringify(seen[1].auditInput).includes("sk-secret"));
+  assert.equal(seen[2].auditInput.command, "rm -rf /");
+  assert.ok(seen[2].auditInput.command_sha256?.match(/^[0-9a-f]{64}$/));
+  assert.ok(!JSON.stringify(seen[3].auditResult).includes("sk-secret"));
+  assert.ok(!("fullOutputPath" in (seen[3].auditResult || {})));
   assert.ok(!JSON.stringify(seen).includes("sk-secret"));
   await rpc.close({ graceMs: 0 });
 });

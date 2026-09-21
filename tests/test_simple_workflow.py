@@ -20,7 +20,7 @@ EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
             'cancel_opencode_run',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',
             'read_agent_run', 'read_agent_request', 'respond_agent_permission',
-            'cancel_agent_run'}
+            'cancel_agent_run', 'list_agent_executions', 'read_agent_execution'}
 MUTATING = {'prepare_handoff', 'write_file', 'edit_file', 'start_opencode_run',
             'respond_opencode_permission', 'cancel_opencode_run',
             'start_agent_run', 'respond_agent_permission', 'cancel_agent_run'}

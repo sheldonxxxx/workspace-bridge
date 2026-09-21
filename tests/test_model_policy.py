@@ -195,7 +195,7 @@ def test_mcp_surface_has_no_policy_mutation_or_bypass():
     assert "force" not in json.dumps(start_schema).lower()
     assert "project-specific" not in TOOLS["list_opencode_models"][1]
     assert "scope=global" in TOOLS["list_opencode_models"][1]
-    assert len(TOOLS) == 26
+    assert len(TOOLS) == 28
 
 
 # ------------------------------------------------------- global sessions table

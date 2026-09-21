@@ -177,6 +177,16 @@ class AgentRunRequest(AgentRunRef):
 class AgentPermissionDecision(AgentRunRequest):
     decision: Literal["once", "always", "reject"] = Field(description="once approves this request; always approves the runtime's exact proposed pattern (never broadened); reject refuses. Denied policy actions are not approvable. Runtimes without permission support fail closed.")
 
+
+class AgentExecutions(Input):
+    run_id: RunID
+    offset: int = Field(default=0, ge=0, le=10000)
+    limit: int = Field(default=50, ge=1, le=50)
+
+
+class AgentExecutionDetail(AgentExecutions):
+    execution_id: str = Field(min_length=1, max_length=200)
+
 UNSCOPED_TOOLS = frozenset({"list_workspaces", SKILL_TOOL})
 
 TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
@@ -206,6 +216,8 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "read_agent_request": (AgentRunRequest, "Read one pending permission/question request: kind, action/tool, requested resource, the runtime's proposed always-scope, sanitized metadata and whether always is safe. Read-only.", True, True),
     "respond_agent_permission": (AgentPermissionDecision, "Answer a still-pending permission request bound to this exact workspace/run/session. once/always resume the SAME session; reject refuses. always passes through the runtime's exact proposed pattern and is never broadened; it fails closed when no scope is available or the runtime has no permission support. Mutating, open-world; this authorizes the native server to act.", False, False),
     "cancel_agent_run": (AgentRunRef, "Abort ONLY the recorded session for an owned run, then record cancelled after positive confirmation. Ambiguous aborts leave the run unchanged and explicit. Mutating and open-world; no arbitrary process kill.", False, True),
+    "list_agent_executions": (AgentExecutions, "List persisted tool executions for one agent run (bounded summaries only: id/sequence/tool/state/target-or-command preview/timing/duration/error/permission effect+decision/truncation; no output body). Persisted-only: completed-record reads require no backend call. Use read_agent_run execution_audit first, then list, then read every failed/material bash/edit/write detail. Read-only.", True, True),
+    "read_agent_execution": (AgentExecutionDetail, "Read one persisted tool execution with bounded sanitized input/result evidence (bash output preview when present; never reasoning, environment, runtime tokens or fullOutputPath). Persisted-only, no backend call. Read-only.", True, True),
 }
 # Tool-effect annotations for open-world/agent operations. File writes and
 # permission approvals can change the environment; runtime tools reflect external state.
@@ -216,7 +228,8 @@ OPEN_WORLD_TOOLS = frozenset({"list_opencode_models", "start_opencode_run", "lis
                               "respond_opencode_permission", "cancel_opencode_run",
                               "list_agent_models", "start_agent_run", "list_agent_runs",
                               "read_agent_run", "read_agent_request",
-                              "respond_agent_permission", "cancel_agent_run"})
+                              "respond_agent_permission", "cancel_agent_run",
+                              "list_agent_executions", "read_agent_execution"})
 # Keep core service/admin input models unscoped; expose a required workspace_id in
 # every project-facing MCP schema. Discovery and package-owned guidance are unscoped.
 TOOLS = {name: (model if name in UNSCOPED_TOOLS else create_model(
@@ -789,10 +802,12 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     return JSONResponse({"runtime": runtime_id,
                                          "policy_scope": "runtime_global", **status})
                 if leaf == "permission-policy":
-                    # 3B1: Pi-only operational permission policy. Full
-                    # validated v1 object on POST (not patch semantics). No
-                    # MCP mutation path: local-admin only. Other runtimes
-                    # fail cleanly as unsupported.
+                    # 3C1: Pi-only operational permission policy (v3). Full
+                    # validated v3 object on POST (not patch semantics); GET
+                    # migrates stored v1/v2 in memory and reports
+                    # migrated_from_version. No MCP mutation path:
+                    # local-admin only. Other runtimes fail cleanly as
+                    # unsupported.
                     if runtime_id != "pi":
                         return JSONResponse({"error": "Permission policy is not supported "
                                                       f"for runtime {runtime_id!r}"}, 404)
@@ -830,6 +845,17 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     reply = PermissionReply.model_validate(await body_json(request))
                     return JSONResponse(await run_in_threadpool(
                         service.admin_respond_agent, run_id, parts[4], reply.decision))
+                if len(parts) == 4 and parts[3] == "executions":
+                    try:
+                        offset = max(0, int(request.query_params.get("offset", "0")))
+                        limit = max(1, min(int(request.query_params.get("limit", "50")), 50))
+                    except ValueError:
+                        offset, limit = 0, 50
+                    return JSONResponse(await run_in_threadpool(
+                        service.admin_list_agent_executions, run_id, offset, limit))
+                if len(parts) == 5 and parts[3] == "executions":
+                    return JSONResponse(await run_in_threadpool(
+                        service.admin_read_agent_execution, run_id, parts[4]))
                 if len(parts) == 3:
                     return JSONResponse(await run_in_threadpool(service.admin_read_agent_run, run_id))
                 return JSONResponse({"error": "Unknown run route"}, 404)
@@ -890,6 +916,8 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/runs/{run_id}", api), Route("/api/runs/{run_id}/session", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
         Route("/api/runs/{run_id}/requests/{request_id}", api, methods=["POST"]),
+        Route("/api/runs/{run_id}/executions", api),
+        Route("/api/runs/{run_id}/executions/{execution_id}", api),
         Route("/api/bridge", api, methods=["GET", "POST"]),
         Route("/api/workspaces", api, methods=["GET", "POST"]),
         Route("/api/workspaces/{workspace}/jobs", api),

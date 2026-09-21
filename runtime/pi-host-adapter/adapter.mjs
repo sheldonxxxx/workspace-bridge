@@ -6,14 +6,18 @@
 // closed instead of silently creating a replacement.
 import { randomUUID } from "node:crypto";
 
+import { ADAPTER_VERSION } from "./config.mjs";
 import { isTrustedExtensionUsable, trustedExtensionPath } from "./config.mjs";
+import { ExecutionJournal, summaryRecord } from "./executions.mjs";
+import { enforcementFingerprint } from "./fingerprint.mjs";
 import { resolveSessionDir } from "./paths.mjs";
 import {
+  SHELL_TOOL,
+  canonicalizeExternalRoots,
   canonicalJson,
   evaluateToolCall,
   policyRevision,
   safeDefaultPolicy,
-  selfProtectionDir,
   validatePolicy,
 } from "./policy.mjs";
 import { PiRpcProcess, RpcError } from "./rpc.mjs";
@@ -31,6 +35,7 @@ export const MAX_MODELS = 2000;
 export const TITLE_LIMIT = 200;
 export const MAX_PREFLIGHTS = 200;
 export const MAX_PENDING_PERMISSIONS = 50;
+export const MAX_EXECUTIONS_LIMIT = 100;
 
 // Opaque permission marker grammar: EXACTLY prefix + toolCallId, where the
 // id is 1..200 non-whitespace characters. No trailing text (tool, action,
@@ -204,7 +209,7 @@ export class PiAdapter {
     return entry;
   }
 
-  _spawnRpc(cwd, { extensionPath = null, extraEnv = {}, onEvent = null } = {}) {
+  _spawnRpc(cwd, { extensionPath = null, tools = null, extraEnv = {}, onEvent = null } = {}) {
     return new PiRpcProcess({
       binary: this.piBinary,
       cwd,
@@ -214,6 +219,7 @@ export class PiAdapter {
       maxLineBytes: this.maxLineBytes,
       extraEnv,
       extensionPath,
+      tools,
       onEvent,
     });
   }
@@ -222,11 +228,16 @@ export class PiAdapter {
   // session snapshot (defense in depth: validated AGAIN here, and the
   // Bridge-supplied revision must equal the recomputed canonical revision).
   // - neither policy nor revision supplied => read-only safe default
-  //   (legacy Bridge compatibility only);
+  //   (legacy Bridge compatibility only; no trusted extension);
   // - exactly one of policy/revision supplied => fail closed, no session;
-  // - supplied policy invalid or revision malformed => fail closed;
+  // - supplied policy invalid, v1/v2, or revision malformed => fail closed
+  //   (older versions need a coordinated Bridge+adapter upgrade; they are
+  //   never silently reinterpreted under v3 semantics);
   // - revision mismatch against the recomputed canonical revision =>
   //   fail closed; a different snapshot revision is never silently accepted.
+  // - configured external roots are canonicalized (realpath, existing
+  //   directory) here; canonical duplicates fail session creation.
+  // v3 has no fixed filesystem denies; ordinary configurable policy applies.
   _snapshotPolicy(options) {
     const raw = options && typeof options === "object" ? options.permission_policy : undefined;
     const suppliedRevision = options && typeof options === "object" ? options.policy_revision : undefined;
@@ -234,10 +245,22 @@ export class PiAdapter {
     const hasRevision = suppliedRevision !== undefined && suppliedRevision !== null;
     if (!hasPolicy && !hasRevision) {
       const policy = safeDefaultPolicy();
-      return { policy, revision: policyRevision(policy), writable: false };
+      return {
+        policy,
+        revision: policyRevision(policy),
+        writable: false,
+        shellMode: "deny",
+        legacy: true,
+        effectiveRoots: [],
+      };
     }
     if (hasPolicy !== hasRevision) {
       throw new AdapterError("Pi permission policy revision is missing", 400, "invalid_policy");
+    }
+    if (raw && typeof raw === "object" && (raw.version === 1 || raw.version === 2)) {
+      throw new AdapterError(
+        `Pi permission policy v${raw.version} is invalid: requires a coordinated Bridge and adapter upgrade`,
+        400, "invalid_policy");
     }
     let policy;
     try {
@@ -252,8 +275,21 @@ export class PiAdapter {
     if (suppliedRevision.toLowerCase() !== computed) {
       throw new AdapterError("Pi permission policy revision mismatch", 409, "conflict");
     }
+    let effectiveRoots;
+    try {
+      effectiveRoots = canonicalizeExternalRoots(policy.external_access.roots);
+    } catch {
+      throw new AdapterError("Pi permission policy external roots are unavailable", 400, "invalid_policy");
+    }
     // Store the verified (equal) revision.
-    return { policy, revision: computed, writable: policy.enabled === true };
+    return {
+      policy,
+      revision: computed,
+      writable: policy.write_tools_enabled === true,
+      shellMode: policy.shell_mode || "deny",
+      legacy: false,
+      effectiveRoots,
+    };
   }
 
   async createSession(directory, title = "", options = {}) {
@@ -262,21 +298,34 @@ export class PiAdapter {
     }
     const cwd = resolveSessionDir(this.projectsRoot, directory);
     const snapshot = this._snapshotPolicy(options);
-    // Writable mode requires the package-owned trusted extension to be a
-    // usable regular file; otherwise session creation fails closed. The
-    // full extension path is never logged or returned.
+    // Every managed v3 session loads exactly the package-owned trusted
+    // extension -- including read-only sessions, so read/grep/find/ls
+    // policy, protected patterns, and external rules are enforced in both
+    // modes. write_tools_enabled decides edit/write exposure; shell_mode
+    // decides bash exposure (deny removes bash, ask keeps it gated, allow
+    // keeps it ungated; no powershell, no command rules). --no-extensions
+    // stays on; the extension path is never logged, returned, or
+    // selectable. Only the legacy no-policy compatibility path runs
+    // without the extension.
     let extensionPath = null;
     let extraEnv = {};
-    if (snapshot.writable) {
+    let tools = null;
+    if (!snapshot.legacy) {
       extensionPath = trustedExtensionPath();
       if (!isTrustedExtensionUsable(extensionPath)) {
-        throw new AdapterError("Pi writable session is unavailable", 502, "unavailable");
+        throw new AdapterError("Pi permission session is unavailable", 502, "unavailable");
       }
       extraEnv = { WB_PI_POLICY_JSON: canonicalJson(snapshot.policy) };
+      const base = snapshot.writable
+        ? ["read", "grep", "find", "ls", "edit", "write"]
+        : ["read", "grep", "find", "ls"];
+      if (snapshot.shellMode !== "deny") base.push(SHELL_TOOL);
+      tools = base.join(",");
     }
     const holder = {};
     const rpc = this._spawnRpc(cwd, {
       extensionPath,
+      tools,
       extraEnv,
       onEvent: (message) => this._onRpcEvent(holder.entry || null, holder.sessionId || "", message),
     });
@@ -294,6 +343,7 @@ export class PiAdapter {
       try { await rpc.close({ graceMs: 0 }); } catch { /* best effort */ }
       throw new AdapterError("Pi session binding failed", 502, "runtime_unavailable");
     }
+    const fingerprint = enforcementFingerprint();
     const entry = {
       rpc,
       cwd,
@@ -304,21 +354,37 @@ export class PiAdapter {
       permissionPolicy: snapshot.policy,
       policyRevision: snapshot.revision,
       writable: snapshot.writable,
+      shellMode: snapshot.shellMode,
+      effectiveRoots: snapshot.effectiveRoots,
       preflights: new Map(),
       pendingByUi: new Map(),
       pendingByPermission: new Map(),
+      // Bounded monotonic execution journal for audit (3C1). Retained
+      // while the adapter session entry remains owned.
+      journal: new ExecutionJournal(),
+      enforcementFingerprint: fingerprint.fingerprint,
     };
     holder.entry = entry;
     holder.sessionId = sessionId;
     // Child exit/EOF must never leave UI waits hanging: drop correlation
-    // state so late HTTP responses fail closed as not_found.
+    // state so late HTTP responses fail closed as not_found. Mark active
+    // journal records interrupted where possible and retain journal
+    // evidence while the entry remains owned.
     rpc.onExit = () => {
+      try { entry.journal.markInterrupted(); } catch { /* best effort */ }
       entry.preflights.clear();
       entry.pendingByUi.clear();
       entry.pendingByPermission.clear();
     };
     this.sessions.set(sessionId, entry);
-    return { id: sessionId, directory: cwd, title: bounded(title, TITLE_LIMIT) };
+    return {
+      id: sessionId, directory: cwd, title: bounded(title, TITLE_LIMIT),
+      policy_revision: snapshot.revision,
+      enforcement_fingerprint: fingerprint.fingerprint,
+      fingerprint_modules: [...fingerprint.modules],
+      adapter_version: ADAPTER_VERSION,
+      pi_version: this.piVersion || "",
+    };
   }
 
   async getSession(directory, sessionId) {
@@ -484,12 +550,13 @@ export class PiAdapter {
   }
 
   _evaluate(entry, toolName, input) {
+    // v3: no fixed filesystem denies; ordinary configurable policy applies.
     return evaluateToolCall({
       cwd: entry.cwd,
       policy: entry.permissionPolicy,
       toolName,
       input,
-      selfProtectedDirs: [selfProtectionDir()],
+      effectiveRoots: entry.effectiveRoots || [],
     });
   }
 
@@ -499,6 +566,8 @@ export class PiAdapter {
     try {
       if (message.type === "tool_execution_start") {
         this._onToolStart(entry, message);
+      } else if (message.type === "tool_execution_update") {
+        this._onToolUpdate(entry, message);
       } else if (message.type === "tool_execution_end") {
         this._onToolEnd(entry, message);
       } else if (message.type === "extension_ui_request") {
@@ -517,7 +586,8 @@ export class PiAdapter {
     // Normalized path-only permission metadata from the RPC layer (never
     // raw tool payloads). Defensive: anything else evaluates as malformed.
     // {path: null} marks a present-but-invalid path so evaluation denies
-    // instead of defaulting to the workspace root.
+    // instead of defaulting to the workspace root. Bash keeps {} for
+    // permission (shell_mode governs it).
     const rawInput = message.input;
     const input = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
       ? rawInput
@@ -528,6 +598,7 @@ export class PiAdapter {
       if (!oldest.done) entry.preflights.delete(oldest.value);
     }
     // Exact preflight for this toolCallId: validated name + args snapshot.
+    // For bash the grant scope is the exact command hash + timeout.
     entry.preflights.set(toolCallId, {
       toolName,
       input,
@@ -535,13 +606,81 @@ export class PiAdapter {
       resource: verdict.resource,
       grantKey: verdict.grantKey,
       alwaysPattern: verdict.alwaysPattern,
+      commandHash: verdict.commandHash || "",
+      timeoutMs: verdict.timeoutMs || 0,
     });
+    // Separate audit journal (bounded evidence, never raw objects).
+    try {
+      const auditInput = message.auditInput && typeof message.auditInput === "object"
+        ? message.auditInput : {};
+      entry.journal.start({
+        toolCallId, tool: toolName, inputSummary: auditInput,
+        permissionEffect: verdict.effect,
+      });
+    } catch { /* journal must never break correlation */ }
+  }
+
+  _onToolUpdate(entry, message) {
+    const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+    if (!toolCallId) return;
+    try {
+      const preview = message.auditUpdate && typeof message.auditUpdate === "object"
+        ? message.auditUpdate : null;
+      if (preview) entry.journal.update({ toolCallId, resultPreview: preview });
+    } catch { /* never break framing */ }
   }
 
   _onToolEnd(entry, message) {
     const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
     if (!toolCallId) return;
     entry.preflights.delete(toolCallId);
+    try {
+      const auditResult = message.auditResult && typeof message.auditResult === "object"
+        ? message.auditResult : { is_error: Boolean(message.isError) };
+      const toolName = typeof message.toolName === "string" && message.toolName
+        ? message.toolName
+        : (entry.journal.records.get(toolCallId)?.tool || "unknown");
+      // If the end carries no tool name, attribute via the journal record.
+      const existing = entry.journal.records.get(toolCallId);
+      if (existing && !message.toolName) {
+        entry.journal.end({
+          toolCallId,
+          resultSummary: auditResult,
+          isError: Boolean(message.isError ?? auditResult.is_error),
+        });
+      } else {
+        entry.journal.end({
+          toolCallId,
+          resultSummary: auditResult,
+          isError: Boolean(message.isError ?? auditResult.is_error),
+        });
+      }
+      void toolName;
+    } catch { /* journal must never break correlation */ }
+  }
+
+  // Token-authenticated exact-session execution journal read on the
+  // UPDATE cursor (after=<update_seq>). Returns current snapshots whose
+  // update_seq > after ordered by update_seq, plus next/head/oldest.
+  // Evicted update history reports audit_gap/cursor_too_old, never
+  // silent completeness.
+  async readExecutions(directory, sessionId, { after = 0, limit = 50 } = {}) {
+    const entry = this._permissionEntry(sessionId, directory);
+    const result = entry.journal.read({ after, limit });
+    return {
+      updates: result.updates,
+      summaries: result.updates.map((r) => summaryRecord(r)),
+      next: result.next,
+      head: result.head,
+      oldest: result.oldest,
+      audit_gap: result.audit_gap,
+      cursor_too_old: result.cursor_too_old,
+    };
+  }
+
+  executionHead(directory, sessionId) {
+    const entry = this._permissionEntry(sessionId, directory);
+    return entry.journal.head;
   }
 
   _expectedUiOptions(entry) {
@@ -627,6 +766,8 @@ export class PiAdapter {
       created: new Date().toISOString(),
       reason: verdict.reason,
       code: verdict.code,
+      commandHash: verdict.commandHash || "",
+      timeoutMs: verdict.timeoutMs || 0,
     };
     entry.pendingByUi.set(uiId, record);
     entry.pendingByPermission.set(permissionId, record);
@@ -634,15 +775,21 @@ export class PiAdapter {
 
   _publicPending(record) {
     // Bounded public record only: no raw args, file contents, reasoning,
-    // tokens, or outside paths.
-    return {
+    // tokens, or environment. For bash the resource/requested carry the
+    // exact bounded command + verified timeout detail (ask flow); file
+    // tools carry the bounded target. always_pattern stays exact-command
+    // scoped for bash (hash + timeout).
+    const isBash = String(record.tool) === SHELL_TOOL;
+    const resourceLimit = isBash ? 16384 : 400;
+    const requestedLimit = isBash ? 16384 : 400;
+    const out = {
       session: String(record.sessionId).slice(0, 200),
       id: String(record.id).slice(0, 200),
       tool: String(record.tool).slice(0, 40),
       action: String(record.action).slice(0, 120),
-      resource: String(record.resource).slice(0, 400),
+      resource: String(record.resource).slice(0, resourceLimit),
       requested: (Array.isArray(record.requested) ? record.requested : []).slice(0, 8)
-        .map((v) => String(v).slice(0, 400)),
+        .map((v) => String(v).slice(0, requestedLimit)),
       always_pattern: String(record.alwaysPattern || "").slice(0, 400),
       tool_call_id: String(record.toolCallId).slice(0, 200),
       created: String(record.created).slice(0, 60),
@@ -651,6 +798,11 @@ export class PiAdapter {
         code: String(record.code || "").slice(0, 80),
       },
     };
+    if (isBash) {
+      if (record.commandHash) out.command_sha256 = String(record.commandHash).slice(0, 64);
+      if (record.timeoutMs) out.timeout_ms = Number(record.timeoutMs) || 0;
+    }
+    return out;
   }
 
   async listPermissions(directory, sessionId) {
@@ -713,6 +865,11 @@ export class PiAdapter {
       throw new AdapterError("Pi session is unavailable", 502, "unavailable");
     }
     // Remove pending only after the response was positively confirmed.
+    // Link the permission decision to the execution journal by toolCallId
+    // when positively known; never guess session-grant decisions (only
+    // the exact call's once/always/reject is recorded here; the trusted
+    // extension owns in-memory exact-grant short-circuits separately).
+    try { entry.journal.setPermissionDecision(record.toolCallId, response); } catch { /* best effort */ }
     entry.pendingByUi.delete(record.uiId);
     entry.pendingByPermission.delete(pid);
     return { ok: true, decision: response };

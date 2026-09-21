@@ -1,8 +1,11 @@
-"""Milestone 3B1: web-configurable Pi file-tool permission policy.
+"""Milestones 3B1/3B2: web-configurable Pi file-tool permission policy.
 
-Focused coverage for the Bridge-side Pi permission policy plus the Pi
-runtime client contract. Scripted fakes only: no Node, network, provider
-credentials, or real model is required.
+3B2 upgrades the schema to v2 (write_tools_enabled + web-configurable
+external file scope) with in-memory v1 migration on read. Focused coverage
+for the Bridge-side Pi permission policy plus the Pi runtime client
+contract. Scripted fakes only: no Node, network, provider credentials, or
+real model is required (except one revision-agreement check that shells to
+the native adapter when node is available).
 """
 import hashlib
 import json
@@ -16,6 +19,7 @@ from workspace_bridge.pi_permissions import (
     PI_PERMISSION_POLICY_SETTING,
     SUPPORTED_PI_PERMISSION_TOOLS,
     canonical_json,
+    migrate_v1_policy,
     policy_revision,
     safe_defaults,
 )
@@ -35,9 +39,22 @@ from runtime_fakes import FakeRuntime, RecordingNotifier, pending_permission
 
 def enabled_policy(**overrides):
     policy = safe_defaults()
-    policy["enabled"] = True
+    policy["write_tools_enabled"] = True
     policy.update(overrides)
     return policy
+
+
+def v1_enabled_policy():
+    """A stored 3B1-era v1 policy, as deployed before the 3B2 upgrade."""
+    return {
+        "version": 1,
+        "enabled": True,
+        "tools": {"read": "allow", "grep": "deny", "find": "allow",
+                  "ls": "allow", "edit": "ask", "write": "ask"},
+        "protected_patterns": [".git/**", "secret/**"],
+        "protected_template_exceptions": [".env.example"],
+        "allow_session_always": False,
+    }
 
 
 def make_service(tmp_path, runtimes):
@@ -60,7 +77,8 @@ def make_pi_runtime(directory):
     runtime._capabilities = RuntimeCapabilities(
         model_discovery=True, session_reuse=True, event_polling=False,
         session_status=True, pending_snapshot=True, permission_response=True,
-        question_detection=False, question_response=False, session_branching=False)
+        question_detection=False, question_response=False, session_branching=False,
+        execution_history=True)
     runtime.models = list(runtime.models)
     return runtime
 
@@ -101,11 +119,14 @@ def call(env, tool, **args):
 # ------------------------------------------------- policy validation/defaults
 def test_safe_defaults_are_read_only_and_revisioned():
     policy = safe_defaults()
-    assert policy["version"] == 1 and policy["enabled"] is False
+    assert policy["version"] == 3 and policy["write_tools_enabled"] is False
     assert policy["tools"] == {"read": "allow", "grep": "allow", "find": "allow",
                                "ls": "allow", "edit": "ask", "write": "ask"}
     assert ".workspace-handoff/**" in policy["protected_patterns"]
     assert policy["allow_session_always"] is True
+    assert policy["external_access"] == {"default_mode": "deny", "roots": []}
+    assert policy["shell_mode"] == "deny"
+    assert "enabled" not in policy
     revision = policy_revision(policy)
     assert len(revision) == 64 and all(c in "0123456789abcdef" for c in revision)
     # Canonical JSON is byte-stable: sorted keys, no spaces (shared with
@@ -141,8 +162,11 @@ def test_unconfigured_policy_reads_safe_defaults(pi_env):
     assert revision == policy_revision(safe_defaults())
     status = service.pi_permission_status()
     assert status["runtime"] == "pi" and status["enabled"] is False
+    assert status["write_tools_enabled"] is False
     assert status["effective_writable"] is False
     assert status["tools"]["edit"] == "ask"
+    assert status["external_default_mode"] == "deny"
+    assert status["external_root_count"] == 0
     blob = json.dumps(status)
     assert ".workspace-handoff" not in blob and "/tmp" not in blob.lower()
 
@@ -150,11 +174,13 @@ def test_unconfigured_policy_reads_safe_defaults(pi_env):
 def test_set_policy_validation_is_strict_and_atomic(pi_env):
     service = pi_env["service"]
     before = service.pi_permission_view()
+    v1_shape = v1_enabled_policy()
     bad_version = safe_defaults()
-    bad_version["version"] = 2
+    bad_version["version"] = 1
     bad_inputs = [
-        None, "not-json", bad_version,
-        {**safe_defaults(), "enabled": "yes"},
+        None, "not-json", bad_version, v1_shape,
+        {**safe_defaults(), "enabled": True},
+        {**safe_defaults(), "write_tools_enabled": "yes"},
         {**safe_defaults(), "tools": {"read": "allow"}},
         {**safe_defaults(), "tools": {**safe_defaults()["tools"], "edit": "sometimes"}},
         {**safe_defaults(), "tools": {**safe_defaults()["tools"], "bash": "deny"}},
@@ -163,6 +189,23 @@ def test_set_policy_validation_is_strict_and_atomic(pi_env):
         {**safe_defaults(), "protected_patterns": ["x" * 401]},
         {**safe_defaults(), "protected_patterns": ["ok"] * 65},
         {**safe_defaults(), "allow_session_always": "yes"},
+        {**safe_defaults(), "external_access": None},
+        {**safe_defaults(), "external_access": {"default_mode": "sometimes", "roots": []}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny"}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny", "roots": {},
+                                                "extra": 1}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny",
+                                                "roots": [{"path": "relative", "mode": "allow"}]}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny",
+                                                "roots": [{"path": "/a/../b", "mode": "allow"}]}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny",
+                                                "roots": [{"path": "/ok", "mode": "sometimes"}]}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny",
+                                                "roots": [{"path": "/dup", "mode": "allow"},
+                                                          {"path": "/dup", "mode": "deny"}]}},
+        {**safe_defaults(), "external_access": {"default_mode": "deny",
+                                                "roots": [{"path": f"/r{i}", "mode": "ask"}
+                                                          for i in range(33)]}},
         {**safe_defaults(), "unknown_field": 1},
     ]
     for bad in bad_inputs:
@@ -177,14 +220,80 @@ def test_set_and_get_round_trip_with_revision(pi_env):
     service = pi_env["service"]
     saved = service.set_pi_permission_policy(enabled_policy())
     assert saved["enabled"] is True and saved["effective_writable"] is True
-    assert saved["policy"]["enabled"] is True
+    assert saved["write_tools_enabled"] is True
+    assert saved["policy"]["write_tools_enabled"] is True
+    assert saved["external_default_mode"] == "deny" and saved["external_root_count"] == 0
     policy, revision, configured = service.get_pi_permission_policy()
-    assert configured is True and policy["enabled"] is True
+    assert configured is True and policy["write_tools_enabled"] is True
     assert revision == saved["policy_revision"] == policy_revision(policy)
     # Corrupt storage fails closed to safe defaults, never partial.
     service.set_setting(PI_PERMISSION_POLICY_SETTING, "corrupt{{")
     fallback, _, configured = service.get_pi_permission_policy()
     assert configured is False and fallback == safe_defaults()
+
+
+# ------------------------------------------- v1/v2 -> v3 migration (3C1)
+def test_v1_stored_policy_migrates_without_losing_admin_settings(pi_env):
+    from workspace_bridge.pi_permissions import load_policy
+    service = pi_env["service"]
+    v1 = v1_enabled_policy()
+    service.set_setting(PI_PERMISSION_POLICY_SETTING, json.dumps(v1))
+    policy, revision, configured, migrated_from = load_policy(service)
+    assert configured is True and migrated_from == 1
+    assert policy["version"] == 3
+    assert policy["write_tools_enabled"] is True
+    assert policy["tools"] == v1["tools"]
+    assert policy["protected_patterns"] == v1["protected_patterns"]
+    assert policy["protected_template_exceptions"] == v1["protected_template_exceptions"]
+    assert policy["allow_session_always"] is False
+    assert policy["external_access"] == {"default_mode": "deny", "roots": []}
+    assert policy["shell_mode"] == "deny"
+    # Migration is in memory only: storage still holds v1 until a v3 save.
+    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 1
+    # Revision is computed from the migrated v3 object (pre-upgrade
+    # sessions cannot continue under a silently changed scope).
+    assert revision == policy_revision(policy)
+    assert revision == policy_revision(migrate_v1_policy(v1))
+    # Public triple stays compatible.
+    triple = service.get_pi_permission_policy()
+    assert triple == (policy, revision, True)
+    # Admin GET reports the migration without mutating storage.
+    view = service.pi_permission_view()
+    assert view["policy"] == policy and view["migrated_from_version"] == 1
+    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 1
+    # First v3 save persists v3 and clears the migration marker.
+    saved = service.set_pi_permission_policy(policy)
+    assert saved["policy"]["version"] == 3
+    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 3
+    assert "migrated_from_version" not in service.pi_permission_view()
+
+
+def test_v1_migration_preserves_disabled_policy(pi_env):
+    from workspace_bridge.pi_permissions import load_policy
+    service = pi_env["service"]
+    v1 = v1_enabled_policy()
+    v1["enabled"] = False
+    service.set_setting(PI_PERMISSION_POLICY_SETTING, json.dumps(v1))
+    policy, _, configured, migrated_from = load_policy(service)
+    assert configured is True and migrated_from == 1
+    assert policy["write_tools_enabled"] is False
+    assert service.pi_permission_status()["effective_writable"] is False
+
+
+def test_status_hides_roots_but_reports_mode_and_count(pi_env):
+    service = pi_env["service"]
+    policy = enabled_policy(external_access={
+        "default_mode": "ask",
+        "roots": [{"path": "/Volumes/private-docs", "mode": "allow"},
+                  {"path": "/tmp", "mode": "deny"}],
+    })
+    service.set_pi_permission_policy(policy)
+    status = service.pi_permission_status()
+    assert status["external_default_mode"] == "ask"
+    assert status["external_root_count"] == 2
+    blob = json.dumps(status)
+    assert "/Volumes/private-docs" not in blob
+    assert "private-docs" not in blob
 
 
 def test_no_mcp_mutation_path_for_permission_policy():
@@ -221,18 +330,33 @@ def test_admin_permission_policy_routes_and_auth(pi_env):
                 initial = (await authed.get("/api/runtimes/pi/permission-policy")).json()
                 assert initial["runtime"] == "pi"
                 assert initial["policy_scope"] == "runtime_global"
-                assert initial["policy"]["enabled"] is False
+                assert initial["policy"]["write_tools_enabled"] is False
+                assert initial["policy"]["external_access"] == {"default_mode": "deny", "roots": []}
+                assert "migrated_from_version" not in initial
                 assert initial["supported_tools"] == list(SUPPORTED_PI_PERMISSION_TOOLS)
                 assert initial["fixed_invariants"]
+                assert not any("Outside-workspace access denied" in text
+                               for text in initial["fixed_invariants"])
                 assert "new" in initial["session_note"].lower()
                 assert ".workspace-handoff" in json.dumps(initial["policy"])
-                bad = dict(initial["policy"])
+                bad = json.loads(json.dumps(initial["policy"]))
                 bad["tools"]["edit"] = "sometimes"
                 rejected = await authed.post("/api/runtimes/pi/permission-policy", json=bad)
                 assert rejected.status_code == 400
+                # v1 payloads are rejected on save.
+                v1_rejected = await authed.post("/api/runtimes/pi/permission-policy",
+                                                json=v1_enabled_policy())
+                assert v1_rejected.status_code == 400
+                with_roots = enabled_policy(external_access={
+                    "default_mode": "ask",
+                    "roots": [{"path": "/tmp", "mode": "allow"}],
+                })
                 saved = (await authed.post("/api/runtimes/pi/permission-policy",
-                                           json=enabled_policy())).json()
-                assert saved["policy"]["enabled"] is True
+                                           json=with_roots)).json()
+                assert saved["policy"]["write_tools_enabled"] is True
+                assert saved["policy"]["external_access"]["default_mode"] == "ask"
+                assert saved["policy"]["external_access"]["roots"] == [
+                    {"path": "/tmp", "mode": "allow"}]
                 assert saved["policy_revision"]
                 reread = (await authed.get("/api/runtimes/pi/permission-policy")).json()
                 assert reread["policy"] == saved["policy"]
@@ -241,6 +365,9 @@ def test_admin_permission_policy_routes_and_auth(pi_env):
                 assert (await authed.get("/api/runtimes/nope/permission-policy")).status_code == 400
                 status = (await authed.get("/api/status")).json()
                 assert status["runtime_permissions"]["pi"]["enabled"] is True
+                assert status["runtime_permissions"]["pi"]["external_default_mode"] == "ask"
+                assert status["runtime_permissions"]["pi"]["external_root_count"] == 1
+                assert "/tmp" not in json.dumps(status["runtime_permissions"])
                 assert ".workspace-handoff" not in json.dumps(status["runtime_permissions"])
                 events = (await authed.get("/api/events")).json()["events"]
                 entry = next(e for e in events if e["action"] == "set_runtime_permission_policy")
@@ -257,18 +384,29 @@ def test_web_ui_has_structured_permission_controls():
     js = (root / "workspace_bridge" / "static" / "app.js").read_text()
     assert "Manage permissions" in html
     assert "pi-permissions-dialog" in html
-    assert "Enable Pi writable tools (edit/write)" in html
+    assert "Expose Pi writable tools (edit/write)" in html
+    assert "read policy is always enforced" in html.lower()
     assert "not a sandbox" in html
     assert "NEW Pi sessions only" in html
     assert "Fixed safety invariants" in html
     assert "Restore safe defaults" in html
+    assert "External file access" in html
+    assert "pi-perm-external-default" in html
+    assert "pi-perm-roots" in html
+    assert "pi-perm-add-root" in html
+    assert "most-specific" in html
+    assert "Add external root" in html
+    assert "Outside-workspace access denied" not in html
     assert "pi-permission-status" in html
     assert "Approval mode enabled" in js and "Read-only" in js
+    assert "outside" in js and "external_default_mode" in js
+    assert "external_root_count" in js
     assert "/api/runtimes/pi/permission-policy" in js
     assert "innerHTML" not in js
     assert "Always allow exact target" in js
     assert "new pi sessions only" in js.lower()
     assert "adapter ready" in js and "adapter update required" in js
+    assert "version: 2" in js and "write_tools_enabled" in js
 
 
 # ------------------------------------------------------- runtime client
@@ -312,7 +450,8 @@ def patch(monkeypatch, handler):
 def ready_adapter_health():
     return {"ok": True, "status": "ok", "locked": False, "pi_usable": True,
             "pi_version": "0.86.1", "adapter_version": "0.2.0", "instance": "pi-1",
-            "capabilities": {"pending_snapshot": True, "permission_response": True}}
+            "capabilities": {"pending_snapshot": True, "permission_response": True,
+                             "execution_history": True}}
 
 
 def old_adapter_health():
@@ -392,7 +531,24 @@ def test_writable_create_refuses_old_adapter_without_session_post(monkeypatch):
     assert calls and all("/sessions" not in call["url"] for call in calls)
 
 
-def test_read_only_create_stays_compatible_with_old_adapter(monkeypatch):
+def test_read_only_v2_create_refuses_old_adapter_without_session_post(monkeypatch):
+    # 3B2: even read-only v2 sessions load the trusted extension, so they
+    # require the deployed permission-capable adapter. Only legacy
+    # no-policy creation stays compatible with old adapters (see below).
+    calls = patch(monkeypatch, lambda record: FakeResponse(old_adapter_health())
+                  if record["method"] == "GET" and record["url"].split("?")[0].endswith("/health")
+                  else (_ for _ in ()).throw(AssertionError(record["url"])))
+    runtime = HttpPiRuntime("http://127.0.0.1:8780")
+    disabled = safe_defaults()
+    with pytest.raises(RuntimeUnsupported):
+        runtime.create_session("/projects/alpha", "Handoff",
+                               {"permission_policy": disabled,
+                                "policy_revision": policy_revision(disabled)})
+    # Only the health probe ran: no POST /sessions was ever attempted.
+    assert calls and all("/sessions" not in call["url"] for call in calls)
+
+
+def test_legacy_no_policy_create_stays_compatible_with_old_adapter(monkeypatch):
     seen = {}
 
     def handler(record):
@@ -408,17 +564,12 @@ def test_read_only_create_stays_compatible_with_old_adapter(monkeypatch):
 
     calls = patch(monkeypatch, handler)
     runtime = HttpPiRuntime("http://127.0.0.1:8780")
-    disabled = safe_defaults()
-    session = runtime.create_session("/projects/alpha", "Handoff",
-                                     {"permission_policy": disabled,
-                                      "policy_revision": policy_revision(disabled)})
-    assert session.id == "pi_old_1"
-    assert seen["permission_policy"]["enabled"] is False
-    # No deployed-capability probe is needed for read-only creation.
-    assert [call["url"] for call in calls] == [
-        "http://127.0.0.1:8780/sessions"]
     legacy = runtime.create_session("/projects/alpha", "Legacy")
     assert legacy.id == "pi_old_1"
+    assert "permission_policy" not in seen and "policy_revision" not in seen
+    # No deployed-capability probe is needed for legacy creation.
+    assert [call["url"] for call in calls] == [
+        "http://127.0.0.1:8780/sessions"]
 
 
 def test_permission_list_and_respond_require_deployed_support(monkeypatch):
@@ -474,16 +625,20 @@ def test_health_normalizes_deployed_capabilities(monkeypatch):
     patch(monkeypatch, lambda record: FakeResponse(ready))
     health = HttpPiRuntime("http://127.0.0.1:8780").health()
     assert health["deployed_capabilities"] == {"pending_snapshot": True,
-                                               "permission_response": True}
+                                               "permission_response": True,
+                                               "execution_history": True}
     assert health["permissions_supported"] is True
+    assert health["execution_supported"] is True
     blob = json.dumps(health)
     assert "token" not in blob.lower() and "permission_policy" not in blob
-    # Pre-3B1 adapter without the block: both default False.
+    # Pre-3C1 adapter without the block: all default False.
     patch(monkeypatch, lambda record: FakeResponse(old_adapter_health()))
     legacy = HttpPiRuntime("http://127.0.0.1:8780").health()
     assert legacy["deployed_capabilities"] == {"pending_snapshot": False,
-                                               "permission_response": False}
+                                               "permission_response": False,
+                                               "execution_history": False}
     assert legacy["permissions_supported"] is False
+    assert legacy["execution_supported"] is False
     # Malformed or partial capabilities shapes fail closed to False, and
     # the normalized block carries strict booleans only.
     for bad in ({"capabilities": None}, {"capabilities": ["x"]},
@@ -495,7 +650,9 @@ def test_health_normalizes_deployed_capabilities(monkeypatch):
         patch(monkeypatch, lambda record, p=payload: FakeResponse(p))
         parsed = HttpPiRuntime("http://127.0.0.1:8780").health()
         assert parsed["permissions_supported"] is False, bad
-        assert set(parsed["deployed_capabilities"]) == {"pending_snapshot", "permission_response"}
+        assert parsed["execution_supported"] is False, bad
+        assert set(parsed["deployed_capabilities"]) == {"pending_snapshot", "permission_response",
+                                                        "execution_history"}
         assert all(isinstance(v, bool)
                    for v in parsed["deployed_capabilities"].values())
 
@@ -555,7 +712,31 @@ def test_pi_continuation_same_revision_then_refused_after_change(pi_env):
     fresh = call(pi_env, "start_agent_run", runtime="pi", job_id=third_job["id"],
                  request_id="cont-fresh")
     assert fresh["session_reused"] is False
-    assert pi_env["pi"].session_options[-1]["permission_policy"]["enabled"] is True
+    assert pi_env["pi"].session_options[-1]["permission_policy"]["write_tools_enabled"] is True
+
+
+def test_pi_continuation_refused_after_external_policy_change(pi_env):
+    from workspace_bridge.runtime import MessageInfo
+    service = pi_env["service"]
+    job = publish(pi_env, "ext-1")
+    first = call(pi_env, "start_agent_run", runtime="pi",
+                 job_id=job["id"], request_id="ext-first")
+    pi_env["pi"].messages_script = [
+        MessageInfo(id="m1", role="user", created=10, text="do it"),
+        MessageInfo(id="m2", role="assistant", created=11, completed=12,
+                    text="Done.", tools=("read",)),
+    ]
+    service.orchestrators["pi"]._poll_sweep(
+        due_permission=False, due_completion=True, due_question=False)
+    assert call(pi_env, "read_agent_run", run_id=first["run_id"])["state"] == "completed"
+    widened = enabled_policy(external_access={
+        "default_mode": "ask", "roots": [{"path": "/tmp", "mode": "allow"}]})
+    service.set_pi_permission_policy(widened)
+    follow = publish(pi_env, "ext-2", title="Follow-up")
+    with pytest.raises(BridgeError) as exc:
+        call(pi_env, "start_agent_run", runtime="pi", job_id=follow["id"],
+             request_id="ext-second", continue_from_run_id=first["run_id"])
+    assert exc.value.code == "permission_scope_changed"
 
 
 def test_pi_ask_to_once_resumes_same_session(pi_env):
@@ -602,9 +783,13 @@ def test_pi_unsupported_question_is_not_applicable(pi_env):
 
 def test_skill_version_bumped_and_workflow_neutral():
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert SKILL_VERSION == "1.8.0"
+    assert SKILL_VERSION == "2.0.0"
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
     skill = (root / "workspace_bridge" / "skills" / "project-lead" / "SKILL.md").read_text()
     assert "web-admin configured" in skill
-    assert "new-session snapshot" in skill or "NEW sessions only" in skill
-    assert "no bash" in skill.lower()
+    flat = " ".join(skill.split())
+    assert "new-session snapshot" in skill or "NEW sessions only" in flat
+    assert "execution_audit" in skill or "execution-evidence" in skill.lower()
+    assert "shell" in skill.lower()
+    assert "external" in skill.lower()
+    assert "read-only mode" in skill.lower()

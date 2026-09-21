@@ -1,28 +1,33 @@
-// Package-owned trusted Pi permission extension (milestone 3B1).
+// Package-owned trusted Pi permission extension (milestone 3C1, policy v3).
 //
-// Loaded explicitly via `-e <this file>` ONLY when the Bridge-delivered
-// policy snapshot has enabled=true. Never discovered from project/global
-// locations (--no-extensions stays on). Pi itself has no sandbox: this is
-// pre-tool policy/approval with exact suspended-call resume, not OS
-// containment.
+// Loaded explicitly via `-e <this file>` for EVERY managed v3 session --
+// including read-only sessions, so read/grep/find/ls policy, protected
+// patterns, and external rules are enforced in both modes. Never discovered
+// from project/global locations (--no-extensions stays on). Pi itself has
+// no sandbox: this is pre-tool policy/approval with exact suspended-call
+// resume, not OS containment. Shell Allow runs with native macOS-user
+// authority and can bypass structured file path controls.
 //
 // Protocol with the adapter (over Pi RPC UI):
 // - tool_call pre-execution interception uses the shared evaluator.
 // - deny => {block: true, reason}; allow => continue.
 // - ask => await ctx.ui.select(markerTitle, OPTIONS). The marker title is
-//   EXACTLY `WB_PERMISSION_V1:<toolCallId>` (opaque: no tool, resource, or
-//   path text) so the adapter can correlate the extension_ui_request to
-//   the exact preflighted call. All human-readable permission metadata
-//   comes ONLY from adapter preflight/evaluator state, never from this
-//   title. The suspended invocation resumes with the UI response; the LLM
-//   never retries.
+//   EXACTLY `WB_PERMISSION_V1:<toolCallId>` (opaque: no tool, resource,
+//   command, or path text) so the adapter can correlate the
+//   extension_ui_request to the exact preflighted call. All human-readable
+//   permission metadata comes ONLY from adapter preflight/evaluator state,
+//   never from this title. The suspended invocation resumes with the UI
+//   response; the LLM never retries.
 // - Options are shared constants below. "always" is offered only when the
-//   immutable session policy has allow_session_always=true.
-// - Grants are in-memory exact grantKeys only (action + exact canonical
-//   workspace-relative target); never persisted to disk.
+//   immutable session policy has allow_session_always=true. For bash,
+//   always stays session-local and exact-command scoped (hash + timeout).
+// - Grants are in-memory exact grantKeys only (file tools: action + exact
+//   target; bash: exact command hash + verified timeout); never persisted
+//   to disk.
 //
-// Any internal failure fails closed (blocks the call).
-import { evaluateToolCall, selfProtectionDir, validatePolicy } from "./policy.mjs";
+// v3 has no fixed filesystem denies and no command rule list. Any internal
+// failure fails closed (blocks the call).
+import { evaluateToolCall, validatePolicy } from "./policy.mjs";
 
 export const MARKER_PREFIX = "WB_PERMISSION_V1:";
 export const OPTION_ONCE = "Allow once";
@@ -49,9 +54,9 @@ function markerTitle(toolCallId) {
 export default function (pi) {
   const policy = loadSnapshot();
   const sessionCwd = process.cwd();
-  const protectedDirs = [selfProtectionDir()];
   // Exact in-memory grants for this session only: grantKey strings from
-  // the shared evaluator ("<tool>\n<workspace-relative target>").
+  // the shared evaluator (file tools "<tool>\n<target>"; bash
+  // "bash\n<commandHash>\n<timeoutMs>").
   const grants = new Set();
 
   pi.on("tool_call", async (event, ctx) => {
@@ -65,7 +70,9 @@ export default function (pi) {
       if (!toolCallId) {
         return { block: true, reason: "Permission correlation unavailable; failing closed" };
       }
-      const base = { cwd: sessionCwd, policy, toolName, input, selfProtectedDirs: protectedDirs };
+      // v3: no fixed filesystem denies, no command rules; ordinary
+      // configurable policy + shell_mode govern.
+      const base = { cwd: sessionCwd, policy, toolName, input };
       const verdict = evaluateToolCall(base);
       if (verdict.effect === "deny") {
         return { block: true, reason: verdict.reason || "Blocked by permission policy" };

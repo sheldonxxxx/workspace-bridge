@@ -77,7 +77,9 @@ UNAVAILABLE_WARN_EVERY = 60.0
 
 RUN_COLUMNS = ("id,workspace,runtime,job,request_id,request_hash,parent_run,session,model,state,"
                "error_code,error_message,result,notification,created,started,updated,finished,"
-               "message_floor_ms,session_reused,transcript,permission_revision")
+               "message_floor_ms,session_reused,transcript,permission_revision,"
+               "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
+               "enforcement_fingerprint,adapter_version,pi_version")
 # Physical legacy storage column for request rows. Existing databases carry
 # this column and its UNIQUE(workspace, opencode_request) constraint; both are
 # retained verbatim for compatibility. Ordinary request logic never matches on
@@ -899,6 +901,289 @@ class AgentOrchestrator:
         policy, revision, _ = _get_policy(self.service)
         return {"permission_policy": policy, "policy_revision": revision}
 
+    # ---------------------------- Pi execution ledger (3C1)
+    def _pi_execution_head(self, ws: dict, session_id: str) -> int:
+        """Adapter execution head for one Pi session (floor capture).
+
+        Poll failures raise; callers treat failure as incomplete, never as
+        proof of no executions. Only records after the floor belong to the
+        new Bridge run.
+        """
+        runtime = self._require_runtime()
+        directory = self._directory(ws)
+        payload = runtime.read_executions(directory, session_id, after=0, limit=1)
+        head = payload.get("head") if isinstance(payload, dict) else 0
+        try:
+            return max(0, int(head or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _upsert_pi_executions(self, run: dict, updates: list[dict]) -> int:
+        """Idempotently persist journal updates for one run.
+
+        ONE comparable sequence space: execution_floor, record start_seq
+        and record update_seq are ALL global update-cursor values from
+        the adapter journal (see executions.mjs). Ownership uses the
+        stable start cursor: only records with start_seq greater than
+        the run's execution_floor belong to this run; older
+        same-session records are never misattributed. The run cursor
+        tracks update_seq so later completion/error/decision mutations
+        of an already-consumed start remain observable. Persisted
+        agent_executions.seq stores the stable start cursor (never the
+        moving update cursor) for deterministic ordering. Legacy
+        payloads without start_seq/update_seq fall back to seq; such
+        payloads only ever meet floors captured from the same legacy
+        adapter, so the comparison stays within one space. Returns the
+        number of rows written.
+        """
+        from .pi_executions import bounded_json, sanitize_input_summary, sanitize_result_summary
+        if not updates:
+            return 0
+        floor = 0
+        try:
+            floor = int(run.get("execution_floor") or 0)
+        except (TypeError, ValueError):
+            floor = 0
+        written = 0
+        max_update = 0
+        created = self._clock()
+        with self.service.lock, self.service.db:
+            for item in updates:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    start_seq = int(item.get("start_seq", item.get("seq")) or 0)
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    update_seq = int(item.get("update_seq", item.get("seq")) or 0)
+                except (TypeError, ValueError):
+                    update_seq = start_seq
+                if start_seq <= floor:
+                    continue
+                if update_seq > max_update:
+                    max_update = update_seq
+                seq = start_seq
+                tool_call_id = str(item.get("tool_call_id") or item.get("toolCallId") or "")[:200]
+                tool = str(item.get("tool") or "")[:40]
+                if not tool_call_id or not tool:
+                    continue
+                state = str(item.get("state") or "started")[:20]
+                if state not in ("started", "completed", "interrupted"):
+                    state = "started"
+                input_summary = sanitize_input_summary(
+                    tool, item.get("input_summary") if isinstance(item.get("input_summary"), dict) else {})
+                result_summary = sanitize_result_summary(
+                    tool, item.get("result_summary") if isinstance(item.get("result_summary"), dict) else {})
+                is_error = 1 if bool(item.get("is_error") or result_summary.get("is_error")) else 0
+                permission_effect = str(item.get("permission_effect") or "")[:20]
+                permission_decision = str(item.get("permission_decision") or "")[:20]
+                if permission_decision not in ("once", "always", "reject", ""):
+                    permission_decision = ""
+                truncated = 1 if bool(item.get("truncated")) else 0
+                started = str(item.get("started_at") or item.get("started") or "")[:60]
+                ended = str(item.get("ended_at") or item.get("ended") or "")[:60]
+                duration = item.get("duration_ms")
+                try:
+                    duration_ms = int(duration) if duration is not None else None
+                except (TypeError, ValueError):
+                    duration_ms = None
+                exec_id = f"ex_{run['id'][4:]}_{tool_call_id}"[:64] if run["id"].startswith("run_") else uid("ex_")
+                # Deterministic id per (run, toolCallId) for idempotent upsert.
+                import hashlib as _hashlib
+                digest = _hashlib.sha256(f"{run['id']}:{tool_call_id}".encode()).hexdigest()[:24]
+                exec_id = f"ex_{digest}"
+                self.service.db.execute(
+                    "INSERT INTO agent_executions (id,run,workspace,runtime,session,tool_call_id,"
+                    "seq,tool,state,started,ended,duration_ms,input_summary,result_summary,"
+                    "is_error,permission_effect,permission_decision,truncated,created,updated) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(run, tool_call_id) DO UPDATE SET "
+                    "seq=excluded.seq, state=excluded.state, started=excluded.started, "
+                    "ended=excluded.ended, duration_ms=excluded.duration_ms, "
+                    "input_summary=excluded.input_summary, result_summary=excluded.result_summary, "
+                    "is_error=excluded.is_error, permission_effect=excluded.permission_effect, "
+                    "permission_decision=CASE WHEN excluded.permission_decision<>'' "
+                    "THEN excluded.permission_decision ELSE agent_executions.permission_decision END, "
+                    "truncated=excluded.truncated, updated=excluded.updated",
+                    (exec_id, run["id"], run["workspace"], run.get("runtime") or "pi",
+                     run.get("session") or "", tool_call_id, seq, tool, state,
+                     started or None, ended or None, duration_ms,
+                     bounded_json(input_summary), bounded_json(result_summary),
+                     is_error, permission_effect, permission_decision, truncated,
+                     created, created))
+                written += 1
+            # Advance the run cursor to the highest synced UPDATE sequence
+            # (never back). The cursor tracks update_seq/head, not start
+            # order, so later mutations of a consumed start stay visible.
+            if max_update:
+                self.service.db.execute(
+                    "UPDATE agent_runs SET execution_cursor=max(execution_cursor, ?), updated=? WHERE id=?",
+                    (max_update, self._clock(), run["id"]))
+        return written
+
+    def _sync_pi_executions(self, ws: dict, run: dict, *, final: bool = False) -> dict:
+        """Reconcile journal updates for one active Pi run into the DB.
+
+        Poll failures never imply no executions: they return ok=False with
+        an explicit error and leave audit status unchanged (or incomplete
+        on final drain). Returns {ok, written, head, cursor, gap, error}.
+        """
+        if not self._is_pi_runtime() or run.get("state") not in ACTIVE_RUN_STATES:
+            return {"ok": True, "written": 0, "gap": False, "error": ""}
+        try:
+            self._require_capability("execution_history")
+        except BridgeError:
+            return {"ok": False, "written": 0, "gap": False, "error": "execution_unsupported"}
+        try:
+            cursor = int(run.get("execution_cursor") or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        try:
+            runtime = self._require_runtime()
+            payload = runtime.read_executions(
+                self._directory(ws), run["session"], after=cursor, limit=100)
+        except Exception as exc:  # noqa: BLE001 - poll failure is metadata, never proof
+            from .oplog import error_code as _error_code
+            return {"ok": False, "written": 0, "gap": False,
+                    "error": f"execution_poll_failed: {_error_code(exc)}"[:200]}
+        updates = payload.get("updates") if isinstance(payload, dict) else []
+        if not isinstance(updates, list):
+            updates = []
+        gap = bool(payload.get("audit_gap") or payload.get("cursor_too_old"))
+        head = payload.get("head")
+        try:
+            head = int(head or 0)
+        except (TypeError, ValueError):
+            head = cursor
+        written = 0
+        try:
+            fresh = self._row(ws, run["id"])
+            written = self._upsert_pi_executions(fresh, updates)
+        except Exception:  # noqa: BLE001 - persistence failure is explicit, never silent
+            return {"ok": False, "written": 0, "gap": gap, "error": "execution_persist_failed"}
+        if gap:
+            with self.service.lock, self.service.db:
+                self.service.db.execute(
+                    "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                    "execution_audit_error='execution_gap: journal history evicted', updated=? "
+                    "WHERE id=?", (self._clock(), run["id"]))
+        return {"ok": True, "written": written, "head": head, "cursor": cursor,
+                "gap": gap, "error": "execution_gap" if gap else ""}
+
+    def _final_pi_drain(self, ws: dict, run: dict) -> None:
+        """Final bounded drain to the adapter head for one Pi run.
+
+        Called after terminal assistant + idle state, before marking
+        audit-complete. Loops boundedly (max 5 pages of 100) until the
+        persisted cursor reaches the adapter head, a gap is proven, or a
+        poll fails. Even at head, audit becomes complete ONLY when no
+        persisted execution owned by the run remains started/unsettled;
+        otherwise incomplete with execution_unsettled. Sets
+        execution_audit_status accordingly; the run itself may still
+        complete.
+        """
+        for _ in range(5):
+            try:
+                fresh = self._row(ws, run["id"])
+            except BridgeError:
+                return
+            if fresh.get("state") in TERMINAL_RUN_STATES:
+                return
+            result = self._sync_pi_executions(ws, fresh, final=True)
+            if not result.get("ok"):
+                with self.service.lock, self.service.db:
+                    self.service.db.execute(
+                        "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                        "execution_audit_error=?, updated=? WHERE id=?",
+                        (str(result.get("error") or "execution_final_drain_failed")[:200],
+                         self._clock(), run["id"]))
+                return
+            if result.get("gap"):
+                return
+            try:
+                after = self._row(ws, run["id"])
+                cursor = int(after.get("execution_cursor") or 0)
+                head = int(result.get("head") or cursor)
+            except (TypeError, ValueError):
+                return
+            if cursor >= head:
+                try:
+                    with self.service.lock:
+                        unsettled = self.service.db.execute(
+                            "SELECT count(*) FROM agent_executions WHERE run=? AND state='started'",
+                            (run["id"],)).fetchone()[0]
+                except Exception:  # noqa: BLE001 - persistence failure blocks complete
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                            "execution_audit_error='execution_final_check_failed', updated=? WHERE id=?",
+                            (self._clock(), run["id"]))
+                    return
+                if unsettled:
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                            "execution_audit_error='execution_unsettled: tool result pending', "
+                            "updated=? WHERE id=?",
+                            (self._clock(), run["id"]))
+                    return
+                with self.service.lock, self.service.db:
+                    self.service.db.execute(
+                        "UPDATE agent_runs SET execution_audit_status='complete', "
+                        "execution_audit_error='', updated=? WHERE id=?",
+                        (self._clock(), run["id"]))
+                return
+        with self.service.lock, self.service.db:
+            self.service.db.execute(
+                "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                "execution_audit_error='execution_drain_bounded: head not reached', updated=? "
+                "WHERE id=?", (self._clock(), run["id"]))
+
+    def _pi_audit_summary(self, run: dict) -> dict:
+        """Persisted-only audit summary for read_agent_run (no backend calls).
+
+        Status is complete only when a final drain proved completeness;
+        otherwise incomplete with an explicit reason. Historical runs
+        report not_recorded. Includes counts, gap indicator and
+        enforcement fingerprint; never embeds execution bodies.
+        """
+        from .pi_executions import audit_counts
+        status = run.get("execution_audit_status") or "not_recorded"
+        if status not in ("pending", "complete", "incomplete", "not_recorded"):
+            status = "not_recorded"
+        runtime_id = run.get("runtime") or ""
+        if runtime_id != "pi":
+            status = "not_recorded"
+        rows: list[dict] = []
+        try:
+            with self.service.lock:
+                rows = [dict(r) for r in self.service.db.execute(
+                    "SELECT tool, is_error FROM agent_executions WHERE run=?", (run["id"],)).fetchall()]
+        except Exception:  # noqa: BLE001 - summary degrades, never fails the read
+            rows = []
+        counts = audit_counts([{"tool": r.get("tool"), "is_error": bool(r.get("is_error"))} for r in rows])
+        try:
+            floor = int(run.get("execution_floor") or 0)
+        except (TypeError, ValueError):
+            floor = 0
+        try:
+            cursor = int(run.get("execution_cursor") or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        return {
+            "status": status,
+            "counts": counts,
+            "incomplete_reason": str(run.get("execution_audit_error") or "")[:200] if status == "incomplete" else "",
+            "has_gap": status == "incomplete" and "gap" in str(run.get("execution_audit_error") or ""),
+            "execution_floor": floor,
+            "execution_cursor": cursor,
+            "enforcement_fingerprint": str(run.get("enforcement_fingerprint") or "")[:64],
+            "adapter_version": str(run.get("adapter_version") or "")[:40],
+            "pi_version": str(run.get("pi_version") or "")[:80],
+            "permission_revision": str(run.get("permission_revision") or "")[:64],
+        }
+
     def list_models(self, ws: dict | None = None, query: str = "", limit: int = 25) -> dict:
         models = self._global_models(self._model_directory(ws))
         needle = (query or "").strip().casefold()
@@ -1063,15 +1348,29 @@ class AgentOrchestrator:
         run_id = uid("run_")
         created = self._clock()
         permission_revision = (session_options or {}).get("policy_revision", "") if session_options else ""
+        # 3C1 execution audit init: fresh sessions start at floor/cursor 0.
+        # Managed Pi runs are pending (require final drain for complete);
+        # OpenCode/legacy stay not_recorded. Fingerprint/versions persist
+        # with the run (no full paths); a changed fingerprint is evidence,
+        # not an automatic refusal.
+        is_pi = self._is_pi_runtime()
+        managed_pi = is_pi and isinstance(session_options, dict)
+        _audit_status = "pending" if managed_pi else "not_recorded"
+        _fingerprint = getattr(session, "enforcement_fingerprint", "") or ""
+        _adapter_version = getattr(session, "adapter_version", "") or ""
+        _pi_version = getattr(session, "pi_version", "") or ""
         with self.service.lock, self.service.db:
             self.service.db.execute(
                 "INSERT INTO agent_runs (id,workspace,runtime,job,request_id,request_hash,parent_run,session,"
                 "model,state,error_code,error_message,result,notification,created,started,updated,finished,"
-                "message_floor_ms,session_reused,transcript,permission_revision) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "message_floor_ms,session_reused,transcript,permission_revision,"
+                "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
+                "enforcement_fingerprint,adapter_version,pi_version) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, ws["id"], self._runtime_id(), job_id, request_id, request_hash, parent_run_id,
                  session.id, selector, "starting", None, None, "{}", "{}", created, None, created,
-                 None, 0, 0, "[]", permission_revision or ""))
+                 None, 0, 0, "[]", permission_revision or "",
+                 0, 0, _audit_status, "", _fingerprint[:64], _adapter_version[:40], _pi_version[:80]))
         # One bounded event-health probe at start: never blocks, waits, or
         # polls. When the adapter stream is not confirmed subscribed the new
         # run is marked degraded so live asks are known to be at risk.
@@ -1242,19 +1541,43 @@ class AgentOrchestrator:
                     "continuation refused because the session snapshot differs. "
                     "Start a fresh session to pick up the current policy.",
                     "permission_scope_changed")
+        # 3C1: capture the adapter execution head as this run's floor
+        # BEFORE promptAsync. Only later records belong to the new run;
+        # prior same-session calls cannot be misattributed. Poll failures
+        # never imply no executions: on failure the floor stays 0 and the
+        # audit is marked incomplete with an explicit reason.
+        _exec_floor = 0
+        _exec_error = ""
+        _fingerprint = str(source.get("enforcement_fingerprint") or "")
+        _adapter_version = str(source.get("adapter_version") or "")
+        _pi_version = str(source.get("pi_version") or "")
+        if self._is_pi_runtime():
+            try:
+                _head = self._pi_execution_head(ws, source["session"])
+                _exec_floor = max(0, int(_head or 0))
+            except Exception as exc:  # noqa: BLE001 - floor failure is audit metadata, never a start refusal
+                _exec_floor = 0
+                _exec_error = f"execution_floor_unavailable: {type(exc).__name__}"[:200]
         run_id = uid("run_")
         created = self._clock()
+        _audit_status = "pending" if self._is_pi_runtime() else "not_recorded"
+        if _exec_error:
+            _audit_status = "incomplete"
         try:
             with self.service.lock, self.service.db:
                 self.service.db.execute(
                     "INSERT INTO agent_runs (id,workspace,runtime,job,request_id,request_hash,parent_run,session,"
                     "model,state,error_code,error_message,result,notification,created,started,updated,finished,"
-                    "message_floor_ms,session_reused,transcript,permission_revision) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "message_floor_ms,session_reused,transcript,permission_revision,"
+                    "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
+                    "enforcement_fingerprint,adapter_version,pi_version) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (run_id, ws["id"], self._runtime_id(), job["id"], request_id, request_hash,
                       continue_from_run_id, source["session"], selector, "starting", None, None,
                       "{}", "{}", created, None, created, None, floor, 1, "[]",
-                      current_revision if self._is_pi_runtime() else ""))
+                      current_revision if self._is_pi_runtime() else "",
+                      _exec_floor, _exec_floor, _audit_status, _exec_error,
+                      _fingerprint[:64], _adapter_version[:40], _pi_version[:80]))
         except sqlite3.IntegrityError:
             raise BridgeError(f"{self._runtime_label()} session already has an active Bridge run",
                               "continuation_unavailable") from None
@@ -1527,6 +1850,14 @@ class AgentOrchestrator:
                 except Exception:  # noqa: BLE001 - one session never breaks the sweep
                     pass
             if due_completion:
+                # 3C1: reconcile execution-journal updates idempotently
+                # during active Pi runs. Poll failures never imply no
+                # executions (sync returns ok=False and leaves audit alone).
+                if self._is_pi_runtime() and run.get("started"):
+                    try:
+                        self._sync_pi_executions(ws, run)
+                    except Exception:  # noqa: BLE001 - one session never breaks the sweep
+                        pass
                 if not run.get("started"):
                     continue
                 try:
@@ -2226,6 +2557,14 @@ class AgentOrchestrator:
             metadata["requested_patterns"] = list(requested)
             if tool is not None:
                 metadata["tool"] = tool
+            # 3C1: link permission asks to executions by toolCallId when
+            # positively known; never guess session-grant decisions.
+            try:
+                _call_id = getattr(interaction, "call_id", None)
+            except Exception:  # noqa: BLE001
+                _call_id = None
+            if isinstance(_call_id, str) and _call_id:
+                metadata["tool_call_id"] = _call_id[:200]
             metadata_json = json.dumps(metadata, default=str)[:8000]
             title = str(interaction.title or "")[:300]
             tool_text = ""
@@ -2497,6 +2836,23 @@ class AgentOrchestrator:
                  session_id=current.get("session"), workspace_id=current.get("workspace"),
                  status="no_final", reason=str(reason)[:80], count=len(scoped))
             return None
+        # 3C1: for Pi runs, final bounded drain to the adapter head after
+        # terminal assistant + idle state. Audit-complete requires proven
+        # completeness; otherwise the run still completes but audit is
+        # incomplete with an explicit reason. Poll failures never imply no
+        # executions.
+        if self._is_pi_runtime():
+            try:
+                self._final_pi_drain(ws, current)
+            except Exception:  # noqa: BLE001 - drain failure is audit metadata, never blocks completion
+                try:
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            "UPDATE agent_runs SET execution_audit_status='incomplete', "
+                            "execution_audit_error='execution_final_drain_failed', updated=? WHERE id=?",
+                            (self._clock(), current["id"]))
+                except Exception:  # noqa: BLE001
+                    pass
         transcript, _ = self._transcript(scoped)
         return self._complete(current, final, reason, message_count=len(scoped),
                               transcript=transcript)
@@ -2577,6 +2933,22 @@ class AgentOrchestrator:
              session_id=run.get("session"), workspace_id=ws["id"],
              request_id=str(request_id)[:200], decision=decision,
              generation=generation)
+        # 3C1: link the decision to the execution journal by toolCallId
+        # when positively known; never guess session-grant decisions.
+        try:
+            _meta = json.loads(final.get("metadata") or request.get("metadata") or "{}")
+        except ValueError:
+            _meta = {}
+        _tool_call_id = _meta.get("tool_call_id") if isinstance(_meta, dict) else None
+        if isinstance(_tool_call_id, str) and _tool_call_id:
+            try:
+                with self.service.lock, self.service.db:
+                    self.service.db.execute(
+                        "UPDATE agent_executions SET permission_decision=?, updated=? "
+                        "WHERE run=? AND tool_call_id=?",
+                        (decision, self._clock(), run_id, _tool_call_id[:200]))
+            except Exception:  # noqa: BLE001 - linkage is best-effort, never blocks the reply
+                pass
         return {"run_id": run_id, "request_id": request_id, "decision": final["decision"] or decision,
                 "request_state": final["state"], "run_state": current["state"],
                 "resumed_same_session": True, "scope": pattern,
@@ -2622,10 +2994,16 @@ class AgentOrchestrator:
     def _summary(self, run: dict, *, idempotent: bool = False) -> dict:
         pending = [r for r in self._requests(run) if r["state"] == "pending"]
         view = neutral_run_summary(run)
+        try:
+            audit = self._pi_audit_summary(run)
+        except Exception:  # noqa: BLE001
+            audit = {"status": "not_recorded",
+                     "counts": {"total": 0, "failed": 0, "shell": 0, "mutating": 0}}
         view.update({
                 "pending_request_count": len(pending), "idempotent_replay": idempotent,
                 "permission_sync": self._sync_view(run["id"]),
-                "question_sync": self._question_view(run["id"])})
+                "question_sync": self._question_view(run["id"]),
+                "execution_audit": audit})
         return view
 
     def list_runs(self, ws: dict, offset: int = 0, limit: int = 20) -> dict:
@@ -2709,6 +3087,14 @@ class AgentOrchestrator:
                     run = self._row(ws, run_id)
         view = self._summary(run)
         view["agent_evidence"] = "unverified"
+        # 3C1: persisted-only execution audit summary (no backend calls,
+        # no execution bodies). Proves what Pi invoked/reported, not that
+        # a test result is semantically correct.
+        try:
+            view["execution_audit"] = self._pi_audit_summary(run)
+        except Exception:  # noqa: BLE001 - audit summary never fails the read
+            view["execution_audit"] = {"status": "not_recorded",
+                                       "counts": {"total": 0, "failed": 0, "shell": 0, "mutating": 0}}
         view["error"] = ({"code": run["error_code"], "message": run["error_message"]}
                          if run["error_code"] or run["error_message"] else None)
         try:

@@ -1,4 +1,4 @@
-// Narrow token-authenticated HTTP surface for the Pi host adapter.
+// Narrow token-authenticated HTTP surface for the Pi host adapter (3C1).
 //
 // Endpoints:
 //   GET  /health (readable without a token; booleans/version/status only)
@@ -11,13 +11,16 @@
 //   POST /sessions/:id/abort {directory}
 //   GET  /sessions/:id/permissions?directory=...
 //   POST /sessions/:id/permissions/:permissionId/respond {directory, response}
+//   GET  /sessions/:id/executions?directory=...&after=<seq>&limit=<n>
 //
-// There is no arbitrary command, shell, spawn, question, or events endpoint
-// in this milestone; Bridge integration polls messages/status/permissions.
+// There is no arbitrary command, shell, spawn, or question endpoint;
+// Bridge polls messages/status/permissions plus the execution journal.
+// Execution evidence never lands in ops logs or general status.
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 
 import { AdapterError } from "./adapter.mjs";
+import { enforcementFingerprint } from "./fingerprint.mjs";
 import { PathError } from "./paths.mjs";
 import { RpcError } from "./rpc.mjs";
 
@@ -101,9 +104,17 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
 
   function healthPayload() {
     // Bounded booleans/version/status only; never roots, full paths, or
-    // raw policy. The capabilities block advertises the 3B1 permission
-    // surface so Bridge can refuse to treat old adapters as writable.
+    // raw policy. The capabilities block advertises the 3C1 permission +
+    // execution-history surface so Bridge can refuse to treat old adapters
+    // as managed. Enforcement fingerprint identifies the Pi enforcement
+    // build without blocking normal project edits (no full paths).
     const ok = !locked && piUsable;
+    let fingerprint = "";
+    try {
+      fingerprint = enforcementFingerprint().fingerprint || "";
+    } catch {
+      fingerprint = "";
+    }
     return {
       ok,
       status: locked ? "locked" : (piUsable ? "ok" : "degraded"),
@@ -116,7 +127,11 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
       adapter_version: adapterVersion,
       instance,
       sessions: adapter ? adapter.sessionCount : 0,
-      capabilities: { pending_snapshot: true, permission_response: true },
+      capabilities: {
+        pending_snapshot: true, permission_response: true,
+        execution_history: true,
+      },
+      ...(fingerprint ? { enforcement_fingerprint: fingerprint } : {}),
     };
   }
 
@@ -195,8 +210,9 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
           const ok = await adapter.abortSession(String(body.directory || ""), sessionId);
           return send(res, 200, { ok });
         }
-        // 3B1 exact-session permission surface (authenticated only).
-        // Pending records carry bounded workspace-relative resources only.
+        // 3C1 exact-session permission surface (authenticated only).
+        // Pending records carry bounded targets; bash carries the exact
+        // bounded command + verified timeout detail.
         if (req.method === "GET" && segments[2] === "permissions" && segments.length === 3) {
           const directory = url.searchParams.get("directory") || "";
           const permissions = await adapter.listPermissions(directory, sessionId);
@@ -209,6 +225,17 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
           const result = await adapter.respondPermission(
             String(body.directory || ""), sessionId, permissionId,
             String(body.response || ""));
+          return send(res, 200, result);
+        }
+        // 3C1 exact-session execution journal (authenticated only).
+        // Bounded normalized updates plus next/head/oldest evidence.
+        // Evicted history reports audit_gap/cursor_too_old, never silent
+        // completeness. Never lands in ops logs or general status.
+        if (req.method === "GET" && segments[2] === "executions" && segments.length === 3) {
+          const directory = url.searchParams.get("directory") || "";
+          const after = Math.max(0, Number(url.searchParams.get("after") || "0") || 0);
+          const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "50") || 50, 100));
+          const result = await adapter.readExecutions(directory, sessionId, { after, limit });
           return send(res, 200, result);
         }
       }

@@ -28,7 +28,7 @@ def read(e, path):
 
 
 def test_generic_tools_replace_handoff_names_without_aliases(env):
-    assert len(TOOLS) == 26
+    assert len(TOOLS) == 28
     assert {'read_file','write_file','edit_file'} <= TOOLS.keys()
     for name in ['write_handoff_file','edit_handoff_file','review_changes','read_change','record_audit']:
         assert name not in TOOLS

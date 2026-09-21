@@ -61,8 +61,9 @@ test("fake-child lifecycle over real stdio", async () => {
     assert.equal(await adapter.abortSession(fs.realpathSync(app), session.id), true);
     await adapter.shutdown({ graceMs: 2000 });
 
-    // Spawn contract: direct argv with read-only tools, validated cwd, and
-    // the resolved absolute agent dir in the child environment.
+    // Spawn contract (legacy no-policy path): direct argv with read-only
+    // tools and no trusted extension, validated cwd, and the resolved
+    // absolute agent dir in the child environment.
     const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
     assert.deepEqual(record.argv, ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"]);
     assert.equal(record.cwd, fs.realpathSync(app));

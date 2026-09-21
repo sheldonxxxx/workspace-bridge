@@ -207,7 +207,9 @@ test("health advertises the permission capability without raw policy", async () 
   const projects = makeProjects();
   await withServer({ adapter: fakeAdapter(projects), piVersion: "0.86.1" }, async (base) => {
     const body = await (await fetch(`${base}/health`)).json();
-    assert.deepEqual(body.capabilities, { pending_snapshot: true, permission_response: true });
+    assert.deepEqual(body.capabilities,
+      { pending_snapshot: true, permission_response: true, execution_history: true });
     assert.ok(!JSON.stringify(body).includes("permission_policy"));
+    assert.ok(!JSON.stringify(body).includes("/tmp"));
   });
 });

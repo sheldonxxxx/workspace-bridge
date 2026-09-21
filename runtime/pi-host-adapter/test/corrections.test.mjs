@@ -29,12 +29,14 @@ function makeProjects() {
 
 function writablePolicy() {
   return validatePolicy({
-    version: 1,
-    enabled: true,
+    version: 3,
+    write_tools_enabled: true,
     tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
     protected_patterns: [".git/**"],
     protected_template_exceptions: [],
     allow_session_always: true,
+    external_access: { default_mode: "deny", roots: [] },
+    shell_mode: "deny",
   });
 }
 
@@ -113,7 +115,7 @@ test("server POST /sessions forwards exactly policy + revision", async () => {
   }
 });
 
-test("enabled policy over HTTP yields a writable child; disabled stays read-only", async () => {
+test("writable policy over HTTP yields an editing child; read-only still loads the trusted extension", async () => {
   const projects = makeProjects();
   const bag = autoSpawn();
   const adapter = new PiAdapter({
@@ -141,15 +143,19 @@ test("enabled policy over HTTP yields a writable child; disabled stays read-only
     const writableArgs = bag.calls[0].args;
     assert.ok(writableArgs.includes("read,grep,find,ls,edit,write"));
     assert.ok(writableArgs.includes("-e"));
-    assert.ok(bag.calls[0].opts.env.WB_PI_POLICY_JSON.includes('"enabled":true'));
-    const disabled = safeDefaultPolicy();
+    assert.ok(bag.calls[0].opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":true'));
+    const readOnly = safeDefaultPolicy();
     const created2 = await post(base, "/sessions", {
       directory: projects.app, title: "r",
-      permission_policy: disabled, policy_revision: policyRevision(disabled),
+      permission_policy: readOnly, policy_revision: policyRevision(readOnly),
     }, AUTH);
     assert.equal(created2.status, 200);
-    assert.deepEqual(bag.calls[1].args,
-      ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"]);
+    // Read-only v2 sessions enforce read policy through the trusted
+    // extension too: read-family tools plus exactly one -e.
+    assert.deepEqual(bag.calls[1].args.slice(0, 5),
+      ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve"]);
+    assert.ok(bag.calls[1].args.includes("--no-extensions"));
+    assert.equal(bag.calls[1].args.filter((a) => a === "-e").length, 1);
     // Mismatched revision fails closed at the HTTP boundary.
     const bad = await post(base, "/sessions", {
       directory: projects.app, title: "x",

@@ -101,6 +101,11 @@ function renderRuntime(status) {
     } else {
       permText = "Permissions: Read-only · new sessions only";
     }
+    // Bounded external scope summary only (never host root paths).
+    if (piPerms && piPerms.external_default_mode) {
+      const rootCount = Number(piPerms.external_root_count) || 0;
+      permText += ` · outside ${piPerms.external_default_mode} (${rootCount} root${rootCount === 1 ? "" : "s"})`;
+    }
     // Deployed adapter readiness comes from bounded runtime diagnostics
     // (never paths or policy bodies): writable sessions need an adapter
     // that advertises both permission capabilities.
@@ -116,16 +121,106 @@ function renderRuntime(status) {
 // controls only, never raw JSON. Draft state is kept in module vars so
 // Cancel/close discards it; only Save posts to the server.
 const PI_PERM_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
+const PI_PERM_MODES = ["allow", "ask", "deny"];
 let piPermCurrent = null;
 let piPermDraft = null;
 function piPermDraftFrom(policy) {
+  const external = policy.external_access || {};
   return {
-    enabled: Boolean(policy.enabled),
+    enabled: Boolean(policy.write_tools_enabled ?? policy.enabled),
     tools: {...policy.tools},
     protected_patterns: [...(policy.protected_patterns || [])],
     protected_template_exceptions: [...(policy.protected_template_exceptions || [])],
     allow_session_always: Boolean(policy.allow_session_always),
+    external_default_mode: ["allow", "ask", "deny"].includes(external.default_mode)
+      ? external.default_mode : "deny",
+    external_roots: (external.roots || []).map((r) => ({
+      path: String(r.path || ""),
+      mode: ["allow", "ask", "deny"].includes(r.mode) ? r.mode : "deny",
+    })),
+    // v3 shell authority: single Deny/Ask/Allow selector, no command rules.
+    // v2 policies migrate in memory with shell deny.
+    shell_mode: ["deny", "ask", "allow"].includes(policy.shell_mode) ? policy.shell_mode : "deny",
   };
+}
+function renderPiExternalRoots() {
+  const draft = piPermDraft;
+  const box = $("pi-perm-roots");
+  if (!draft || !box) return;
+  box.replaceChildren();
+  if (!draft.external_roots.length) {
+    box.append(node("p", "No external roots. Every outside-workspace path uses the default mode above.", "muted"));
+  }
+  draft.external_roots.forEach((root, index) => {
+    const row = node("div", undefined, "pi-perm-root");
+    const pathInput = node("input");
+    pathInput.type = "text";
+    pathInput.value = root.path;
+    pathInput.placeholder = "/absolute/native/macos/path";
+    pathInput.setAttribute("aria-label", `External root ${index + 1} path`);
+    pathInput.spellcheck = false;
+    pathInput.onchange = () => { root.path = pathInput.value.trim(); renderPiExternalWarning(); };
+    const modeSelect = node("select");
+    modeSelect.setAttribute("aria-label", `External root ${index + 1} mode`);
+    for (const mode of PI_PERM_MODES) {
+      const option = node("option", mode[0].toUpperCase() + mode.slice(1));
+      option.value = mode;
+      modeSelect.append(option);
+    }
+    modeSelect.value = root.mode;
+    modeSelect.onchange = () => { root.mode = modeSelect.value; renderPiExternalWarning(); };
+    const remove = node("button", "Remove", "secondary");
+    remove.type = "button";
+    remove.onclick = () => {
+      draft.external_roots.splice(index, 1);
+      renderPiExternalRoots();
+    };
+    row.append(pathInput, modeSelect, remove);
+    box.append(row);
+  });
+  const defaultSelect = $("pi-perm-external-default");
+  if (defaultSelect) defaultSelect.value = draft.external_default_mode;
+  renderPiExternalWarning();
+}
+function renderPiExternalWarning() {
+  const draft = piPermDraft;
+  const warn = $("pi-perm-external-warning");
+  if (!draft || !warn) return;
+  const current = piPermCurrent ? piPermCurrent.policy : null;
+  const currentDefault = (current && current.external_access && current.external_access.default_mode) || "deny";
+  const warnings = [];
+  if (draft.external_default_mode !== "deny") {
+    warnings.push(`Default outside-workspace mode is ${draft.external_default_mode.toUpperCase()}: every unlisted host path is ${draft.external_default_mode === "allow" ? "readable/writable without asking" : "ask-gated"}.`);
+  } else if (currentDefault !== "deny" && draft.external_default_mode === "deny") {
+    warnings.push("Default outside-workspace mode returns to Deny.");
+  }
+  for (const root of draft.external_roots) {
+    if (root.path === "/") {
+      warnings.push("Root “/” exposes the entire host filesystem — configure only if you fully trust every Pi session.");
+      break;
+    }
+  }
+  const broadened = draft.external_roots.filter((r) => r.mode !== "deny");
+  if (broadened.length) {
+    warnings.push(`${broadened.length} root${broadened.length === 1 ? "" : "s"} broaden${broadened.length === 1 ? "s" : ""} access beyond deny; most-specific match wins.`);
+  }
+  warn.hidden = !warnings.length;
+  warn.textContent = warnings.join(" ");
+}
+function renderPiShellWarning() {
+  const draft = piPermDraft;
+  const warn = $("pi-perm-shell-warning");
+  if (!draft || !warn) return;
+  if (draft.shell_mode === "allow") {
+    warn.hidden = false;
+    warn.textContent = "Shell Allow runs with native macOS-user authority and can bypass structured file path controls.";
+  } else if (draft.shell_mode === "ask") {
+    warn.hidden = false;
+    warn.textContent = "Shell Ask pauses each bash invocation for approval (exact command + timeout; once approves the exact call, always is exact-command scoped).";
+  } else {
+    warn.hidden = true;
+    warn.textContent = "";
+  }
 }
 function renderPiPermissions() {
   const draft = piPermDraft;
@@ -133,7 +228,7 @@ function renderPiPermissions() {
   $("pi-perm-enabled").checked = draft.enabled;
   const toolsBox = $("pi-perm-tools");
   toolsBox.replaceChildren();
-  const tableTitle = node("p", "Per-tool mode (Allow / Ask / Deny). When disabled above, edit/write stay unavailable; the draft below is preserved but inactive.", "muted");
+  const tableTitle = node("p", "Per-tool mode (Allow / Ask / Deny). Read, search, and list policy is enforced in every session; when the writable switch above is off, edit/write stay unexposed and their draft below is preserved but inactive.", "muted");
   toolsBox.append(tableTitle);
   for (const tool of PI_PERM_TOOLS) {
     const label = node("label", `${tool}`);
@@ -156,6 +251,13 @@ function renderPiPermissions() {
   $("pi-perm-always").checked = draft.allow_session_always;
   $("pi-perm-protected").value = draft.protected_patterns.join("\n");
   $("pi-perm-exceptions").value = draft.protected_template_exceptions.join("\n");
+  const shellSelect = $("pi-perm-shell");
+  if (shellSelect) {
+    shellSelect.value = draft.shell_mode || "deny";
+    shellSelect.onchange = () => { draft.shell_mode = shellSelect.value; renderPiShellWarning(); };
+  }
+  renderPiExternalRoots();
+  renderPiShellWarning();
   const invariants = $("pi-perm-invariants");
   invariants.replaceChildren();
   for (const text of (piPermCurrent && piPermCurrent.fixed_invariants) || []) {
@@ -200,6 +302,29 @@ function piPermDangerSummary(draft, current) {
         ? "Offer “Always allow exact target” again."
         : "Stop offering “Always allow exact target” (once/reject only).");
     }
+    const curShell = cur.shell_mode || "deny";
+    if ((draft.shell_mode || "deny") !== curShell) {
+      lines.push(`Shell execution: ${curShell} -> ${draft.shell_mode}.` +
+        (draft.shell_mode === "allow"
+          ? " WARNING: Allow runs with native user authority and can bypass file scope."
+          : draft.shell_mode === "ask" ? " Each bash invocation will pause for approval." : ""));
+    }
+    const curExternal = cur.external_access || {default_mode: "deny", roots: []};
+    if (draft.external_default_mode !== curExternal.default_mode) {
+      lines.push(`External default: ${curExternal.default_mode} -> ${draft.external_default_mode}.` +
+        (draft.external_default_mode !== "deny" ? " WARNING: broadens outside-workspace access." : ""));
+    }
+    const curRoots = curExternal.roots || [];
+    const sameRoots = curRoots.length === draft.external_roots.length &&
+      curRoots.every((r, i) => r.path === draft.external_roots[i].path &&
+        r.mode === draft.external_roots[i].mode);
+    if (!sameRoots) {
+      lines.push(`External roots: ${curRoots.length} -> ${draft.external_roots.length} configured root(s). ` +
+        draft.external_roots.map((r) => `${r.path || "(empty path)"} (${r.mode})`).join("; "));
+      if (draft.external_roots.some((r) => r.path === "/")) {
+        lines.push("WARNING: root “/” exposes the entire host filesystem.");
+      }
+    }
   }
   return lines;
 }
@@ -214,18 +339,30 @@ async function savePiPermissions() {
     const select = document.querySelector(`[data-pi-perm-tool="${tool}"]`);
     if (select && select.value) draft.tools[tool] = select.value;
   }
+  const defaultSelect = $("pi-perm-external-default");
+  if (defaultSelect && defaultSelect.value) draft.external_default_mode = defaultSelect.value;
+  const shellSelect = $("pi-perm-shell");
+  if (shellSelect && shellSelect.value) draft.shell_mode = shellSelect.value;
+  draft.external_roots = draft.external_roots
+    .map((r) => ({path: String(r.path || "").trim(), mode: r.mode}))
+    .filter((r) => r.path);
   const summary = piPermDangerSummary(draft, piPermCurrent);
   const warning = "Pi runs natively with your macOS user authority; this is not a sandbox.\n" +
     "Policy changes apply to NEW Pi sessions only; active sessions keep their snapshot.\n" +
     (summary.length ? "Changes:\n- " + summary.join("\n- ") : "No changes compared to the current policy.");
   if (!confirm(`Save Pi permission policy?\n\n${warning}`)) return;
   const body = {
-    version: 1,
-    enabled: draft.enabled,
+    version: 3,
+    write_tools_enabled: draft.enabled,
     tools: draft.tools,
     protected_patterns: draft.protected_patterns,
     protected_template_exceptions: draft.protected_template_exceptions,
     allow_session_always: draft.allow_session_always,
+    external_access: {
+      default_mode: draft.external_default_mode,
+      roots: draft.external_roots,
+    },
+    shell_mode: draft.shell_mode || "deny",
   };
   const saved = await api("/api/runtimes/pi/permission-policy", "POST", body);
   piPermCurrent = saved;
@@ -375,12 +512,42 @@ async function saveModelPolicy() {
   message(`Model policy saved. Default: ${def}.`);
 }
 
+function auditLabel(run) {
+  const audit = run.execution_audit;
+  if (!audit || run.runtime !== "pi") return "audit not-recorded";
+  const counts = audit.counts || {};
+  const base = `audit ${audit.status || "not-recorded"}`;
+  const parts = [`${counts.total || 0} exec`, `${counts.failed || 0} failed`, `${counts.shell || 0} shell`];
+  return `${base} · ${parts.join(" · ")}`;
+}
+async function executionView(runId) {
+  const data = await api(`/api/runs/${runId}/executions?${new URLSearchParams({offset: "0", limit: "50"})}`);
+  const container = node("div");
+  container.append(node("p", `Runtime ${(data.runtime || "")} · ${data.executions.length} shown (bounded summaries; no output bodies).`, "muted"));
+  for (const ex of data.executions || []) {
+    const line = `${ex.sequence || ex.seq} · ${ex.tool} · ${ex.state}${ex.is_error ? " · ERROR" : ""} · ${ex.target_preview || "—"} · ${ex.permission_effect || ""}${ex.permission_decision ? "/" + ex.permission_decision : ""}${ex.truncated ? " · truncated" : ""}`;
+    const row = node("div", undefined, "job");
+    row.append(node("div", line, "path"));
+    const detailBtn = button("Execution detail", async () => {
+      const detail = await api(`/api/runs/${runId}/executions/${encodeURIComponent(ex.execution_id)}`);
+      // Safe DOM/textContent only: bounded/truncated potentially
+      // sensitive local output is rendered as text, never HTML.
+      show(`Execution ${ex.execution_id} (bounded, may be sensitive)`, detail);
+    });
+    row.append(detailBtn);
+    container.append(row);
+  }
+  if (!(data.executions || []).length) container.append(node("p", "No executions recorded.", "muted"));
+  $("output-title").textContent = `Execution history for ${runId}`;
+  $("output").textContent = ""; $("output").append(container); $("output-panel").hidden = false; $("output-panel").scrollIntoView({behavior: "smooth", block: "center"});
+}
 function runRow(ws, run) {
   const row = node("div", undefined, "job");
   const runtimeLabel = run.runtime || "opencode";
   const title = node("h3", `${run.state} · ${run.model || "Default model"} · ${runtimeLabel}`);
   row.append(title, node("div", `Run ${run.run_id} · Runtime ${runtimeLabel} · Session ${run.session_id || "—"} · Job ${run.job_id} · Request ${run.request_id}`, "path"));
   if (run.session_reused) row.append(node("div", `Reused ${runtimeLabel} session · Continued from ${run.continue_from_run_id || run.parent_run_id || "—"}`, "muted"));
+  if (run.execution_audit || runtimeLabel === "pi") row.append(node("div", auditLabel(run), "muted"));
   const times = [`created ${run.created ? new Date(run.created).toLocaleString() : "—"}`];
   if (run.started) times.push(`started ${new Date(run.started).toLocaleString()}`);
   if (run.finished) times.push(`finished ${new Date(run.finished).toLocaleString()}`);
@@ -390,6 +557,7 @@ function runRow(ws, run) {
   const actions = node("div", undefined, "actions");
   actions.append(button("View session", async () => { const data = await api(`/api/runs/${run.run_id}/session`); const lines = (data.transcript || []).map(m => `[${m.role}] ${m.error ? "ERROR " + m.error + "\n" : ""}${m.text || ""}${m.tools && m.tools.length ? "\ntools: " + m.tools.join(", ") : ""}`).join("\n\n"); show(`Session ${run.session_id || ""} (escaped, bounded)`, lines || "No messages yet."); }));
   actions.append(button("Run details", async () => { const data = await api(`/api/runs/${run.run_id}`); show(`Run ${run.run_id}`, data); }));
+  actions.append(button("Execution history", () => executionView(run.run_id)));
   if (run.active) actions.append(button("Stop", () => stopRun(run.run_id), "danger"));
   if (run.pending_request_count > 0) actions.append(button(`Requests (${run.pending_request_count})`, () => requestView(ws, run.run_id)));
   row.append(actions);
@@ -431,6 +599,7 @@ function sessionRow(run) {
   const actionsCell = node("td");
   const actions = node("div", undefined, "actions");
   actions.append(button("View details", async () => { const data = await api(`/api/runs/${run.run_id}/session`); show(`Session ${run.session_id || ""} (escaped, bounded)`, data); }));
+  actions.append(button("Executions", () => executionView(run.run_id)));
   if (run.active) actions.append(button("Stop", () => stopRun(run.run_id), "danger"));
   if (pending > 0) actions.append(button(`Requests (${pending})`, async () => { const data = await api(`/api/runs/${run.run_id}`); show(`Run ${run.run_id}`, data); }));
   actionsCell.append(actions);
@@ -481,6 +650,7 @@ async function respond(runId, requestId, decision) {
 async function jobs(ws) {
   currentWorkspace = ws;
   const [data, runs] = await Promise.all([api(`/api/workspaces/${ws.id}/jobs`), api(`/api/workspaces/${ws.id}/runs`)]);
+  navigate("jobs-panel");
   $("jobs-title").textContent = `${ws.name} · Handoffs & runs`; $("jobs-panel").hidden = false; $("jobs").replaceChildren();
   $("jobs").append(node("h3", "Handoffs"));
   if (!data.handoffs.length) $("jobs").append(node("p", "No handoffs yet. Ask ChatGPT to inspect the project and prepare a handoff.", "muted"));
@@ -514,6 +684,7 @@ async function refresh() {
   if (!data.workspaces.length) $("workspaces").append(node("p", "No projects are exposed. Add a workspace below.", "muted"));
   for (const ws of data.workspaces) {
     const row = node("div", undefined, "workspace"); const title = node("h3", ws.name); title.append(node("span", ws.enabled ? "Enabled" : "Disabled", ws.enabled ? "enabled" : "disabled"));
+    row.dataset.search = `${ws.name} ${ws.root}`.toLowerCase();
     row.append(title, node("div", ws.root, "path"), node("div", `Write: ${ws.write_scope} · Agent: ${ws.agent_enabled ? "enabled" : "disabled"}`, "workspace-meta"));
     const actions = node("div", undefined, "actions");
     // Policy controls first: workspace access immediately followed by the agent toggle.
@@ -551,8 +722,14 @@ async function refresh() {
     }));
     row.append(actions, details); $("workspaces").append(row);
   }
+  filterWorkspaces();
   const names = Object.fromEntries(data.workspaces.map(w => [w.id, w.name])); $("events").replaceChildren();
   for (const e of history.events) { const tr = node("tr"); for (const value of [new Date(e.at).toLocaleString(), names[e.workspace] || "Admin", e.action, e.outcome]) tr.append(node("td", value)); $("events").append(tr); }
+  if (!history.events.length) {
+    const row = node("tr");
+    const cell = node("td", "No activity yet. Access and configuration changes will appear here.", "muted");
+    cell.colSpan = 4; row.append(cell); $("events").append(row);
+  }
   // Global sessions refresh independently; model discovery is lazy (dialog
   // open / explicit refresh) so it never blocks workspace/policy rendering.
   await Promise.allSettled([loadSessions(true)]);
@@ -604,14 +781,30 @@ $("pi-perm-reload").onclick = () => loadPiPermissions().catch(e=>message(e.messa
 $("pi-perm-restore").onclick = () => {
   if (!piPermCurrent) return;
   piPermDraft = piPermDraftFrom({
-    version: 1, enabled: false,
+    version: 2, write_tools_enabled: false,
     tools: {read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask"},
     protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
+    external_access: {default_mode: "deny", roots: []},
   });
   renderPiPermissions();
-  message("Safe defaults loaded in the draft. Press “Save permission policy” to apply.");
+  message("Safe defaults loaded in the draft (external access denied, no roots). Press “Save permission policy” to apply.");
+};
+$("pi-perm-add-root").onclick = () => {
+  if (!piPermDraft) return;
+  if (piPermDraft.external_roots.length >= 32) {
+    message("At most 32 external roots are allowed.");
+    return;
+  }
+  piPermDraft.external_roots.push({path: "", mode: "ask"});
+  renderPiExternalRoots();
+};
+$("pi-perm-external-default").onchange = (event) => {
+  if (piPermDraft) {
+    piPermDraft.external_default_mode = event.target.value;
+    renderPiExternalWarning();
+  }
 };
 $("pi-perm-save").onclick = () => savePiPermissions().catch(e=>message(e.message));
 $("pi-perm-cancel").onclick = () => { const dialog = $("pi-permissions-dialog"); if (dialog && typeof dialog.close === "function") dialog.close(); };
@@ -637,3 +830,50 @@ $("bridge-pause").onclick = async () => {
   try { await api("/api/bridge", "POST", {operation:bridgeState.enabled ? "disable" : "enable"}); await refresh(); }
   catch(e) { message(e.message); }
 };
+
+// Section navigation keeps policy and activity views separate from daily project work.
+const views = {
+  "workspaces-panel": ["Workspaces", "Manage the projects your agents can access."],
+  "jobs-panel": ["Handoffs & runs", "Follow work from a prepared handoff to its result."],
+  "sessions-panel": ["Agent sessions", "Review progress and respond when an agent needs you."],
+  "system-panel": ["System", "Manage runtime connections, models, and permissions."],
+  "activity-panel": ["Activity", "A record of access and configuration changes."]
+};
+function navigate(id, focus = false) {
+  if (!views[id]) id = "workspaces-panel";
+  for (const key of Object.keys(views)) $(key).hidden = key !== id;
+  document.querySelectorAll(".side-nav a").forEach(link => {
+    if (link.hash === `#${id}`) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  $("page-title").textContent = views[id][0];
+  $("status-dup").textContent = views[id][1];
+  if (location.hash !== `#${id}`) history.replaceState(null, "", `#${id}`);
+  if (focus) $("page-title").focus();
+}
+document.querySelectorAll(".side-nav a").forEach(link => {
+  link.onclick = event => { event.preventDefault(); navigate(link.hash.slice(1), true); };
+});
+window.addEventListener("hashchange", () => navigate(location.hash.slice(1)));
+$("choose-workspace").onclick = () => navigate("workspaces-panel", true);
+$("add-workspace").onclick = () => {
+  $("add-workspace-drawer").open = true;
+  $("add-form").elements.name.focus();
+};
+function filterWorkspaces() {
+  const query = $("workspace-search").value.trim().toLowerCase();
+  let matches = 0;
+  document.querySelectorAll(".workspace").forEach(row => {
+    row.hidden = !row.dataset.search.includes(query);
+    if (!row.hidden) matches++;
+  });
+  $("search-empty").hidden = !query || matches > 0;
+}
+$("workspace-search").oninput = filterWorkspaces;
+navigate(location.hash.slice(1));
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !document.querySelector("dialog[open]")) {
+    $("close-output").click();
+  }
+});

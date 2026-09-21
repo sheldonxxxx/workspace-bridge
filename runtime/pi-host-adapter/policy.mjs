@@ -1,45 +1,72 @@
-// Package-owned Pi file-tool permission policy (milestone 3B1).
+// Package-owned Pi permission policy (milestone 3C1, policy v3).
 //
 // Single shared evaluator used by the trusted permission extension and by
 // the adapter's RPC correlation layer. The Bridge web manager owns the
-// *operational* policy (master enable, per-tool allow/ask/deny, protected
-// workspace-relative globs, session-always availability). Everything else
-// here is a non-configurable protocol/security invariant:
+// *operational* policy (write-tool exposure switch, per-tool allow/ask/deny
+// for the six file tools, protected workspace-relative globs,
+// session-always availability, external file scope, and a single shell
+// authority mode deny|ask|allow over the Pi built-in bash tool only).
+// There are no project-name/path-specific rules, no permission-source or
+// control-directory fixed denies, and no command rule list. Protected
+// patterns remain ADMIN-CONFIGURED rules; ordinary configurable
+// file/external policy applies to normal project edits.
+//
+// Non-configurable protocol integrity only:
 //
 // - exact session + toolCallId + UI-request correlation (adapter layer);
-// - canonical/symlink-aware confinement to the exact mapped workspace cwd;
-// - outside-workspace access always denied;
-// - malformed/unknown tool input fails closed;
-// - package-owned permission implementation paths always deny edit/write;
-// - no bash; no project/global extension discovery; no approval persistence.
+// - stale/forged approvals never authorize;
+// - immutable session policy revision (changes apply to new sessions only);
+// - package-owned trusted extension loading identity;
+// - malformed protocol/tool input fails closed;
+// - no silent authority widening or fallback.
+//
+// Shell Allow runs with native macOS-user authority and can bypass
+// structured file path controls; Ask pauses each bash invocation with the
+// existing suspended-call permission flow. No powershell, no command
+// regex/prefix/allowlist/denylist.
 //
 // Defense in depth: the adapter validates Bridge-delivered policy AGAIN with
 // validatePolicy() before storing a session snapshot; the extension
 // re-validates the snapshot it receives via environment. Invalid policy
-// fails closed to the read-only safe default.
+// fails closed.
+//
+// Version history: v1 (3B1) used an `enabled` master switch. v2 (3B2) used
+// `write_tools_enabled` plus `external_access`. v3 (3C1) adds `shell_mode`
+// and removes fixed filesystem denies. v1/v2 payloads are NOT
+// interpretable here: the adapter fails them clearly (invalid_policy)
+// instead of silently misinterpreting them, so Bridge and adapter must be
+// upgraded together (the Bridge migrates stored v1/v2 to v3 in memory and
+// only ever sends v3).
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const POLICY_VERSION = 1;
+export const POLICY_VERSION = 3;
 export const SUPPORTED_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
 export const POLICY_MODES = ["allow", "ask", "deny"];
+export const SHELL_TOOL = "bash";
+export const SHELL_MODES = ["deny", "ask", "allow"];
+export const DEFAULT_SHELL_MODE = "deny";
 export const MAX_PROTECTED_PATTERNS = 64;
 export const MAX_PATTERN_CHARS = 400;
 export const MAX_POLICY_BYTES = 32768;
 export const MAX_REASON_CHARS = 200;
+export const MAX_EXTERNAL_ROOTS = 32;
+export const MAX_EXTERNAL_ROOT_CHARS = 1024;
+// Shell command evidence bounds: exact bounded command target ~16 KiB.
+export const MAX_SHELL_COMMAND_CHARS = 16384;
 
-// Fixed safety invariants shown read-only in the web manager.
+// Rank for "most restrictive wins" composition: deny > ask > allow.
+const MODE_RANK = { allow: 0, ask: 1, deny: 2 };
+
+// Fixed protocol-integrity invariants shown read-only in the web manager.
 export const FIXED_INVARIANTS = [
   "Exact session + toolCallId + UI-request correlation",
-  "Canonical/symlink-aware confinement to the mapped workspace",
-  "Outside-workspace access denied",
-  "Malformed or unknown tool input denied",
-  "Permission implementation is self-protected from edit/write",
+  "Stale or forged approvals never authorize",
+  "Session policy revision is immutable; changes apply to new sessions only",
   "Trusted extension path is package-owned, never admin/project/env-selectable",
-  "No bash tool",
-  "No project or global extension discovery",
-  "Approvals are session-local and never persisted to disk",
+  "Malformed protocol or tool input fails closed",
+  "No silent authority widening or fallback",
 ];
 
 export class PolicyError extends Error {
@@ -52,7 +79,7 @@ export class PolicyError extends Error {
 export function safeDefaultPolicy() {
   return {
     version: POLICY_VERSION,
-    enabled: false,
+    write_tools_enabled: false,
     tools: {
       read: "allow",
       grep: "allow",
@@ -64,7 +91,19 @@ export function safeDefaultPolicy() {
     protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
+    external_access: {
+      default_mode: "deny",
+      roots: [],
+    },
+    shell_mode: DEFAULT_SHELL_MODE,
   };
+}
+
+function checkShellMode(value) {
+  if (!SHELL_MODES.includes(value)) {
+    throw new PolicyError("policy 'shell_mode' must be one of deny, ask, allow");
+  }
+  return value;
 }
 
 function checkPatternList(value, name) {
@@ -102,8 +141,74 @@ function checkPatternList(value, name) {
   return [...new Set(cleaned)];
 }
 
-// Strictly validate a full v1 policy object. Returns the canonical policy.
+function checkExternalRoot(value, index) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyError(`external root #${index} must be an object`);
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("path") || !keys.includes("mode")) {
+    throw new PolicyError(`external root #${index} must have exactly 'path' and 'mode'`);
+  }
+  const rawPath = value.path;
+  if (typeof rawPath !== "string" || !rawPath) {
+    throw new PolicyError(`external root #${index} 'path' must be a non-empty string`);
+  }
+  if (rawPath.includes("\0")) throw new PolicyError(`external root #${index} 'path' is invalid`);
+  const text = rawPath.trim();
+  if (!text || text.length > MAX_EXTERNAL_ROOT_CHARS) {
+    throw new PolicyError(`external root #${index} 'path' must be 1..${MAX_EXTERNAL_ROOT_CHARS} chars`);
+  }
+  // Absolute POSIX host path syntax only. The Bridge validates this same
+  // syntax (it may lack host filesystem visibility); the native adapter
+  // canonicalizes each root with realpath and requires an existing
+  // directory at session creation.
+  if (!text.startsWith("/")) {
+    throw new PolicyError(`external root #${index} 'path' must be an absolute path`);
+  }
+  if (text.includes("//") || (text.endsWith("/") && text !== "/")) {
+    throw new PolicyError(`external root #${index} 'path' is not normalized`);
+  }
+  const segments = text.split("/").filter((s) => s !== "" && s !== ".");
+  if (segments.includes("..")) {
+    throw new PolicyError(`external root #${index} 'path' must not traverse with '..'`);
+  }
+  if (!POLICY_MODES.includes(value.mode)) {
+    throw new PolicyError(`external root #${index} 'mode' must be one of allow, ask, deny`);
+  }
+  return { path: text, mode: value.mode };
+}
+
+function checkExternalAccess(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyError("'external_access' must be an object");
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("default_mode") || !keys.includes("roots")) {
+    throw new PolicyError("'external_access' must have exactly 'default_mode' and 'roots'");
+  }
+  if (!POLICY_MODES.includes(value.default_mode)) {
+    throw new PolicyError("external 'default_mode' must be one of allow, ask, deny");
+  }
+  if (!Array.isArray(value.roots)) {
+    throw new PolicyError("external 'roots' must be a list");
+  }
+  if (value.roots.length > MAX_EXTERNAL_ROOTS) {
+    throw new PolicyError(`external 'roots' allows at most ${MAX_EXTERNAL_ROOTS} roots`);
+  }
+  const cleaned = value.roots.map((item, index) => checkExternalRoot(item, index));
+  const seen = new Set();
+  for (const entry of cleaned) {
+    if (seen.has(entry.path)) {
+      throw new PolicyError(`external root '${entry.path.slice(0, 80)}' is duplicated`);
+    }
+    seen.add(entry.path);
+  }
+  return { default_mode: value.default_mode, roots: cleaned };
+}
+
+// Strictly validate a full v3 policy object. Returns the canonical policy.
 // Throws PolicyError on any violation; invalid policy never partially applies.
+// There is no command rule list: shell_mode is the only shell control.
 export function validatePolicy(raw) {
   let value = raw;
   if (typeof value === "string") {
@@ -120,8 +225,9 @@ export function validatePolicy(raw) {
     throw new PolicyError("policy must be a JSON object");
   }
   const allowed = new Set([
-    "version", "enabled", "tools", "protected_patterns",
-    "protected_template_exceptions", "allow_session_always",
+    "version", "write_tools_enabled", "tools", "protected_patterns",
+    "protected_template_exceptions", "allow_session_always", "external_access",
+    "shell_mode",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new PolicyError("policy has unknown fields");
@@ -129,8 +235,8 @@ export function validatePolicy(raw) {
   if (value.version !== POLICY_VERSION) {
     throw new PolicyError(`policy version must be ${POLICY_VERSION}`);
   }
-  if (typeof value.enabled !== "boolean") {
-    throw new PolicyError("policy 'enabled' must be a boolean");
+  if (typeof value.write_tools_enabled !== "boolean") {
+    throw new PolicyError("policy 'write_tools_enabled' must be a boolean");
   }
   const tools = value.tools;
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) {
@@ -151,14 +257,58 @@ export function validatePolicy(raw) {
   if (typeof value.allow_session_always !== "boolean") {
     throw new PolicyError("policy 'allow_session_always' must be a boolean");
   }
+  const externalAccess = checkExternalAccess(value.external_access);
+  const shellMode = checkShellMode(value.shell_mode);
   return {
     version: POLICY_VERSION,
-    enabled: value.enabled,
+    write_tools_enabled: value.write_tools_enabled,
     tools: Object.fromEntries(SUPPORTED_TOOLS.map((t) => [t, tools[t]])),
     protected_patterns: protectedPatterns,
     protected_template_exceptions: exceptions,
     allow_session_always: value.allow_session_always,
+    external_access: externalAccess,
+    shell_mode: shellMode,
   };
+}
+
+// Extract the exact bounded bash command + verified timeout from tool input.
+// Verified against installed Pi 0.86.1 bashSchema: {command, timeout?}
+// where timeout is SECONDS (optional, no default). Millisecond aliases
+// (timeoutMs/timeout_ms) are accepted from scripted fakes. Returns
+// {ok, command, commandHash, timeoutMs} or {ok:false}. Never throws;
+// unknown shapes fail closed without dumping args. No command
+// regex/prefix/allowlist/denylist: the full command string is the
+// authority scope.
+export function extractBashCommand(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false };
+  }
+  const raw = input.command ?? input.cmd ?? input.script ?? input.code ?? null;
+  if (typeof raw !== "string" || !raw) return { ok: false };
+  const command = raw.slice(0, MAX_SHELL_COMMAND_CHARS);
+  const truncated = raw.length > MAX_SHELL_COMMAND_CHARS;
+  let timeoutMs = 30000;
+  const msCandidate = input.timeoutMs ?? input.timeout_ms ?? null;
+  const secCandidate = input.timeout ?? null;
+  const coerceMs = (value) => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  };
+  const msValue = coerceMs(msCandidate);
+  if (msValue !== null) {
+    timeoutMs = Math.max(1000, Math.min(Math.floor(msValue), 300000));
+  } else {
+    const secValue = coerceMs(secCandidate);
+    if (secValue !== null) {
+      timeoutMs = Math.max(1000, Math.min(Math.floor(secValue * 1000), 300000));
+    }
+  }
+  const commandHash = createHash("sha256").update(raw, "utf8").digest("hex");
+  return { ok: true, command, truncated, commandHash, timeoutMs };
 }
 
 function sortKeysDeep(value) {
@@ -235,10 +385,102 @@ function matchesAny(patterns, rel) {
   });
 }
 
+// Canonicalize the session cwd once. Falls back to the normalized input
+// when it cannot be resolved (fail-closed classification still applies).
+function canonicalizeCwd(cwd) {
+  try {
+    return fs.realpathSync(cwd);
+  } catch {
+    return path.normalize(String(cwd || ""));
+  }
+}
+
+// Canonicalize one configured external root. Returns the canonical path,
+// or null when the root cannot be resolved (callers fail closed).
+function canonicalizeRoot(rootPath) {
+  try {
+    const real = fs.realpathSync(rootPath);
+    const stat = fs.statSync(real);
+    if (!stat.isDirectory()) return null;
+    return real;
+  } catch {
+    return null;
+  }
+}
+
+// Canonicalize configured external roots for a session snapshot.
+// Throws PolicyError when any root is unresolvable, not a directory, or a
+// canonical duplicate of another root (conflicting or repeated definitions
+// fail session creation rather than guess precedence). Overlapping
+// (nested) roots are allowed: the most-specific match wins at evaluation.
+export function canonicalizeExternalRoots(roots) {
+  const list = Array.isArray(roots) ? roots : [];
+  const canonical = [];
+  const seen = new Map();
+  for (let index = 0; index < list.length; index += 1) {
+    const entry = list[index];
+    const configured = typeof entry?.path === "string" ? entry.path : "";
+    const real = canonicalizeRoot(configured);
+    if (real === null) {
+      throw new PolicyError(`external root '${configured.slice(0, 80)}' is unavailable`);
+    }
+    if (seen.has(real)) {
+      throw new PolicyError(`external root '${configured.slice(0, 80)}' duplicates another root`);
+    }
+    seen.set(real, true);
+    canonical.push({ path: real, mode: entry.mode });
+  }
+  return canonical;
+}
+
+// Canonicalize fixed control-plane roots (agent credential/config dir and
+// similar). Best-effort nearest-existing-ancestor resolution: a missing
+// tail does not void protection of the existing prefix.
+export function canonicalizeControlRoots(dirs) {
+  const out = [];
+  for (const dir of Array.isArray(dirs) ? dirs : []) {
+    if (typeof dir !== "string" || !dir) continue;
+    const normalized = path.normalize(dir);
+    const existing = [normalized];
+    let cursor = normalized;
+    for (;;) {
+      if (fs.existsSync(cursor)) break;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+      existing.push(cursor);
+      if (existing.length > 64) break;
+    }
+    let realBase;
+    try {
+      realBase = fs.realpathSync(cursor);
+    } catch {
+      realBase = cursor;
+    }
+    let rebuilt = realBase;
+    for (let index = existing.length - 2; index >= 0; index -= 1) {
+      rebuilt = path.join(rebuilt, path.basename(existing[index]));
+    }
+    const canon = path.normalize(rebuilt);
+    if (canon && !out.includes(canon)) out.push(canon);
+  }
+  return out;
+}
+
+function isWithinOrEqual(parent, candidate) {
+  if (candidate === parent) return true;
+  const rel = path.relative(parent, candidate);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 // Resolve one requested path operand against the session cwd.
-// Returns {ok, rel, canonical} where rel is the workspace-relative path
-// (forward slashes, "." for cwd itself). Failures carry a bounded code.
-function resolveOperand(cwd, operand) {
+// Returns {ok, scope, rel, canonical}:
+// - scope "workspace": rel is the workspace-relative path ("." for cwd).
+// - scope "external": canonical is the exact absolute host target; the
+//   caller applies external policy. Relative ".." escapes and symlink
+//   escapes are external, never malformed solely for leaving the cwd.
+// Failures carry a bounded code and fail closed.
+function resolveOperand(cwdCanon, operand) {
   if (typeof operand !== "string" || !operand || operand.includes("\0")) {
     return { ok: false, code: "malformed_path" };
   }
@@ -247,7 +489,7 @@ function resolveOperand(cwd, operand) {
   if (path.isAbsolute(operand)) {
     absolute = path.normalize(operand);
   } else {
-    absolute = path.normalize(path.join(cwd, operand));
+    absolute = path.normalize(path.join(cwdCanon, operand));
   }
   // Existing target: canonical realpath.
   let real = null;
@@ -256,39 +498,80 @@ function resolveOperand(cwd, operand) {
   } catch {
     real = null;
   }
+  let canonical;
   if (real !== null) {
-    const rel = path.relative(cwd, real);
-    if (rel === "") return { ok: true, rel: ".", canonical: real };
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      // absolute input that canonicalizes outside, or a symlink escape.
-      return { ok: false, code: "outside_workspace" };
+    canonical = real;
+  } else {
+    // New write target: nearest-existing-ancestor realpath + rebuild suffix.
+    const parts = [];
+    let cursor = absolute;
+    for (;;) {
+      if (fs.existsSync(cursor)) break;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return { ok: false, code: "malformed_path" };
+      parts.unshift(path.basename(cursor));
+      cursor = parent;
+      if (parts.length > 64) return { ok: false, code: "malformed_path" };
     }
-    return { ok: true, rel: rel.split(path.sep).join("/"), canonical: real };
+    let realBase;
+    try {
+      realBase = fs.realpathSync(cursor);
+    } catch {
+      return { ok: false, code: "malformed_path" };
+    }
+    canonical = parts.length ? path.join(realBase, ...parts) : realBase;
   }
-  // New write target: nearest-existing-ancestor realpath + rebuild suffix.
-  const parts = [];
-  let cursor = absolute;
-  for (;;) {
-    if (fs.existsSync(cursor)) break;
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return { ok: false, code: "outside_workspace" };
-    parts.unshift(path.basename(cursor));
-    cursor = parent;
-    if (parts.length > 64) return { ok: false, code: "malformed_path" };
+  const rel = path.relative(cwdCanon, canonical);
+  if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+    return {
+      ok: true,
+      scope: "workspace",
+      rel: rel === "" ? "." : rel.split(path.sep).join("/"),
+      canonical,
+    };
   }
-  let realBase;
-  try {
-    realBase = fs.realpathSync(cursor);
-  } catch {
-    return { ok: false, code: "outside_workspace" };
+  return { ok: true, scope: "external", rel: "", canonical };
+}
+
+// Choose the external location mode for a canonical absolute target:
+// the most-specific matching canonical root wins; otherwise the default.
+function externalModeFor(canonicalTarget, effectiveRoots, defaultMode) {
+  let best = null;
+  for (const root of effectiveRoots) {
+    if (isWithinOrEqual(root.path, canonicalTarget)) {
+      if (best === null || root.path.length > best.path.length) best = root;
+    }
   }
-  const rebuilt = parts.length ? path.join(realBase, ...parts) : realBase;
-  const rel = path.relative(cwd, rebuilt);
-  if (rel === "") return { ok: true, rel: ".", canonical: rebuilt };
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    return { ok: false, code: "outside_workspace" };
+  return best ? best.mode : defaultMode;
+}
+
+// Compose per-tool mode with location mode: deny > ask > allow.
+function composeModes(toolMode, locationMode) {
+  return MODE_RANK[toolMode] >= MODE_RANK[locationMode] ? toolMode : locationMode;
+}
+
+// Build protected-pattern match candidates for a resolved target:
+// - workspace: the workspace-relative resource (as before);
+// - external under an override root: the root-relative path plus the
+//   canonical absolute path with leading slash stripped;
+// - external under the default: canonical absolute with leading slash stripped.
+function protectedCandidates(resolved, effectiveRoots) {
+  if (resolved.scope === "workspace") return [resolved.rel];
+  const canonical = resolved.canonical;
+  const stripped = canonical.startsWith("/") ? canonical.slice(1) : canonical;
+  let best = null;
+  for (const root of effectiveRoots) {
+    if (isWithinOrEqual(root.path, canonical)) {
+      if (best === null || root.path.length > best.path.length) best = root;
+    }
   }
-  return { ok: true, rel: rel.split(path.sep).join("/"), canonical: rebuilt };
+  if (best) {
+    const rel = path.relative(best.path, canonical);
+    const rootRel = (rel === "" ? "." : rel).split(path.sep).join("/");
+    if (rootRel === stripped) return [stripped];
+    return [rootRel, stripped];
+  }
+  return [stripped];
 }
 
 // Path operands per tool per the installed Pi schemas (verified 0.86.1):
@@ -317,32 +600,100 @@ function boundedReason(text) {
 // Evaluate one validated tool call against the immutable session snapshot.
 // Returns a bounded structured effect:
 //   {effect: "allow"|"ask"|"deny", action, tool, resource, requested,
-//    alwaysPattern, grantKey, reason, code}
+//    alwaysPattern, grantKey, reason, code, commandHash?, timeoutMs?}
 //
-// - resource: workspace-relative public target (or "." for the cwd root).
-// - requested: bounded list of requested workspace-relative targets.
-// - alwaysPattern: exact scope ("<tool>:<rel>") for ask; "" otherwise.
+// File tools:
+// - resource: workspace-relative target (or "." for the cwd root) for
+//   workspace targets; the exact canonical absolute host target for
+//   external targets (so reviewers see what is actually requested).
+// - requested: bounded list of requested targets in the same form.
+// - alwaysPattern: exact scope ("<tool>:<target>") for ask; "" otherwise.
 // - grantKey: internal exact grant key for ask; "" otherwise.
-// - reason/code: bounded machine-readable explanation.
-export function evaluateToolCall({ cwd, policy, toolName, input, selfProtectedDirs = [] }) {
+//
+// Bash tool (Pi built-in bash only, no powershell, no command rules):
+// - shell_mode deny: bash absent from --tools, deny here in depth.
+// - shell_mode ask: bash present and each invocation uses the suspended-call
+//   flow; permission detail carries the exact bounded command + verified
+//   timeout; once approves the exact call; always stays session-local and
+//   exact-command scoped (hash + timeout); reject blocks it.
+// - shell_mode allow: bash present without prompt.
+// Shell authority is independent of file/external policy. Allow runs with
+// native macOS-user authority and can bypass structured file path controls.
+//
+// v3 has no fixed filesystem denies: selfProtectedDirs/controlDirs and any
+// project-specific rules are ignored (ordinary configurable file/external
+// policy applies). Configured protected_patterns remain ADMIN-CONFIGURED
+// hard denies. Only protocol/session/policy integrity is hardcoded.
+export function evaluateToolCall({
+  cwd, policy, toolName, input,
+  selfProtectedDirs = [], controlDirs = [],
+  effectiveRoots = null,
+}) {
   const tool = typeof toolName === "string" ? toolName : "";
+  let snapshot;
+  try {
+    snapshot = validatePolicy(policy);
+  } catch {
+    return {
+      effect: "deny", action: tool.slice(0, 40) || "unknown", tool: tool.slice(0, 40) || "unknown",
+      resource: "", requested: [],
+      alwaysPattern: "", grantKey: "",
+      reason: boundedReason("Permission policy is invalid; failing closed"),
+      code: "invalid_policy",
+    };
+  }
+  // Bash is governed solely by shell_mode, independent of file policy.
+  if (tool === SHELL_TOOL) {
+    const extracted = extractBashCommand(input);
+    if (!extracted.ok) {
+      return {
+        effect: "deny", action: tool, tool, resource: "", requested: [],
+        alwaysPattern: "", grantKey: "",
+        reason: boundedReason("Tool input is malformed"),
+        code: "malformed_input",
+      };
+    }
+    const mode = snapshot.shell_mode || DEFAULT_SHELL_MODE;
+    const resource = extracted.command;
+    const requested = [extracted.command];
+    if (mode === "deny") {
+      return {
+        effect: "deny", action: tool, tool, resource, requested,
+        alwaysPattern: "", grantKey: "",
+        reason: boundedReason("Denied by shell policy"),
+        code: "shell_deny",
+      };
+    }
+    if (mode === "allow") {
+      return {
+        effect: "allow", action: tool, tool, resource, requested,
+        alwaysPattern: "", grantKey: "",
+        reason: boundedReason("Allowed by shell policy; runs with native user authority"),
+        code: "shell_allow",
+        commandHash: extracted.commandHash,
+        timeoutMs: extracted.timeoutMs,
+        commandTruncated: Boolean(extracted.truncated),
+      };
+    }
+    // ask: exact-command scope via hash + verified timeout.
+    const alwaysPattern = `${SHELL_TOOL}:${extracted.commandHash}:${extracted.timeoutMs}`;
+    const grantKey = `${SHELL_TOOL}\n${extracted.commandHash}\n${extracted.timeoutMs}`;
+    return {
+      effect: "ask", action: tool, tool, resource, requested,
+      alwaysPattern, grantKey,
+      reason: boundedReason("Requires approval"),
+      code: "shell_ask",
+      commandHash: extracted.commandHash,
+      timeoutMs: extracted.timeoutMs,
+      commandTruncated: Boolean(extracted.truncated),
+    };
+  }
   if (!SUPPORTED_TOOLS.includes(tool)) {
     return {
       effect: "deny", action: "unknown", tool: tool.slice(0, 40) || "unknown",
       resource: "", requested: [], alwaysPattern: "", grantKey: "",
       reason: boundedReason("Tool is not enabled for this session"),
       code: "unknown_tool",
-    };
-  }
-  let snapshot;
-  try {
-    snapshot = validatePolicy(policy);
-  } catch {
-    return {
-      effect: "deny", action: tool, tool, resource: "", requested: [],
-      alwaysPattern: "", grantKey: "",
-      reason: boundedReason("Permission policy is invalid; failing closed"),
-      code: "invalid_policy",
     };
   }
   const operands = operandsFor(tool, input);
@@ -354,88 +705,100 @@ export function evaluateToolCall({ cwd, policy, toolName, input, selfProtectedDi
       code: "malformed_input",
     };
   }
+  const cwdCanon = canonicalizeCwd(cwd);
+  // Effective canonical external roots: prefer caller-supplied session
+  // snapshot roots (adapter), else canonicalize the policy roots
+  // best-effort (trusted extension). Unresolvable roots fail closed.
+  let roots;
+  try {
+    if (effectiveRoots !== null && effectiveRoots !== undefined) {
+      if (!Array.isArray(effectiveRoots)) throw new PolicyError("effective roots are invalid");
+      roots = effectiveRoots.map((entry, index) => {
+        if (!entry || typeof entry.path !== "string" || !POLICY_MODES.includes(entry.mode)) {
+          throw new PolicyError(`effective root #${index} is invalid`);
+        }
+        return { path: entry.path, mode: entry.mode };
+      });
+    } else {
+      roots = canonicalizeExternalRoots(snapshot.external_access.roots);
+    }
+  } catch {
+    return {
+      effect: "deny", action: tool, tool, resource: "", requested: [],
+      alwaysPattern: "", grantKey: "",
+      reason: boundedReason("External policy roots are unavailable; failing closed"),
+      code: "invalid_roots",
+    };
+  }
+  // v3: no fixed filesystem denies. selfProtectedDirs/controlDirs and any
+  // project-specific rules are ignored; ordinary configurable file/external
+  // policy applies. Retained params are ignored for backward compatibility.
+  void selfProtectedDirs;
+  void controlDirs;
+  void canonicalizeControlRoots;
   // Resolve every relevant operand; any failure denies the whole call.
   const resolved = [];
   for (const operand of operands) {
-    const result = resolveOperand(cwd, operand);
+    const result = resolveOperand(cwdCanon, operand);
     if (!result.ok) {
       return {
         effect: "deny", action: tool, tool, resource: "", requested: [],
         alwaysPattern: "", grantKey: "",
-        reason: boundedReason(result.code === "outside_workspace"
-          ? "Target is outside the mapped workspace"
-          : "Tool input is malformed"),
+        reason: boundedReason("Tool input is malformed"),
         code: result.code,
       };
     }
     resolved.push(result);
   }
   const primary = resolved[0];
-  const resource = primary.rel;
-  const requested = resolved.map((r) => r.rel).slice(0, 8);
+  const isExternal = primary.scope === "external";
+  const resource = isExternal ? primary.canonical : primary.rel;
+  const requested = resolved.map((r) => (r.scope === "external" ? r.canonical : r.rel)).slice(0, 8);
 
-  const isWrite = tool === "edit" || tool === "write";
-  if (isWrite) {
-    // Non-configurable fixed self-protection: the package-owned
-    // permission implementation (trusted extension + policy module can
-    // never edit/write themselves.
-    for (const dir of selfProtectedDirs) {
-      if (typeof dir !== "string" || !dir) continue;
-      const canon = primary.canonical;
-      if (canon === dir || canon.startsWith(dir + path.sep)) {
-        return {
-          effect: "deny", action: tool, tool, resource, requested,
-          alwaysPattern: "", grantKey: "",
-          reason: boundedReason("Target is protected permission implementation"),
-          code: "self_protected",
-        };
-      }
-    }
-    // Configured protected patterns (with validated template exceptions)
-    // are a hard deny and are never remotely approvable.
-    if (matchesAny(snapshot.protected_patterns, resource)
-        && !matchesAny(snapshot.protected_template_exceptions, resource)) {
-      return {
-        effect: "deny", action: tool, tool, resource, requested,
-        alwaysPattern: "", grantKey: "",
-        reason: boundedReason("Target matches a protected pattern"),
-        code: "protected_pattern",
-      };
-    }
-  } else {
-    // Read-family tools honor configured protected patterns too when the
-    // admin configures them: outside-workspace/symlink escapes already
-    // denied above; protected matches stay a hard deny.
-    if (matchesAny(snapshot.protected_patterns, resource)
-        && !matchesAny(snapshot.protected_template_exceptions, resource)) {
-      return {
-        effect: "deny", action: tool, tool, resource, requested,
-        alwaysPattern: "", grantKey: "",
-        reason: boundedReason("Target matches a protected pattern"),
-        code: "protected_pattern",
-      };
-    }
-  }
-
-  const mode = snapshot.tools[tool];
-  if (mode === "allow") {
-    return {
-      effect: "allow", action: tool, tool, resource, requested,
-      alwaysPattern: "", grantKey: "",
-      reason: boundedReason("Allowed by permission policy"),
-      code: "tool_allow",
-    };
-  }
-  if (mode === "deny") {
+  // Configured protected patterns are a hard deny and are never remotely
+  // approvable. Workspace targets match the workspace-relative resource;
+  // external targets match root-relative/absolute candidates above.
+  const candidates = protectedCandidates(primary, roots);
+  const protectedHit = candidates.some((c) => matchesAny(snapshot.protected_patterns, c))
+    && !candidates.some((c) => matchesAny(snapshot.protected_template_exceptions, c));
+  if (protectedHit) {
     return {
       effect: "deny", action: tool, tool, resource, requested,
       alwaysPattern: "", grantKey: "",
-      reason: boundedReason("Denied by permission policy"),
-      code: "tool_deny",
+      reason: boundedReason("Target matches a protected pattern"),
+      code: "protected_pattern",
     };
   }
-  // ask: exact scope is action + exact canonical workspace-relative
-  // target, never a wildcard/sibling/other tool.
+
+  const toolMode = snapshot.tools[tool];
+  const locationMode = isExternal
+    ? externalModeFor(primary.canonical, roots, snapshot.external_access.default_mode)
+    : "allow";
+  const finalMode = composeModes(toolMode, locationMode);
+  if (finalMode === "allow") {
+    return {
+      effect: "allow", action: tool, tool, resource, requested,
+      alwaysPattern: "", grantKey: "",
+      reason: boundedReason(isExternal
+        ? "Allowed by permission policy"
+        : "Allowed by permission policy"),
+      code: isExternal ? "external_allow" : "tool_allow",
+    };
+  }
+  if (finalMode === "deny") {
+    const external = isExternal && toolMode !== "deny";
+    return {
+      effect: "deny", action: tool, tool, resource, requested,
+      alwaysPattern: "", grantKey: "",
+      reason: boundedReason(external
+        ? "Denied by external access policy"
+        : "Denied by permission policy"),
+      code: external ? "external_deny" : "tool_deny",
+    };
+  }
+  // ask: exact scope is action + exact target (workspace-relative for
+  // workspace targets, canonical absolute for external targets), never a
+  // wildcard/root/sibling/other tool.
   const alwaysPattern = `${tool}:${resource}`;
   const grantKey = `${tool}\n${resource}`;
   return {
@@ -446,8 +809,9 @@ export function evaluateToolCall({ cwd, policy, toolName, input, selfProtectedDi
   };
 }
 
-// Directory containing this package-owned module: the non-configurable
-// self-protection root for edit/write.
+// Directory containing this package-owned module. Retained for
+// fingerprint/identity diagnostics only; v3 performs no fixed filesystem
+// deny on it (ordinary configurable file/external policy applies).
 export function selfProtectionDir() {
   return path.dirname(new URL(import.meta.url).pathname);
 }

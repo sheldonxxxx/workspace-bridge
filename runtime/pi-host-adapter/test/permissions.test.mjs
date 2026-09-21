@@ -26,12 +26,14 @@ function makeProjects() {
 
 function writablePolicy() {
   return validatePolicy({
-    version: 1,
-    enabled: true,
+    version: 3,
+    write_tools_enabled: true,
     tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
     protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
+    external_access: { default_mode: "deny", roots: [] },
+    shell_mode: "deny",
   });
 }
 
@@ -95,7 +97,7 @@ function emit(child, message) {
   child.respond(message);
 }
 
-test("missing policy starts a read-only session with safe defaults", async () => {
+test("missing policy starts a legacy read-only session with safe defaults", async () => {
   const projects = makeProjects();
   const bag = autoSpawn();
   const adapter = makeAdapter(projects, bag);
@@ -111,7 +113,79 @@ test("missing policy starts a read-only session with safe defaults", async () =>
   await adapter.shutdown({ graceMs: 0 });
 });
 
-test("enabled policy loads the trusted extension with edit/write and no bash", async () => {
+test("read-only v2 session loads the trusted extension without edit/write", async () => {
+  const projects = makeProjects();
+  const bag = autoSpawn();
+  const adapter = makeAdapter(projects, bag);
+  const policy = safeDefaultPolicy();
+  const session = await createSession(adapter, projects, projects.appA,
+    { permission_policy: policy, policy_revision: policyRevision(policy) });
+  const entry = adapter.sessions.get(session.id);
+  assert.equal(entry.writable, false);
+  const call = bag.calls[0];
+  assert.deepEqual(call.args.slice(0, 5),
+    ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve"]);
+  assert.ok(call.args.includes("--no-extensions"));
+  assert.equal(call.args.filter((a) => a === "-e").length, 1);
+  assert.ok(call.args[call.args.indexOf("-e") + 1].endsWith("trusted-permission-extension.mjs"));
+  assert.ok(!call.args.join(" ").includes("bash"));
+  assert.ok(call.opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":false'));
+  await adapter.shutdown({ graceMs: 0 });
+});
+
+test("v1 policy payloads fail clearly instead of being reinterpreted", async () => {
+  const projects = makeProjects();
+  const bag = autoSpawn();
+  const adapter = makeAdapter(projects, bag);
+  const before = bag.calls.length;
+  await assert.rejects(
+    createSession(adapter, projects, projects.appA, {
+      permission_policy: {
+        version: 1,
+        enabled: true,
+        tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
+        protected_patterns: [],
+        protected_template_exceptions: [],
+        allow_session_always: true,
+      },
+      policy_revision: "0".repeat(64),
+    }),
+    /coordinated|invalid_policy/i);
+  assert.equal(bag.calls.length, before);
+  await adapter.shutdown({ graceMs: 0 });
+});
+
+test("unresolvable or duplicate external roots fail session creation", async () => {
+  const projects = makeProjects();
+  const bag = autoSpawn();
+  const adapter = makeAdapter(projects, bag);
+  const missing = writablePolicy();
+  missing.external_access = { default_mode: "deny", roots: [{ path: "/no-such-pi-root-xyz", mode: "ask" }] };
+  await assert.rejects(
+    createSession(adapter, projects, projects.appA,
+      { permission_policy: missing, policy_revision: policyRevision(missing) }),
+    /external roots/i);
+  // Canonical duplicates (a symlink alias of the same dir) fail rather
+  // than guess. (Exact string duplicates already fail at validation.)
+  const dupDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dup-"));
+  const dupAlias = `${fs.realpathSync(dupDir)}-alias`;
+  fs.symlinkSync(fs.realpathSync(dupDir), dupAlias);
+  const dup = writablePolicy();
+  dup.external_access = {
+    default_mode: "deny",
+    roots: [
+      { path: fs.realpathSync(dupDir), mode: "allow" },
+      { path: dupAlias, mode: "deny" },
+    ],
+  };
+  await assert.rejects(
+    createSession(adapter, projects, projects.appA,
+      { permission_policy: dup, policy_revision: policyRevision(dup) }),
+    /external roots/i);
+  await adapter.shutdown({ graceMs: 0 });
+});
+
+test("writable policy loads the trusted extension with edit/write and no bash", async () => {
   const projects = makeProjects();
   const bag = autoSpawn();
   const adapter = makeAdapter(projects, bag);
@@ -127,9 +201,9 @@ test("enabled policy loads the trusted extension with edit/write and no bash", a
   const extPath = call.args[extIndex + 1];
   assert.ok(extPath.endsWith("trusted-permission-extension.mjs"));
   // Snapshot survives in the entry and is never the raw caller object.
-  assert.equal(entry.permissionPolicy.enabled, true);
+  assert.equal(entry.permissionPolicy.write_tools_enabled, true);
   // Policy travels to the child via environment, never in logs.
-  assert.ok(call.opts.env.WB_PI_POLICY_JSON.includes('"enabled":true'));
+  assert.ok(call.opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":true'));
   await adapter.shutdown({ graceMs: 0 });
 });
 
@@ -167,7 +241,7 @@ test("supplied policy requires an equal valid revision or creation fails", async
   // Invalid policy fails closed even when no revision games are played.
   await assert.rejects(
     createSession(adapter, projects, projects.appA,
-      { permission_policy: { version: 1, enabled: true }, policy_revision: "0".repeat(64) }),
+      { permission_policy: { version: 2 }, policy_revision: "0".repeat(64) }),
     /invalid/i);
   assert.equal(bag.calls.length, before);
   await adapter.shutdown({ graceMs: 0 });

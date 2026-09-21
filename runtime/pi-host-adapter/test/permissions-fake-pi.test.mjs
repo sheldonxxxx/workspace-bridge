@@ -17,12 +17,14 @@ const FAKE_PI = fileURLToPath(new URL("./fake-pi.mjs", import.meta.url));
 
 function enabledPolicy() {
   return {
-    version: 1,
-    enabled: true,
+    version: 3,
+    write_tools_enabled: true,
     tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
     protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
+    external_access: { default_mode: "deny", roots: [] },
+    shell_mode: "deny",
   };
 }
 

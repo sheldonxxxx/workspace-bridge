@@ -23,7 +23,8 @@
 //   API responses (only its byte length is exposed for debugging).
 import { spawn } from "node:child_process";
 
-import { SUPPORTED_TOOLS } from "./policy.mjs";
+import { SHELL_TOOL, SUPPORTED_TOOLS } from "./policy.mjs";
+import { summarizeInput, summarizeResult } from "./executions.mjs";
 
 export const RPC_TIMEOUT_MS = 30000;
 export const MAX_LINE_BYTES = 1024 * 1024;
@@ -39,10 +40,14 @@ export const MAX_UI_OPTIONS = 8;
 export const MAX_UI_OPTION_CHARS = 400;
 
 // Reduce a raw tool_execution_start to bounded path-only permission
-// metadata. Only the single path operand per known file-tool schema is
-// kept (read/edit/write path; grep/find/ls optional path). Write content,
-// edit old/new text, grep patterns, find globs, and arbitrary args are
-// NEVER retained. Returns null when the event is unusable for correlation.
+// metadata plus a SEPARATE bounded audit input summary. Permission keeps
+// only the single path operand per known file-tool schema (read/edit/write
+// path; grep/find/ls optional path); bash keeps {} for permission (its
+// authority is shell_mode) while audit carries the exact bounded command.
+// Write content, edit old/new text, grep patterns, find globs, and
+// arbitrary args are NEVER retained in permission metadata; audit carries
+// only hashes/counts/previews per executions.mjs. Raw event objects are
+// never retained after normalization. Returns null when unusable.
 export function normalizeToolStart(message) {
   if (!message || typeof message !== "object") return null;
   const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
@@ -56,7 +61,11 @@ export function normalizeToolStart(message) {
       && (args === null || typeof args !== "object" || Array.isArray(args))) {
     // Present-but-malformed args: keep the call identity with an empty
     // input so evaluation fails closed as malformed (never allowed).
-    return { type: "tool_execution_start", toolCallId, toolName, input: null };
+    // Audit records the failure safely without dumping args.
+    return {
+      type: "tool_execution_start", toolCallId, toolName, input: null,
+      auditInput: { error: "malformed_input" },
+    };
   }
   let input = {};
   if (SUPPORTED_TOOLS.includes(toolName) && args && typeof args === "object"
@@ -69,15 +78,72 @@ export function normalizeToolStart(message) {
       ? { path: rawPath }
       : { path: null };
   }
-  return { type: "tool_execution_start", toolCallId, toolName, input };
+  // Separate audit path: bounded tool-specific evidence, never raw args.
+  let auditInput = {};
+  try {
+    const { ok, summary } = summarizeInput(toolName, args ?? {});
+    auditInput = ok ? summary : summary;
+    if (!ok && (toolName === SHELL_TOOL || SUPPORTED_TOOLS.includes(toolName))) {
+      // Preserve the failure marker; evaluation already fails closed.
+    } else if (!ok) {
+      auditInput = { error: "unknown_tool" };
+    }
+  } catch {
+    auditInput = { error: "malformed_input" };
+  }
+  return { type: "tool_execution_start", toolCallId, toolName, input, auditInput };
+}
+
+// Separate audit path for tool_execution_update: bounded preview only,
+// never raw payloads. Returns null when unusable; unknown tools fail
+// safely.
+export function normalizeToolUpdate(message) {
+  // Verified Pi 0.86.1 shape: {toolCallId, toolName, args,
+  // partialResult:{content, details}}. Synthetic {result,preview,data}
+  // fallbacks stay for scripted fakes only.
+  if (!message || typeof message !== "object") return null;
+  const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+  if (!toolCallId || toolCallId.length > MAX_TOOL_CALL_ID_CHARS) return null;
+  const toolName = typeof message.toolName === "string" ? message.toolName : "";
+  let preview = {};
+  try {
+    const result = message.partialResult ?? message.result ?? message.preview ?? message.data ?? null;
+    const isError = message.isError === true;
+    if (toolName) {
+      preview = summarizeResult(toolName, result, isError);
+    } else {
+      preview = { is_error: isError };
+    }
+  } catch {
+    preview = {};
+  }
+  return { type: "tool_execution_update", toolCallId, toolName, auditUpdate: preview };
 }
 
 export function normalizeToolEnd(message) {
   if (!message || typeof message !== "object") return null;
   const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
   if (!toolCallId || toolCallId.length > MAX_TOOL_CALL_ID_CHARS) return null;
-  // Tool results may carry file content: never forwarded.
-  return { type: "tool_execution_end", toolCallId };
+  // Separate audit path: bounded result evidence only. Never forward raw
+  // file contents, fullOutputPath, reasoning, or environment. fullOutputPath
+  // is explicitly dropped here.
+  const toolName = typeof message.toolName === "string" ? message.toolName : "";
+  const isError = message.isError === true;
+  let auditResult = { is_error: isError };
+  try {
+    if (toolName) {
+      auditResult = summarizeResult(toolName, message.result, isError);
+    } else {
+      // Without a tool name the journal cannot attribute evidence;
+      // record only the error bit, never the raw result.
+      auditResult = { is_error: isError };
+      if (message.cancelled === true) auditResult.cancelled = true;
+      if (message.truncated === true) auditResult.truncated = true;
+    }
+  } catch {
+    auditResult = { is_error: isError };
+  }
+  return { type: "tool_execution_end", toolCallId, toolName, isError, auditResult };
 }
 
 export function normalizeUiRequest(message) {
@@ -112,7 +178,7 @@ let nextId = 1;
 export class PiRpcProcess {
   constructor({ binary, cwd, agentDir, extraEnv = {}, spawnFn = spawn,
                 timeoutMs = RPC_TIMEOUT_MS, maxLineBytes = MAX_LINE_BYTES,
-                onEvent = null, extensionPath = null }) {
+                onEvent = null, extensionPath = null, tools = null }) {
     this.binary = binary;
     this.cwd = cwd;
     this.agentDir = agentDir;
@@ -124,8 +190,10 @@ export class PiRpcProcess {
     // (tool_execution_start/end, extension_ui_request). Unrelated events
     // are ignored. Listener errors never break framing.
     this.onEvent = typeof onEvent === "function" ? onEvent : null;
-    // Package-owned trusted permission extension, loaded only in writable
-    // mode. The full path is never logged or returned.
+    // Explicit tool allowlist for this child ("read,grep,find,ls" or the
+    // writable set). The adapter sets it from the session snapshot;
+    // direct constructions default to the read-only set.
+    this.tools = typeof tools === "string" && tools ? tools : "read,grep,find,ls";
     this.extensionPath = typeof extensionPath === "string" && extensionPath ? extensionPath : null;
     this.child = null;
     this.pending = new Map();
@@ -143,17 +211,18 @@ export class PiRpcProcess {
   }
 
   argv() {
-    // Permission-aware spawn contract (3B1), centralized here:
-    // - read-only (no trusted extension): strict read-family allowlist,
-    //   project trust/extensions out (see README);
-    // - writable: read/grep/find/ls/edit/write plus exactly one
-    //   package-owned trusted extension. No bash in either mode.
+    // Permission-aware spawn contract (3B2), centralized here:
+    // - every managed v2 session carries the package-owned trusted
+    //   extension (read-only: strict read-family allowlist + extension;
+    //   writable: + edit/write + extension), project trust/extensions out;
+    // - only the legacy no-policy path spawns without an extension.
+    //   No bash in either mode.
     const base = ["--mode", "rpc"];
     if (this.extensionPath) {
-      return [...base, "--tools", "read,grep,find,ls,edit,write",
+      return [...base, "--tools", this.tools,
         "--no-approve", "--no-extensions", "-e", this.extensionPath];
     }
-    return [...base, "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"];
+    return [...base, "--tools", this.tools, "--no-approve", "--no-extensions"];
   }
 
   get alive() {
@@ -321,16 +390,18 @@ export class PiRpcProcess {
       this._protocolFailure("uncorrelated response");
       return;
     }
-    // Agent event (e.g. agent_settled, tool_execution_start/end,
-    // extension_ui_request): never resolves a pending command. The bounded
-    // permission-correlation subset is normalized to minimal path-only
-    // metadata and forwarded to the adapter listener; everything else is
-    // ignored here. Raw tool payloads never leave this process.
+    // Agent event (e.g. agent_settled, tool_execution_start/update/end,
+    // extension_ui_request): never resolves a pending command. Permission
+    // stays minimal path-only; audit carries a SEPARATE bounded evidence
+    // path (never raw payloads). Everything else is ignored here. Raw
+    // tool payloads never leave this process.
     if (this.onEvent) {
       let normalized = null;
       try {
         if (message.type === "tool_execution_start") {
           normalized = normalizeToolStart(message);
+        } else if (message.type === "tool_execution_update") {
+          normalized = normalizeToolUpdate(message);
         } else if (message.type === "tool_execution_end") {
           normalized = normalizeToolEnd(message);
         } else if (message.type === "extension_ui_request") {

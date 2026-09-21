@@ -219,6 +219,28 @@ class FakeRuntime(AgentRuntime):
         if self.prompt_hook is not None:
             self.prompt_hook(session_id)
 
+    # 3C1 execution-history journal read on the UPDATE cursor
+    # (scripted fake, no backend). Updates carry update_seq (cursor) and
+    # start_seq (stable ownership); legacy fixtures with seq only fall
+    # back to seq for both.
+    def read_executions(self, directory, session_id, *, after=0, limit=50):
+        self.list_pending_calls.append(("executions", directory, session_id))
+        executions = getattr(self, "executions_by_session", {}).get(session_id, [])
+        def _update_seq(e):
+            try:
+                return int(e.get("update_seq", e.get("seq")) or 0)
+            except (TypeError, ValueError):
+                return 0
+        ordered = sorted(
+            [e for e in executions if isinstance(e, dict) and _update_seq(e) > int(after or 0)],
+            key=_update_seq)[:max(1, min(int(limit or 50), 100))]
+        head = max([_update_seq(e) for e in executions] + [0])
+        oldest = min([_update_seq(e) for e in executions] + [head + 1]) if executions else head + 1
+        gap = bool(getattr(self, "executions_gap", False))
+        return {"updates": ordered,
+                "next": _update_seq(ordered[-1]) if ordered else int(after or 0),
+                "head": head, "oldest": oldest, "audit_gap": gap, "cursor_too_old": gap}
+
     def messages(self, directory, session_id, limit=40):
         self.messages_calls.append((directory, session_id, limit))
         return list(self.messages_script)[:limit]
