@@ -35,6 +35,27 @@ def within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
 
 
+def _bounded_extension_snapshot(raw) -> list[dict]:
+    """Bounded active-extension rows for persisted run views (no paths)."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else []
+    except ValueError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    rows = []
+    for row in parsed[:64]:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        rows.append({
+            "id": str(row.get("id"))[:218],
+            "name": str(row.get("name") or "")[:214],
+            "version": str(row.get("version") or "")[:80],
+            "fingerprint": str(row.get("fingerprint") or "")[:64],
+        })
+    return rows
+
+
 # Retain the old jobs.baseline column and any existing review tables for a
 # non-destructive upgrade. New handoffs store only "{}" in that legacy column;
 # no source snapshots, reviews, or verdicts are produced or loaded.
@@ -250,6 +271,20 @@ class Service:
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS ix_agent_executions_run_seq "
                 "ON agent_executions(run, seq)")
+        # 3C2: runtime-global extension policy revision + immutable active
+        # extension snapshot per run (bounded JSON rows, no host paths).
+        # Migration-safe: historical runs keep '' / '[]' and stay
+        # readable with an empty/not-recorded extension snapshot.
+        run_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_runs)")}
+        for _ddl in (
+            "ALTER TABLE agent_runs ADD COLUMN extension_revision TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE agent_runs ADD COLUMN extension_snapshot TEXT NOT NULL DEFAULT '[]'",
+        ):
+            _col = _ddl.split("ADD COLUMN ")[1].split(" ")[0]
+            if _col not in run_columns:
+                with self.db:
+                    self.db.execute(_ddl)
+                run_columns.add(_col)
         # Fail closed on the first v0.2 open of a v0.1 database. Existing mappings
         # were authorized for separate credentials, not a shared credential.
         with self.db:
@@ -583,6 +618,32 @@ class Service:
         policy, _ = _set_policy(self, raw)
         return {**_summary(self), "policy": policy}
 
+    # ----------------------------------------- Pi extension policy (3C2)
+    def get_pi_extension_policy(self) -> tuple[dict, str, bool]:
+        """Current Pi extension policy snapshot (Bridge is source of truth)."""
+        from .pi_extensions import get_policy as _get_policy
+        return _get_policy(self)
+
+    def pi_extension_status(self) -> dict:
+        """Bounded admin status summary: counts + revision prefix only.
+
+        Degrades gracefully when Pi is unconfigured: installed_count is
+        None with ready=False instead of failing the whole status read.
+        """
+        try:
+            return self.orchestrator_for_runtime("pi").pi_extension_status()
+        except Exception:  # noqa: BLE001 - status degrades, never fails the read
+            from .pi_extensions import status_summary as _summary
+            return _summary(self, None, inventory_available=False)
+
+    def pi_extension_view(self) -> dict:
+        """Full admin GET view: effective policy plus bounded live inventory."""
+        return self.orchestrator_for_runtime("pi").pi_extension_view()
+
+    def set_pi_extension_policy(self, raw) -> dict:
+        """Validate against the live inventory and persist; local-admin only."""
+        return self.orchestrator_for_runtime("pi").set_pi_extension_policy(raw)
+
     def read_agent_request(self, ws: dict, run_id: str, request_id: str) -> dict:
         """Neutral request read routed solely by the persisted run runtime.
 
@@ -665,6 +726,8 @@ class Service:
                 "adapter_version": str(run.get("adapter_version") or "")[:40],
                 "pi_version": str(run.get("pi_version") or "")[:80],
                 "permission_revision": str(run.get("permission_revision") or "")[:64],
+                "extension_revision": str(run.get("extension_revision") or "")[:64],
+                "extensions": _bounded_extension_snapshot(run.get("extension_snapshot")),
             },
             "error": ({"code": run["error_code"], "message": run["error_message"]}
                       if run["error_code"] or run["error_message"] else None),

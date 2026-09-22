@@ -22,6 +22,45 @@ export const MAX_TARGET_CHARS = 1024;
 export const MAX_QUERY_CHARS = 2048;
 export const MAX_JOURNAL_RECORDS = 500;
 export const MAX_READ_LIMIT = 100;
+// Generic third-party extension-tool audit bounds (3C2): input carries a
+// canonical args hash + size + top-level keys plus only bounded safe
+// selector fields; result carries a bounded ToolResult text preview (~8
+// KiB). Never full args, fullOutputPath, env, auth, provider payloads,
+// reasoning, cookies, tokens, or arbitrary nested objects.
+export const MAX_EXTENSION_ARGS_BYTES = 16384;
+export const MAX_EXTENSION_KEYS = 20;
+export const MAX_EXTENSION_KEY_CHARS = 80;
+export const MAX_EXTENSION_SELECTOR_CHARS = 500;
+export const MAX_EXTENSION_PREVIEW_CHARS = 8192;
+export const EXTENSION_SELECTOR_FIELDS = ["query", "url", "server", "tool", "name", "method", "path"];
+
+// Conservative best-effort credential redaction for extension audit
+// strings (3C2 corrective). Extension results/selectors can themselves
+// print credentials (URLs with userinfo/query tokens, Bearer values,
+// key=value pairs), so verbatim storage would persist secrets. This is
+// structural hygiene plus pattern redaction, NOT perfect secret
+// detection: detail views remain labeled potentially sensitive. Hash/size
+// evidence always describes the ORIGINAL full args, never redacted text.
+const SENSITIVE_PARAM_RE = /^(?:.*?(?:token|secret|passwd|password|auth|cookie|session|api[_-]?key|apikey|client[_-]?secret)|key|.*?[{_-]key)$/i;
+
+export function redactExtensionText(value) {
+  if (typeof value !== "string" || !value) return "";
+  let out = value;
+  // URL userinfo: scheme://user:pass@host -> scheme://[redacted]@host.
+  out = out.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s?#@]+@/g, "$1[redacted]@");
+  // Sensitive URL query/form params: ?token=abc&next=x -> ?token=[redacted]&next=x.
+  out = out.replace(/([?&])([^?&#=\s;]+)=([^&#\s;]*)/g, (match, sep, name, val) => {
+    if (!val) return match;
+    return SENSITIVE_PARAM_RE.test(name) ? `${sep}${name}=[redacted]` : match;
+  });
+  // Bearer/Basic authorization forms.
+  out = out.replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]+/g, "Bearer [redacted]");
+  out = out.replace(/\bBasic\s+[A-Za-z0-9+/=]+/g, "Basic [redacted]");
+  // Obvious key=value / key: value credential patterns.
+  out = out.replace(/\b(password|passwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s"'{},;]+)/gi,
+    "$1$2[redacted]");
+  return out;
+}
 
 function sha256Hex(text) {
   return createHash("sha256").update(String(text ?? ""), "utf8").digest("hex");
@@ -138,6 +177,81 @@ export function summarizeInput(tool, args) {
   } catch {
     return { ok: false, summary: { error: "malformed_input" } };
   }
+}
+
+// Bounded generic audit input for explicitly enabled third-party
+// extension tools (3C2). Canonical args SHA-256 + byte size + top-level
+// keys, plus only bounded safe selector fields when present as strings.
+// Selector strings get best-effort credential redaction; the hash/size
+// still describe the original full args. Never arbitrary full args or
+// nested objects. Redaction is best-effort, not perfect detection.
+export function summarizeExtensionInput(args) {
+  try {
+    const input = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+    let canonical = "";
+    try {
+      canonical = JSON.stringify(sortKeysDeep(input)).slice(0, MAX_EXTENSION_ARGS_BYTES);
+    } catch {
+      canonical = "";
+    }
+    const full = (() => {
+      try {
+        return JSON.stringify(sortKeysDeep(input));
+      } catch {
+        return "";
+      }
+    })();
+    const keys = Object.keys(input).slice(0, MAX_EXTENSION_KEYS)
+      .filter((k) => typeof k === "string").map((k) => k.slice(0, MAX_EXTENSION_KEY_CHARS));
+    const summary = {
+      args_sha256: sha256Hex(full),
+      args_bytes: byteLen(full),
+      top_keys: keys,
+    };
+    for (const field of EXTENSION_SELECTOR_FIELDS) {
+      const value = input[field];
+      if (typeof value === "string" && value) {
+        summary[field] = redactExtensionText(value).slice(0, MAX_EXTENSION_SELECTOR_CHARS);
+      }
+    }
+    return { ok: true, summary };
+  } catch {
+    return { ok: false, summary: { error: "malformed_input" } };
+  }
+}
+
+// Bounded generic audit result for explicitly enabled third-party
+// extension tools (3C2): verified Pi ToolResult text content preview
+// bounded to ~8 KiB plus truncation/error, with best-effort credential
+// redaction (a result body can itself print secrets). Never
+// fullOutputPath, env, auth headers, provider payloads, reasoning,
+// cookies, or tokens in structural form. Redaction is best-effort, not
+// perfect detection: detail views stay labeled potentially sensitive.
+export function summarizeExtensionResult(result, isError) {
+  const out = { is_error: Boolean(isError) };
+  try {
+    const text = extractResultText(result);
+    const truncated = text.length > MAX_EXTENSION_PREVIEW_CHARS;
+    const redacted = redactExtensionText(text);
+    if (redacted) out.preview = redacted.slice(0, MAX_EXTENSION_PREVIEW_CHARS);
+    out.preview_bytes = byteLen(text);
+    out.truncated = truncated;
+    const details = extractResultDetails(result);
+    if (detailsTruncated(details)) out.truncated = true;
+    return out;
+  } catch {
+    return { is_error: Boolean(isError) };
+  }
+}
+
+function sortKeysDeep(value) {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortKeysDeep(value[key]);
+    return out;
+  }
+  return value;
 }
 
 // Verified against installed Pi 0.86.1 (bundle chunk-CMRUVXTE):
@@ -494,8 +608,18 @@ export function summaryRecord(record) {
   let target = "";
   if (record.tool === "bash") {
     target = String(input.command || "").slice(0, 200);
+  } else if (typeof input.target === "string") {
+    target = input.target.slice(0, 200);
   } else {
-    target = String(input.target || "").slice(0, 200);
+    // Extension-tool list surface: no result body; a bounded redacted
+    // safe selector (or nothing) as the target preview.
+    for (const field of EXTENSION_SELECTOR_FIELDS) {
+      const candidate = input[field];
+      if (typeof candidate === "string" && candidate) {
+        target = redactExtensionText(candidate).slice(0, 200);
+        break;
+      }
+    }
   }
   const startCursor = record.start_seq ?? record.seq;
   return {

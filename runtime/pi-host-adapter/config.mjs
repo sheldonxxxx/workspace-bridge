@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const ADAPTER_VERSION = "0.2.0";
+export const ADAPTER_VERSION = "0.3.1";
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 8780;
 export const DEFAULT_PI_BINARY = "pi";
@@ -179,6 +179,20 @@ export function isTrustedExtensionUsable(candidate) {
   }
 }
 
+// Built-ins hidden via --exclude-tools once third-party extensions are
+// enabled (3C2). Official Pi --tools is an allowlist across built-in AND
+// extension/custom tools, so managed sessions drop --tools then and hide
+// only: edit/write when write_tools_enabled=false; bash when
+// shell_mode=deny; powershell on macOS if applicable (never loaded by Pi
+// on macOS, excluded defensively).
+export function piRpcExcludesFor({ writable = false, shellMode = "deny" } = {}) {
+  const hidden = [];
+  if (!writable) hidden.push("edit", "write");
+  if (shellMode === "deny") hidden.push("bash");
+  hidden.push("powershell");
+  return hidden.join(",");
+}
+
 // Centralized spawn contract (3C1, v3):
 // - writable=false: read/grep/find/ls plus exactly one package-owned
 //   trusted extension (read policy is enforced in read-only mode too).
@@ -189,10 +203,24 @@ export function isTrustedExtensionUsable(candidate) {
 //   trusted extension is missing.
 // - piRpcArgv() stays as the legacy no-extension read-only argv, used only
 //   for the legacy no-policy compatibility path.
-export function piRpcArgvFor({ writable = false, shellMode = "deny" } = {}) {
+// - 3C2: extensionPaths (resolved native package roots) switches the
+//   managed argv to --exclude-tools with repeated explicit -e (trusted
+//   permission extension first, then enabled packages in deterministic
+//   inventory order). --no-extensions stays on; Bridge never sends a host
+//   path. With no enabled packages the 3C1 --tools argv is unchanged.
+export function piRpcArgvFor({ writable = false, shellMode = "deny", extensionPaths = [] } = {}) {
   const extension = trustedExtensionPath();
   if (!isTrustedExtensionUsable(extension)) {
     throw new Error("Trusted permission extension is unavailable");
+  }
+  const extra = Array.isArray(extensionPaths)
+    ? extensionPaths.filter((p) => typeof p === "string" && p)
+    : [];
+  if (extra.length) {
+    return ["--mode", "rpc",
+      "--exclude-tools", piRpcExcludesFor({ writable, shellMode }),
+      "--no-approve", "--no-extensions",
+      "-e", extension, ...extra.flatMap((p) => ["-e", p])];
   }
   const tools = [...(writable ? WRITABLE_TOOLS : READONLY_TOOLS)];
   if (shellMode !== "deny") tools.push("bash");

@@ -18,6 +18,7 @@ export const FINGERPRINT_MODULES = [
   "config.mjs",
   "server.mjs",
   "executions.mjs",
+  "extensions.mjs",
 ];
 
 function packageDir() {

@@ -201,9 +201,11 @@
               <p class="hint" id="pi-meta"></p>
               <p class="hint" id="pi-policy-status"></p>
               <p class="hint" id="pi-permission-status"></p>
+              <p class="hint" id="pi-extension-status"></p>
               <div class="actions">
                 <button type="button" id="open-pi-models" class="secondary">Manage Pi models</button>
                 <button type="button" id="open-pi-permissions" class="secondary">Manage permissions</button>
+                <button type="button" id="open-pi-extensions" class="secondary">Manage extensions</button>
               </div>
               <details>
                 <summary>Policy rules</summary>
@@ -261,6 +263,22 @@
                     <button type="button" id="pi-perm-restore" class="secondary">Restore safe defaults</button>
                     <button type="button" id="pi-perm-save">Save permission policy</button>
                     <button type="button" id="pi-perm-cancel" class="secondary">Cancel</button>
+                  </div>
+                </form>
+              </dialog>
+              <dialog id="pi-extensions-dialog" aria-label="Pi extension policy">
+                <form method="dialog">
+                  <span class="eyebrow">Pi runtime</span>
+                  <h2>Pi extensions</h2>
+                  <p class="hint" id="pi-ext-revision"></p>
+                  <p class="hint" id="pi-ext-warning">Warning: extension packages execute arbitrary native code with your macOS user authority and may access filesystem/network independent of Bridge file/shell policy. Enable only packages you trust.</p>
+                  <p class="hint" id="pi-ext-session-note">Changes apply to NEW Pi sessions only. Active sessions keep the snapshot they were created with.</p>
+                  <div id="pi-ext-list"></div>
+                  <p class="hint" id="pi-ext-empty" hidden>No installed extension packages found in the isolated Pi profile. Install packages with the Pi CLI first (for example: PI_CODING_AGENT_DIR=&lt;bridge-profile&gt; pi install npm:package-name), then press Refresh.</p>
+                  <div class="actions">
+                    <button type="button" id="pi-ext-refresh" class="secondary">Refresh</button>
+                    <button type="button" id="pi-ext-save">Save extension policy</button>
+                    <button type="button" id="pi-ext-cancel" class="secondary">Cancel</button>
                   </div>
                 </form>
               </dialog>

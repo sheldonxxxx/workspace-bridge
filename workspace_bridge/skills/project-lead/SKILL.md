@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, resumable permission decisions, execution-evidence audit, and current-source review; use general file tools within administrator-controlled write and agent policies.
-version: 2.0.0
+version: 2.1.0
 ---
 
 # Project lead
@@ -127,15 +127,23 @@ Read the original plan with `read_handoff`, then the final result with
 with general tools. Check every acceptance criterion and plausible regressions beyond
 the claimed file list.
 
-### Execution-evidence review (completed Pi coding runs, skill 2.0.0)
+### Execution-evidence review (completed Pi coding runs, skill 2.1.0)
 Bridge proves what Pi invoked/reported, not that a test result is
 semantically correct. For completed Pi runs:
 - inspect `execution_audit` in `read_agent_run` first (status, counts
   total/failed/shell/mutating, incomplete/gap indicator, enforcement
-  fingerprint);
+  fingerprint, active extension snapshot: extension revision plus the
+  id/name/version/fingerprint rows of every enabled package);
 - list executions with `list_agent_executions`;
 - read every failed execution and every material bash/edit/write detail
   with `read_agent_execution` before accepting the agent's claims;
+- material extension-tool executions are part of execution-evidence
+  review: their bounded generic input selectors and ~8 KiB result
+  previews are audit evidence, labeled potentially sensitive in detail
+  views; list views never carry result bodies;
+- extension packages are trusted native code, not constrained by
+  structured file/shell policy: an enabled extension tool executing
+  without a permission ask is expected, not a policy bypass;
 - still inspect current source/tests independently with general tools.
 If audit is incomplete, say so explicitly (status + reason) and treat
 claims as unaudited for the missing span. If audit is not_recorded

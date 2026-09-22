@@ -29,6 +29,7 @@ function fakeAdapter(projects) {
     abortSession: async () => true,
     listPermissions: async () => [],
     respondPermission: async () => ({ ok: true, decision: "once" }),
+    listExtensions: async () => ({ packages: [] }),
   };
 }
 
@@ -208,7 +209,8 @@ test("health advertises the permission capability without raw policy", async () 
   await withServer({ adapter: fakeAdapter(projects), piVersion: "0.86.1" }, async (base) => {
     const body = await (await fetch(`${base}/health`)).json();
     assert.deepEqual(body.capabilities,
-      { pending_snapshot: true, permission_response: true, execution_history: true });
+      { pending_snapshot: true, permission_response: true, execution_history: true,
+        extension_inventory: true });
     assert.ok(!JSON.stringify(body).includes("permission_policy"));
     assert.ok(!JSON.stringify(body).includes("/tmp"));
   });

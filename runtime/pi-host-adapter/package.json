@@ -1,6 +1,6 @@
 {
   "name": "workspace-bridge-pi-host-adapter",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Native macOS host adapter that owns read-only pi --mode rpc subprocesses for Workspace Bridge. Not a Compose service.",

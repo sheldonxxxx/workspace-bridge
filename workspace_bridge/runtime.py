@@ -136,6 +136,12 @@ class SessionInfo:
     adapter_version: str = ""
     pi_version: str = ""
     policy_revision: str = ""
+    # Pi 3C2 extension snapshot metadata (empty for OpenCode/legacy and
+    # for Pi sessions created without enabled extensions). The revision
+    # binds continuation; the snapshot rows carry id/name/version/
+    # fingerprint with no host paths.
+    extension_revision: str = ""
+    extensions: list = field(default_factory=list)
 
 
 @dataclass
@@ -192,6 +198,9 @@ class RuntimeCapabilities:
     question_response: bool = False
     session_branching: bool = False
     execution_history: bool = False
+    # 3C2: native extension inventory (GET /extensions). Pi implements
+    # it; OpenCode remains unsupported and unchanged.
+    extension_inventory: bool = False
 
 
 @dataclass
@@ -901,6 +910,7 @@ class HttpPiRuntime(AgentRuntime):
         question_response=False,
         session_branching=False,
         execution_history=True,
+        extension_inventory=True,
     )
 
     def __init__(self, base_url: str, token: str = "", *,
@@ -978,7 +988,8 @@ class HttpPiRuntime(AgentRuntime):
         # count as deployed support.
         deployed = {"pending_snapshot": caps.get("pending_snapshot") is True,
                     "permission_response": caps.get("permission_response") is True,
-                    "execution_history": caps.get("execution_history") is True}
+                    "execution_history": caps.get("execution_history") is True,
+                    "extension_inventory": caps.get("extension_inventory") is True}
         fingerprint = value.get("enforcement_fingerprint")
         out: dict[str, Any] = {"ok": bool(value.get("ok")),
                 "version": _bounded(value.get("pi_version"), 80),
@@ -989,7 +1000,8 @@ class HttpPiRuntime(AgentRuntime):
                 "deployed_capabilities": deployed,
                 "permissions_supported": bool(deployed["pending_snapshot"]
                                               and deployed["permission_response"]),
-                "execution_supported": bool(deployed["execution_history"])}
+                "execution_supported": bool(deployed["execution_history"]),
+                "extension_inventory_supported": bool(deployed["extension_inventory"])}
         if isinstance(fingerprint, str) and len(fingerprint) == 64:
             out["enforcement_fingerprint"] = fingerprint
         return out
@@ -1024,6 +1036,46 @@ class HttpPiRuntime(AgentRuntime):
         if not self._deployed_execution_supported():
             raise RuntimeUnsupported("Pi adapter does not support execution history")
 
+    def _deployed_extension_inventory_supported(self) -> bool:
+        """Whether the CONNECTED adapter serves extension inventory.
+
+        Probed via /health; any probe failure or missing capability fails
+        closed to False. Old adapters (no capability block) are never
+        treated as inventory-capable.
+        """
+        try:
+            return bool(self.health().get("extension_inventory_supported"))
+        except (RuntimeUnavailable, RuntimeRejected, RuntimeUnsupported):
+            return False
+
+    def _require_extension_inventory_supported(self) -> None:
+        if not self._deployed_extension_inventory_supported():
+            raise RuntimeUnsupported("Pi adapter does not support extension inventory")
+
+    def list_extensions(self) -> list[dict]:
+        """Bounded native extension inventory (3C2).
+
+        Token-authenticated GET /extensions (global, no workspace path).
+        Requires deployed adapter support first; old adapters fail cleanly
+        with RuntimeUnsupported. Rows are strictly normalized here: only
+        bounded id/name/version/extension declarations/fingerprints and
+        supported/reason flags cross this boundary. No host paths,
+        agentDir, tokens, settings fields, file contents, or dependency
+        lists are ever carried.
+        """
+        from .pi_extensions import normalize_inventory_row
+        self._require_extension_inventory_supported()
+        value = self._request("GET", "/extensions", timeout=self.connect_timeout)
+        rows = value.get("packages") if isinstance(value, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeUnavailable("Pi extension list was invalid")
+        result: list[dict] = []
+        for row in rows[:200]:
+            normalized = normalize_inventory_row(row)
+            if normalized is not None:
+                result.append(normalized)
+        return result
+
     def list_models(self, directory: str | None = None) -> list[ModelInfo]:
         # Workspace-scoped discovery: the adapter resolves Pi configuration
         # per workspace directory. Fail closed without one.
@@ -1054,6 +1106,8 @@ class HttpPiRuntime(AgentRuntime):
         # permission policy (v3). The exact policy snapshot + revision
         # travel in the internal session-creation body (never MCP). options
         # carries {"permission_policy": {...}, "policy_revision": "..."}.
+        # 3C2: the extension policy snapshot + revision travel alongside
+        # ({"extension_policy": {...}, "extension_revision": "..."}).
         body: dict[str, Any] = {"directory": directory, "title": title}
         if options:
             snapshot = options.get("permission_policy")
@@ -1061,6 +1115,11 @@ class HttpPiRuntime(AgentRuntime):
             if isinstance(snapshot, dict) and isinstance(revision, str) and revision:
                 body["permission_policy"] = snapshot
                 body["policy_revision"] = revision
+            ext_snapshot = options.get("extension_policy")
+            ext_revision = options.get("extension_revision")
+            if isinstance(ext_snapshot, dict) and isinstance(ext_revision, str) and ext_revision:
+                body["extension_policy"] = ext_snapshot
+                body["extension_revision"] = ext_revision
         # Every managed v3 session loads the trusted permission extension
         # and requires BOTH deployed permission and execution-history
         # support BEFORE any session exists, so normal sessions cannot
@@ -1068,9 +1127,16 @@ class HttpPiRuntime(AgentRuntime):
         # no session is created (never a silent unmanaged fallback). Only
         # legacy no-policy creation stays compatible and reports
         # not_recorded downstream.
+        # 3C2: a managed session with a non-empty enabled extension set
+        # additionally requires deployed extension-inventory support, so
+        # configured extensions are never silently omitted. An empty
+        # extension set keeps the old 3C1 compatibility behavior.
         if isinstance(body.get("permission_policy"), dict):
             self._require_permissions_supported()
             self._require_execution_supported()
+            ext_body = body.get("extension_policy")
+            if isinstance(ext_body, dict) and len(ext_body.get("enabled") or []) > 0:
+                self._require_extension_inventory_supported()
         value = self._request("POST", "/sessions", body=body)
         session = value.get("session") if isinstance(value, dict) else None
         if not isinstance(session, dict) or not session.get("id"):
@@ -1080,6 +1146,26 @@ class HttpPiRuntime(AgentRuntime):
             fingerprint = value.get("enforcement_fingerprint") if isinstance(value, dict) else ""
         if not isinstance(fingerprint, str):
             fingerprint = ""
+        ext_revision_out = session.get("extension_revision")
+        if not isinstance(ext_revision_out, str):
+            ext_revision_out = ""
+        ext_snapshot_out = session.get("extensions")
+        if not isinstance(ext_snapshot_out, list):
+            ext_snapshot_out = []
+        bounded_snapshot = []
+        for row in ext_snapshot_out[:64]:
+            if not isinstance(row, dict):
+                continue
+            ident = row.get("id") if isinstance(row.get("id"), str) else ""
+            if not ident:
+                continue
+            bounded_snapshot.append({
+                "id": ident[:218],
+                "name": row.get("name")[:214] if isinstance(row.get("name"), str) else "",
+                "version": row.get("version")[:80] if isinstance(row.get("version"), str) else "",
+                "fingerprint": row.get("fingerprint")[:64]
+                if isinstance(row.get("fingerprint"), str) else "",
+            })
         return SessionInfo(id=_bounded(session["id"], 200),
                            directory=_bounded(session.get("directory"), 1024),
                            title=_bounded(session.get("title"), 200),
@@ -1088,7 +1174,9 @@ class HttpPiRuntime(AgentRuntime):
                                                     or (value.get("adapter_version") if isinstance(value, dict) else ""), 40),
                            pi_version=_bounded(session.get("pi_version")
                                                or (value.get("pi_version") if isinstance(value, dict) else ""), 80),
-                           policy_revision=_bounded(session.get("policy_revision") or "", 64))
+                           policy_revision=_bounded(session.get("policy_revision") or "", 64),
+                           extension_revision=_bounded(ext_revision_out, 64),
+                           extensions=bounded_snapshot)
 
     # Deployed capability negotiation (see _require_permissions_supported):
     # permission list/respond require the connected adapter to advertise

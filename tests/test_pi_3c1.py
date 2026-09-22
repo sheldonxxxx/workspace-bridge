@@ -502,7 +502,11 @@ def test_evidence_bounds_no_read_contents():
     assert len(bash_out["output_preview"]) == 32768
     assert bash_out["truncated"] is True
     unknown = sanitize_input_summary("powershell", {"command": "ls"})
-    assert unknown == {"error": "unknown_tool"}
+    # 3C2: non-managed tools carry bounded generic extension evidence
+    # (hash/size/keys + safe selectors), never raw args or unknown_tool.
+    assert unknown["args_sha256"] and len(unknown["args_sha256"]) == 64
+    assert unknown["top_keys"] == ["command"]
+    assert "ls" not in json.dumps(unknown)
     row = {"tool_call_id": "c", "seq": 1, "tool": "bash", "state": "completed",
            "started": None, "ended": None, "duration_ms": 1,
            "input_summary": json.dumps({"command": "ls"}),

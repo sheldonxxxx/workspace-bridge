@@ -613,6 +613,53 @@ dialog::backdrop {
   gap:8px;
   align-items:center;
 }
+#pi-ext-list {
+  max-height:min(46vh,420px);
+  overflow:auto;
+  margin:18px 0;
+  background:var(--page);
+  border:1px solid var(--line);
+  border-radius:8px;
+}
+.pi-ext-row {
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  margin:0;
+  padding:10px 12px;
+  font-size:13px;
+  font-weight:400;
+  border-bottom:1px solid var(--line);
+  cursor:pointer;
+}
+.pi-ext-row:last-child {
+  border-bottom:0;
+}
+.pi-ext-row:hover {
+  background:var(--raised);
+}
+.pi-ext-row input[type=checkbox] {
+  flex:0 0 auto;
+  margin:2px 0 0;
+}
+.pi-ext-info {
+  min-width:0;
+}
+.pi-ext-info strong {
+  display:block;
+  overflow-wrap:anywhere;
+}
+.pi-ext-info .muted {
+  margin-top:4px;
+  overflow-wrap:anywhere;
+}
+.pi-ext-row.is-disabled {
+  opacity:.6;
+  cursor:default;
+}
+.pi-ext-row.is-disabled:hover {
+  background:transparent;
+}
 .output-panel {
   position:fixed;
   inset:8vh 4vw 8vh auto;

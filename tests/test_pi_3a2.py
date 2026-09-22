@@ -135,9 +135,11 @@ def test_pi_health_models_and_session_calls(monkeypatch):
                       "locked": False, "instance": "pi-1", "status": "ok",
                       "deployed_capabilities": {"pending_snapshot": False,
                                                 "permission_response": False,
-                                                "execution_history": False},
+                                                "execution_history": False,
+                                                "extension_inventory": False},
                       "permissions_supported": False,
-                      "execution_supported": False}
+                      "execution_supported": False,
+                      "extension_inventory_supported": False}
     blob = json.dumps(health)
     assert "token" not in blob.lower() and "/projects" not in blob and "sessions" not in blob
     models = runtime.list_models("/projects/alpha")

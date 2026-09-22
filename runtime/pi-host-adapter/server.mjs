@@ -129,7 +129,7 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
       sessions: adapter ? adapter.sessionCount : 0,
       capabilities: {
         pending_snapshot: true, permission_response: true,
-        execution_history: true,
+        execution_history: true, extension_inventory: true,
       },
       ...(fingerprint ? { enforcement_fingerprint: fingerprint } : {}),
     };
@@ -158,6 +158,15 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
         return send(res, 200, { models, scope: "global" });
       }
 
+      // 3C2 bounded native extension inventory (token-authenticated,
+      // global: no workspace path). Bounded rows only; never host
+      // paths, agentDir, tokens, settings fields, file contents, or
+      // dependency lists.
+      if (url.pathname === "/extensions" && req.method === "GET") {
+        const inventory = adapter.listExtensions();
+        return send(res, 200, { packages: inventory.packages, scope: "global" });
+      }
+
       if (segments[0] === "sessions") {
         const sessionId = segments[1] ? decodeURIComponent(segments[1]) : "";
         if (req.method === "POST" && segments.length === 1) {
@@ -172,6 +181,14 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
           }
           if (body.policy_revision !== undefined) {
             options.policy_revision = body.policy_revision;
+          }
+          // 3C2 extension policy snapshot fields; arbitrary body fields
+          // are never forwarded.
+          if (body.extension_policy !== undefined) {
+            options.extension_policy = body.extension_policy;
+          }
+          if (body.extension_revision !== undefined) {
+            options.extension_revision = body.extension_revision;
           }
           const session = await adapter.createSession(
             directory, String(body.title || "Workspace Bridge run"), options);

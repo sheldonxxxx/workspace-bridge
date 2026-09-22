@@ -36,9 +36,68 @@ pi --mode rpc --tools read,grep,find,ls --no-approve --no-extensions
   permissions, so they stay off for this read-only spike even though the tool
   allowlist alone would constrain tool names.
 
-Later permission integration will deliberately revisit `--no-extensions` when
-a trusted Workspace Bridge permission extension is introduced; until then the
-flag stays on and no extension is added.
+## Managed extension set (3C2, adapter 0.3.0)
+
+The isolated Bridge profile (`PI_CODING_AGENT_DIR`) may hold user-scope npm
+packages installed with the Pi CLI:
+
+```sh
+PI_CODING_AGENT_DIR="$HOME/.pi/workspace-bridge" pi install npm:pi-web-access
+```
+
+The web manager lists installed packages that provide extension resources
+and lets the local admin enable/disable each package for NEW Bridge
+sessions (default: none enabled; newly installed code is never
+auto-enabled). Token-authenticated `GET /extensions` exposes the bounded
+native inventory (no host paths); `GET /health` advertises the
+`extension_inventory` capability.
+
+Managed sessions keep `--no-extensions` (auto-discovery stays off) and
+load the package-owned trusted permission extension first, then each
+enabled package root via repeated explicit `-e`. A manifest entry that
+resolves to a directory follows Pi 0.86.1's verified explicit-loader
+rule (empirically confirmed with marker fixtures, no provider): the
+directory loads `<dir>/index.ts`, else `<dir>/index.js`, else
+`<dir>/package.json` `main` limited to same-directory files; subpath
+mains, `index.mjs`, and main-less/index-less directories load nothing.
+This is why e.g. `pi.extensions: ["./dist"]` with `dist/index.js`
+(a real installed package shape) is accepted and inventoried as
+`dist/index.js`. Because official Pi
+`--tools` allowlists extension tools too, sessions with enabled packages
+drop `--tools` and hide built-ins with `--exclude-tools` instead
+(edit/write unless writable; bash when shell is denied; powershell
+defensively), so extension tools stay available. Session creation fails
+clearly when an enabled package disappeared or its manifest is invalid;
+enabled packages are never silently skipped.
+
+Trust semantics: enabled extension packages execute native code with the
+macOS user's authority; Bridge file/shell policy is NOT a sandbox for
+extension internals or extension tools. Extension-tool executions are
+audited with bounded generic evidence (args hash/size/keys + redacted
+safe selectors; ~8 KiB redacted result preview) and never ask for Bridge
+permission. Redaction is conservative best-effort, not perfect secret
+detection; detail views stay labeled potentially sensitive.
+
+## Tool availability notes (Pi 0.86.1, verified locally)
+
+Pi's RPC surface enumerates commands, skills, and prompts
+(`get_commands`) but exposes NO route to enumerate registered tools, so
+a provider-free check cannot prove a specific extension tool is callable.
+The adapter test suite proves instead that a fixture package root loads
+through the managed flags (`--no-extensions -e <root> --exclude-tools …`)
+and that its command registration is visible via `get_commands`.
+
+Post-deploy smoke requirement (after restart, before trusting the
+extension set): exercise one REAL tool from each enabled extension
+package in a scratch session and confirm its execution appears in the
+Bridge execution audit with the expected extension snapshot.
+
+Provider-free real-profile check (read-only; modifies nothing
+installed): `WB_REAL_PROFILE_CHECK=1 npm test` additionally validates
+the real isolated-profile inventory (e.g. installed `pi-web-access`
+resolves supported with contained relative markers) and launches Pi
+with the managed flags against the real package root, asserting the
+session starts with no extension load error.
 
 ## Protocol notes (pi 0.86.1, verified locally)
 

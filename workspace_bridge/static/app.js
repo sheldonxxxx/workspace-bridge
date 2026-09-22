@@ -115,6 +115,23 @@ function renderRuntime(status) {
     }
     $("pi-permission-status").textContent = permText;
   }
+  const piExts = (status.runtime_extensions && status.runtime_extensions.pi) || null;
+  if ($("pi-extension-status")) {
+    let extText;
+    if (!piExts) {
+      extText = "Extensions: loading…";
+    } else {
+      const installed = piExts.installed_count;
+      const installedText = (installed === null || installed === undefined) ? "?" : String(installed);
+      extText = `Extensions: ${piExts.enabled_count} enabled · ${installedText} installed`;
+      if (piExts.extension_revision_prefix) {
+        extText += ` · rev ${piExts.extension_revision_prefix}`;
+      }
+      if (!piExts.ready) extText += " · adapter update required";
+      extText += " · new sessions only";
+    }
+    $("pi-extension-status").textContent = extText;
+  }
 }
 
 // Pi file permission policy lives in a dedicated <dialog>: structured
@@ -372,6 +389,106 @@ async function savePiPermissions() {
   if (dialog && typeof dialog.close === "function") dialog.close();
   await refresh();
   message(`Pi permission policy saved (rev ${String(saved.policy_revision || "").slice(0, 12)}). New Pi sessions only.`);
+}
+
+// Pi extension policy lives in a dedicated <dialog>: one row per installed
+// extension package, no raw JSON, structured DOM creation only. Draft state is kept in
+// module vars so Cancel/close discards it; only Save posts to the server.
+// There are no install/update/remove controls in this milestone.
+let piExtCurrent = null;
+let piExtDraft = null;
+function renderPiExtensions() {
+  const draft = piExtDraft;
+  const box = $("pi-ext-list");
+  if (!draft || !box) return;
+  box.replaceChildren();
+  const rows = draft.inventory || [];
+  $("pi-ext-empty").hidden = rows.length !== 0;
+  for (const row of rows) {
+    const line = node("label", undefined, row.supported ? "pi-ext-row" : "pi-ext-row is-disabled");
+    const toggle = node("input");
+    toggle.type = "checkbox";
+    toggle.checked = draft.enabled.has(row.id);
+    toggle.disabled = !row.supported;
+    toggle.setAttribute("aria-label", `Enable ${row.id} for new Bridge sessions`);
+    const info = node("div", undefined, "pi-ext-info");
+    const title = node("strong", row.name || row.id);
+    info.append(title);
+    const meta = node("p",
+      `${row.id} · v${row.version || "?"} · ` +
+      (row.supported
+        ? (row.extension_count
+          ? `${row.extension_count} extension declaration${row.extension_count === 1 ? "" : "s"}`
+          : "conventional extensions/ marker")
+        : `not toggleable (${row.reason || "unsupported"})`),
+      "muted");
+    info.append(meta);
+    if (row.supported && row.extensions && row.extensions.length) {
+      info.append(node("p", `Declares: ${row.extensions.slice(0, 8).join(", ")}`, "muted"));
+    }
+    toggle.onchange = () => {
+      if (toggle.checked) draft.enabled.add(row.id);
+      else draft.enabled.delete(row.id);
+    };
+    line.append(toggle, info);
+    box.append(line);
+  }
+  if (piExtCurrent) {
+    $("pi-ext-revision").textContent =
+      `Revision ${String(piExtCurrent.extension_revision || "").slice(0, 12)} · ${piExtCurrent.session_note || "Applies to new Pi sessions only."}`;
+  }
+}
+async function loadPiExtensions() {
+  const data = await api("/api/runtimes/pi/extensions");
+  piExtCurrent = data;
+  piExtDraft = {
+    enabled: new Set((data.policy && data.policy.enabled) || []),
+    inventory: (data.inventory || []).slice(0, 200),
+  };
+  renderPiExtensions();
+  // Enabled IDs missing from live inventory are reported (the server
+  // rejects them on save instead of silently broadening or dropping).
+  const missing = [...piExtDraft.enabled].filter((id) =>
+    !piExtDraft.inventory.some((row) => row.id === id));
+  if (missing.length) {
+    message(`Enabled but not installed (save will fail until removed or reinstalled): ${missing.join(", ")}`);
+  }
+}
+async function openPiExtensions() {
+  try {
+    await loadPiExtensions();
+  } catch (e) { message(e.message); return; }
+  const dialog = $("pi-extensions-dialog");
+  if (dialog && typeof dialog.showModal === "function") dialog.showModal();
+  else message("This browser does not support the extension management dialog.");
+}
+async function savePiExtensions() {
+  if (!piExtDraft) return;
+  const draft = piExtDraft;
+  const current = (piExtCurrent && piExtCurrent.policy && piExtCurrent.policy.enabled) || [];
+  const enabled = [...draft.enabled];
+  const added = enabled.filter((id) => !current.includes(id));
+  const removed = current.filter((id) => !enabled.includes(id));
+  const changes = [];
+  for (const id of added) changes.push(`Enable ${id} for NEW Bridge sessions.`);
+  for (const id of removed) changes.push(`Disable ${id} for NEW Bridge sessions.`);
+  const warning = "Extension packages execute arbitrary native code with your macOS user authority " +
+    "and may access filesystem/network independent of Bridge file/shell policy. Enable only packages you trust.\n" +
+    "Save applies to NEW sessions only; active sessions keep their snapshot.\n" +
+    (changes.length ? "Changes:\n- " + changes.join("\n- ") : "No changes compared to the current policy.");
+  if (!confirm(`Save Pi extension policy?\n\n${warning}`)) return;
+  const saved = await api("/api/runtimes/pi/extensions", "POST",
+    {version: 1, enabled});
+  piExtCurrent = saved;
+  piExtDraft = {
+    enabled: new Set((saved.policy && saved.policy.enabled) || []),
+    inventory: piExtDraft.inventory,
+  };
+  renderPiExtensions();
+  const dialog = $("pi-extensions-dialog");
+  if (dialog && typeof dialog.close === "function") dialog.close();
+  await refresh();
+  message(`Pi extension policy saved (rev ${String(saved.extension_revision || "").slice(0, 12)}). New Pi sessions only.`);
 }
 
 // Model management lives in a lazily loaded <dialog>: the main page shows
@@ -777,6 +894,10 @@ $("refresh").onclick = () => refresh().catch(e=>message(e.message));
 $("open-models").onclick = () => openModels("opencode").catch(e=>message(e.message));
 $("open-pi-models").onclick = () => openModels("pi").catch(e=>message(e.message));
 $("open-pi-permissions").onclick = () => openPiPermissions().catch(e=>message(e.message));
+$("open-pi-extensions").onclick = () => openPiExtensions().catch(e=>message(e.message));
+$("pi-ext-refresh").onclick = () => loadPiExtensions().catch(e=>message(e.message));
+$("pi-ext-save").onclick = () => savePiExtensions().catch(e=>message(e.message));
+$("pi-ext-cancel").onclick = () => { const dialog = $("pi-extensions-dialog"); if (dialog && typeof dialog.close === "function") dialog.close(); };
 $("pi-perm-reload").onclick = () => loadPiPermissions().catch(e=>message(e.message));
 $("pi-perm-restore").onclick = () => {
   if (!piPermCurrent) return;

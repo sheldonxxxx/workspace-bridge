@@ -24,7 +24,14 @@
 import { spawn } from "node:child_process";
 
 import { SHELL_TOOL, SUPPORTED_TOOLS } from "./policy.mjs";
-import { summarizeInput, summarizeResult } from "./executions.mjs";
+import { summarizeExtensionInput, summarizeExtensionResult, summarizeInput, summarizeResult } from "./executions.mjs";
+
+// Managed Bridge built-ins governed by file/shell policy. Any other tool
+// name belongs to an explicitly enabled third-party extension (trusted
+// native code, not constrained by structured file/shell policy).
+export function isManagedTool(toolName) {
+  return toolName === SHELL_TOOL || SUPPORTED_TOOLS.includes(toolName);
+}
 
 export const RPC_TIMEOUT_MS = 30000;
 export const MAX_LINE_BYTES = 1024 * 1024;
@@ -79,14 +86,22 @@ export function normalizeToolStart(message) {
       : { path: null };
   }
   // Separate audit path: bounded tool-specific evidence, never raw args.
+  // Managed tools keep their tool-specific summaries; explicitly enabled
+  // third-party extension tools carry the bounded generic extension
+  // summary (hash/size/keys + safe selectors), never arbitrary args.
   let auditInput = {};
   try {
-    const { ok, summary } = summarizeInput(toolName, args ?? {});
-    auditInput = ok ? summary : summary;
-    if (!ok && (toolName === SHELL_TOOL || SUPPORTED_TOOLS.includes(toolName))) {
-      // Preserve the failure marker; evaluation already fails closed.
-    } else if (!ok) {
-      auditInput = { error: "unknown_tool" };
+    if (isManagedTool(toolName)) {
+      const { ok, summary } = summarizeInput(toolName, args ?? {});
+      auditInput = ok ? summary : summary;
+      if (!ok && (toolName === SHELL_TOOL || SUPPORTED_TOOLS.includes(toolName))) {
+        // Preserve the failure marker; evaluation already fails closed.
+      } else if (!ok) {
+        auditInput = { error: "unknown_tool" };
+      }
+    } else {
+      const { ok, summary } = summarizeExtensionInput(args ?? {});
+      auditInput = ok ? summary : { error: "malformed_input" };
     }
   } catch {
     auditInput = { error: "malformed_input" };
@@ -109,8 +124,10 @@ export function normalizeToolUpdate(message) {
   try {
     const result = message.partialResult ?? message.result ?? message.preview ?? message.data ?? null;
     const isError = message.isError === true;
-    if (toolName) {
+    if (toolName && isManagedTool(toolName)) {
       preview = summarizeResult(toolName, result, isError);
+    } else if (toolName) {
+      preview = summarizeExtensionResult(result, isError);
     } else {
       preview = { is_error: isError };
     }
@@ -131,8 +148,10 @@ export function normalizeToolEnd(message) {
   const isError = message.isError === true;
   let auditResult = { is_error: isError };
   try {
-    if (toolName) {
+    if (toolName && isManagedTool(toolName)) {
       auditResult = summarizeResult(toolName, message.result, isError);
+    } else if (toolName) {
+      auditResult = summarizeExtensionResult(message.result, isError);
     } else {
       // Without a tool name the journal cannot attribute evidence;
       // record only the error bit, never the raw result.
@@ -178,7 +197,8 @@ let nextId = 1;
 export class PiRpcProcess {
   constructor({ binary, cwd, agentDir, extraEnv = {}, spawnFn = spawn,
                 timeoutMs = RPC_TIMEOUT_MS, maxLineBytes = MAX_LINE_BYTES,
-                onEvent = null, extensionPath = null, tools = null }) {
+                onEvent = null, extensionPath = null, extensionPaths = null,
+                tools = null, excludeTools = null }) {
     this.binary = binary;
     this.cwd = cwd;
     this.agentDir = agentDir;
@@ -192,9 +212,22 @@ export class PiRpcProcess {
     this.onEvent = typeof onEvent === "function" ? onEvent : null;
     // Explicit tool allowlist for this child ("read,grep,find,ls" or the
     // writable set). The adapter sets it from the session snapshot;
-    // direct constructions default to the read-only set.
-    this.tools = typeof tools === "string" && tools ? tools : "read,grep,find,ls";
+    // direct constructions default to the read-only set. A null allowlist
+    // means no --tools flag: used with --exclude-tools once third-party
+    // extensions are enabled, so extension tools stay available.
+    this.tools = typeof tools === "string" && tools ? tools : null;
+    if (this.tools === null && tools === undefined) this.tools = "read,grep,find,ls";
+    // Denylist for built-ins that must stay hidden while extension tools
+    // remain available (3C2). Null/empty means no --exclude-tools flag.
+    this.excludeTools = typeof excludeTools === "string" && excludeTools ? excludeTools : null;
     this.extensionPath = typeof extensionPath === "string" && extensionPath ? extensionPath : null;
+    // Ordered explicit extension loading: the package-owned trusted
+    // permission extension first, then enabled package roots. Repeated
+    // explicit -e with --no-extensions keeps auto-discovery off.
+    const extra = Array.isArray(extensionPaths)
+      ? extensionPaths.filter((p) => typeof p === "string" && p)
+      : [];
+    this.extensionPaths = this.extensionPath ? [this.extensionPath, ...extra] : extra;
     this.child = null;
     this.pending = new Map();
     // Raw-byte frame accumulator: bytes are split on LF before any UTF-8
@@ -217,12 +250,22 @@ export class PiRpcProcess {
     //   writable: + edit/write + extension), project trust/extensions out;
     // - only the legacy no-policy path spawns without an extension.
     //   No bash in either mode.
+    // 3C2: once third-party extensions are enabled the allowlist is
+    // dropped (official Pi --tools allowlists extension tools too) and
+    // built-in exposure uses --exclude-tools instead; --no-extensions
+    // stays on with repeated explicit -e (trusted first, then enabled
+    // package roots in deterministic inventory order).
     const base = ["--mode", "rpc"];
-    if (this.extensionPath) {
-      return [...base, "--tools", this.tools,
-        "--no-approve", "--no-extensions", "-e", this.extensionPath];
+    if (this.excludeTools) {
+      const head = [...base, "--exclude-tools", this.excludeTools,
+        "--no-approve", "--no-extensions"];
+      for (const ext of this.extensionPaths) head.push("-e", ext);
+      return head;
     }
-    return [...base, "--tools", this.tools, "--no-approve", "--no-extensions"];
+    const head = [...base, "--tools", this.tools || "read,grep,find,ls",
+      "--no-approve", "--no-extensions"];
+    for (const ext of this.extensionPaths) head.push("-e", ext);
+    return head;
   }
 
   get alive() {

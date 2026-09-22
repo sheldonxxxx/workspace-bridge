@@ -577,7 +577,7 @@ def test_ui_has_pi_card_workspace_picker_and_neutral_labels():
 
 def test_skill_prefers_neutral_workflow_and_pins_version():
     from workspace_bridge.embedded_skill import SKILL_VERSION, read_project_lead_skill
-    assert SKILL_VERSION == "2.0.0"
+    assert SKILL_VERSION == "2.1.0"
     content = read_project_lead_skill()["content"]
     for fragment in ("list_agent_models", "start_agent_run", "read_agent_run",
                      "respond_agent_permission", "silent", "OpenCode",

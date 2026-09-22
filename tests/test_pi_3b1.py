@@ -626,9 +626,11 @@ def test_health_normalizes_deployed_capabilities(monkeypatch):
     health = HttpPiRuntime("http://127.0.0.1:8780").health()
     assert health["deployed_capabilities"] == {"pending_snapshot": True,
                                                "permission_response": True,
-                                               "execution_history": True}
+                                               "execution_history": True,
+                                               "extension_inventory": False}
     assert health["permissions_supported"] is True
     assert health["execution_supported"] is True
+    assert health["extension_inventory_supported"] is False
     blob = json.dumps(health)
     assert "token" not in blob.lower() and "permission_policy" not in blob
     # Pre-3C1 adapter without the block: all default False.
@@ -636,9 +638,11 @@ def test_health_normalizes_deployed_capabilities(monkeypatch):
     legacy = HttpPiRuntime("http://127.0.0.1:8780").health()
     assert legacy["deployed_capabilities"] == {"pending_snapshot": False,
                                                "permission_response": False,
-                                               "execution_history": False}
+                                               "execution_history": False,
+                                               "extension_inventory": False}
     assert legacy["permissions_supported"] is False
     assert legacy["execution_supported"] is False
+    assert legacy["extension_inventory_supported"] is False
     # Malformed or partial capabilities shapes fail closed to False, and
     # the normalized block carries strict booleans only.
     for bad in ({"capabilities": None}, {"capabilities": ["x"]},
@@ -651,8 +655,9 @@ def test_health_normalizes_deployed_capabilities(monkeypatch):
         parsed = HttpPiRuntime("http://127.0.0.1:8780").health()
         assert parsed["permissions_supported"] is False, bad
         assert parsed["execution_supported"] is False, bad
+        assert parsed["extension_inventory_supported"] is False, bad
         assert set(parsed["deployed_capabilities"]) == {"pending_snapshot", "permission_response",
-                                                        "execution_history"}
+                                                        "execution_history", "extension_inventory"}
         assert all(isinstance(v, bool)
                    for v in parsed["deployed_capabilities"].values())
 
@@ -783,7 +788,7 @@ def test_pi_unsupported_question_is_not_applicable(pi_env):
 
 def test_skill_version_bumped_and_workflow_neutral():
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert SKILL_VERSION == "2.0.0"
+    assert SKILL_VERSION == "2.1.0"
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
     skill = (root / "workspace_bridge" / "skills" / "project-lead" / "SKILL.md").read_text()
     assert "web-admin configured" in skill

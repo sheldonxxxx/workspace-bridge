@@ -703,6 +703,11 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     # secrets).
                     "runtime_permissions": {"pi": await run_in_threadpool(
                         service.pi_permission_status)},
+                    # Additive 3C2: Pi extension policy summary
+                    # (installed/enabled counts + revision prefix/readiness
+                    # only; no package names, versions, or paths).
+                    "runtime_extensions": {"pi": await run_in_threadpool(
+                        service.pi_extension_status)},
                     "agent_execution": {"control": "local manager only", "default": "disabled",
                                         "note": "Independent from write_scope; MCP cannot enable it."},
                     "tunnel_status": "Not observed by this service; check tunnel-client doctor /ui", "state_path": str(service.state)})
@@ -826,6 +831,37 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     except BridgeError as exc:
                         return JSONResponse({"error": str(exc) or "Invalid policy"}, 400)
                     return JSONResponse(saved)
+                if leaf == "extensions":
+                    # 3C2: Pi extension policy (v1). GET returns the
+                    # effective policy + revision + bounded live native
+                    # inventory + new-session note. POST saves the FULL
+                    # v1 enabled-ID list validated against the live
+                    # inventory (duplicates/unknown/not-installed/
+                    # non-extension IDs rejected; unavailable inventory
+                    # fails the save). No MCP mutation path:
+                    # local-admin only. Other runtimes fail cleanly as
+                    # unsupported.
+                    if runtime_id != "pi":
+                        return JSONResponse({"error": "Extension policy is not supported "
+                                                      f"for runtime {runtime_id!r}"}, 404)
+                    if request.method == "GET":
+                        try:
+                            return JSONResponse(await run_in_threadpool(
+                                service.pi_extension_view))
+                        except BridgeError as exc:
+                            return JSONResponse({"error": str(exc) or "Inventory unavailable"}, 400)
+                    if request.method != "POST":
+                        return JSONResponse({"error": "Method not allowed here"}, 405)
+                    try:
+                        raw = await body_json(request)
+                    except BridgeError as exc:
+                        return JSONResponse({"error": str(exc) or "Invalid request"}, 400)
+                    try:
+                        saved = await run_in_threadpool(
+                            service.set_pi_extension_policy, raw)
+                    except BridgeError as exc:
+                        return JSONResponse({"error": str(exc) or "Invalid policy"}, 400)
+                    return JSONResponse(saved)
                 return JSONResponse({"error": "Unknown runtime route"}, 404)
             if path.startswith("/api/runs/"):
                 parts = [p for p in path.split("/") if p]
@@ -913,6 +949,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/runtimes/{runtime}/models", api),
         Route("/api/runtimes/{runtime}/model-policy", api, methods=["GET", "POST"]),
         Route("/api/runtimes/{runtime}/permission-policy", api, methods=["GET", "POST"]),
+        Route("/api/runtimes/{runtime}/extensions", api, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", api), Route("/api/runs/{run_id}/session", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
         Route("/api/runs/{run_id}/requests/{request_id}", api, methods=["POST"]),

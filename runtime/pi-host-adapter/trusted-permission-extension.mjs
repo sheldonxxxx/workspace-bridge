@@ -27,12 +27,27 @@
 //
 // v3 has no fixed filesystem denies and no command rule list. Any internal
 // failure fails closed (blocks the call).
+//
+// 3C2 third-party extensions: this hook governs ONLY Bridge-managed
+// built-ins (read/grep/find/ls/edit/write/bash). Any other tool name was
+// registered by an explicitly enabled extension package: Bridge file/shell
+// policy is NOT a sandbox for extension internals or extension tools, and
+// enabled extension packages execute native code with the macOS user's
+// authority (filesystem/network access independent of Bridge file/shell
+// policy). Such calls require a credible toolCallId for audit correlation
+// and are otherwise allowed through as trusted extension capabilities:
+// no file/shell evaluator runs for them and they are never blocked as
+// unknown. A missing/empty toolCallId fails closed.
 import { evaluateToolCall, validatePolicy } from "./policy.mjs";
 
 export const MARKER_PREFIX = "WB_PERMISSION_V1:";
 export const OPTION_ONCE = "Allow once";
 export const OPTION_ALWAYS = "Always allow exact target this session";
 export const OPTION_REJECT = "Reject";
+
+// Bridge-managed built-ins governed by file/shell policy. Everything else
+// is a third-party extension tool (see above).
+export const MANAGED_TOOLS = ["read", "grep", "find", "ls", "edit", "write", "bash"];
 
 function loadSnapshot() {
   const raw = process.env.WB_PI_POLICY_JSON || "";
@@ -69,6 +84,13 @@ export default function (pi) {
       }
       if (!toolCallId) {
         return { block: true, reason: "Permission correlation unavailable; failing closed" };
+      }
+      if (!MANAGED_TOOLS.includes(toolName)) {
+        // Explicitly enabled third-party extension capability: trusted
+        // native code, not constrained by structured file/shell policy.
+        // Allowed through without a permission ask; audit correlation
+        // uses the credible toolCallId above.
+        return undefined;
       }
       // v3: no fixed filesystem denies, no command rules; ordinary
       // configurable policy + shell_mode govern.

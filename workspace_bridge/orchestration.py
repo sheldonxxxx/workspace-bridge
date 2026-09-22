@@ -79,7 +79,8 @@ RUN_COLUMNS = ("id,workspace,runtime,job,request_id,request_hash,parent_run,sess
                "error_code,error_message,result,notification,created,started,updated,finished,"
                "message_floor_ms,session_reused,transcript,permission_revision,"
                "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
-               "enforcement_fingerprint,adapter_version,pi_version")
+               "enforcement_fingerprint,adapter_version,pi_version,"
+               "extension_revision,extension_snapshot")
 # Physical legacy storage column for request rows. Existing databases carry
 # this column and its UNIQUE(workspace, opencode_request) constraint; both are
 # retained verbatim for compatibility. Ordinary request logic never matches on
@@ -207,6 +208,7 @@ def neutral_run_summary(run: dict) -> dict:
             "created": run["created"], "started": run["started"], "updated": run["updated"],
             "finished": run["finished"],
             "permission_revision": run.get("permission_revision") or "",
+            "extension_revision": run.get("extension_revision") or "",
             "duration_seconds": _duration(run["started"], run["finished"]),
             "notification": notification,
             "active": run["state"] in ACTIVE_RUN_STATES}
@@ -894,12 +896,84 @@ class AgentOrchestrator:
         """Immutable policy snapshot options for a NEW Pi session.
 
         Returns None only when the Pi runtime is unavailable (fail closed
-        upstream). The snapshot is validated again by the adapter; the
-        revision is persisted on the agent run for continuation binding.
+        upstream). The permission snapshot is validated again by the
+        adapter; both revisions are persisted on the agent run for
+        continuation binding. The extension snapshot is default-empty
+        (no third-party extension) until the local admin enables packages.
         """
+        from .pi_extensions import get_policy as _get_ext_policy
         from .pi_permissions import get_policy as _get_policy
         policy, revision, _ = _get_policy(self.service)
-        return {"permission_policy": policy, "policy_revision": revision}
+        ext_policy, ext_revision, _ = _get_ext_policy(self.service)
+        return {"permission_policy": policy, "policy_revision": revision,
+                "extension_policy": ext_policy, "extension_revision": ext_revision}
+
+    # ---------------------------- Pi extension policy (3C2)
+    def _require_pi_runtime_ext(self) -> None:
+        if not self._is_pi_runtime():
+            raise BridgeError("Pi extension policy is only available on the Pi runtime",
+                              "unknown_runtime")
+
+    def get_pi_extension_policy(self) -> tuple[dict, str, bool]:
+        """Current Pi extension policy snapshot (Bridge is source of truth)."""
+        self._require_pi_runtime_ext()
+        from .pi_extensions import get_policy as _get_policy
+        return _get_policy(self.service)
+
+    def pi_extension_status(self) -> dict:
+        """Bounded admin status summary: counts + revision prefix only.
+
+        Never carries package names, IDs, versions, or host paths. The
+        live inventory is consulted for installed_count/readiness; when
+        the adapter inventory is unavailable the counts report
+        installed_count=None with ready=False instead of failing.
+        """
+        self._require_pi_runtime_ext()
+        from .pi_extensions import status_summary as _summary
+        try:
+            self._require_capability("extension_inventory")
+            inventory = self._require_runtime().list_extensions()
+            return _summary(self.service, inventory, inventory_available=True)
+        except BridgeError as exc:
+            if exc.code in ("runtime_unsupported", "runtime_unavailable"):
+                return _summary(self.service, None, inventory_available=False)
+            raise
+        except Exception:  # noqa: BLE001 - status degrades, never fails the read
+            return _summary(self.service, None, inventory_available=False)
+
+    def pi_extension_view(self) -> dict:
+        """Full admin GET view: effective policy plus bounded live inventory."""
+        self._require_pi_runtime_ext()
+        from .pi_extensions import full_view as _view
+        self._require_capability("extension_inventory")
+        try:
+            inventory = self._require_runtime().list_extensions()
+        except Exception as exc:  # noqa: BLE001 - inventory failure is explicit
+            raise BridgeError(
+                "Pi extension inventory is unavailable from the adapter",
+                "inventory_unavailable") from exc
+        return _view(self.service, inventory, inventory_available=True)
+
+    def set_pi_extension_policy(self, raw: Any) -> dict:
+        """Validate strictly against the live inventory and persist.
+
+        Local-admin only (no MCP path). When the adapter inventory is
+        unavailable the save fails rather than persisting an unvalidated
+        broadened policy.
+        """
+        self._require_pi_runtime_ext()
+        from .pi_extensions import set_policy as _set_policy
+        from .pi_extensions import status_summary as _summary
+        self._require_capability("extension_inventory")
+        try:
+            inventory = self._require_runtime().list_extensions()
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeError(
+                "Pi extension inventory is unavailable; refusing to save an "
+                "unvalidated policy", "inventory_unavailable") from exc
+        policy, revision = _set_policy(self.service, raw, inventory)
+        void = _summary(self.service, inventory, inventory_available=True)
+        return {**void, "policy": policy, "extension_revision": revision}
 
     # ---------------------------- Pi execution ledger (3C1)
     def _pi_execution_head(self, ws: dict, session_id: str) -> int:
@@ -1171,6 +1245,25 @@ class AgentOrchestrator:
             cursor = int(run.get("execution_cursor") or 0)
         except (TypeError, ValueError):
             cursor = 0
+        # 3C2: active extension snapshot so ChatGPT can audit which code
+        # capabilities were loaded (bounded id/name/version/fingerprint
+        # rows, no host paths). Historical runs report an empty snapshot.
+        extensions: list[dict] = []
+        try:
+            raw_snapshot = run.get("extension_snapshot") or "[]"
+            parsed = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else []
+            if isinstance(parsed, list):
+                for row in parsed[:64]:
+                    if not isinstance(row, dict) or not row.get("id"):
+                        continue
+                    extensions.append({
+                        "id": str(row.get("id"))[:218],
+                        "name": str(row.get("name") or "")[:214],
+                        "version": str(row.get("version") or "")[:80],
+                        "fingerprint": str(row.get("fingerprint") or "")[:64],
+                    })
+        except (TypeError, ValueError):
+            extensions = []
         return {
             "status": status,
             "counts": counts,
@@ -1182,6 +1275,8 @@ class AgentOrchestrator:
             "adapter_version": str(run.get("adapter_version") or "")[:40],
             "pi_version": str(run.get("pi_version") or "")[:80],
             "permission_revision": str(run.get("permission_revision") or "")[:64],
+            "extension_revision": str(run.get("extension_revision") or "")[:64],
+            "extensions": extensions,
         }
 
     def list_models(self, ws: dict | None = None, query: str = "", limit: int = 25) -> dict:
@@ -1348,6 +1443,28 @@ class AgentOrchestrator:
         run_id = uid("run_")
         created = self._clock()
         permission_revision = (session_options or {}).get("policy_revision", "") if session_options else ""
+        # 3C2 extension snapshot: revision binds continuation; the active
+        # snapshot persists bounded rows (id/name/version/fingerprint,
+        # no host paths) so ChatGPT can audit which code capabilities
+        # were loaded.
+        extension_revision = (session_options or {}).get("extension_revision", "") if session_options else ""
+        extension_snapshot = "[]"
+        if self._is_pi_runtime():
+            try:
+                rows = getattr(session, "extensions", []) or []
+                bounded = []
+                for row in rows[:64]:
+                    if not isinstance(row, dict) or not row.get("id"):
+                        continue
+                    bounded.append({
+                        "id": str(row.get("id"))[:218],
+                        "name": str(row.get("name") or "")[:214],
+                        "version": str(row.get("version") or "")[:80],
+                        "fingerprint": str(row.get("fingerprint") or "")[:64],
+                    })
+                extension_snapshot = json.dumps(bounded, separators=(",", ":"))
+            except Exception:  # noqa: BLE001 - snapshot failure never fails start
+                extension_snapshot = "[]"
         # 3C1 execution audit init: fresh sessions start at floor/cursor 0.
         # Managed Pi runs are pending (require final drain for complete);
         # OpenCode/legacy stay not_recorded. Fingerprint/versions persist
@@ -1365,12 +1482,14 @@ class AgentOrchestrator:
                 "model,state,error_code,error_message,result,notification,created,started,updated,finished,"
                 "message_floor_ms,session_reused,transcript,permission_revision,"
                 "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
-                "enforcement_fingerprint,adapter_version,pi_version) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "enforcement_fingerprint,adapter_version,pi_version,"
+                "extension_revision,extension_snapshot) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, ws["id"], self._runtime_id(), job_id, request_id, request_hash, parent_run_id,
                  session.id, selector, "starting", None, None, "{}", "{}", created, None, created,
                  None, 0, 0, "[]", permission_revision or "",
-                 0, 0, _audit_status, "", _fingerprint[:64], _adapter_version[:40], _pi_version[:80]))
+                 0, 0, _audit_status, "", _fingerprint[:64], _adapter_version[:40], _pi_version[:80],
+                 extension_revision or "", extension_snapshot))
         # One bounded event-health probe at start: never blocks, waits, or
         # polls. When the adapter stream is not confirmed subscribed the new
         # run is marked degraded so live asks are known to be at risk.
@@ -1541,6 +1660,23 @@ class AgentOrchestrator:
                     "continuation refused because the session snapshot differs. "
                     "Start a fresh session to pick up the current policy.",
                     "permission_scope_changed")
+        # 3C2: Pi continuation requires the source run's extension
+        # revision to equal the current extension policy revision, just
+        # like the permission revision. Mismatch fails closed with
+        # extension_scope_changed and requires a fresh session: active
+        # sessions never hot-reload extensions.
+        source_ext_revision = ""
+        current_ext_revision = ""
+        if self._is_pi_runtime():
+            from .pi_extensions import get_policy as _get_pi_ext_policy
+            _ext_policy, current_ext_revision, _ = _get_pi_ext_policy(self.service)
+            source_ext_revision = (source.get("extension_revision") or "")
+            if source_ext_revision != current_ext_revision:
+                raise BridgeError(
+                    "The Pi extension policy changed since the source run; "
+                    "continuation refused because the session extension snapshot "
+                    "differs. Start a fresh session to pick up the current policy.",
+                    "extension_scope_changed")
         # 3C1: capture the adapter execution head as this run's floor
         # BEFORE promptAsync. Only later records belong to the new run;
         # prior same-session calls cannot be misattributed. Poll failures
@@ -1570,14 +1706,17 @@ class AgentOrchestrator:
                     "model,state,error_code,error_message,result,notification,created,started,updated,finished,"
                     "message_floor_ms,session_reused,transcript,permission_revision,"
                     "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
-                    "enforcement_fingerprint,adapter_version,pi_version) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "enforcement_fingerprint,adapter_version,pi_version,"
+                    "extension_revision,extension_snapshot) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (run_id, ws["id"], self._runtime_id(), job["id"], request_id, request_hash,
                       continue_from_run_id, source["session"], selector, "starting", None, None,
                       "{}", "{}", created, None, created, None, floor, 1, "[]",
                       current_revision if self._is_pi_runtime() else "",
                       _exec_floor, _exec_floor, _audit_status, _exec_error,
-                      _fingerprint[:64], _adapter_version[:40], _pi_version[:80]))
+                      _fingerprint[:64], _adapter_version[:40], _pi_version[:80],
+                      current_ext_revision if self._is_pi_runtime() else "",
+                      str(source.get("extension_snapshot") or "[]")[:8192]))
         except sqlite3.IntegrityError:
             raise BridgeError(f"{self._runtime_label()} session already has an active Bridge run",
                               "continuation_unavailable") from None

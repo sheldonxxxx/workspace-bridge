@@ -7,8 +7,16 @@
 import { randomUUID } from "node:crypto";
 
 import { ADAPTER_VERSION } from "./config.mjs";
-import { isTrustedExtensionUsable, trustedExtensionPath } from "./config.mjs";
+import { isTrustedExtensionUsable, piRpcExcludesFor, trustedExtensionPath } from "./config.mjs";
 import { ExecutionJournal, summaryRecord } from "./executions.mjs";
+import {
+  canonicalizeEnabledOrder,
+  defaultExtensionPolicy,
+  extensionRevision,
+  readExtensionInventory,
+  resolveEnabledExtensionRoots,
+  validateExtensionPolicy,
+} from "./extensions.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { resolveSessionDir } from "./paths.mjs";
 import {
@@ -21,6 +29,7 @@ import {
   validatePolicy,
 } from "./policy.mjs";
 import { PiRpcProcess, RpcError } from "./rpc.mjs";
+import { isManagedTool } from "./rpc.mjs";
 import {
   MARKER_PREFIX,
   OPTION_ALWAYS,
@@ -209,7 +218,8 @@ export class PiAdapter {
     return entry;
   }
 
-  _spawnRpc(cwd, { extensionPath = null, tools = null, extraEnv = {}, onEvent = null } = {}) {
+  _spawnRpc(cwd, { extensionPath = null, extensionPaths = null, tools = null,
+                   excludeTools = null, extraEnv = {}, onEvent = null } = {}) {
     return new PiRpcProcess({
       binary: this.piBinary,
       cwd,
@@ -219,7 +229,9 @@ export class PiAdapter {
       maxLineBytes: this.maxLineBytes,
       extraEnv,
       extensionPath,
+      extensionPaths,
       tools,
+      excludeTools,
       onEvent,
     });
   }
@@ -292,12 +304,97 @@ export class PiAdapter {
     };
   }
 
+  // Resolve the Bridge-delivered extension policy into an immutable
+  // session snapshot (3C2, extension policy v1, independent of the
+  // permission policy):
+  // - neither extension_policy nor extension_revision supplied =>
+  //   default-empty policy (no third-party extension; 3C1 behavior);
+  // - exactly one supplied => fail closed, no session;
+  // - invalid policy or malformed revision => fail closed;
+  // - revision mismatch against the recomputed canonical revision =>
+  //   fail closed;
+  // - non-empty enabled list => resolved against the live native
+  //   inventory (isolated profile user npm packages); a missing,
+  //   invalid, or unresolvable package fails session creation clearly
+  //   and is never silently skipped. Inventory unavailable with a
+  //   non-empty policy fails rather than persisting an unvalidated
+  //   broadened session.
+  // Changes apply to NEW sessions only; the snapshot below is immutable.
+  _snapshotExtensions(options) {
+    const raw = options && typeof options === "object" ? options.extension_policy : undefined;
+    const suppliedRevision = options && typeof options === "object" ? options.extension_revision : undefined;
+    const hasPolicy = raw !== undefined && raw !== null;
+    const hasRevision = suppliedRevision !== undefined && suppliedRevision !== null;
+    if (!hasPolicy && !hasRevision) {
+      const policy = defaultExtensionPolicy();
+      return { policy, revision: extensionRevision(policy), roots: [], snapshot: [] };
+    }
+    if (hasPolicy !== hasRevision) {
+      throw new AdapterError("Pi extension policy revision is missing", 400, "invalid_policy");
+    }
+    let policy;
+    try {
+      policy = validateExtensionPolicy(raw);
+    } catch {
+      throw new AdapterError("Pi extension policy is invalid", 400, "invalid_policy");
+    }
+    // Canonical order: the revision represents the active set/load order
+    // (live inventory/settings order), never arbitrary sender ordering.
+    // The Bridge canonicalizes on save; the adapter canonicalizes again
+    // here so both sides agree even for a non-canonical sender.
+    let inventory = null;
+    if (policy.enabled.length) {
+      inventory = readExtensionInventory(this.agentDir);
+      if (inventory.error && inventory.packages.length === 0) {
+        throw new AdapterError(
+          "Pi extension inventory is unavailable; refusing an unvalidated policy",
+          400, "invalid_policy");
+      }
+      policy = {
+        version: policy.version,
+        enabled: canonicalizeEnabledOrder(inventory.packages, policy.enabled),
+      };
+    }
+    if (typeof suppliedRevision !== "string" || !/^[0-9a-fA-F]{64}$/.test(suppliedRevision)) {
+      throw new AdapterError("Pi extension policy revision is malformed", 400, "invalid_policy");
+    }
+    const computed = extensionRevision(policy);
+    if (suppliedRevision.toLowerCase() !== computed) {
+      throw new AdapterError("Pi extension policy revision mismatch", 409, "conflict");
+    }
+    if (!policy.enabled.length) {
+      return { policy, revision: computed, roots: [], snapshot: [] };
+    }
+    let resolved;
+    try {
+      resolved = resolveEnabledExtensionRoots(this.agentDir, policy.enabled);
+    } catch (error) {
+      throw new AdapterError(
+        `Pi extension is unavailable: ${String((error && error.message) || error).slice(0, 160)}`,
+        400, "invalid_policy");
+    }
+    return { policy, revision: computed, roots: resolved.roots, snapshot: resolved.snapshot };
+  }
+
+  // Bounded native extension inventory for the isolated profile user npm
+  // packages (3C2). No host paths, agentDir, tokens, settings fields,
+  // file contents, or dependency lists ever leave this boundary.
+  listExtensions() {
+    return readExtensionInventory(this.agentDir);
+  }
+
   async createSession(directory, title = "", options = {}) {
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
     }
     const cwd = resolveSessionDir(this.projectsRoot, directory);
     const snapshot = this._snapshotPolicy(options);
+    // 3C2 extension snapshot: validated alongside the permission snapshot
+    // (default-empty when the Bridge sends no extension policy). Enabled
+    // package roots resolve natively from logical IDs; the Bridge never
+    // sends a host path. A disappeared/invalid package fails session
+    // creation clearly and is never silently skipped.
+    const extSnapshot = this._snapshotExtensions(options);
     // Every managed v3 session loads exactly the package-owned trusted
     // extension -- including read-only sessions, so read/grep/find/ls
     // policy, protected patterns, and external rules are enforced in both
@@ -307,25 +404,38 @@ export class PiAdapter {
     // stays on; the extension path is never logged, returned, or
     // selectable. Only the legacy no-policy compatibility path runs
     // without the extension.
-    let extensionPath = null;
+    // 3C2: with enabled third-party packages the official Pi --tools
+    // allowlist is dropped (it would hide extension tools) and built-in
+    // exposure uses --exclude-tools instead; repeated explicit -e loads
+    // the trusted extension first, then enabled package roots in
+    // deterministic inventory order. With no enabled packages the 3C1
+    // --tools argv is unchanged.
+    let extensionPaths = null;
     let extraEnv = {};
     let tools = null;
+    let excludeTools = null;
     if (!snapshot.legacy) {
-      extensionPath = trustedExtensionPath();
-      if (!isTrustedExtensionUsable(extensionPath)) {
+      const trusted = trustedExtensionPath();
+      if (!isTrustedExtensionUsable(trusted)) {
         throw new AdapterError("Pi permission session is unavailable", 502, "unavailable");
       }
       extraEnv = { WB_PI_POLICY_JSON: canonicalJson(snapshot.policy) };
-      const base = snapshot.writable
-        ? ["read", "grep", "find", "ls", "edit", "write"]
-        : ["read", "grep", "find", "ls"];
-      if (snapshot.shellMode !== "deny") base.push(SHELL_TOOL);
-      tools = base.join(",");
+      extensionPaths = [trusted, ...extSnapshot.roots];
+      if (extSnapshot.roots.length) {
+        excludeTools = piRpcExcludesFor({ writable: snapshot.writable, shellMode: snapshot.shellMode });
+      } else {
+        const base = snapshot.writable
+          ? ["read", "grep", "find", "ls", "edit", "write"]
+          : ["read", "grep", "find", "ls"];
+        if (snapshot.shellMode !== "deny") base.push(SHELL_TOOL);
+        tools = base.join(",");
+      }
     }
     const holder = {};
     const rpc = this._spawnRpc(cwd, {
-      extensionPath,
+      extensionPaths,
       tools,
+      excludeTools,
       extraEnv,
       onEvent: (message) => this._onRpcEvent(holder.entry || null, holder.sessionId || "", message),
     });
@@ -356,6 +466,12 @@ export class PiAdapter {
       writable: snapshot.writable,
       shellMode: snapshot.shellMode,
       effectiveRoots: snapshot.effectiveRoots,
+      // Immutable extension snapshot (3C2). Never mutated after
+      // creation; extension policy changes apply to new sessions only.
+      // Active sessions never hot-reload extensions.
+      extensionPolicy: extSnapshot.policy,
+      extensionRevision: extSnapshot.revision,
+      extensionSnapshot: extSnapshot.snapshot,
       preflights: new Map(),
       pendingByUi: new Map(),
       pendingByPermission: new Map(),
@@ -380,6 +496,8 @@ export class PiAdapter {
     return {
       id: sessionId, directory: cwd, title: bounded(title, TITLE_LIMIT),
       policy_revision: snapshot.revision,
+      extension_revision: extSnapshot.revision,
+      extensions: extSnapshot.snapshot.map((row) => ({ ...row })),
       enforcement_fingerprint: fingerprint.fingerprint,
       fingerprint_modules: [...fingerprint.modules],
       adapter_version: ADAPTER_VERSION,
@@ -550,6 +668,24 @@ export class PiAdapter {
   }
 
   _evaluate(entry, toolName, input) {
+    // 3C2: explicitly enabled extension tools are trusted native
+    // capabilities, not unknown calls. With at least one enabled
+    // package in the immutable session snapshot, any non-managed tool
+    // name passes through as an extension capability (credible
+    // toolCallId correlation happens in _onToolStart; the trusted
+    // extension independently fails closed without one). No permission
+    // UI is ever created for them and no deny is synthesized. Without
+    // enabled extensions, unknown tools keep the legacy deny.
+    if (typeof toolName === "string" && toolName && !isManagedTool(toolName)
+        && entry.extensionSnapshot && entry.extensionSnapshot.length) {
+      const name = toolName.slice(0, 40);
+      return {
+        effect: "allow", action: name, tool: name, resource: "", requested: [],
+        alwaysPattern: "", grantKey: "",
+        reason: "Trusted extension capability",
+        code: "extension_tool",
+      };
+    }
     // v3: no fixed filesystem denies; ordinary configurable policy applies.
     return evaluateToolCall({
       cwd: entry.cwd,

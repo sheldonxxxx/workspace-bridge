@@ -1,12 +1,15 @@
-"""Persisted Pi execution ledger (milestone 3C1).
+"""Persisted Pi execution ledger (milestone 3C1, extended 3C2).
 
 One logical record per toolCallId per Bridge run, synced idempotently
 from the native adapter execution journal. Bounded tool-specific
 evidence only; never raw event objects, reasoning, environment, runtime
-tokens, or fullOutputPath. File audit never persists read contents or
-complete edit/write inputs. Bash command/output can contain sensitive
-data: list/summary surfaces never include result output, only exact
-execution detail does. No perfect secret detection is claimed.
+tokens, or fullOutputPath in structural form. File audit never persists
+read contents or complete edit/write inputs. Bash command/output can contain
+sensitive data: list/summary surfaces never include result output, only exact
+execution detail does. Third-party extension tools (3C2) carry bounded
+generic evidence with best-effort credential redaction; redaction is
+best-effort, never perfect secret detection, and detail views stay
+labeled potentially sensitive. No perfect secret detection is claimed.
 
 Bounds (mirroring the native adapter):
 - bash input: exact bounded command (16 KiB max), SHA-256, verified timeout.
@@ -19,12 +22,15 @@ Bounds (mirroring the native adapter):
 - read: input target + range/options; result status/count/truncation only.
 - grep/find/ls: input target + bounded query/options; result bounded
   preview + truncation flag.
-- Unknown tools fail safely (recorded as {error} without arbitrary args).
+- Extension tools: generic args hash/size/keys + redacted safe
+  selectors; result preview (~8 KiB) with best-effort credential
+  redaction. Redaction is best-effort, never perfect detection.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 MAX_COMMAND_CHARS = 16384
@@ -37,6 +43,63 @@ MAX_SUMMARY_JSON_BYTES = 65536
 
 AUDIT_STATUSES = ("pending", "complete", "incomplete", "not_recorded")
 MUTATING_TOOLS = ("edit", "write", "bash")
+
+# Bridge-managed built-ins with tool-specific audit shapes. Any other tool
+# name is a third-party extension capability with the bounded generic
+# extension-tool evidence (3C2). Managed file/shell policy is NOT a sandbox
+# for extension internals or extension tools.
+MANAGED_TOOLS = ("read", "grep", "find", "ls", "edit", "write", "bash")
+
+# Generic third-party extension-tool audit bounds (mirroring the native
+# adapter): input carries canonical args hash + size + top-level keys plus
+# only bounded safe selector fields; result carries a bounded ToolResult
+# text preview (~8 KiB). Never full args, fullOutputPath, env, auth,
+# provider payloads, reasoning, cookies, tokens, or nested objects.
+MAX_EXTENSION_ARGS_BYTES = 16384
+MAX_EXTENSION_KEYS = 20
+MAX_EXTENSION_KEY_CHARS = 80
+MAX_EXTENSION_SELECTOR_CHARS = 500
+MAX_EXTENSION_PREVIEW_CHARS = 8192
+EXTENSION_SELECTOR_FIELDS = ("query", "url", "server", "tool", "name", "method", "path")
+
+#: Sensitivity label for exact extension-tool result previews shown in
+#: execution detail views.
+EXTENSION_RESULT_SENSITIVITY = "potentially sensitive"
+
+_SENSITIVE_PARAM_RE = re.compile(
+    r"^(?:.*?(?:token|secret|passwd|password|auth|cookie|session|api[_-]?key|apikey|client[_-]?secret)"
+    r"|key|.*?[{_-]key)$", re.IGNORECASE)
+_CREDENTIAL_KV_RE = re.compile(
+    r"\b(password|passwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+    r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s\"'{},;]+)", re.IGNORECASE)
+
+
+def redact_extension_text(value: Any) -> str:
+    """Conservative best-effort credential redaction for extension strings.
+
+    Mirrors the native adapter normalizer so a compromised or old adapter
+    cannot bypass it at the persistence/detail boundary: URL userinfo,
+    sensitive query params, Bearer/Basic forms, and obvious key=value
+    credential patterns. Best-effort only, never perfect secret
+    detection; detail views remain labeled potentially sensitive.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    out = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s?#@]+@", r"\1[redacted]@", value)
+
+    def _param(match: re.Match) -> str:
+        sep, name, val = match.group(1), match.group(2), match.group(3)
+        if not val:
+            return match.group(0)
+        if _SENSITIVE_PARAM_RE.match(name):
+            return f"{sep}{name}=[redacted]"
+        return match.group(0)
+
+    out = re.sub(r"([?&])([^?&#=\s;]+)=([^&#\s;]*)", _param, out)
+    out = re.sub(r"\bBearer\s+[A-Za-z0-9\-._~+/=]+", "Bearer [redacted]", out)
+    out = re.sub(r"\bBasic\s+[A-Za-z0-9+/=]+", "Basic [redacted]", out)
+    out = _CREDENTIAL_KV_RE.sub(r"\1\2[redacted]", out)
+    return out
 
 
 def _sha256(text: str) -> str:
@@ -126,16 +189,72 @@ def sanitize_input_summary(tool: str, summary: Any) -> dict:
             if isinstance(summary.get("content_sha256"), str) and len(summary["content_sha256"]) == 64:
                 out["content_sha256"] = summary["content_sha256"]
             return out
+        # Third-party extension tools (3C2): bounded generic evidence only.
+        if tool not in MANAGED_TOOLS:
+            return sanitize_extension_input(summary)
         return {"error": "unknown_tool"}
     except Exception:  # noqa: BLE001 - fail safely, never dump args
+        return {"error": "malformed_input"}
+
+
+def sanitize_extension_input(summary: Any) -> dict:
+    """Validate and bound an extension-tool input summary (3C2).
+
+    Accepts the adapter-normalized shape (canonical args hash + size +
+    top-level keys plus bounded safe selectors) and drops everything
+    else, including any forbidden keys a compromised adapter might have
+    sent. A raw (non-normalized) mapping is derived defensively into the
+    same bounded shape instead of being persisted verbatim.
+    """
+    if not isinstance(summary, dict):
+        return {"error": "malformed_input"}
+    try:
+        keys = summary.get("top_keys")
+        sha = summary.get("args_sha256")
+        if (isinstance(keys, list) and isinstance(sha, str) and len(sha) == 64):
+            out: dict[str, Any] = {}
+            out["args_sha256"] = sha
+            try:
+                size = int(summary.get("args_bytes", 0))
+            except (TypeError, ValueError):
+                size = 0
+            out["args_bytes"] = max(0, min(size, MAX_EXTENSION_ARGS_BYTES * 4))
+            out["top_keys"] = [str(k)[:MAX_EXTENSION_KEY_CHARS]
+                               for k in keys if isinstance(k, str)][:MAX_EXTENSION_KEYS]
+            for field in EXTENSION_SELECTOR_FIELDS:
+                value = summary.get(field)
+                if isinstance(value, str) and value:
+                    out[field] = redact_extension_text(value)[:MAX_EXTENSION_SELECTOR_CHARS]
+            return out
+        # Defensive derivation from a raw mapping (never verbatim).
+        try:
+            canonical = json.dumps(summary, sort_keys=True, ensure_ascii=False,
+                                   separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return {"error": "malformed_input"}
+        out = {
+            "args_sha256": _sha256(canonical),
+            "args_bytes": len(canonical.encode("utf-8")),
+            "top_keys": [str(k)[:MAX_EXTENSION_KEY_CHARS]
+                         for k in summary.keys() if isinstance(k, str)][:MAX_EXTENSION_KEYS],
+        }
+        for field in EXTENSION_SELECTOR_FIELDS:
+            value = summary.get(field)
+            if isinstance(value, str) and value:
+                out[field] = redact_extension_text(value)[:MAX_EXTENSION_SELECTOR_CHARS]
+        return out
+    except Exception:  # noqa: BLE001
         return {"error": "malformed_input"}
 
 
 def sanitize_result_summary(tool: str, summary: Any, is_error: bool | None = None) -> dict:
     """Validate and bound an adapter-supplied result summary.
 
-    Never persists fullOutputPath, reasoning, environment, or tokens.
-    Read carries metadata only, no contents.
+    Never persists fullOutputPath, reasoning, or environment in
+    structural form. Extension-tool previews get best-effort credential
+    redaction (a result body can itself print secrets); redaction is
+    best-effort, never perfect detection. Read carries metadata only,
+    no contents.
     """
     if not isinstance(summary, dict):
         return {"is_error": bool(is_error) if is_error is not None else False}
@@ -199,6 +318,11 @@ def sanitize_result_summary(tool: str, summary: Any, is_error: bool | None = Non
             if isinstance(summary.get("count"), int):
                 out["count"] = max(0, summary["count"])
             return out
+        # Third-party extension tools (3C2): bounded generic result only.
+        if tool not in MANAGED_TOOLS:
+            return sanitize_extension_result(summary,
+                                             is_error if is_error is not None
+                                             else bool(summary.get("is_error")))
         if isinstance(summary.get("status"), str):
             out["status"] = summary["status"][:80]
         if isinstance(summary.get("message"), str):
@@ -206,6 +330,51 @@ def sanitize_result_summary(tool: str, summary: Any, is_error: bool | None = Non
         return out
     except Exception:  # noqa: BLE001
         return {"is_error": bool(summary.get("is_error")) if isinstance(summary, dict) else False}
+
+
+def sanitize_extension_result(summary: Any, is_error: bool = False) -> dict:
+    """Validate and bound an extension-tool result summary (3C2).
+
+    Keeps only the verified ToolResult text preview (~8 KiB) with
+    best-effort credential redaction, plus truncation/error flags.
+    Structural args/details/auth/env/provider/fullOutputPath are never
+    kept. Redaction is best-effort, never perfect secret detection:
+    detail views stay labeled potentially sensitive.
+    """
+    out: dict[str, Any] = {"is_error": bool(is_error)}
+    if not isinstance(summary, dict):
+        return out
+    try:
+        if summary.get("cancelled") is True:
+            out["cancelled"] = True
+        if summary.get("truncated") is True:
+            out["truncated"] = True
+        preview = summary.get("preview", "")
+        if not isinstance(preview, str) or not preview:
+            for fallback in ("output_preview", "output", "stdout", "text"):
+                candidate = summary.get(fallback)
+                if isinstance(candidate, str) and candidate:
+                    preview = candidate
+                    break
+        if (not isinstance(preview, str) or not preview) and isinstance(
+                summary.get("content"), list):
+            # Defensive: verified Pi ToolResult content blocks only.
+            parts = [b.get("text") for b in summary["content"][:32]
+                     if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str)]
+            preview = "".join(parts)
+        if not isinstance(preview, str):
+            preview = ""
+        truncated = len(preview) > MAX_EXTENSION_PREVIEW_CHARS or bool(summary.get("truncated"))
+        redacted = redact_extension_text(preview)
+        if redacted:
+            out["preview"] = redacted[:MAX_EXTENSION_PREVIEW_CHARS]
+        if isinstance(summary.get("preview_bytes"), int):
+            out["preview_bytes"] = max(0, summary["preview_bytes"])
+        out["truncated"] = truncated
+        return out
+    except Exception:  # noqa: BLE001
+        return {"is_error": bool(is_error)}
 
 
 def bounded_json(value: dict) -> str:
@@ -240,8 +409,18 @@ def summary_record(row: dict) -> dict:
     tool = row.get("tool") or ""
     if tool == "bash":
         target = str(input_summary.get("command") or "")[:200]
-    else:
+    elif tool in MANAGED_TOOLS:
         target = str(input_summary.get("target") or "")[:200]
+    else:
+        # Extension-tool list surface: no result body; a bounded safe
+        # selector (or nothing) as the target preview, with the same
+        # best-effort credential redaction as detail views.
+        target = ""
+        for field in EXTENSION_SELECTOR_FIELDS:
+            candidate = input_summary.get(field)
+            if isinstance(candidate, str) and candidate:
+                target = redact_extension_text(candidate)[:200]
+                break
     return {
         "execution_id": row["tool_call_id"],
         "tool_call_id": row["tool_call_id"],
@@ -283,12 +462,19 @@ def detail_record(row: dict) -> dict:
     # might have sent (fullOutputPath, tokens, env, reasoning).
     for forbidden in ("fullOutputPath", "full_output_path", "token",
                       "runtime_token", "environment", "env", "reasoning",
-                      "thinking", "provider"):
+                      "thinking", "provider", "cookie", "cookies",
+                      "authorization", "auth", "secret"):
         result_summary.pop(forbidden, None)
         input_summary.pop(forbidden, None)
-    base["input_summary"] = sanitize_input_summary(row.get("tool") or "", input_summary)
+    tool_name = row.get("tool") or ""
+    base["input_summary"] = sanitize_input_summary(tool_name, input_summary)
     # Re-sanitize result to enforce bounds even for historical rows.
-    base["result_summary"] = sanitize_result_summary(row.get("tool") or "", result_summary)
+    base["result_summary"] = sanitize_result_summary(tool_name, result_summary)
+    if tool_name not in MANAGED_TOOLS and isinstance(
+            base["result_summary"], dict) and base["result_summary"].get("preview"):
+        # Exact extension-tool result previews are shown only here and
+        # are labeled as potentially sensitive.
+        base["result_sensitivity"] = EXTENSION_RESULT_SENSITIVITY
     # For list safety the base summary already excludes bodies; detail
     # explicitly includes the bounded bash preview above.
     return base
