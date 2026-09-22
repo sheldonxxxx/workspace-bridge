@@ -102,10 +102,11 @@ test("tool start events are normalized to path-only metadata plus separate audit
     result: { content: secret } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(seen.length, 4);
-  // Permission metadata stays path-only.
+  // Permission metadata stays path-only for files, exact command+timeout
+  // for bash (never {}: shell policy needs the exact authority identity).
   assert.deepEqual(seen[0].input, { path: "notes.txt" });
   assert.deepEqual(seen[1].input, { path: "sub" });
-  assert.deepEqual(seen[2].input, {});
+  assert.deepEqual(seen[2].input, { command: "rm -rf /", timeoutMs: 30000 });
   // Separate audit path carries bounded evidence, never raw secrets.
   assert.equal(seen[0].auditInput.target, "notes.txt");
   assert.ok(seen[0].auditInput.content_sha256?.match(/^[0-9a-f]{64}$/));
@@ -116,5 +117,95 @@ test("tool start events are normalized to path-only metadata plus separate audit
   assert.ok(!JSON.stringify(seen[3].auditResult).includes("sk-secret"));
   assert.ok(!("fullOutputPath" in (seen[3].auditResult || {})));
   assert.ok(!JSON.stringify(seen).includes("sk-secret"));
+  await rpc.close({ graceMs: 0 });
+});
+
+test("bash permission input keeps only bounded exact command+timeout", async () => {
+  const bag = createFakeSpawn();
+  const seen = [];
+  const rpc = makeRpc(bag, { onEvent: (message) => { seen.push(message); } });
+  const child = await startRpc(rpc, bag.children);
+  // Valid bash with seconds timeout plus unrelated raw fields that must
+  // never enter permission metadata.
+  child.respond({ type: "tool_execution_start", toolCallId: "b1", toolName: "bash",
+    args: { command: "echo hi", timeout: 20, env: { SECRET: "x" }, shell: "bash", extra: "drop" } });
+  // Alias + ms-timeout canonicalization uses the same single parser.
+  child.respond({ type: "tool_execution_start", toolCallId: "b2", toolName: "bash",
+    args: { cmd: "echo hi", timeoutMs: 20000 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.length, 2);
+  // Exact authority fields only: no env, no arbitrary args, no audit keys.
+  assert.deepEqual(seen[0].input, { command: "echo hi", timeoutMs: 20000 });
+  assert.deepEqual(Object.keys(seen[0].input).sort(), ["command", "timeoutMs"]);
+  assert.deepEqual(seen[1].input, { command: "echo hi", timeoutMs: 20000 });
+  assert.ok(!JSON.stringify(seen.map((m) => m.input)).includes("SECRET"));
+  assert.ok(!JSON.stringify(seen.map((m) => m.input)).includes("extra"));
+  assert.ok(!JSON.stringify(seen.map((m) => m.input)).includes("command_sha256"));
+  // Evaluator computes the same hash/timeout from the normalized form as
+  // from the original Pi args.
+  const { evaluateToolCall } = await import("../policy.mjs");
+  const { extractBashCommand } = await import("../policy.mjs");
+  const fromOrig = extractBashCommand({ command: "echo hi", timeout: 20 });
+  const fromNorm = extractBashCommand(seen[0].input);
+  assert.equal(fromOrig.ok, true);
+  assert.equal(fromNorm.ok, true);
+  assert.equal(fromNorm.commandHash, fromOrig.commandHash);
+  assert.equal(fromNorm.timeoutMs, fromOrig.timeoutMs);
+  assert.equal(fromNorm.command, fromOrig.command);
+  const allowPolicy = {
+    version: 3, write_tools_enabled: false,
+    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
+    protected_patterns: [], protected_template_exceptions: [],
+    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
+    shell_mode: "allow",
+  };
+  const vOrig = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash",
+    input: { command: "echo hi", timeout: 20 } });
+  const vNorm = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash",
+    input: seen[0].input });
+  assert.equal(vNorm.effect, "allow");
+  assert.equal(vNorm.effect, vOrig.effect);
+  assert.equal(vNorm.commandHash, vOrig.commandHash);
+  assert.equal(vNorm.timeoutMs, vOrig.timeoutMs);
+  await rpc.close({ graceMs: 0 });
+});
+
+test("malformed and truncated bash inputs fail closed in permission metadata", async () => {
+  const bag = createFakeSpawn();
+  const seen = [];
+  const rpc = makeRpc(bag, { onEvent: (message) => { seen.push(message); } });
+  const child = await startRpc(rpc, bag.children);
+  child.respond({ type: "tool_execution_start", toolCallId: "m1", toolName: "bash", args: {} });
+  child.respond({ type: "tool_execution_start", toolCallId: "m2", toolName: "bash",
+    args: { command: "" } });
+  child.respond({ type: "tool_execution_start", toolCallId: "m3", toolName: "bash",
+    args: { command: "x".repeat(20000) } });
+  child.respond({ type: "tool_execution_start", toolCallId: "m4", toolName: "bash" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.length, 4);
+  for (const entry of seen) {
+    assert.equal(entry.input, null);
+  }
+  // Audit still carries bounded evidence (failure marker or truncated
+  // preview) and never the raw oversized command verbatim beyond bounds.
+  assert.equal(seen[0].auditInput.error, "malformed_input");
+  assert.equal(seen[1].auditInput.error, "malformed_input");
+  assert.equal(seen[2].auditInput.truncated, true);
+  assert.ok(seen[2].auditInput.command.length <= 16384);
+  assert.ok(seen[2].auditInput.command_sha256?.match(/^[0-9a-f]{64}$/));
+  // None of the truncated/failed permission inputs can evaluate to allow.
+  const { evaluateToolCall } = await import("../policy.mjs");
+  const allowPolicy = {
+    version: 3, write_tools_enabled: false,
+    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
+    protected_patterns: [], protected_template_exceptions: [],
+    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
+    shell_mode: "allow",
+  };
+  for (const entry of seen) {
+    const verdict = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash", input: entry.input });
+    assert.equal(verdict.effect, "deny");
+    assert.equal(verdict.code, "malformed_input");
+  }
   await rpc.close({ graceMs: 0 });
 });

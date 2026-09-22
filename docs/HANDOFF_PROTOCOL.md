@@ -70,7 +70,7 @@ state is not a completion signal.
 
 ## Optional automated run
 
-When a workspace has agent execution enabled, `start_opencode_run` requires a
+When a workspace has agent execution enabled, `start_agent_run` requires a
 prepared handoff in the same workspace and accepts no free-form prompt or path. A run
 is bound to one OpenCode session under the canonical mapped workspace root and stores
 its exact model selector (the configured default when `model` is omitted, or an

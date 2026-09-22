@@ -1,3 +1,18 @@
+# Unreleased — Pi default runtime, OpenCode MCP aliases removed
+
+- Public MCP surface no longer exposes the seven OpenCode-specific tools
+  (`list_opencode_models`, `start_opencode_run`, `list_opencode_runs`,
+  `read_opencode_run`, `read_opencode_request`, `respond_opencode_permission`,
+  `cancel_opencode_run`); use the runtime-neutral `list_agent_models` /
+  `start_agent_run` / `list_agent_runs` / `read_agent_run` / `read_agent_request` /
+  `respond_agent_permission` / `cancel_agent_run` with an explicit `runtime`.
+- Project-lead skill 2.2.0 defaults a silent runtime choice to Pi (explicit user
+  runtime requests still win; runtime changes still require a fresh session).
+- OpenCode backend, admin HTTP compatibility routes, and historical run
+  compatibility are unchanged: persisted OpenCode runs remain readable through
+  `read_agent_run` / `list_agent_runs`, and explicit `runtime="opencode"` keeps
+  working through the runtime-neutral APIs.
+
 # Unreleased — canonical runtime-id grammar for registry and cursor keys
 
 - Package-owned canonical runtime identity

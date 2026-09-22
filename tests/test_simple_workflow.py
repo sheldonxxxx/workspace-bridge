@@ -15,14 +15,10 @@ RETIRED = ('review_changes', 'read_change', 'record_audit')
 EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
             'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
-            'list_opencode_models', 'start_opencode_run', 'list_opencode_runs',
-            'read_opencode_run', 'read_opencode_request', 'respond_opencode_permission',
-            'cancel_opencode_run',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',
             'read_agent_run', 'read_agent_request', 'respond_agent_permission',
             'cancel_agent_run', 'list_agent_executions', 'read_agent_execution'}
-MUTATING = {'prepare_handoff', 'write_file', 'edit_file', 'start_opencode_run',
-            'respond_opencode_permission', 'cancel_opencode_run',
+MUTATING = {'prepare_handoff', 'write_file', 'edit_file',
             'start_agent_run', 'respond_agent_permission', 'cancel_agent_run'}
 
 

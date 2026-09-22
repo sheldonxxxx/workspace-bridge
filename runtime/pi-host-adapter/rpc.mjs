@@ -23,7 +23,7 @@
 //   API responses (only its byte length is exposed for debugging).
 import { spawn } from "node:child_process";
 
-import { SHELL_TOOL, SUPPORTED_TOOLS } from "./policy.mjs";
+import { SHELL_TOOL, SUPPORTED_TOOLS, extractBashCommand } from "./policy.mjs";
 import { summarizeExtensionInput, summarizeExtensionResult, summarizeInput, summarizeResult } from "./executions.mjs";
 
 // Managed Bridge built-ins governed by file/shell policy. Any other tool
@@ -46,15 +46,20 @@ export const MAX_UI_TITLE_CHARS = 500;
 export const MAX_UI_OPTIONS = 8;
 export const MAX_UI_OPTION_CHARS = 400;
 
-// Reduce a raw tool_execution_start to bounded path-only permission
-// metadata plus a SEPARATE bounded audit input summary. Permission keeps
-// only the single path operand per known file-tool schema (read/edit/write
-// path; grep/find/ls optional path); bash keeps {} for permission (its
-// authority is shell_mode) while audit carries the exact bounded command.
-// Write content, edit old/new text, grep patterns, find globs, and
-// arbitrary args are NEVER retained in permission metadata; audit carries
-// only hashes/counts/previews per executions.mjs. Raw event objects are
-// never retained after normalization. Returns null when unusable.
+// Reduce a raw tool_execution_start to bounded permission metadata plus
+// a SEPARATE bounded audit input summary. Permission keeps only the
+// single path operand per known file-tool schema (read/edit/write path;
+// grep/find/ls optional path); bash keeps ONLY the bounded exact command
+// plus verified timeout ({command, timeoutMs}) so shell-policy evaluation
+// sees the exact authority identity (hash + timeout) while audit carries
+// the full bounded command evidence separately. A bash input that cannot
+// preserve the exact command identity (malformed or truncated) normalizes
+// to null so evaluation fails closed instead of judging a different
+// command. Write content, edit old/new text, grep patterns, find globs,
+// environment, and arbitrary args are NEVER retained in permission
+// metadata; audit carries only hashes/counts/previews per executions.mjs.
+// Raw event objects are never retained after normalization. Returns null
+// when unusable.
 export function normalizeToolStart(message) {
   if (!message || typeof message !== "object") return null;
   const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
@@ -84,6 +89,25 @@ export function normalizeToolStart(message) {
         && rawPath.length <= MAX_PERMISSION_PATH_CHARS)
       ? { path: rawPath }
       : { path: null };
+  } else if (toolName === SHELL_TOOL) {
+    // Bounded exact-command permission metadata: reuse the single
+    // extractBashCommand parser/bounds so the evaluator computes the same
+    // command hash and verified timeout as from the original Pi args.
+    // Only {command, timeoutMs} are retained; aliases (cmd/script/code)
+    // canonicalize to command and second-based timeouts canonicalize to
+    // verified milliseconds. Truncated (oversized) commands cannot
+    // preserve the exact hash identity, so they fail closed as null
+    // instead of authorizing the truncated prefix.
+    try {
+      const extracted = extractBashCommand(args ?? {});
+      if (extracted.ok && !extracted.truncated) {
+        input = { command: extracted.command, timeoutMs: extracted.timeoutMs };
+      } else {
+        input = null;
+      }
+    } catch {
+      input = null;
+    }
   }
   // Separate audit path: bounded tool-specific evidence, never raw args.
   // Managed tools keep their tool-specific summaries; explicitly enabled
@@ -435,7 +459,7 @@ export class PiRpcProcess {
     }
     // Agent event (e.g. agent_settled, tool_execution_start/update/end,
     // extension_ui_request): never resolves a pending command. Permission
-    // stays minimal path-only; audit carries a SEPARATE bounded evidence
+    // stays minimal (path-only for files, exact command+timeout for bash); audit carries a SEPARATE bounded evidence
     // path (never raw payloads). Everything else is ignored here. Raw
     // tool payloads never leave this process.
     if (this.onEvent) {

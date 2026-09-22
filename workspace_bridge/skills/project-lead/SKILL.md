@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, resumable permission decisions, execution-evidence audit, and current-source review; use general file tools within administrator-controlled write and agent policies.
-version: 2.1.0
+version: 2.2.0
 ---
 
 # Project lead
@@ -62,8 +62,8 @@ When the agent policy allows it, prefer the runtime-neutral workflow:
 `start_agent_run(runtime, ...)` resolves the model on the server. Never invent
 a selector. Runs are handoff-bound, idempotent per `request_id` within the
 selected runtime, and fail closed without a policy. Runtime choice: an explicit
-user request for an available runtime → use it; a silent user → OpenCode
-(current behavior); never silently switch runtimes after failure or quota; a
+user request for an available runtime → use it; a silent user → Pi
+(default behavior); never silently switch runtimes after failure or quota; a
 self-initiated switch away from the user's/current/default runtime → ask first.
 Model choice (the enabled list is the boundary; intent is yours): silent user →
 that runtime's default; an explicit ENABLED request → may use it; a category
@@ -77,8 +77,6 @@ A runtime change always requires a fresh session. Use a fresh session when the
 model changes, the prior run did not complete, the permission scope changes,
 clean context is requested, or validation fails; a requested continuation never
 silently becomes a fresh session.
-Legacy `list_opencode_models`/`start_opencode_run` remain OpenCode-only
-compatibility paths, not the preferred workflow.
 
 Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks. Never weaken tests or invent
@@ -123,11 +121,11 @@ permission scope, else start fresh.
 ## Audit using normal tools
 Treat the run result and any manual reply as claims and inspection guides, not proof.
 Read the original plan with `read_handoff`, then the final result with
-`read_agent_run` (or `read_opencode_run` on the legacy compatibility path). Inspect current implementation, callers, configuration and tests
+`read_agent_run`. Inspect current implementation, callers, configuration and tests
 with general tools. Check every acceptance criterion and plausible regressions beyond
 the claimed file list.
 
-### Execution-evidence review (completed Pi coding runs, skill 2.1.0)
+### Execution-evidence review (completed Pi coding runs, skill 2.2.0)
 Bridge proves what Pi invoked/reported, not that a test result is
 semantically correct. For completed Pi runs:
 - inspect `execution_audit` in `read_agent_run` first (status, counts

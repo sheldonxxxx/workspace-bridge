@@ -577,14 +577,19 @@ def test_ui_has_pi_card_workspace_picker_and_neutral_labels():
 
 def test_skill_prefers_neutral_workflow_and_pins_version():
     from workspace_bridge.embedded_skill import SKILL_VERSION, read_project_lead_skill
-    assert SKILL_VERSION == "2.1.0"
+    assert SKILL_VERSION == "2.2.0"
     content = read_project_lead_skill()["content"]
     for fragment in ("list_agent_models", "start_agent_run", "read_agent_run",
-                     "respond_agent_permission", "silent", "OpenCode",
+                     "respond_agent_permission", "silent", "silent user \u2192 Pi",
                      "ask first", "fresh session", "web-admin configured",
                      "immutable policy snapshot", "bash",
                      "execution_audit", "list_agent_executions"):
         assert fragment in content, fragment
+    for alias in ("list_opencode_models", "start_opencode_run", "list_opencode_runs",
+                  "read_opencode_run", "read_opencode_request",
+                  "respond_opencode_permission", "cancel_opencode_run"):
+        assert alias not in content, alias
+    assert "silent user \u2192 OpenCode" not in content
 
 
 def test_compose_docs_state_orbstack_guidance_without_absolute_claim():

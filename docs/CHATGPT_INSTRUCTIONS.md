@@ -18,12 +18,13 @@ verdicts. Use explicit handoff paths when searching notes; root-source scans omi
 
 Two loops are available. **Manual (always supported):** inspect and resolve design,
 publish a small handoff, return the actual path/copy prompt, then let the user
-manually dispatch OpenCode; after the user pastes its reply, audit real current
+manually dispatch the local agent; after the user pastes its reply, audit real current
 source/callers/tests. **Automated (only when the local admin enabled agent execution
 for the workspace):** after `prepare_handoff`, optionally call
-`list_opencode_models(query=...)` to inspect the GLOBAL enabled model list and
-default, then `start_opencode_run(job_id, request_id)` without a model to use
-the global default. An explicit enabled model may be chosen only per the
+`list_agent_models(runtime, query=...)` to inspect that runtime's enabled model list and
+default, then `start_agent_run(runtime, job_id, request_id)` with an explicit runtime
+(a silent runtime choice means Pi) without a model to use
+that runtime's default. An explicit enabled model may be chosen only per the
 project-lead skill model-choice rule (the user requested it or a matching
 category; a self-initiated change needs prior user approval; never silently
 switch after failure). Never invent or broaden a selector, never pass a
@@ -33,14 +34,14 @@ closed. A corrective iteration reuses the session when a safe continuation
 path exists and task/model/scope match; otherwise it is a new handoff and run.
 
 When a run reaches `waiting_permission`, read the pending request with
-`read_opencode_run`/`read_opencode_request` and check its action and OpenCode-proposed
+`read_agent_run`/`read_agent_request` and check its action and runtime-proposed
 scope against the handoff and the user's intent. When the user asks you to act, call
-`respond_opencode_permission` with `once`, `always` or `reject`; a successful
+`respond_agent_permission` with `once`, `always` or `reject`; a successful
 `once`/`always` resumes the SAME session. Treat `always` as the broader choice: show
 the exact proposed pattern first and surface ambiguous, overly broad or sensitive
 scopes instead of guessing. `always` fails closed when no scope is reviewable. An
-explicit OpenCode `deny` is not approvable. After completion, read the final result
-with `read_opencode_run` and audit current code. The agent's test report is never
+explicit runtime `deny` is not approvable. After completion, read the final result
+with `read_agent_run` and audit current code. The agent's test report is never
 independent proof; this server does not run tests.
 
 No callbacks, required report files, snapshots, review IDs, stored verdicts or

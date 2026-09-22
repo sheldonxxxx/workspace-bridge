@@ -518,6 +518,47 @@ def test_pi_pending_and_respond_mapping(monkeypatch):
         runtime.respond_permission("/d", "ses_1", "perm_1", "sometimes")
 
 
+def test_pi_pending_requires_canonical_session_id_3d4(monkeypatch):
+    """3D4 live blocker: adapter rows without canonical session_id are dropped.
+
+    The deployed adapter emitted only the legacy `session` key while
+    _normalize_pi_pending requires `session_id` for strict session
+    scoping, so every Pi pending was dropped (matched=0, run never
+    reached waiting_permission). The fixed adapter emits both keys with
+    the identical bounded value. Fail-closed: legacy-only or
+    cross-session rows never normalize.
+    """
+    live_call = ("call_01a0c749a17876808c7659bb3c8645c4"
+                 "|fc_01a0c749a17876808c7659bb3c8645c4")
+    fixed_row = {
+        "session": "ses_live", "session_id": "ses_live", "id": "perm_live",
+        "tool": "read", "action": "read", "title": "",
+        "resource": "/etc/hosts", "requested": ["/etc/hosts"],
+        "always_pattern": "read:/etc/hosts", "tool_call_id": live_call,
+        "created": "2026-09-22T00:00:00Z",
+        "metadata": {"code": "tool_ask"}}
+
+    def handler(record):
+        url = record["url"]
+        if record["method"] == "GET" and url.split("?")[0].endswith("/health"):
+            return FakeResponse(ready_adapter_health())
+        if record["method"] == "GET" and url.endswith("/permissions?directory=%2Fd"):
+            return FakeResponse({"permissions": [dict(fixed_row)]})
+        raise AssertionError(url)
+
+    patch(monkeypatch, handler)
+    runtime = HttpPiRuntime("http://127.0.0.1:8780")
+    pending = runtime.list_pending_permissions("/d", "ses_live")
+    assert len(pending) == 1 and pending[0].id == "perm_live"
+    assert pending[0].session_id == "ses_live"
+    assert pending[0].call_id == live_call
+    assert pending[0].pattern == ("read:/etc/hosts",)
+    # Fail-closed without the canonical key or across sessions.
+    legacy = {k: v for k, v in fixed_row.items() if k != "session_id"}
+    assert HttpPiRuntime._normalize_pi_pending(legacy, "ses_live") is None
+    assert HttpPiRuntime._normalize_pi_pending(dict(fixed_row), "ses_other") is None
+
+
 def test_writable_create_refuses_old_adapter_without_session_post(monkeypatch):
     calls = patch(monkeypatch, lambda record: FakeResponse(old_adapter_health())
                   if record["method"] == "GET" and record["url"].split("?")[0].endswith("/health")
@@ -788,7 +829,7 @@ def test_pi_unsupported_question_is_not_applicable(pi_env):
 
 def test_skill_version_bumped_and_workflow_neutral():
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert SKILL_VERSION == "2.1.0"
+    assert SKILL_VERSION == "2.2.0"
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
     skill = (root / "workspace_bridge" / "skills" / "project-lead" / "SKILL.md").read_text()
     assert "web-admin configured" in skill

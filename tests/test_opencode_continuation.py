@@ -49,11 +49,10 @@ def publish_and_complete(agent_env, payload, job_overrides=None, request_id="fir
 
 # ------------------------------------------------------------- tool surface
 def test_tool_count_unchanged_and_continue_exposed(agent_env):
-    assert len(TOOLS) == 28
-    schema = TOOLS["start_opencode_run"][0].model_json_schema()
+    assert len(TOOLS) == 21
+    schema = TOOLS["start_agent_run"][0].model_json_schema()
     assert "continue_from_run_id" in schema["properties"]
-    assert "session is busy" in TOOLS["start_opencode_run"][1].lower() or \
-        "busy" in TOOLS["start_opencode_run"][1]
+    assert "SAME runtime" in TOOLS["start_agent_run"][1]
 
 
 def test_fresh_start_creates_session_and_reports_not_reused(agent_env, payload):

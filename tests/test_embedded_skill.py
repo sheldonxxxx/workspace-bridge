@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "2.1.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "2.2.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -81,10 +81,23 @@ def test_mcp_instructions_match_skill_model_rule():
     assert "enabled model" in INSTRUCTIONS
     assert "model-choice rule" in INSTRUCTIONS
     assert "always uses the global default" not in INSTRUCTIONS
-    start_description = TOOLS["start_opencode_run"][1]
-    assert "model_not_enabled" in start_description or "admin-enabled" in start_description
+    start_description = TOOLS["start_agent_run"][1]
+    assert "admin-enabled" in start_description or "currently available" in start_description
     assert "model_override_forbidden" not in start_description
-    assert TOOLS["list_opencode_models"][1].count("scope=global") >= 1
+    assert "scope" in TOOLS["list_agent_models"][1]
+
+
+def test_skill_defaults_silent_dispatch_to_pi_without_legacy_aliases():
+    content = read_project_lead_skill()["content"]
+    assert "a silent user \u2192 Pi" in content
+    assert "silent user \u2192 OpenCode" not in content
+    for alias in ("list_opencode_models", "start_opencode_run", "list_opencode_runs",
+                  "read_opencode_run", "respond_opencode_permission",
+                  "cancel_opencode_run", "read_opencode_request"):
+        assert alias not in content, alias
+    assert "silent/default runtime is Pi" in INSTRUCTIONS or \
+        "silent user choice means runtime pi" in INSTRUCTIONS
+    assert "Legacy list_opencode" not in INSTRUCTIONS
 
 
 def test_tool_schema_is_read_only_unscoped_and_empty():

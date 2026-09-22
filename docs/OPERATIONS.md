@@ -112,7 +112,7 @@ merging their failure semantics:
 Each sweep covers at most 50 distinct sessions, issues no work when no
 relevant active run exists, and stops polling terminal runs immediately.
 Expected worst-case detection latency is ~4s (poll tick) + 4s/7s cadence
-plus one bounded adapter round trip. `read_opencode_run` keeps an
+plus one bounded adapter round trip. `read_agent_run` keeps an
 immediate permission resync, question resync and completion self-heal
 (`reason=read_reconcile`); sweeps complete with
 `reason=background_reconcile`. Waiting permission/question runs and
@@ -143,7 +143,7 @@ only `status`/`attempts`/`code` plus an optional short non-secret `detail` parse
 from Discord JSON error bodies (HTML/proxy pages are never stored). Post-deploy live
 smoke (user-triggered only, never in automated tests): with a webhook configured,
 start a real run and let it reach a notified state (for example completion), then
-read the run's `notification` field in the manager or via `read_opencode_run`;
+read the run's `notification` field in the manager or via `read_agent_run`;
 `sent` confirms delivery and `failed` with `http_403` points at webhook/egress
 filtering, not the bridge payload. `workspace-bridge doctor` reports runtime
 configuration and the model policy status without contacting the host server.

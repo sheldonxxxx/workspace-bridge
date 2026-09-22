@@ -428,3 +428,75 @@ test("abort resolves owned pending UI first, then aborts Pi", async () => {
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
   await adapter.shutdown({ graceMs: 0 });
 });
+
+test("3D4 live shape: pending carries canonical session_id for the Bridge contract", async () => {
+  // Regression for the live 0.87.0 correlation blocker (run_4f5a7700):
+  // the execution journal persisted permission_effect=ask while Bridge
+  // saw zero pendings. Root cause was the adapter pending row carrying
+  // only the legacy `session` key while the Bridge normalizer requires
+  // the canonical `session_id` for strict session scoping, so every Pi
+  // pending was dropped (matched=0). The adapter must emit session_id.
+  // Wire shape mirrors the verified Pi 0.87.0 transport: UUID UI id,
+  // opaque WB_PERMISSION_V1:<toolCallId> marker (pipe-form call id as
+  // seen live), exact 3-option ask shape, start observed before UI.
+  const projects = makeProjects();
+  const bag = autoSpawn();
+  const adapter = makeAdapter(projects, bag);
+  // External-read ask policy mirrors the live run: /etc/hosts outside
+  // the workspace evaluates to ask (not deny) under default_mode=ask.
+  const base = writablePolicy();
+  base.external_access = { default_mode: "ask", roots: [] };
+  const session = await createSession(adapter, projects, projects.appA,
+    { permission_policy: base, policy_revision: policyRevision(base) });
+  const child = bag.children[0];
+  const liveCallId = "call_01a0c749a17876808c7659bb3c8645c4|fc_01a0c749a17876808c7659bb3c8645c4";
+  emit(child, { type: "tool_execution_start", toolCallId: liveCallId, toolName: "read",
+    args: { path: "/etc/hosts" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  emit(child, {
+    type: "extension_ui_request", id: "d5ec6467-aaaa-4bbb-8ccc-0123456789ab", method: "select",
+    title: `WB_PERMISSION_V1:${liveCallId}`,
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const listed = await adapter.listPermissions(projects.appA, session.id);
+  assert.equal(listed.length, 1);
+  const pending = listed[0];
+  // Canonical Bridge contract key: strict session scoping depends on it.
+  assert.equal(pending.session_id, session.id);
+  // Legacy alias stays with the identical bounded value for older readers.
+  assert.equal(pending.session, session.id);
+  assert.equal(pending.tool_call_id, liveCallId);
+  assert.equal(pending.tool, "read");
+  // Serialized row must satisfy the Bridge normalizer shape (id +
+  // session_id + requested/always_pattern/tool_call_id, no raw args).
+  const serialized = JSON.stringify(pending);
+  assert.ok(serialized.includes('"session_id"'));
+  assert.ok(!serialized.includes("/etc/hosts".repeat(2)));
+  // once answers the exact UUID UI request.
+  const result = await adapter.respondPermission(projects.appA, session.id, pending.id, "once");
+  assert.deepEqual(result, { ok: true, decision: "once" });
+  const written = child.requests().filter((r) => r.type === "extension_ui_response");
+  assert.equal(written.length, 1);
+  assert.deepEqual(written[0], {
+    type: "extension_ui_response",
+    id: "d5ec6467-aaaa-4bbb-8ccc-0123456789ab",
+    value: OPTION_ONCE,
+  });
+  assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
+  // Stale UI for an ended call still fails closed with a cancel write.
+  emit(child, { type: "tool_execution_end", toolCallId: liveCallId, toolName: "read",
+    result: {}, isError: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  emit(child, {
+    type: "extension_ui_request", id: "stale-ui-1", method: "select",
+    title: `WB_PERMISSION_V1:${liveCallId}`,
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
+  const stale = child.requests().filter((r) => r.type === "extension_ui_response" && r.id === "stale-ui-1");
+  assert.equal(stale.length, 1);
+  assert.deepEqual(stale[0], { type: "extension_ui_response", id: "stale-ui-1", cancelled: true });
+  await adapter.shutdown({ graceMs: 0 });
+});

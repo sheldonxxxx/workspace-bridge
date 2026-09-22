@@ -9,6 +9,7 @@ import {
   ExecutionJournal, summarizeInput, summarizeResult, summaryRecord,
 } from "../executions.mjs";
 import { enforcementFingerprint } from "../fingerprint.mjs";
+import { OPTION_ALWAYS, OPTION_ONCE, OPTION_REJECT } from "../trusted-permission-extension.mjs";
 import { createFakeSpawn, respondState } from "./helpers.mjs";
 import fs from "node:fs";
 import os from "node:os";
@@ -210,6 +211,11 @@ test("adapter correlation: parallel starts/ends via RPC update the journal obser
   await new Promise((resolve) => setImmediate(resolve));
   const first = await adapter.readExecutions(directory, session.id, { after: 0, limit: 10 });
   assert.equal(first.updates.length, 2);
+  const firstById = Object.fromEntries(first.updates.map((u) => [u.tool_call_id, u]));
+  // Normalized bash start carries the exact shell authority: ask mode
+  // persists ask (not malformed deny), read persists allow.
+  assert.equal(firstById["rpc-a"].permission_effect, "allow");
+  assert.equal(firstById["rpc-b"].permission_effect, "ask");
   const cursor = first.next;
   // End out of order with verified content/details shapes; bash end omits timeout units.
   emit({
@@ -295,4 +301,162 @@ test("session creation returns fingerprint without paths", async () => {
   assert.ok(!JSON.stringify(session.fingerprint_modules || []).includes("/"));
   assert.ok(!String(session.enforcement_fingerprint).includes("/"));
   await adapter.shutdown({ graceMs: 0 });
+});
+
+test("shell_mode=allow bash start persists allow via normalized flow", async () => {
+  const projects = makeProjects();
+  const bag = createFakeSpawn();
+  const adapter = new PiAdapter({
+    projectsRoot: projects.root, piBinary: "pi", agentDir: "/tmp/agent",
+    timeoutMs: 1000, spawnFn: bag.spawnFn, maxLineBytes: 1024 * 1024,
+  });
+  const policy = v3Policy({ shell_mode: "allow", write_tools_enabled: false });
+  const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
+  const promise = adapter.createSession(projects.app, "t", options);
+  const child = bag.children[0];
+  respondState(child, child.lastRequest().id, { sessionId: "ses-allow-1" });
+  const session = await promise;
+  child.respond({ type: "tool_execution_start", toolCallId: "sh-allow", toolName: "bash",
+    args: { command: "echo allow-ok", timeout: 10 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const entry = adapter.sessions.get(session.id);
+  const preflight = entry.preflights.get("sh-allow");
+  assert.ok(preflight);
+  assert.equal(preflight.effect, "allow");
+  // Preflight input is bounded exact authority only.
+  assert.deepEqual(Object.keys(preflight.input).sort(), ["command", "timeoutMs"]);
+  assert.equal(preflight.input.command, "echo allow-ok");
+  assert.equal(preflight.input.timeoutMs, 10000);
+  const listed = await adapter.readExecutions(projects.app, session.id, { after: 0, limit: 10 });
+  const byId = Object.fromEntries(listed.updates.map((u) => [u.tool_call_id, u]));
+  assert.equal(byId["sh-allow"].permission_effect, "allow");
+  await adapter.shutdown({ graceMs: 0 });
+});
+
+test("shell_mode=ask bash start persists ask and survives trusted UI re-evaluation", async () => {
+  const projects = makeProjects();
+  const bag = createFakeSpawn();
+  const adapter = new PiAdapter({
+    projectsRoot: projects.root, piBinary: "pi", agentDir: "/tmp/agent",
+    timeoutMs: 1000, spawnFn: bag.spawnFn, maxLineBytes: 1024 * 1024,
+  });
+  const policy = v3Policy({ shell_mode: "ask", write_tools_enabled: false });
+  const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
+  const promise = adapter.createSession(projects.app, "t", options);
+  const child = bag.children[0];
+  respondState(child, child.lastRequest().id, { sessionId: "ses-ask-1" });
+  const session = await promise;
+  const entry = adapter.sessions.get(session.id);
+  child.respond({ type: "tool_execution_start", toolCallId: "sh-ask", toolName: "bash",
+    args: { command: "echo ask-ok", timeout: 20 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  // Journal persists ask, not malformed deny.
+  const started = await adapter.readExecutions(projects.app, session.id, { after: 0, limit: 10 });
+  const byId = Object.fromEntries(started.updates.map((u) => [u.tool_call_id, u]));
+  assert.equal(byId["sh-ask"].permission_effect, "ask");
+  const preflight = entry.preflights.get("sh-ask");
+  assert.ok(preflight);
+  assert.equal(preflight.effect, "ask");
+  assert.ok(preflight.commandHash?.match(/^[0-9a-f]{64}$/));
+  assert.equal(preflight.timeoutMs, 20000);
+  assert.ok(preflight.grantKey.includes(String(preflight.timeoutMs)));
+  assert.ok(preflight.alwaysPattern.includes(preflight.commandHash));
+  // Trusted UI ask with the exact marker/options re-evaluates the same
+  // exact command+timeout and becomes answerable (no fail-closed cancel).
+  child.respond({ type: "extension_ui_request", id: "ui-ask-1", method: "select",
+    title: "WB_PERMISSION_V1:sh-ask",
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const pending = await adapter.listPermissions(projects.app, session.id);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].tool, "bash");
+  assert.equal(pending[0].resource, "echo ask-ok");
+  assert.equal(pending[0].command_sha256, preflight.commandHash);
+  assert.equal(pending[0].timeout_ms, 20000);
+  assert.equal(pending[0].always_pattern, preflight.alwaysPattern);
+  const answered = await adapter.respondPermission(projects.app, session.id, pending[0].id, "once");
+  assert.deepEqual(answered, { ok: true, decision: "once" });
+  const writes = child.requests().filter((r) => r.type === "extension_ui_response");
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0], { type: "extension_ui_response", id: "ui-ask-1", value: OPTION_ONCE });
+  // The exact-command decision is linked to the execution journal.
+  const after = await adapter.readExecutions(projects.app, session.id, { after: started.next, limit: 10 });
+  const decisions = after.updates.filter((u) => u.tool_call_id === "sh-ask");
+  assert.ok(decisions.length >= 1);
+  assert.equal(decisions[0].permission_decision, "once");
+  assert.equal(decisions[0].permission_effect, "ask");
+  await adapter.shutdown({ graceMs: 0 });
+});
+
+test("shell always decision stays exact-command scoped and deny/malformed stay closed", async () => {
+  const projects = makeProjects();
+  const bag = createFakeSpawn();
+  const adapter = new PiAdapter({
+    projectsRoot: projects.root, piBinary: "pi", agentDir: "/tmp/agent",
+    timeoutMs: 1000, spawnFn: bag.spawnFn, maxLineBytes: 1024 * 1024,
+  });
+  const policy = v3Policy({ shell_mode: "ask", write_tools_enabled: false });
+  const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
+  const promise = adapter.createSession(projects.app, "t", options);
+  const child = bag.children[0];
+  respondState(child, child.lastRequest().id, { sessionId: "ses-always-1" });
+  const session = await promise;
+  const entry = adapter.sessions.get(session.id);
+  // Malformed bash (no command) fails closed even in ask mode.
+  child.respond({ type: "tool_execution_start", toolCallId: "sh-bad", toolName: "bash", args: {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(entry.preflights.get("sh-bad")?.effect, "deny");
+  child.respond({ type: "extension_ui_request", id: "ui-bad", method: "select",
+    title: "WB_PERMISSION_V1:sh-bad",
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
+  const badWrites = child.requests().filter((r) => r.type === "extension_ui_response" && r.id === "ui-bad");
+  assert.equal(badWrites.length, 1);
+  assert.deepEqual(badWrites[0], { type: "extension_ui_response", id: "ui-bad", cancelled: true });
+  // Valid bash answered always records the exact hash+timeout scope.
+  child.respond({ type: "tool_execution_start", toolCallId: "sh-always", toolName: "bash",
+    args: { command: "echo always-ok", timeout: 5 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.respond({ type: "extension_ui_request", id: "ui-always", method: "select",
+    title: "WB_PERMISSION_V1:sh-always",
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const pending = await adapter.listPermissions(projects.app, session.id);
+  assert.equal(pending.length, 1);
+  const first = entry.preflights.get("sh-always");
+  assert.ok(first.alwaysPattern.includes(first.commandHash));
+  assert.ok(first.alwaysPattern.endsWith(`:${first.timeoutMs}`));
+  const done = await adapter.respondPermission(projects.app, session.id, pending[0].id, "always");
+  assert.deepEqual(done, { ok: true, decision: "always" });
+  const journal = await adapter.readExecutions(projects.app, session.id, { after: 0, limit: 50 });
+  const rec = journal.updates.find((u) => u.tool_call_id === "sh-always" && u.permission_decision === "always");
+  assert.ok(rec);
+  assert.equal(rec.permission_effect, "ask");
+  await adapter.shutdown({ graceMs: 0 });
+
+  // shell_mode=deny stays denied through the same normalized flow.
+  const bag2 = createFakeSpawn();
+  const adapter2 = new PiAdapter({
+    projectsRoot: projects.root, piBinary: "pi", agentDir: "/tmp/agent",
+    timeoutMs: 1000, spawnFn: bag2.spawnFn, maxLineBytes: 1024 * 1024,
+  });
+  const denyPolicy = v3Policy({ shell_mode: "deny", write_tools_enabled: false });
+  const promise2 = adapter2.createSession(projects.app, "t",
+    { permission_policy: denyPolicy, policy_revision: policyRevision(denyPolicy) });
+  const child2 = bag2.children[0];
+  respondState(child2, child2.lastRequest().id, { sessionId: "ses-deny-1" });
+  const session2 = await promise2;
+  child2.respond({ type: "tool_execution_start", toolCallId: "sh-deny", toolName: "bash",
+    args: { command: "echo no", timeout: 5 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const denied = await adapter2.readExecutions(projects.app, session2.id, { after: 0, limit: 10 });
+  const deniedById = Object.fromEntries(denied.updates.map((u) => [u.tool_call_id, u]));
+  assert.equal(deniedById["sh-deny"].permission_effect, "deny");
+  child2.respond({ type: "extension_ui_request", id: "ui-deny", method: "select",
+    title: "WB_PERMISSION_V1:sh-deny",
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await adapter2.listPermissions(projects.app, session2.id), []);
+  await adapter2.shutdown({ graceMs: 0 });
 });

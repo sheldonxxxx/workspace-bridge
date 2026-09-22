@@ -1,14 +1,15 @@
 # Workspace Bridge — v0.8.4
 
-**One private tunnel. Protected workspaces. Plain handoffs. Optional OpenCode runs. Review in ChatGPT.**
+**One private tunnel. Protected workspaces. Plain handoffs. Optional agent runs. Review in ChatGPT.**
 
 ChatGPT reads your project, resolves the technical approach, and writes a handoff.
-By default you paste its instructions and path into OpenCode manually. When a local
+By default you paste its instructions and path into the local agent manually. When a local
 administrator enables agent execution for a workspace, ChatGPT can instead start one
-bounded OpenCode session for that prepared handoff through Workspace Bridge and read
+bounded agent session (Pi by default, or another configured runtime on explicit request)
+for that prepared handoff through Workspace Bridge and read
 the final result back itself. Permission requests are resumable: `waiting_permission`
 is a non-terminal state that ChatGPT can answer with `once`, `always` or `reject`,
-resuming the **same** session. When OpenCode finishes, Workspace Bridge records a
+resuming the **same** session. When the run finishes, Workspace Bridge records a
 terminal state and (if configured) sends a Discord notification. ChatGPT then audits
 current source with the normal browsing tools and gives findings in the conversation.
 
@@ -50,14 +51,14 @@ mandatory default that MCP cannot override), shows a global Bridge-owned OpenCod
 sessions table, creates/rotates the shared
 credential, pauses MCP access, and generates a single tunnel profile.
 
-## Nineteen tools
+## Twenty-one tools
 
 | Purpose | Tools |
 |---|---|
 | Project-lead guidance | `read_project_lead_skill` |
 | Workspace selection | `list_workspaces`, `workspace_info` |
 | General inspection and audit | `list_dir`, `glob`, `grep_files`, `read_file` |
-| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_opencode_models`, `start_opencode_run`, `list_opencode_runs`, `read_opencode_run`, `read_opencode_request`, `respond_opencode_permission`, `cancel_opencode_run` |
+| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_agent_models`, `start_agent_run`, `list_agent_runs`, `read_agent_run`, `read_agent_request`, `respond_agent_permission`, `cancel_agent_run`, `list_agent_executions`, `read_agent_execution` |
 | Policy-controlled writing | `write_file`, `edit_file` |
 
 The embedded skill tells ChatGPT to own decisions, give the less-capable implementer
@@ -169,13 +170,13 @@ It returns a copyable instruction and an absolute path. Each new handoff contain
 Optional `context_hashes` only check specifically referenced files before publishing;
 they do not capture a baseline. No whole-project snapshot scan is performed.
 
-**Build:** manually paste the instruction/path into OpenCode. It implements the
+**Build:** manually paste the instruction/path into the local agent (Pi by default). It implements the
 plan, runs checks locally, and returns a summary in its own conversation. No
 `RESULT.md`, `TESTS.json`, callback, or completion signal is required.
 
 **Review:** paste that reply into ChatGPT, for example:
 
-> Here is OpenCode's return for this handoff: [paste reply]. Read the relevant
+> Here is the agent's return for this handoff: [paste reply]. Read the relevant
 > current source, callers and tests using Workspace Bridge. Check the acceptance
 > criteria, identify regressions, and give findings or a corrective handoff.
 
@@ -229,7 +230,7 @@ Handoff replacements remain 0600. Extended attributes/ACLs are not copied.
 
 For handoff discovery, explicitly select `.workspace-handoff` in list/glob/search;
 default root-source scans omit notes. Normal `read_file` can read any allowed source
-or handoff path in every write mode. The user still pastes OpenCode's reply into
+or handoff path in every write mode. The user still pastes the agent's reply into
 ChatGPT for general-tool review; workspace permission alone does not authorize
 ChatGPT to take over implementation. See [file access guide](docs/FILE_ACCESS.md).
 
@@ -253,9 +254,10 @@ denied (401) and agent operations fail closed. Provider credentials and the serv
 URL never enter the bridge container, MCP, the manager, events or logs.
 
 The loop is handoff-bound: `prepare_handoff` → optionally
-`list_opencode_models(query=...)` (global list, `scope="global"`) →
-`start_opencode_run(job_id, request_id)`. `start_opencode_run` accepts **no arbitrary prompt or
-filesystem path** and resolves the model against the global policy: omitting
+`list_agent_models(runtime, query=...)` →
+`start_agent_run(runtime, job_id, request_id)` with an explicit runtime (a silent
+runtime choice means Pi). `start_agent_run` accepts **no arbitrary prompt or
+filesystem path** and resolves the model against that runtime's policy: omitting
 `model` uses the configured default, while an explicit `model` is allowed only
 when its exact selector is admin-enabled and currently available
 (`model_not_enabled`/`model_unavailable` otherwise),
@@ -263,14 +265,14 @@ new runs fail closed with `model_policy_unconfigured` until the local
 administrator saves a model policy, and the exact selector is persisted per run.
 Requests are idempotent per `request_id`. The
 bridge records run state independently of handoff publication state. On completion
-ChatGPT reads the bounded final result with `read_opencode_run`; the agent's report is
+ChatGPT reads the bounded final result with `read_agent_run`; the agent's report is
 **unverified evidence**, not independent proof.
 
 Permission handling preserves OpenCode's normal configuration. When OpenCode asks
 (for example `external_directory`), the run moves to the non-terminal
 `waiting_permission` state, the request is persisted, and a Discord attention
-notification is sent. `read_opencode_request` exposes the exact pending scope; when
-the user asks, ChatGPT calls `respond_opencode_permission` with `once`, `always` or
+notification is sent. `read_agent_request` exposes the exact pending scope; when
+the user asks, ChatGPT calls `respond_agent_permission` with `once`, `always` or
 `reject`, which resumes the **same** session. `always` passes through OpenCode's own
 proposed pattern unchanged and fails closed when no reviewable scope exists. OpenCode
 permissions are **not an OS sandbox**: the native server has the host user's
@@ -278,7 +280,7 @@ authority. Stronger OS/container isolation is optional hardening, not a Phase-2
 requirement. Explicit OpenCode `deny` is a policy rejection and is not remotely
 approvable.
 
-Missed-ask recovery is best-effort: `read_opencode_run` resyncs the official
+Missed-ask recovery is best-effort: `read_agent_run` resyncs the official
 pending-permission listing before reporting, but upstream `GET /permission` can
 itself fail (one malformed pending request can break the whole listing), in
 which case the run stays active with `pending_request_count=0` and a visible

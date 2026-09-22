@@ -189,13 +189,13 @@ def test_two_workspaces_share_one_global_policy(agent_env, payload):
 def test_mcp_surface_has_no_policy_mutation_or_bypass():
     from workspace_bridge.api import TOOLS
     assert "set_model_policy" not in TOOLS
-    start_schema = TOOLS["start_opencode_run"][0].model_json_schema()
-    assert set(start_schema["properties"]) <= {"workspace_id", "job_id", "request_id", "model",
+    start_schema = TOOLS["start_agent_run"][0].model_json_schema()
+    assert set(start_schema["properties"]) <= {"workspace_id", "runtime", "job_id", "request_id", "model",
                                                "parent_run_id", "continue_from_run_id"}
     assert "force" not in json.dumps(start_schema).lower()
-    assert "project-specific" not in TOOLS["list_opencode_models"][1]
-    assert "scope=global" in TOOLS["list_opencode_models"][1]
-    assert len(TOOLS) == 28
+    assert "project-specific" not in TOOLS["list_agent_models"][1]
+    assert "runtime" in TOOLS["list_agent_models"][1]
+    assert len(TOOLS) == 21
 
 
 # ------------------------------------------------------- global sessions table

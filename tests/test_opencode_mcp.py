@@ -12,6 +12,9 @@ from runtime_fakes import permission_event
 OPENCODE_TOOLS = {"list_opencode_models", "start_opencode_run", "list_opencode_runs",
                   "read_opencode_run", "read_opencode_request", "respond_opencode_permission",
                   "cancel_opencode_run"}
+NEUTRAL_TOOLS = {"list_agent_models", "start_agent_run", "list_agent_runs",
+                   "read_agent_run", "read_agent_request", "respond_agent_permission",
+                   "cancel_agent_run", "list_agent_executions", "read_agent_execution"}
 
 
 def publish(agent_env, payload):
@@ -35,16 +38,17 @@ def mcp_value(response):
     return json.loads(result["content"][0]["text"])
 
 
-def test_new_tool_schemas_and_annotations(agent_env):
-    assert OPENCODE_TOOLS <= set(TOOLS)
-    assert len(TOOLS) == 28
-    for name in OPENCODE_TOOLS:
+def test_removed_aliases_absent_from_public_surface(agent_env):
+    assert not OPENCODE_TOOLS & set(TOOLS)
+    assert len(TOOLS) == 21
+    assert NEUTRAL_TOOLS <= set(TOOLS)
+    for name in NEUTRAL_TOOLS:
         schema = TOOLS[name][0].model_json_schema()
         assert schema["additionalProperties"] is False
         assert "workspace_id" in schema["required"]
-    assert TOOLS["start_opencode_run"][2] is False and TOOLS["start_opencode_run"][3] is True
-    assert TOOLS["respond_opencode_permission"][2] is False
-    assert TOOLS["list_opencode_models"][2] is True
+    assert TOOLS["start_agent_run"][2] is False and TOOLS["start_agent_run"][3] is True
+    assert TOOLS["respond_agent_permission"][2] is False
+    assert TOOLS["list_agent_models"][2] is True
 
 
 @pytest.mark.asyncio
@@ -55,46 +59,61 @@ async def test_tools_list_annotations_are_open_world(agent_env):
                                                       "Accept": "application/json"},
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     tools = {t["name"]: t for t in response.json()["result"]["tools"]}
-    for name in OPENCODE_TOOLS:
+    assert not OPENCODE_TOOLS & set(tools)
+    assert not any(name.startswith(("list_opencode_", "start_opencode_", "read_opencode_",
+                                     "respond_opencode_", "cancel_opencode_")) for name in tools)
+    for name in NEUTRAL_TOOLS:
         assert tools[name]["annotations"]["openWorldHint"] is True
-    assert tools["start_opencode_run"]["annotations"]["destructiveHint"] is True
-    assert tools["start_opencode_run"]["annotations"]["readOnlyHint"] is False
-    assert tools["respond_opencode_permission"]["annotations"]["destructiveHint"] is True
-    assert tools["cancel_opencode_run"]["annotations"]["readOnlyHint"] is False
-    assert tools["cancel_opencode_run"]["annotations"]["destructiveHint"] is False
-    assert tools["read_opencode_run"]["annotations"]["readOnlyHint"] is True
+    assert tools["start_agent_run"]["annotations"]["destructiveHint"] is True
+    assert tools["start_agent_run"]["annotations"]["readOnlyHint"] is False
+    assert tools["respond_agent_permission"]["annotations"]["destructiveHint"] is True
+    assert tools["cancel_agent_run"]["annotations"]["readOnlyHint"] is False
+    assert tools["cancel_agent_run"]["annotations"]["destructiveHint"] is False
+    assert tools["read_agent_run"]["annotations"]["readOnlyHint"] is True
     assert "shell" not in tools and "execute" not in tools
+
+
+@pytest.mark.asyncio
+async def test_mcp_calls_to_removed_aliases_fail_unknown_tool(agent_env):
+    for name in sorted(OPENCODE_TOOLS):
+        response = await mcp_call(agent_env, name, {})
+        assert response.json()["error"]["code"] == -32602, name
 
 
 @pytest.mark.asyncio
 async def test_mcp_start_read_and_arbitrary_fields_rejected(agent_env, payload):
     job = publish(agent_env, payload)
-    response = await mcp_call(agent_env, "start_opencode_run",
-                              {"job_id": job["id"], "request_id": "mcp-run", "model": None})
+    response = await mcp_call(agent_env, "start_agent_run",
+                              {"runtime": "opencode", "job_id": job["id"],
+                               "request_id": "mcp-run", "model": None})
     run = mcp_value(response)
     assert run["workspace_id"] == agent_env["id"] and run["session_id"]
-    detail = mcp_value(await mcp_call(agent_env, "read_opencode_run", {"run_id": run["run_id"]}))
+    assert run["runtime"] == "opencode"
+    detail = mcp_value(await mcp_call(agent_env, "read_agent_run", {"run_id": run["run_id"]}))
     assert detail["agent_evidence"] == "unverified"
+    assert detail["runtime"] == "opencode"
     for extra in ({"prompt": "do something else"}, {"path": "/etc/passwd"}, {"command": "rm -rf /"}):
-        bad = await mcp_call(agent_env, "start_opencode_run",
-                             {"job_id": job["id"], "request_id": "x", **extra})
+        bad = await mcp_call(agent_env, "start_agent_run",
+                             {"runtime": "opencode", "job_id": job["id"],
+                              "request_id": "x", **extra})
         assert bad.json()["error"]["code"] == -32602
 
 
 @pytest.mark.asyncio
 async def test_mcp_permission_roundtrip_on_same_session(agent_env, payload):
     job = publish(agent_env, payload)
-    run = mcp_value(await mcp_call(agent_env, "start_opencode_run",
-                                   {"job_id": job["id"], "request_id": "perm-run", "model": None}))
+    run = mcp_value(await mcp_call(agent_env, "start_agent_run",
+                                   {"runtime": "opencode", "job_id": job["id"],
+                                    "request_id": "perm-run", "model": None}))
     agent_env["service"].orchestrator.handle_event(permission_event(run["session_id"], "per_mcp",
                                                                    pattern=["/Users/me/projects/**"]))
-    detail = mcp_value(await mcp_call(agent_env, "read_opencode_run", {"run_id": run["run_id"]}))
+    detail = mcp_value(await mcp_call(agent_env, "read_agent_run", {"run_id": run["run_id"]}))
     assert detail["state"] == "waiting_permission"
     assert detail["pending_requests"][0]["request_id"] == "per_mcp"
-    request = mcp_value(await mcp_call(agent_env, "read_opencode_request",
+    request = mcp_value(await mcp_call(agent_env, "read_agent_request",
                                        {"run_id": run["run_id"], "request_id": "per_mcp"}))
     assert request["pattern"] == ["/Users/me/projects/**"] and request["always_allowed"] is True
-    replied = mcp_value(await mcp_call(agent_env, "respond_opencode_permission",
+    replied = mcp_value(await mcp_call(agent_env, "respond_agent_permission",
                                        {"run_id": run["run_id"], "request_id": "per_mcp", "decision": "always"}))
     assert replied["run_state"] == "running" and replied["decision"] == "always"
     assert agent_env["runtime"].respond_calls[-1][2] == "always"
@@ -346,3 +365,39 @@ async def test_manager_list_views_carry_continuation_lineage(agent_env, payload)
         detail = (await client.get(f"/api/runs/{second['run_id']}")).json()
         assert detail["session_reused"] is True
         assert detail["continue_from_run_id"] == first["run_id"]
+
+
+def test_opencode_history_remains_readable_via_neutral_tools(agent_env, payload):
+    """Persisted OpenCode runs stay readable through runtime-neutral tools.
+
+    The public OpenCode MCP aliases are gone, but the backend and the
+    internal service aliases are intact: a run started for runtime opencode
+    is fully visible through read_agent_run/list_agent_runs, and explicit
+    runtime="opencode" still routes to the OpenCode backend."""
+    service = agent_env["service"]
+    job = publish(agent_env, payload)
+    legacy = service.call(agent_env["id"], agent_env["token"], "start_opencode_run",
+                          {"job_id": job["id"], "request_id": "compat-legacy",
+                           "model": None, "parent_run_id": None})
+    assert legacy["runtime"] == "opencode"
+    detail = service.call(agent_env["id"], agent_env["token"], "read_agent_run",
+                          {"run_id": legacy["run_id"]})
+    assert detail["runtime"] == "opencode"
+    assert detail["run_id"] == legacy["run_id"]
+    listed = service.call(agent_env["id"], agent_env["token"], "list_agent_runs",
+                          {"offset": 0, "limit": 20})["runs"]
+    assert legacy["run_id"] in {r["run_id"] for r in listed}
+    filtered = service.call(agent_env["id"], agent_env["token"], "list_agent_runs",
+                            {"runtime": "opencode", "offset": 0, "limit": 20})["runs"]
+    assert legacy["run_id"] in {r["run_id"] for r in filtered}
+    models = service.call(agent_env["id"], agent_env["token"], "list_agent_models",
+                          {"runtime": "opencode", "query": "", "limit": 25})
+    assert models["runtime"] == "opencode" and models["models"]
+    job2 = service.call(agent_env["id"], agent_env["token"], "prepare_handoff",
+                        Handoff.model_validate({**payload, "request_id": "compat-2",
+                                                "title": "Explicit runtime"}).model_dump())
+    explicit = service.call(agent_env["id"], agent_env["token"], "start_agent_run",
+                            {"runtime": "opencode", "job_id": job2["id"],
+                             "request_id": "compat-explicit", "model": None,
+                             "parent_run_id": None})
+    assert explicit["runtime"] == "opencode" and explicit["session_id"]

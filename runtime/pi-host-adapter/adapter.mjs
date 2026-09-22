@@ -719,11 +719,13 @@ export class PiAdapter {
     const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
     const toolName = typeof message.toolName === "string" ? message.toolName : "";
     if (!toolCallId || toolCallId.length > 200 || !toolName) return;
-    // Normalized path-only permission metadata from the RPC layer (never
+    // Normalized bounded permission metadata from the RPC layer (never
     // raw tool payloads). Defensive: anything else evaluates as malformed.
     // {path: null} marks a present-but-invalid path so evaluation denies
-    // instead of defaulting to the workspace root. Bash keeps {} for
-    // permission (shell_mode governs it).
+    // instead of defaulting to the workspace root. Bash carries ONLY the
+    // bounded exact command plus verified timeout ({command, timeoutMs});
+    // a null bash input marks a malformed/truncated command so shell
+    // evaluation fails closed instead of judging a different command.
     const rawInput = message.input;
     const input = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
       ? rawInput
@@ -918,8 +920,13 @@ export class PiAdapter {
     const isBash = String(record.tool) === SHELL_TOOL;
     const resourceLimit = isBash ? 16384 : 400;
     const requestedLimit = isBash ? 16384 : 400;
+    // Canonical owner key is session_id (the Bridge normalizer and the
+    // OpenCode adapter both require it for strict session scoping).
+    // The legacy session alias is retained with the identical bounded
+    // value so older readers keep working; both keys always agree.
     const out = {
       session: String(record.sessionId).slice(0, 200),
+      session_id: String(record.sessionId).slice(0, 200),
       id: String(record.id).slice(0, 200),
       tool: String(record.tool).slice(0, 40),
       action: String(record.action).slice(0, 120),

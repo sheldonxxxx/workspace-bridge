@@ -75,7 +75,7 @@ OpenCode's own proposed scope unchanged.
 
 ## Agent execution boundary
 
-Handoffs remain the mandatory execution unit: `start_opencode_run` requires a
+Handoffs remain the mandatory execution unit: `start_agent_run` requires a
 prepared job in the same workspace and accepts no free-form prompt or path. Agent
 execution is a per-workspace local-admin policy (`agent_enabled`, default FALSE,
 independent from `write_scope`); MCP cannot change it. The runtime session directory
