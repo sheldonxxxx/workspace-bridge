@@ -1,13 +1,13 @@
 """Scripted runtime/notifier fakes for agent orchestration tests.
 
-These never touch the network, Node, a real OpenCode server, Discord or provider
+These never touch the network, Node, a real agent server, Discord or provider
 credentials. They implement the same neutral AgentRuntime boundary the HTTP
 adapter exposes.
 """
 from __future__ import annotations
 
 from workspace_bridge.notifications import NotificationResult, Notifier
-from workspace_bridge.runtime import (OPENCODE_RUNTIME_ID, AgentRuntime, MessageInfo, ModelInfo,
+from workspace_bridge.runtime import (PI_RUNTIME_ID, AgentRuntime, MessageInfo, ModelInfo,
                                       PendingPermission, PendingQuestion, RuntimeCapabilities,
                                       RuntimeEvent, RuntimeInteraction, RuntimeRejected,
                                       RuntimeUnavailable, SessionInfo, coerce_runtime_event)
@@ -51,9 +51,9 @@ class FakeRuntime(AgentRuntime):
         self.instance = instance
         self.head_cursor = cursor
         # Neutral identity/capabilities: the fake models the installed
-        # OpenCode backend by default. Tests override these attributes to
+        # Pi backend by default. Tests override these attributes to
         # exercise runtime-mismatch and capability fail-closed paths.
-        self._runtime_id = OPENCODE_RUNTIME_ID
+        self._runtime_id = PI_RUNTIME_ID
         self._capabilities = RuntimeCapabilities()
         self.sessions: list[dict] = []
         self.prompts: list[dict] = []
@@ -126,7 +126,7 @@ class FakeRuntime(AgentRuntime):
     def create_session(self, directory, title, options=None):
         self._counter += 1
         # 3B1: record the optional runtime-neutral session options (Pi
-        # permission policy snapshot) for assertions; OpenCode passes None.
+        # permission policy snapshot) for assertions.
         self.session_options = getattr(self, "session_options", [])
         self.session_options.append(options)
         # None means "adapter did not override" (normal); "" explicitly simulates an
@@ -160,7 +160,7 @@ class FakeRuntime(AgentRuntime):
             raise self.status_error
         status = self.statuses.get(session_id, "idle")
         if status not in ("idle", "busy", "retry"):
-            raise RuntimeUnavailable("OpenCode session status was invalid")
+            raise RuntimeUnavailable("Agent session status was invalid")
         return status
 
     def set_session_status(self, status, session_id=None):
@@ -171,7 +171,7 @@ class FakeRuntime(AgentRuntime):
             self.statuses[target] = status
 
     def add_pending_permission(self, session_id: str, permission: RuntimeInteraction) -> RuntimeInteraction:
-        """Stage an OpenCode-side pending permission without emitting any event."""
+        """Stage a backend-side pending permission without emitting any event."""
         self.pending_by_session.setdefault(session_id, []).append(permission)
         return permission
 
@@ -196,7 +196,7 @@ class FakeRuntime(AgentRuntime):
         return found
 
     def add_pending_question(self, session_id: str, question: RuntimeInteraction) -> RuntimeInteraction:
-        """Stage an OpenCode-side pending question without emitting any event."""
+        """Stage a backend-side pending question without emitting any event."""
         self.questions_by_session.setdefault(session_id, []).append(question)
         return question
 
@@ -294,7 +294,7 @@ def permission_event(session_id: str, permission_id: str = "per_1", *, pattern=N
                      event_type="permission.asked", generation="v1") -> dict:
     """Realistic V1 ask at the orchestrator boundary.
 
-    `pattern` is the legacy alias for the exact OpenCode-proposed always
+    `pattern` is the legacy alias for the exact backend-proposed always
     scope; `patterns`/`requested_patterns` is what is being requested.
     When only `pattern` is given it is mirrored into `requested_patterns`
     so older single-scope call sites stay reviewable.
@@ -335,7 +335,7 @@ def permission_event_v2(session_id: str, permission_id: str = "per_v2", *,
                         source=None, metadata=None, created="2026-09-19T00:00:00+00:00") -> dict:
     """Canonical V2 ask at the orchestrator boundary (adapter-normalized).
 
-    `resources` are the requested targets; `save` is OpenCode's exact
+    `resources` are the requested targets; `save` is the backend's exact
     proposed always scope (never synthesized: omitted `save` means an empty
     pattern so "always" fails closed). `source` carries the V2 tool
     reference {type, messageID, callID}; its callID is preserved verbatim.
@@ -368,7 +368,7 @@ def pending_permission(session_id: str, permission_id: str = "per_1", *,
                        pattern=None, requested_patterns=None,
                        action="external_directory", title="access outside workspace",
                        tool=None, metadata=None, generation="v1") -> PendingPermission:
-    """Canonical OpenCode-side pending permission with no live event attached.
+    """Canonical backend-side pending permission with no live event attached.
 
     `pattern` is the exact proposed always scope; `requested_patterns` is
     what is being requested. Mirrors permission_event's split.
@@ -386,7 +386,7 @@ def pending_permission(session_id: str, permission_id: str = "per_1", *,
 def pending_permission_v2(session_id: str, permission_id: str = "per_v2", *,
                           action="external_directory", resources=None, save=None,
                           source=None, metadata=None) -> PendingPermission:
-    """V2 OpenCode-side pending permission (adapter-normalized V2 snapshot row).
+    """V2 backend-side pending permission (adapter-normalized V2 snapshot row).
 
     `resources` are the requested targets; `save` is the exact proposed
     always scope and is never synthesized when absent.

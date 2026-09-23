@@ -1,42 +1,45 @@
 # Pi host adapter (native macOS only)
 
-A native macOS host adapter that owns read-only `pi --mode rpc` subprocesses
-for Workspace Bridge. It is intentionally **not** a Compose service and never
-runs in Docker.
+A native macOS host adapter that owns in-process Pi AgentSession instances
+(Pi 0.87.0 SDK) for Workspace Bridge. It is intentionally **not** a Compose
+service and never runs in Docker.
 
 ## Topology
 
 ```
-Docker Workspace Bridge (future HttpPiRuntime)
+Docker Workspace Bridge (HttpPiRuntime)
   -> http://host.docker.internal:8780 (X-Runtime-Token)
     -> native pi-host-adapter (this component, normal macOS user)
-      -> stdio JSONL
-        -> pi --mode rpc --tools read,grep,find,ls --no-approve --no-extensions
-          -> macOS Xcode/CoreML/MLX/Metal toolchain
+      -> in-process AgentSession (@earendil-works/pi-coding-agent 0.87.0)
+        -> macOS Xcode/CoreML/MLX/Metal toolchain
 ```
 
-The Bridge runtime selection is not wired yet: OpenCode remains the sole wired
-backend. This adapter validates the Mac execution plane independently first.
+The Bridge runtime selection is Pi-only: Pi is the configured backend.
+This adapter serves the Mac execution plane.
 
-## Read-only boundary flags
+There is no subprocess transport: managed sessions never spawn
+`pi --mode rpc`, there is no JSONL framing, and no frame-size ceiling can
+kill a session. Oversized tool payloads are summarized to bounded audit
+evidence while the session stays usable.
 
-Every Pi child (long-lived sessions and short-lived model-discovery children)
-is spawned as:
+## Read-only boundary loadout
 
-```
-pi --mode rpc --tools read,grep,find,ls --no-approve --no-extensions
-```
+Every managed session is created with an explicit SDK loadout:
 
-- `--tools read,grep,find,ls` is Pi's strict allowlist across built-in,
-  extension, and custom tools.
-- `--no-approve` overrides project trust for the run, so trusted
-  project-local resources cannot widen what the child may do.
-- `--no-extensions` disables extension discovery in the isolated agent dir.
-  Extensions otherwise execute arbitrary TypeScript with the macOS user's full
-  permissions, so they stay off for this read-only spike even though the tool
-  allowlist alone would constrain tool names.
+- `tools: ["read", "grep", "find", "ls"]` (plus `edit`, `write` when the
+  session is writable; plus `bash` unless shell mode is `deny`) is Pi's
+  strict allowlist across built-in, extension, and custom tools.
+- Project trust is disabled (`projectTrusted: false`, the SDK equivalent
+  of `--no-approve`), so trusted project-local resources cannot widen
+  what the session may do.
+- Extension/skills/prompt/theme/context-file discovery is disabled (the
+  SDK equivalent of `--no-extensions` plus skill/prompt/context
+  suppression). Extensions otherwise execute arbitrary TypeScript with
+  the macOS user's full permissions, so they stay off for this
+  read-only posture even though the tool allowlist alone would constrain
+  tool names.
 
-## Managed extension set (3C2, adapter 0.3.0)
+## Managed extension set (3C2, adapter 0.4.0)
 
 The isolated Bridge profile (`PI_CODING_AGENT_DIR`) may hold user-scope npm
 packages installed with the Pi CLI:
@@ -52,23 +55,25 @@ auto-enabled). Token-authenticated `GET /extensions` exposes the bounded
 native inventory (no host paths); `GET /health` advertises the
 `extension_inventory` capability.
 
-Managed sessions keep `--no-extensions` (auto-discovery stays off) and
-load the package-owned trusted permission extension first, then each
-enabled package root via repeated explicit `-e`. A manifest entry that
-resolves to a directory follows Pi 0.86.1's verified explicit-loader
-rule (empirically confirmed with marker fixtures, no provider): the
-directory loads `<dir>/index.ts`, else `<dir>/index.js`, else
-`<dir>/package.json` `main` limited to same-directory files; subpath
-mains, `index.mjs`, and main-less/index-less directories load nothing.
-This is why e.g. `pi.extensions: ["./dist"]` with `dist/index.js`
+Managed sessions keep auto-discovery off and load the package-owned
+trusted permission extension as an inline factory (with the session's
+immutable policy snapshot closed over), plus each enabled package root
+via explicit `additionalExtensionPaths`. A manifest entry that resolves
+to a directory follows Pi's verified explicit-loader rule (empirically
+confirmed with marker fixtures, no provider): the directory loads
+`<dir>/index.ts`, else `<dir>/index.js`, else `<dir>/package.json`
+`main` limited to same-directory files; subpath mains, `index.mjs`, and
+main-less/index-less directories load nothing. This is why e.g.
+`pi.extensions: ["./dist"]` with `dist/index.js`
 (a real installed package shape) is accepted and inventoried as
-`dist/index.js`. Because official Pi
-`--tools` allowlists extension tools too, sessions with enabled packages
-drop `--tools` and hide built-ins with `--exclude-tools` instead
-(edit/write unless writable; bash when shell is denied; powershell
-defensively), so extension tools stay available. Session creation fails
-clearly when an enabled package disappeared or its manifest is invalid;
-enabled packages are never silently skipped.
+`dist/index.js`. Because the SDK `tools` allowlist covers extension
+tools too, sessions with enabled packages drop the allowlist and hide
+built-ins with `excludeTools` instead (edit/write unless writable; bash
+when shell is denied; powershell defensively), then activate the
+intended built-ins explicitly alongside registered extension tools, so
+extension tools stay available. Session creation fails clearly when an
+enabled package disappeared or its manifest is invalid; enabled packages
+are never silently skipped.
 
 Trust semantics: enabled extension packages execute native code with the
 macOS user's authority; Bridge file/shell policy is NOT a sandbox for
@@ -78,14 +83,14 @@ safe selectors; ~8 KiB redacted result preview) and never ask for Bridge
 permission. Redaction is conservative best-effort, not perfect secret
 detection; detail views stay labeled potentially sensitive.
 
-## Tool availability notes (Pi 0.86.1, verified locally)
+## Tool availability notes (Pi 0.87.0 SDK, verified locally)
 
-Pi's RPC surface enumerates commands, skills, and prompts
-(`get_commands`) but exposes NO route to enumerate registered tools, so
-a provider-free check cannot prove a specific extension tool is callable.
-The adapter test suite proves instead that a fixture package root loads
-through the managed flags (`--no-extensions -e <root> --exclude-tools …`)
-and that its command registration is visible via `get_commands`.
+The SDK enumerates registered tools directly (`getAllTools()`), so a
+provider-free check proves a specific extension tool is registered: the
+adapter test suite creates a real AgentSession with a fixture package
+root under the managed boundary (auto-discovery off, explicit root,
+denylist exposure) and asserts the fixture tool is registered. No LLM
+prompt is sent.
 
 Post-deploy smoke requirement (after restart, before trusting the
 extension set): exercise one REAL tool from each enabled extension
@@ -95,34 +100,58 @@ Bridge execution audit with the expected extension snapshot.
 Provider-free real-profile check (read-only; modifies nothing
 installed): `WB_REAL_PROFILE_CHECK=1 npm test` additionally validates
 the real isolated-profile inventory (e.g. installed `pi-web-access`
-resolves supported with contained relative markers) and launches Pi
-with the managed flags against the real package root, asserting the
-session starts with no extension load error.
+resolves supported with contained relative markers) and creates a real
+AgentSession against the real package root with a throwaway agentDir,
+asserting the session starts with no extension load error.
 
-## Protocol notes (pi 0.86.1, verified locally)
+## Session protocol notes (Pi 0.87.0 SDK, verified locally)
 
-- Commands are sent as single LF-delimited JSON lines shaped
-  `{type, id, ...params}` where `type` is the command name (`get_state`,
-  `prompt`, `get_messages`, `get_available_models`, `set_model`, `abort`, …).
-- Responses correlate by `id`: `{type:"response", id, command, success,
-  data|error}`. Command order on the wire is not response order.
-- `prompt` responds with success as soon as the prompt is **accepted**; the
-  agent keeps working asynchronously (poll `GET /sessions/:id` / `status`).
-- `get_state` returns authoritative `sessionId`, `sessionFile`, `isStreaming`
-  (plus model/thinking/steering metadata the adapter does not expose).
-- `get_available_models` returns `{models: [...]}` with provider/id/name
-  style entries (empty when no provider is authenticated).
-- `set_model` takes `{provider, modelId}` and fails closed (`Model not
-  found`) for unknown models.
-- `abort` succeeds even when idle and never kills the child process.
-- The Pi RPC protocol is version-sensitive: the adapter fails closed on
-  incompatible shapes (malformed lines, uncorrelated responses, missing
-  `sessionId`) by marking that session dead instead of guessing.
+- `promptAsync` returns `{accepted: true}` as soon as the prompt is
+  **accepted** (via the SDK preflight hook); the agent keeps working
+  asynchronously (poll `GET /sessions/:id` / `status`). The adapter never
+  waits for run completion before responding.
+- `GET /sessions/:id` returns authoritative `sessionId`, `sessionFile`,
+  `isStreaming`, `messageCount`, and `pendingMessageCount` read
+  in-process from the owned session.
+- `GET /models` returns `{models: [...]}` with provider/id/name style
+  entries from the isolated profile inventory (empty when no provider is
+  authenticated).
+- Prompt-async `model` selection and `setModel` take an exact
+  `provider/id` selector and fail closed for unknown or ambiguous models.
+- `abort` succeeds even when idle, resolves owned suspended permission
+  selects as rejected first, and never disposes the session.
+- Sessions are persistent (SessionManager files under the isolated
+  profile session area) and dispose cleanly on shutdown; a disposed
+  session fails closed instead of being silently replaced.
+
+## Temporary SDK event diagnostics
+
+Remove this instrumentation and section after the missing tool-completion
+issue is identified and fixed.
+
+The adapter emits structured `sdk_tool_event_trace` records for tool
+start/end delivery and terminal agent events. Records contain only the
+session ID, tool-call ID, event type, stage, pending-tool count, journal
+state/cursor, and dispatch duration; tool arguments and results are never
+logged. `extension_dispatch_stalled` is a warning emitted after 10 seconds
+when Pi has not finished awaiting extension handlers for that event.
+
+For a stalled tool call, compare the stages for its call ID:
+
+- A start with a positive `pending_tool_count` and no end dispatch means
+  Pi has not finished the tool or its pre/post-tool hook.
+- An end dispatch with `pending_tool_count: 0` but no dispatch end or
+  `session_subscriber` points to an awaited extension event handler.
+- `adapter_received` followed by `journal_missing_start` means the adapter
+  received an end without a journal start for that call ID.
+- `journal_completed` includes the resulting journal state and update
+  cursor, which can be compared with Bridge execution-audit persistence.
 
 ## Run
 
 ```sh
 cd runtime/pi-host-adapter
+npm install
 WB_RUNTIME_TOKEN="shared-secret" \
 WB_PI_PROJECTS_DIR="$HOME/Projects" \
 node main.mjs
@@ -134,13 +163,14 @@ Optional environment:
 |---|---|---|
 | `WB_PI_ADAPTER_HOST` | `127.0.0.1` | Keep loopback; broad binds are not the default. |
 | `WB_PI_ADAPTER_PORT` | `8780` | |
-| `WB_PI_BINARY` | `pi` | Never installed or upgraded by the adapter. |
+| `WB_PI_BINARY` | `pi` | Deployment signal only (checked for health); sessions run in-process and never spawn it. Never installed or upgraded by the adapter. |
 | `PI_CODING_AGENT_DIR` | `$HOME/.pi/workspace-bridge` | Isolated agent dir; `~`, `$HOME`, `${HOME}` prefixes expanded. Never the normal `~/.pi/agent` tree. |
 | `WB_PI_PROJECTS_DIR` (`WB_PROJECTS_DIR` fallback) | required | Canonicalized; must exist. Every session dir must realpath beneath it. |
 
 `GET /health` is readable without a token and exposes booleans/version/status
-only. Every other endpoint requires `X-Runtime-Token: <WB_RUNTIME_TOKEN>`;
-an empty token locks the adapter fail-closed.
+plus the `agentsession-sdk` transport marker. Every other endpoint requires
+`X-Runtime-Token: <WB_RUNTIME_TOKEN>`; an empty token locks the adapter
+fail-closed.
 
 ## Smoke
 
@@ -154,8 +184,7 @@ curl -s -H "X-Runtime-Token: $WB_RUNTIME_TOKEN" \
   http://127.0.0.1:8780/sessions
 ```
 
-Docker-to-host connectivity (from inside the future Bridge container; Bridge
-wiring is not implemented yet):
+Docker-to-host connectivity (from inside the Bridge container):
 
 ```sh
 curl -s http://host.docker.internal:8780/health
@@ -164,16 +193,43 @@ curl -s http://host.docker.internal:8780/health
 `compose.yaml` is deliberately untouched: this adapter must never become a
 Compose service because it needs the native macOS toolchain.
 
-## launchd (optional, manual)
+## Start after login with launchd
 
-The adapter never touches launchd itself. To run it as your user agent:
+Install a copy of this adapter under
+`~/Library/Application Support/workspace-bridge/pi-host-adapter` before loading
+the LaunchAgent. A LaunchAgent starts when this macOS user logs in after a
+reboot and restarts the process if it exits. It does not run before login.
+Keeping the Node entrypoint under the user's home directory avoids startup
+access problems when the source checkout is on an external volume.
 
-1. Copy `launchd/com.workspace-bridge.pi-host-adapter.plist` to
-   `~/Library/LaunchAgents/`.
-2. Replace **every** `__HOME__` with your absolute home path
-   (launchd performs no shell expansion), set `WB_RUNTIME_TOKEN` and
-   `WB_PI_PROJECTS_DIR`, and fix the `node` path (`which node`).
-3. `launchctl load ~/Library/LaunchAgents/com.workspace-bridge.pi-host-adapter.plist`
+```sh
+mkdir -p "$HOME/Library/Application Support/workspace-bridge/pi-host-adapter"
+rsync -a --exclude '/test/' --exclude '/launchd/' --exclude '/README.md' \
+  runtime/pi-host-adapter/ \
+  "$HOME/Library/Application Support/workspace-bridge/pi-host-adapter/"
+```
+
+Copy `launchd/com.workspace-bridge.pi-host-adapter.plist` to
+`~/Library/LaunchAgents/`. Replace every placeholder with the absolute home,
+project parent, Node and Pi paths, and the shared `WB_RUNTIME_TOKEN` value.
+Keep the plist private (`chmod 600`) because it contains the token. Then load
+and inspect the service:
+
+```sh
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.workspace-bridge.pi-host-adapter.plist"
+curl -s http://127.0.0.1:8780/health
+```
+
+After updating adapter source, stop the LaunchAgent, sync the installed copy,
+and load it again. Check that no managed sessions are active before restarting:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.workspace-bridge.pi-host-adapter"
+# Run the rsync command above.
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.workspace-bridge.pi-host-adapter.plist"
+```
 
 ## Tests
 
@@ -181,8 +237,11 @@ The adapter never touches launchd itself. To run it as your user agent:
 npm test
 ```
 
-Node test runner with a fake Pi child process; no network, provider, or model
-calls. An optional live smoke (`LIVE_PI_SMOKE=1 npm test`) checks
-`pi --version` and a `get_state`/`abort` round-trip inside a temporary
-workspace with a temporary `PI_CODING_AGENT_DIR`, without sending an LLM
-prompt. It is skipped when `pi` is not installed.
+Node test runner with an in-process fake SDK transport; no network,
+provider, or model calls. A provider-free real-SDK smoke runs in the
+normal suite: it creates/disposes a real AgentSession in an isolated
+temporary profile (verifying session persistence, model discovery, the
+0.87.0 dependency pin, and suppressed auto-discovery) without sending
+an LLM prompt. An optional real-profile check
+(`WB_REAL_PROFILE_CHECK=1 npm test`) additionally validates the real
+isolated-profile inventory and loads the real package root in-process.

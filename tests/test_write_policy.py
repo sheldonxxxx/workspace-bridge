@@ -183,25 +183,6 @@ def test_queued_call_uses_current_policy_not_old_discovery(env):
     assert not (env['root']/'queued.md').exists()
 
 
-def test_old_database_migrates_to_handoff_and_preserves_jobs_credentials(env,payload):
-    svc=env['service'];job=call(env,'prepare_handoff',**payload)
-    before=svc.workspace(env['id']);svc.db.execute('ALTER TABLE workspaces DROP COLUMN write_scope');svc.db.commit()
-    svc.close()
-    restored=Service(env['state'],env['config'])
-    try:
-        current=restored.workspace(env['id']);assert current['write_scope']=='handoff'
-        assert {k:v for k,v in current.items() if k!='write_scope'} == {k:v for k,v in before.items() if k!='write_scope'}
-        restored.authenticate_bridge(env['token'])
-        assert restored.job(current,job['id'])['state']=='prepared'
-        assert {p.name for p in Path(job['path']).iterdir()}=={'TASK.md','CONTEXT.md','ACCEPTANCE.md'}
-        assert restored.db.execute("SELECT name FROM sqlite_master WHERE name IN ('reviews','audits')").fetchall()==[]
-        restored.manage_workspace(env['id'],'set_write_scope',write_scope='workspace')
-    finally:restored.close()
-    again=Service(env['state'],env['config'])
-    try:assert again.workspace(env['id'])['write_scope']=='workspace'
-    finally:again.close()
-
-
 async def test_only_admin_listener_and_admin_credential_can_set_policy(env):
     svc=env['service'];key=(env['state']/'admin-token').read_text().strip()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_admin(svc,digest(key.encode()))),base_url='http://127.0.0.1:8766') as c:

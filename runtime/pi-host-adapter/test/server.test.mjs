@@ -57,7 +57,7 @@ const AUTH = { "X-Runtime-Token": TOKEN };
 
 test("health is readable and exposes booleans/version/status only", async () => {
   const projects = makeProjects();
-  await withServer({ adapter: fakeAdapter(projects), piVersion: "0.86.1" }, async (base) => {
+  await withServer({ adapter: fakeAdapter(projects), piVersion: "0.87.0" }, async (base) => {
     const res = await fetch(`${base}/health`);
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -66,8 +66,9 @@ test("health is readable and exposes booleans/version/status only", async () => 
     assert.equal(body.locked, false);
     assert.equal(body.token_configured, true);
     assert.equal(body.pi_usable, true);
-    assert.equal(body.pi_version, "0.86.1");
+    assert.equal(body.pi_version, "0.87.0");
     assert.equal(body.adapter_version, "0.1.0");
+    assert.equal(body.transport, "agentsession-sdk");
     const serialized = JSON.stringify(body);
     assert.ok(!serialized.includes(projects.tmp));
     assert.ok(!serialized.includes(TOKEN));
@@ -206,7 +207,7 @@ test("permission list/respond routes are authenticated and exact-session bound",
 
 test("health advertises the permission capability without raw policy", async () => {
   const projects = makeProjects();
-  await withServer({ adapter: fakeAdapter(projects), piVersion: "0.86.1" }, async (base) => {
+  await withServer({ adapter: fakeAdapter(projects), piVersion: "0.87.0" }, async (base) => {
     const body = await (await fetch(`${base}/health`)).json();
     assert.deepEqual(body.capabilities,
       { pending_snapshot: true, permission_response: true, execution_history: true,

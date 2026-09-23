@@ -56,8 +56,8 @@ def test_handoff_does_not_read_or_walk_project(env, payload, monkeypatch):
     assert not any(k in job for k in ['baseline_files', 'baseline_sha256', 'review_id', 'verdict'])
     assert job['completion_tracking'] == 'not_tracked'
     assert 'paste your reply' in job['copy_prompt']
-    row = env['service'].db.execute('SELECT baseline FROM jobs WHERE id=?', (job['id'],)).fetchone()
-    assert row['baseline'] == '{}'
+    cols = {row[1] for row in env['service'].db.execute('PRAGMA table_info(jobs)')}
+    assert 'baseline' not in cols
 
 
 def test_optional_context_checks_only_named_files(env, payload, monkeypatch):
@@ -143,43 +143,6 @@ async def test_retired_tools_are_rejected_at_http_and_service(env, name):
         r = await c.post('/mcp', headers={'X-Bridge-Token': env['token'], 'Accept':'application/json'},
             json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':{'workspace_id':env['id']}}})
         assert r.json()['error']['code'] == -32602
-
-
-def test_upgrade_preserves_legacy_data_but_does_not_expose_it(env, payload):
-    job = publish(env, payload)
-    svc = env['service']
-    documents = json.loads(svc.job(svc.workspace(env['id']), job['id'])['documents'])
-    documents['BASELINE.json'] = 'c' * 64
-    # The legacy schema is preserved in place; sentinel contents must not be
-    # parsed or returned by normal handoff/discovery tools after reopening.
-    sentinel = 'OLD_PRIVATE_SOURCE_SENTINEL'
-    with svc.db:
-        svc.db.execute('UPDATE jobs SET baseline=?,documents=? WHERE id=?', (sentinel, json.dumps(documents), job['id']))
-        svc.db.executescript('''CREATE TABLE reviews (id TEXT PRIMARY KEY, job TEXT NOT NULL REFERENCES jobs(id), created TEXT NOT NULL, evidence TEXT NOT NULL);
-        CREATE TABLE audits (id TEXT PRIMARY KEY, review TEXT NOT NULL REFERENCES reviews(id), verdict TEXT NOT NULL, created TEXT NOT NULL, content TEXT NOT NULL);''')
-        svc.db.execute('INSERT INTO reviews VALUES(?,?,?,?)', ('old_review',job['id'],'2026-09-18',sentinel))
-        svc.db.execute('INSERT INTO audits VALUES(?,?,?,?,?)', ('old_audit','old_review','blocked','2026-09-18',sentinel))
-    legacy_file = Path(job['path'])/'BASELINE.json'
-    legacy_file.write_text(sentinel)
-    reopened = Service(env['state'], env['config'])
-    try:
-        assert reopened.authenticate(env['id'], env['token'])['enabled']
-        out = reopened.call(env['id'], env['token'], 'list_handoffs', {'offset':0,'limit':20})
-        assert out['handoffs'][0]['legacy_handoff'] is True
-        assert 'superseded' in out['handoffs'][0]['copy_prompt']
-        assert sentinel not in json.dumps(out)
-        assert 'baseline' not in reopened.job(reopened.workspace(env['id']), job['id'])
-        assert reopened.db.execute('SELECT baseline FROM jobs WHERE id=?',(job['id'],)).fetchone()[0] == sentinel
-        assert reopened.db.execute('SELECT evidence FROM reviews').fetchone()[0] == sentinel
-        assert reopened.db.execute('SELECT content FROM audits').fetchone()[0] == sentinel
-        assert legacy_file.read_text() == sentinel
-        next_payload = Handoff.model_validate({**payload, 'request_id':'new-version'}).model_dump()
-        new = reopened.call(env['id'], env['token'], 'prepare_handoff', next_payload)
-        assert new['legacy_handoff'] is False
-        assert reopened.db.execute('SELECT baseline FROM jobs WHERE id=?',(new['id'],)).fetchone()[0] == '{}'
-        assert reopened.db.execute('SELECT count(*) FROM reviews').fetchone()[0] == 1
-    finally:
-        reopened.close()
 
 
 def test_skill_and_discovery_describe_manual_return_not_retired_tools():

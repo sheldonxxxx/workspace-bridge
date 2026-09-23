@@ -36,8 +36,8 @@
         <span id="bridge-status" class="pill signal-value">Not configured</span>
       </div>
       <div class="topbar-signal">
-        <span class="topbar-signal-label">OpenCode</span>
-        <span id="opencode-status" class="pill signal-value">Checking…</span>
+        <span class="topbar-signal-label">Pi</span>
+        <span id="pi-top-status" class="pill signal-value">Checking…</span>
       </div>
     </nav>
     <div class="topbar-actions">
@@ -164,37 +164,6 @@
             </div>
           </div>
           <div class="system-grid">
-            <section class="system-card" id="opencode-panel">
-              <div class="section-title"><h3>OpenCode runtime</h3><span class="system-glyph" aria-hidden="true">◎</span></div>
-              <p class="path" id="opencode-endpoint"></p>
-              <p class="hint" id="opencode-meta"></p>
-              <p class="hint" id="policy-status"></p>
-              <div class="actions"><button type="button" id="open-models" class="secondary">Manage models</button></div>
-              <details>
-                <summary>Policy rules</summary>
-                <p class="hint">At least one enabled model plus a mandatory default.</p>
-              </details>
-              <p class="hint" id="discord-status"></p>
-              <dialog id="models-dialog" aria-label="Runtime model policy">
-                <form method="dialog">
-                  <span class="eyebrow" id="models-runtime-eyebrow">OpenCode runtime</span>
-                  <h2>Model policy</h2>
-                  <p class="hint" id="models-hint">Choose available models and one default.</p>
-                  <label id="discovery-workspace-row" hidden>Discovery workspace<select id="discovery-workspace" aria-label="Discovery workspace"></select></label>
-                  <label>Filter models
-                    <input id="model-filter" type="search" placeholder="Filter by provider or model" autocomplete="off">
-                  </label>
-                  <div id="model-policy"></div>
-                  <label>Default model<select id="policy-default" aria-label="Default model"></select></label>
-                  <div class="actions">
-                    <button type="button" id="load-models" class="secondary">Refresh global models</button>
-                    <button type="button" id="save-policy">Save model policy</button>
-                    <button type="button" id="cancel-policy" class="secondary">Cancel</button>
-                  </div>
-                </form>
-              </dialog>
-            </section>
-
             <section class="system-card" id="pi-panel">
               <div class="section-title"><h3>Pi runtime</h3><span id="pi-status" class="pill signal-value">Checking…</span><span class="system-glyph" aria-hidden="true">◍</span></div>
               <p class="path" id="pi-endpoint"></p>
@@ -204,6 +173,24 @@
               <p class="hint" id="pi-extension-status"></p>
               <div class="actions">
                 <button type="button" id="open-pi-models" class="secondary">Manage Pi models</button>
+              <dialog id="models-dialog" aria-label="Runtime model policy">
+                <form method="dialog">
+                  <span class="eyebrow" id="models-runtime-eyebrow">Pi runtime</span>
+                  <h2>Model policy</h2>
+                  <p class="hint" id="models-hint">Choose available models and one default.</p>
+                  <label id="discovery-workspace-row" hidden>Discovery workspace<select id="discovery-workspace" aria-label="Discovery workspace"></select></label>
+                  <label>Filter models
+                    <input id="model-filter" type="search" placeholder="Filter by provider or model" autocomplete="off">
+                  </label>
+                  <div id="model-policy"></div>
+                  <label>Default model<select id="policy-default" aria-label="Default model"></select></label>
+                  <div class="actions">
+                    <button type="button" id="load-models" class="secondary">Refresh Pi models</button>
+                    <button type="button" id="save-policy">Save model policy</button>
+                    <button type="button" id="cancel-policy" class="secondary">Cancel</button>
+                  </div>
+                </form>
+              </dialog>
                 <button type="button" id="open-pi-permissions" class="secondary">Manage permissions</button>
                 <button type="button" id="open-pi-extensions" class="secondary">Manage extensions</button>
               </div>
@@ -317,6 +304,7 @@
       </div>
     </section>
 
+    <div id="output-backdrop" hidden></div>
     <section class="panel output-panel" id="output-panel" hidden>
       <div class="section-title"><h2 id="output-title">Details</h2><button type="button" class="secondary" id="close-output">Close</button></div>
       <pre id="output"></pre>

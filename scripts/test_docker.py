@@ -2,7 +2,7 @@
 """Real Docker smoke test using disposable projects and private state only.
 
 Requires local Docker Engine/Desktop, Compose v2 and a non-root POSIX host user.
-Never uses the deployment's .env, mounts real projects, or contacts OpenCode/tunnel.
+Never uses the deployment's .env, mounts real projects, or contacts the Pi agent/tunnel.
 An absent Docker engine is an error, not a passing/skipped runtime validation.
 """
 from __future__ import annotations
@@ -143,7 +143,7 @@ def main():
             assert (parent/'alpha'/'.workspace-handoff/notes/compose-check.md').read_text()=='two\n'
             print('PASS: real Compose build/start/health, non-root runtime, loopback port publishing, two workspaces, native PNG, '
                   'handoff host paths/writes, default source denial, stale hashes, hostile Origin, separation and recreate persistence.')
-            print('No real tunnel, ChatGPT recognition or OpenCode execution was tested.')
+            print('No real tunnel, ChatGPT recognition or Pi agent execution was tested.')
         finally:
             compose('down','--remove-orphans')
 

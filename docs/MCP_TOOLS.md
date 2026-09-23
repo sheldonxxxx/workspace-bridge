@@ -186,7 +186,7 @@ read_agent_execution(workspace_id, run_id, execution_id)
 ```
 
 `list_agent_models` reads one runtime's model list for an explicit `runtime`
-(`opencode`, `pi`, or another configured runtime; unknown runtimes fail
+(`pi` or another configured runtime; unknown runtimes fail
 `unknown_runtime`) and returns exact canonical selectors annotated with their
 runtime-global policy status (`enabled`, `policy_default`), plus runtime,
 discovery scope and policy scope. A `query` filters or ranks candidates; it
@@ -231,10 +231,7 @@ ambiguous abort leaves the run explicit and unchanged. `list_agent_executions` /
 summaries and sanitized input/result previews; no output bodies, reasoning, or
 secrets).
 
-Historical OpenCode runs remain readable through `read_agent_run` / `list_agent_runs`;
-the run's `runtime` field identifies the owning backend. There are no
-OpenCode-specific MCP tool aliases: use the runtime-neutral tools above with
-`runtime="opencode"` where OpenCode behavior is explicitly wanted.
+The run's `runtime` field identifies the owning backend.
 
 A run's final result is what the agent reported. It is unverified evidence: audit
 current source with the general tools. This server does not independently run tests

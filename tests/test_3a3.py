@@ -1,6 +1,6 @@
 """Milestone 3A3: runtime-neutral MCP/admin workflow with Pi model policy.
 
-Focused coverage: neutral tool schemas/routing/annotations, legacy OpenCode
+Focused coverage: neutral tool schemas/routing/annotations, cross-runtime
 scoping, runtime-safe idempotency, global-per-runtime model policy, Pi
 completion without events, and capability-safe Pi continuation. Scripted
 fakes only: no Node, network, provider credentials, or real model.
@@ -60,17 +60,21 @@ def dual_env(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    opencode = FakeRuntime(str(root))
+    aux = FakeRuntime(str(root))
+    # The generic fake models a second configured backend for cross-runtime
+    # isolation coverage alongside Pi.
+    aux._runtime_id = "aux"
     pi = FakePiRuntime(str(root))
-    service = Service(state, cfg, runtimes={"opencode": opencode, "pi": pi},
+    service = Service(state, cfg, runtimes={"aux": aux, "pi": pi},
                       notifier=RecordingNotifier(), orchestrator_background=False)
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.orchestrators["opencode"].set_model_policy(
-        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet")
-    yield {"service": service, "opencode": opencode, "pi": pi, "root": root,
+    ws = service.workspace(ws_id)
+    service.orchestrators["aux"].set_model_policy(
+        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet", ws)
+    yield {"service": service, "aux": aux, "pi": pi, "root": root,
            "state": state, "config": cfg, "id": ws_id, "token": token, "tmp": tmp_path}
     service.close()
 
@@ -132,9 +136,9 @@ def test_neutral_summary_helper_leaks_no_bodies():
 # ------------------------------------------------------- start persists owner
 def test_neutral_starts_persist_runtime(dual_env):
     job = publish(dual_env, "persist-1")
-    started_oc = call(dual_env, "start_agent_run", runtime="opencode",
-                      job_id=job["id"], request_id="persist-oc")
-    assert started_oc["runtime"] == "opencode"
+    started_aux = call(dual_env, "start_agent_run", runtime="aux",
+                      job_id=job["id"], request_id="persist-aux")
+    assert started_aux["runtime"] == "aux"
     ws = dual_env["service"].workspace(dual_env["id"])
     dual_env["service"].orchestrators["pi"].set_model_policy(
         ["pi/default"], "pi/default", ws)
@@ -144,14 +148,14 @@ def test_neutral_starts_persist_runtime(dual_env):
     assert started_pi["session_id"].startswith("ses_")
     db = dual_env["service"].db
     assert db.execute("SELECT runtime FROM agent_runs WHERE id=?",
-                      (started_oc["run_id"],)).fetchone()["runtime"] == "opencode"
+                      (started_aux["run_id"],)).fetchone()["runtime"] == "aux"
     assert db.execute("SELECT runtime FROM agent_runs WHERE id=?",
                       (started_pi["run_id"],)).fetchone()["runtime"] == "pi"
 
 
 def test_unknown_runtime_fails_before_backend(dual_env):
     job = publish(dual_env, "unknown-1")
-    oc_calls = len(dual_env["opencode"].model_calls)
+    aux_calls = len(dual_env["aux"].model_calls)
     pi_calls = len(dual_env["pi"].model_calls)
     for tool, args in (
             ("list_agent_models", {"runtime": "nope"}),
@@ -161,34 +165,44 @@ def test_unknown_runtime_fails_before_backend(dual_env):
         with pytest.raises(BridgeError) as exc:
             call(dual_env, tool, **args)
         assert exc.value.code == "unknown_runtime"
-    assert len(dual_env["opencode"].model_calls) == oc_calls
+    assert len(dual_env["aux"].model_calls) == aux_calls
     assert len(dual_env["pi"].model_calls) == pi_calls
 
 
-# ------------------------------------------------------- legacy stays scoped
-def test_legacy_paths_reject_and_filter_pi_rows(dual_env):
-    job = publish(dual_env, "legacy-1")
+# ------------------------------------------------------- foreign rows stay scoped
+def test_foreign_rows_rejected_and_neutral_paths_serve_owned(dual_env):
+    job = publish(dual_env, "foreign-1")
     ws = dual_env["service"].workspace(dual_env["id"])
     dual_env["service"].orchestrators["pi"].set_model_policy(
         ["pi/default"], "pi/default", ws)
     pi_run = call(dual_env, "start_agent_run", runtime="pi",
-                  job_id=job["id"], request_id="legacy-pi")
+                  job_id=job["id"], request_id="foreign-pi")
     service = dual_env["service"]
-    # Legacy lists never surface Pi rows.
-    assert call(dual_env, "list_opencode_runs")["runs"] == []
-    assert service.orchestrator.list_all_runs()["runs"] == []
-    # Legacy per-run paths fail closed on Pi rows.
-    for fn in (lambda: service.orchestrator.read_run(ws, pi_run["run_id"]),
-               lambda: service.orchestrator.read_request(ws, pi_run["run_id"], "x"),
-               lambda: service.orchestrator.respond_permission(
-                   ws, pi_run["run_id"], "x", "once"),
-               lambda: service.orchestrator.cancel_run(ws, pi_run["run_id"])):
+    # Neutral paths serve owned rows.
+    assert {r["run_id"] for r in call(dual_env, "list_agent_runs")["runs"]} == {pi_run["run_id"]}
+    assert call(dual_env, "read_agent_run", run_id=pi_run["run_id"])["runtime"] == "pi"
+    # A foreign persisted row is listed but inoperable through this owner:
+    # direct per-run paths fail closed without backend contact.
+    with service.lock, service.db:
+        service.db.execute(
+            "INSERT INTO agent_runs (id,workspace,runtime,job,request_id,request_hash,"
+            "parent_run,session,model,state,error_code,error_message,result,notification,"
+            "created,started,updated,finished,message_floor_ms,session_reused,transcript) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("run_foreign", dual_env["id"], "legacy", job["id"], "foreign-req", "hash", None,
+             "ses_foreign", "legacy/model", "running", None, None, "{}", "{}",
+             "2026-09-21T00:00:00+00:00", None, "2026-09-21T00:00:00+00:00",
+             None, 0, 0, "[]"))
+    assert {r["run_id"] for r in call(dual_env, "list_agent_runs")["runs"]} == {
+        pi_run["run_id"], "run_foreign"}
+    for fn in (lambda: service.orchestrators["pi"].read_run(ws, "run_foreign"),
+               lambda: service.orchestrators["pi"].read_request(ws, "run_foreign", "x"),
+               lambda: service.orchestrators["pi"].respond_permission(
+                   ws, "run_foreign", "x", "once"),
+               lambda: service.orchestrators["pi"].cancel_run(ws, "run_foreign")):
         with pytest.raises(BridgeError) as exc:
             fn()
         assert exc.value.code == "runtime_mismatch"
-    with pytest.raises(BridgeError) as exc:
-        call(dual_env, "read_opencode_run", run_id=pi_run["run_id"])
-    assert exc.value.code == "runtime_mismatch"
 
 
 def test_neutral_list_crosses_runtimes_with_filter(dual_env):
@@ -196,24 +210,24 @@ def test_neutral_list_crosses_runtimes_with_filter(dual_env):
     ws = dual_env["service"].workspace(dual_env["id"])
     dual_env["service"].orchestrators["pi"].set_model_policy(
         ["pi/default"], "pi/default", ws)
-    oc_run = call(dual_env, "start_agent_run", runtime="opencode",
-                  job_id=job["id"], request_id="cross-oc")
+    aux_run = call(dual_env, "start_agent_run", runtime="aux",
+                  job_id=job["id"], request_id="cross-aux")
     pi_run = call(dual_env, "start_agent_run", runtime="pi",
                   job_id=job["id"], request_id="cross-pi")
     # Keep the Pi run active: the scripted default history would otherwise
     # complete it on the next read_reconcile.
     dual_env["pi"].messages_script = []
     full = call(dual_env, "list_agent_runs")
-    assert {r["run_id"] for r in full["runs"]} == {oc_run["run_id"], pi_run["run_id"]}
-    assert {r["runtime"] for r in full["runs"]} == {"opencode", "pi"}
+    assert {r["run_id"] for r in full["runs"]} == {aux_run["run_id"], pi_run["run_id"]}
+    assert {r["runtime"] for r in full["runs"]} == {"aux", "pi"}
     assert "transcript" not in json.dumps(full)
-    only_oc = call(dual_env, "list_agent_runs", runtime="opencode")
-    assert [r["run_id"] for r in only_oc["runs"]] == [oc_run["run_id"]]
-    assert only_oc["runtime"] == "opencode"
+    only_aux = call(dual_env, "list_agent_runs", runtime="aux")
+    assert [r["run_id"] for r in only_aux["runs"]] == [aux_run["run_id"]]
+    assert only_aux["runtime"] == "aux"
     only_pi = call(dual_env, "list_agent_runs", runtime="pi")
     assert [r["run_id"] for r in only_pi["runs"]] == [pi_run["run_id"]]
     # Neutral per-run routing serves both owners.
-    assert call(dual_env, "read_agent_run", run_id=oc_run["run_id"])["runtime"] == "opencode"
+    assert call(dual_env, "read_agent_run", run_id=aux_run["run_id"])["runtime"] == "aux"
     assert call(dual_env, "read_agent_run", run_id=pi_run["run_id"])["runtime"] == "pi"
     # Neutral cancel reaches the owning backend.
     stopped = call(dual_env, "cancel_agent_run", run_id=pi_run["run_id"])
@@ -227,7 +241,7 @@ def test_idempotency_never_replays_across_runtimes(dual_env):
     ws = dual_env["service"].workspace(dual_env["id"])
     dual_env["service"].orchestrators["pi"].set_model_policy(
         ["pi/default"], "pi/default", ws)
-    first = call(dual_env, "start_agent_run", runtime="opencode",
+    first = call(dual_env, "start_agent_run", runtime="aux",
                  job_id=job["id"], request_id="shared-req")
     # Same workspace request_id under the other runtime fails closed even
     # though job/model/hash would otherwise match.
@@ -240,11 +254,11 @@ def test_idempotency_never_replays_across_runtimes(dual_env):
     second = call(dual_env, "start_agent_run", runtime="pi",
                   job_id=job["id"], request_id="shared-pi")
     with pytest.raises(BridgeError) as exc:
-        call(dual_env, "start_agent_run", runtime="opencode",
+        call(dual_env, "start_agent_run", runtime="aux",
              job_id=job["id"], request_id="shared-pi")
     assert exc.value.code == "runtime_mismatch"
     # Same-runtime exact retry still replays.
-    replay = call(dual_env, "start_agent_run", runtime="opencode",
+    replay = call(dual_env, "start_agent_run", runtime="aux",
                   job_id=job["id"], request_id="shared-req")
     assert replay["run_id"] == first["run_id"] and replay["idempotent_replay"] is True
     assert second["idempotent_replay"] is False
@@ -267,9 +281,9 @@ def test_pi_policy_isolated_workspace_validated_and_global(dual_env):
     status = pi_orch.set_model_policy(["pi/default", "anthropic/claude-opus"],
                                       "pi/default", ws)
     assert status["configured"] is True and status["default"] == "pi/default"
-    assert service.db.execute("SELECT value FROM settings WHERE key='model_policy:pi'").fetchone()
-    # OpenCode policy is untouched.
-    assert service.orchestrator.model_policy_status()["default"] == "anthropic/claude-sonnet"
+    assert service.db.execute("SELECT value FROM settings WHERE key='model_policy'").fetchone()
+    # Aux policy is untouched.
+    assert service.orchestrators["aux"].model_policy_status()["default"] == "anthropic/claude-sonnet"
     # Discovery metadata exposes runtime scopes.
     models = call(dual_env, "list_agent_models", runtime="pi")
     assert models["runtime"] == "pi"
@@ -277,10 +291,10 @@ def test_pi_policy_isolated_workspace_validated_and_global(dual_env):
     assert models["policy_scope"] == "runtime_global"
     assert models["policy"]["default"] == "pi/default"
     assert models["workspace_id"] == dual_env["id"]
-    oc_models = call(dual_env, "list_agent_models", runtime="opencode")
-    assert oc_models["runtime"] == "opencode"
-    assert oc_models["discovery_scope"] == "global"
-    assert oc_models["policy_scope"] == "runtime_global"
+    aux_models = call(dual_env, "list_agent_models", runtime="aux")
+    assert aux_models["runtime"] == "aux"
+    assert aux_models["discovery_scope"] == "workspace"
+    assert aux_models["policy_scope"] == "runtime_global"
 
 
 def test_pi_run_revalidates_policy_per_workspace(dual_env):
@@ -381,15 +395,15 @@ def test_pi_continuation_same_runtime_and_cross_runtime_refused(dual_env):
     # Cross-runtime continuation fails closed in both directions.
     other = publish(dual_env, "cont-3", title="Other")
     with pytest.raises(BridgeError) as exc:
-        call(dual_env, "start_agent_run", runtime="opencode", job_id=other["id"],
+        call(dual_env, "start_agent_run", runtime="aux", job_id=other["id"],
              request_id="cont-x1", continue_from_run_id=first["run_id"])
     assert exc.value.code == "continuation_unavailable"
-    oc_first = call(dual_env, "start_agent_run", runtime="opencode",
-                    job_id=publish(dual_env, "cont-4")["id"], request_id="cont-oc")
-    assert call(dual_env, "read_agent_run", run_id=oc_first["run_id"])["state"] == "completed"
+    aux_first = call(dual_env, "start_agent_run", runtime="aux",
+                    job_id=publish(dual_env, "cont-4")["id"], request_id="cont-aux")
+    assert call(dual_env, "read_agent_run", run_id=aux_first["run_id"])["state"] == "completed"
     with pytest.raises(BridgeError) as exc:
         call(dual_env, "start_agent_run", runtime="pi", job_id=other["id"],
-             request_id="cont-x2", continue_from_run_id=oc_first["run_id"])
+             request_id="cont-x2", continue_from_run_id=aux_first["run_id"])
     assert exc.value.code == "continuation_unavailable"
 
 
@@ -401,7 +415,9 @@ def test_unconfigured_runtime_rows_stay_listable_but_inoperable(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    service = Service(state, cfg, runtimes={"opencode": FakeRuntime(str(root))},
+    aux = FakeRuntime(str(root))
+    aux._runtime_id = "aux"
+    service = Service(state, cfg, runtimes={"aux": aux},
                       notifier=RecordingNotifier(), orchestrator_background=False)
     try:
         ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
@@ -429,7 +445,7 @@ def test_unconfigured_runtime_rows_stay_listable_but_inoperable(tmp_path):
             service.list_agent_runs(ws, runtime="ghost")
         assert exc.value.code == "unknown_runtime"
         # Reads stay available from persisted state only, with no backend.
-        runtime = service.orchestrators["opencode"].runtime
+        runtime = service.orchestrators["aux"].runtime
         calls_before = (len(runtime.get_session_calls), len(runtime.messages_calls),
                         len(runtime.model_calls))
         view = service.read_agent_run(ws, "run_hist_pi")
@@ -462,17 +478,19 @@ async def test_admin_runtime_routes_and_compat(dual_env):
                 app=make_admin(service, service.config["admin_token_hash"])),
             base_url="http://127.0.0.1:8766",
             headers={"Authorization": "Bearer " + token}) as client:
-        # Legacy OpenCode routes are unchanged.
-        assert (await client.get("/api/opencode/models")).json()["scope"] == "global"
+        # Pi policy via the legacy settings route (service owner is Pi).
         assert (await client.get("/api/settings")).json()["model_policy"]["configured"] is True
-        saved = (await client.post("/api/settings",
-                                   json={"enabled": ["glm/zai-glm-5.2"],
-                                         "default": "glm/zai-glm-5.2"})).json()
-        assert saved["default"] == "glm/zai-glm-5.2"
+        # Runtime-scoped policy save for the second backend keeps Pi untouched.
+        aux_saved = (await client.post("/api/runtimes/aux/model-policy",
+                                        json={"enabled": ["glm/zai-glm-5.2"],
+                                              "default": "glm/zai-glm-5.2",
+                                              "workspace_id": dual_env["id"]})).json()
+        assert aux_saved["default"] == "glm/zai-glm-5.2"
         # Restore the dual fixture default for later tests (function scope).
-        await client.post("/api/settings",
+        await client.post("/api/runtimes/aux/model-policy",
                           json={"enabled": ["anthropic/claude-sonnet", "glm/zai-glm-5.2"],
-                                "default": "anthropic/claude-sonnet"})
+                                "default": "anthropic/claude-sonnet",
+                                "workspace_id": dual_env["id"]})
         # Neutral runtime discovery: Pi requires an enabled workspace.
         assert (await client.get("/api/runtimes/pi/models")).status_code == 400
         models = (await client.get("/api/runtimes/pi/models",
@@ -480,8 +498,8 @@ async def test_admin_runtime_routes_and_compat(dual_env):
         assert models["runtime"] == "pi" and models["discovery_scope"] == "workspace"
         assert models["policy_scope"] == "runtime_global"
         assert models["workspace_id"] == dual_env["id"]
-        oc_models = (await client.get("/api/runtimes/opencode/models")).json()
-        assert oc_models["runtime"] == "opencode" and oc_models["discovery_scope"] == "global"
+        aux_models = (await client.get("/api/runtimes/aux/models")).json()
+        assert aux_models["runtime"] == "aux" and aux_models["discovery_scope"] == "workspace"
         assert (await client.get("/api/runtimes/ghost/models")).status_code == 400
         # Neutral runtime policy: Pi requires workspace_id on POST.
         assert (await client.post("/api/runtimes/pi/model-policy",
@@ -496,20 +514,20 @@ async def test_admin_runtime_routes_and_compat(dual_env):
                                           "workspace_id": dual_env["id"]})).json()
         assert posted["default"] == "pi/default"
         assert (await client.get("/api/status")).json()["runtime_policies"]["pi"]["configured"] is True
-        # Sessions: neutral crosses runtimes, opencode route stays scoped.
+        # Sessions: neutral crosses runtimes, runtime filter stays scoped.
         job = publish(dual_env, "admin-sess")
-        oc_run = service.call(dual_env["id"], dual_env["token"], "start_agent_run",
-                              {"runtime": "opencode", "job_id": job["id"],
-                               "request_id": "admin-oc"})
+        aux_run = service.call(dual_env["id"], dual_env["token"], "start_agent_run",
+                              {"runtime": "aux", "job_id": job["id"],
+                               "request_id": "admin-aux"})
         pi_run = service.call(dual_env["id"], dual_env["token"], "start_agent_run",
                               {"runtime": "pi", "job_id": job["id"],
                                "request_id": "admin-pi"})
         neutral = (await client.get("/api/sessions")).json()
-        assert {r["run_id"] for r in neutral["runs"]} >= {oc_run["run_id"], pi_run["run_id"]}
-        assert {r["runtime"] for r in neutral["runs"]} >= {"opencode", "pi"}
-        scoped = (await client.get("/api/opencode/sessions")).json()
-        assert {r["run_id"] for r in scoped["runs"]} >= {oc_run["run_id"]}
-        assert all(r["runtime"] == "opencode" for r in scoped["runs"])
+        assert {r["run_id"] for r in neutral["runs"]} >= {aux_run["run_id"], pi_run["run_id"]}
+        assert {r["runtime"] for r in neutral["runs"]} >= {"aux", "pi"}
+        scoped = (await client.get("/api/sessions", params={"runtime": "aux"})).json()
+        assert {r["run_id"] for r in scoped["runs"]} >= {aux_run["run_id"]}
+        assert all(r["runtime"] == "aux" for r in scoped["runs"])
         filtered = (await client.get("/api/sessions", params={"runtime": "pi"})).json()
         assert {r["run_id"] for r in filtered["runs"]} >= {pi_run["run_id"]}
         assert all(r["runtime"] == "pi" for r in filtered["runs"])
@@ -538,12 +556,12 @@ async def test_mcp_neutral_roundtrip_and_unknown_runtime(dual_env):
         return json.loads(result["content"][0]["text"])
 
     job = publish(dual_env, "mcp-3a3")
-    models = value(await mcp_call("list_agent_models", {"runtime": "opencode"}))
-    assert models["workspace_id"] == dual_env["id"] and models["runtime"] == "opencode"
+    models = value(await mcp_call("list_agent_models", {"runtime": "aux"}))
+    assert models["workspace_id"] == dual_env["id"] and models["runtime"] == "aux"
     run = value(await mcp_call("start_agent_run",
-                               {"runtime": "opencode", "job_id": job["id"],
+                               {"runtime": "aux", "job_id": job["id"],
                                 "request_id": "mcp-3a3-run"}))
-    assert run["runtime"] == "opencode" and run["session_id"]
+    assert run["runtime"] == "aux" and run["session_id"]
     detail = value(await mcp_call("read_agent_run", {"run_id": run["run_id"]}))
     assert detail["run_id"] == run["run_id"]
     listed = value(await mcp_call("list_agent_runs", {}))
@@ -569,9 +587,7 @@ def test_ui_has_pi_card_workspace_picker_and_neutral_labels():
     html = (root / "workspace_bridge" / "static" / "index.html").read_text()
     assert "Pi runtime" in html and 'id="pi-policy-status"' in html
     assert 'id="open-pi-models"' in html and 'id="discovery-workspace"' in html
-    assert "Reused OpenCode session" not in js
-    assert "Interrupt only this OpenCode session" not in js
-    assert "OpenCode default model" not in js
+    assert "Manage permissions" in html
     assert "innerHTML" not in js
 
 
@@ -585,18 +601,22 @@ def test_skill_prefers_neutral_workflow_and_pins_version():
                      "immutable policy snapshot", "bash",
                      "execution_audit", "list_agent_executions"):
         assert fragment in content, fragment
-    for alias in ("list_opencode_models", "start_opencode_run", "list_opencode_runs",
-                  "read_opencode_run", "read_opencode_request",
-                  "respond_opencode_permission", "cancel_opencode_run"):
-        assert alias not in content, alias
-    assert "silent user \u2192 OpenCode" not in content
+    for tool in ("list_agent_models", "start_agent_run", "read_agent_run",
+                 "read_agent_request", "respond_agent_permission",
+                 "list_agent_executions"):
+        assert tool in content, tool
+    assert "a silent user \u2192 Pi" in content
 
 
 def test_compose_docs_state_orbstack_guidance_without_absolute_claim():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     compose = (root / "compose.yaml").read_text()
-    assert "host.docker.internal:8780" in compose
+    assert "WB_PI_RUNTIME_URL" in compose
+    assert "WB_RUNTIME_TOKEN" in compose
+    import yaml as _yaml
+    cfg = _yaml.safe_load(compose)
+    assert set(cfg["services"]) == {"bridge", "mcp-tunnel"}
     assert "OrbStack 29.4.0" in compose
     assert "Docker Desktop behavior may" in compose
     assert "host.docker.internal cannot reach it" not in compose

@@ -78,7 +78,7 @@ def test_same_path_after_restart_stays_usable(env):
     env["service"] = _Service(env["state"], env["config"])
 
 
-def test_opencode_execution_remains_available_after_remount(agent_env, payload):
+def test_pi_execution_remains_available_after_remount(agent_env, payload):
     s = agent_env["service"]
     with s.lock, s.db:
         s.db.execute("UPDATE workspaces SET dev=?, ino=? WHERE id=?",
@@ -86,12 +86,12 @@ def test_opencode_execution_remains_available_after_remount(agent_env, payload):
     job = s.call(agent_env["id"], agent_env["token"], "prepare_handoff",
                  Handoff.model_validate(payload).model_dump())
     assert job["id"].startswith("job_")
-    run = s.call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                 {"job_id": job["id"], "request_id": "remount-run-1",
+    run = s.call(agent_env["id"], agent_env["token"], "start_agent_run",
+                 {"runtime": "pi", "job_id": job["id"], "request_id": "remount-run-1",
                   "model": None, "parent_run_id": None})
     assert run["run_id"].startswith("run_")
-    models = s.call(agent_env["id"], agent_env["token"], "list_opencode_models",
-                    {"query": "", "limit": 25})
+    models = s.call(agent_env["id"], agent_env["token"], "list_agent_models",
+                    {"runtime": "pi", "query": "", "limit": 25})
     assert models["count"] >= 1
 
 

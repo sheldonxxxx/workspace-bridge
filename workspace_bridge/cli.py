@@ -215,9 +215,8 @@ def main(argv: list[str] | None = None):
                 except BlockingIOError:
                     raise BridgeError("A bridge process already owns this state directory; rotate online in the local manager") from None
             # The serve path builds the full multi-runtime registry from
-            # environment (OpenCode + optional Pi) so every configured
-            # backend gets its own orchestrator. Direct/test callers keep
-            # the runtime= compatibility path via runtime_from_environment.
+            # environment (Pi) so every configured
+            # backend gets its own orchestrator.
             service = Service(state, config, recover_incomplete=args.command == "serve",
                               registry=runtime_registry_from_environment(),
                               notifier=notifier_from_environment())
@@ -238,7 +237,7 @@ def main(argv: list[str] | None = None):
                         report.append({"workspace": ws["name"], "enabled": bool(ws["enabled"]), "check": result})
                     print(json.dumps({"config": "ok", "workspaces": report,
                         "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked",
-                        "opencode": service.orchestrator.runtime_status(),
+                        "pi": service.orchestrator.runtime_status(),
                         "model_policy": service.orchestrator.model_policy_status(),
                         "runtimes": service.runtime_diagnostics(),
                         "admin_allowed_hosts": list(admin_allowed_hosts_from_env())}, indent=2))

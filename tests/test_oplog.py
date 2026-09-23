@@ -1,8 +1,8 @@
 """Operational container logging: contract, redaction and lifecycle sequence.
 
 No Docker daemon is required. Python lifecycle tests drive a scripted fake
-runtime; adapter EventHub transitions are covered in
-runtime/opencode-adapter/test/oplog.test.mjs.
+runtime; Pi adapter lifecycle transitions are covered in
+runtime/pi-host-adapter/test/lifecycle.test.mjs.
 """
 from __future__ import annotations
 
@@ -61,8 +61,8 @@ def publish(agent_env, payload, **overrides):
 
 
 def start(agent_env, job_id, request_id="run-request-1", model=None):
-    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                                     {"job_id": job_id, "request_id": request_id,
+    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_agent_run",
+                                     {"runtime": "pi", "job_id": job_id, "request_id": request_id,
                                       "model": model, "parent_run_id": None})
 
 
@@ -179,7 +179,7 @@ def test_lifecycle_logs_are_ordered_and_safe(agent_env, payload, captured):
         permission_replied_event(run["session_id"], "per_log1", reply="once"))
     agent_env["service"].orchestrator.handle_event(
         {"type": "session.idle", "session_id": run["session_id"]})
-    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    detail = call(agent_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] == "completed"
 
     events = [r.get("event") for r in records(captured)]
@@ -239,7 +239,7 @@ def test_resync_failure_warns_and_stays_non_terminal(agent_env, payload, capture
     agent_env["runtime"].set_list_pending_error(
         BE("upstream exploded with secret /tmp/boom", "upstream_broken"))
     captured.lines.clear()
-    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    detail = call(agent_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] in ("starting", "running")
     assert detail["permission_sync"]["status"] == "degraded"
     warnings = [r for r in records(captured) if r.get("event") == "permission_resync"]
@@ -260,7 +260,7 @@ def test_unknown_event_leaves_state_unchanged_and_rejection_record_is_safe(agent
     # Unknown event kinds are ignored without mutation.
     agent_env["service"].orchestrator.handle_event(
         {"type": "message.updated", "session_id": run["session_id"]})
-    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    detail = call(agent_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] in ("starting", "running")
     # The pump rejection record carries a sanitized code only.
     record = oplog.build_record("bridge", "event_rejected", "WARNING", code="rejected")
@@ -269,12 +269,13 @@ def test_unknown_event_leaves_state_unchanged_and_rejection_record_is_safe(agent
 
 
 # ------------------------------------------------------------------ config
-def test_compose_passes_log_level_to_both_services():
+def test_compose_passes_log_level_to_bridge():
     root = Path(__file__).resolve().parents[1]
     cfg = yaml.safe_load((root / "compose.yaml").read_text())
-    for name in ("bridge", "opencode-adapter"):
-        env = cfg["services"][name]["environment"]
-        assert "WB_LOG_LEVEL" in env, name
+    assert set(cfg["services"]) == {"bridge", "mcp-tunnel"}
+    env = cfg["services"]["bridge"]["environment"]
+    assert "WB_LOG_LEVEL" in env
+    assert "WB_PI_RUNTIME_URL" in env
 
 
 def test_env_example_documents_log_level():

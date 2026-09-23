@@ -12,9 +12,9 @@ from .media import (ImageReadResult, DEFAULT_DIMENSION, SUPPORTED_SUFFIXES,
                     image_capabilities, read_image, selected_read_limit, sniff_image)
 from .embedded_skill import SKILL_TOOL, read_project_lead_skill, skill_hint
 from .notifications import Notifier
-from .orchestration import AgentOrchestrator
+from .orchestration import AgentOrchestrator, REQUEST_COLUMNS
 from .registry import RuntimeRegistry
-from .runtime import OPENCODE_RUNTIME_ID, AgentRuntime
+from .runtime import PI_RUNTIME_ID, AgentRuntime
 from .security import (BridgeError, SafeRoot, HANDOFF, MAX_FILE,
                        MAX_OUTPUT, MAX_WRITE, WRITE_SCOPES, allowed, handoff_allowed, file_text, digest, redact, require_write_path)
 
@@ -56,16 +56,8 @@ def _bounded_extension_snapshot(raw) -> list[dict]:
     return rows
 
 
-# Retain the old jobs.baseline column and any existing review tables for a
-# non-destructive upgrade. New handoffs store only "{}" in that legacy column;
-# no source snapshots, reviews, or verdicts are produced or loaded.
 HANDOFF_DOCUMENTS = ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md")
 JOB_COLUMNS = "id,workspace,request_id,request_hash,title,state,created,documents"
-OPENCODE_TOOLS = frozenset({
-    "list_opencode_models", "start_opencode_run", "list_opencode_runs",
-    "read_opencode_run", "read_opencode_request", "respond_opencode_permission",
-    "cancel_opencode_run",
-})
 NEUTRAL_AGENT_TOOLS = frozenset({
     "list_agent_models", "start_agent_run", "list_agent_runs",
     "read_agent_run", "read_agent_request", "respond_agent_permission",
@@ -81,9 +73,9 @@ class Service:
                  runtimes: dict[str, AgentRuntime] | None = None):
         # Optional multi-runtime construction path (3A2): a package-owned
         # registry maps stable runtime ids to configured backends. The
-        # legacy runtime= path stays exactly backward compatible: it builds
+        # legacy runtime= path stays backward compatible: it builds
         # a single-entry registry internally and service.orchestrator keeps
-        # pointing at the OpenCode compatibility orchestrator.
+        # pointing at the Pi compatibility orchestrator.
         if registry is not None and runtimes is not None:
             from .security import BridgeError as _BridgeError
             raise _BridgeError("Pass registry or runtimes, not both", "invalid_arguments")
@@ -96,9 +88,9 @@ class Service:
             try:
                 legacy_id = runtime.runtime_id
             except NotImplementedError:
-                legacy_id = OPENCODE_RUNTIME_ID
+                legacy_id = PI_RUNTIME_ID
             if not legacy_id:
-                legacy_id = OPENCODE_RUNTIME_ID
+                legacy_id = PI_RUNTIME_ID
             registry = RuntimeRegistry({legacy_id: runtime})
         self.state = state.resolve()
         self.config = config
@@ -112,11 +104,13 @@ class Service:
           CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT UNIQUE NOT NULL,
             dev INTEGER NOT NULL, ino INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
-            token_hash TEXT NOT NULL, excludes TEXT NOT NULL, created TEXT NOT NULL);
+            token_hash TEXT NOT NULL, excludes TEXT NOT NULL, created TEXT NOT NULL,
+            write_scope TEXT NOT NULL DEFAULT 'handoff' CHECK(write_scope IN ('none','handoff','workspace')),
+            agent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(agent_enabled IN (0,1)));
           CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
             request_id TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL,
-            state TEXT NOT NULL, created TEXT NOT NULL, baseline TEXT NOT NULL,
+            state TEXT NOT NULL, created TEXT NOT NULL,
             documents TEXT NOT NULL, UNIQUE(workspace, request_id));
           CREATE TABLE IF NOT EXISTS gateway (
             id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL,
@@ -128,187 +122,74 @@ class Service:
             key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS agent_runs (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
-            runtime TEXT NOT NULL DEFAULT 'opencode',
+            runtime TEXT NOT NULL DEFAULT 'pi',
             job TEXT NOT NULL REFERENCES jobs(id), request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
             parent_run TEXT, session TEXT, model TEXT, state TEXT NOT NULL,
             error_code TEXT, error_message TEXT, result TEXT NOT NULL DEFAULT '{}',
             notification TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL, started TEXT,
             updated TEXT NOT NULL, finished TEXT, permission_revision TEXT NOT NULL DEFAULT '',
+            message_floor_ms INTEGER NOT NULL DEFAULT 0,
+            session_reused INTEGER NOT NULL DEFAULT 0 CHECK(session_reused IN (0,1)),
+            transcript TEXT NOT NULL DEFAULT '[]',
+            execution_floor INTEGER NOT NULL DEFAULT 0,
+            execution_cursor INTEGER NOT NULL DEFAULT 0,
+            execution_audit_status TEXT NOT NULL DEFAULT 'not_recorded',
+            execution_audit_error TEXT NOT NULL DEFAULT '',
+            enforcement_fingerprint TEXT NOT NULL DEFAULT '',
+            adapter_version TEXT NOT NULL DEFAULT '',
+            pi_version TEXT NOT NULL DEFAULT '',
+            extension_revision TEXT NOT NULL DEFAULT '',
+            extension_snapshot TEXT NOT NULL DEFAULT '[]',
             UNIQUE(workspace, request_id));
           CREATE TABLE IF NOT EXISTS agent_requests (
             id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id),
-            workspace TEXT NOT NULL, session TEXT NOT NULL, opencode_request TEXT NOT NULL,
-            runtime_request TEXT,
+            workspace TEXT NOT NULL, session TEXT NOT NULL,
+            runtime_request TEXT NOT NULL,
             kind TEXT NOT NULL, action TEXT, resource TEXT, pattern TEXT NOT NULL DEFAULT '[]',
             metadata TEXT NOT NULL DEFAULT '{}', explanation TEXT, redacted INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL, decision TEXT, created TEXT NOT NULL, updated TEXT,
             resolved TEXT, generation TEXT NOT NULL DEFAULT 'v1' CHECK(generation IN ('v1','v2')),
-            UNIQUE(workspace, opencode_request));
+            UNIQUE(run, runtime_request));
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_session_active
+            ON agent_runs(runtime, session)
+            WHERE state IN ('starting','running','waiting_permission','waiting_question')
+              AND session IS NOT NULL AND session <> '';
+          CREATE TABLE IF NOT EXISTS agent_executions (
+            id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id),
+            workspace TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'pi',
+            session TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+            seq INTEGER NOT NULL, tool TEXT NOT NULL, state TEXT NOT NULL,
+            started TEXT, ended TEXT, duration_ms INTEGER,
+            input_summary TEXT NOT NULL DEFAULT '{}',
+            result_summary TEXT NOT NULL DEFAULT '{}',
+            is_error INTEGER NOT NULL DEFAULT 0,
+            permission_effect TEXT NOT NULL DEFAULT '',
+            permission_decision TEXT NOT NULL DEFAULT '',
+            truncated INTEGER NOT NULL DEFAULT 0,
+            created TEXT NOT NULL, updated TEXT NOT NULL,
+            UNIQUE(run, tool_call_id));
+          CREATE INDEX IF NOT EXISTS ix_agent_executions_run_seq
+            ON agent_executions(run, seq);
         """)
-        # v0.5: never broaden existing mappings on upgrade. Add one policy column;
-        # leave credentials, enabled state, handoff records and legacy evidence intact.
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(workspaces)")}
-        if "write_scope" not in columns:
-            with self.db:
-                self.db.execute("ALTER TABLE workspaces ADD COLUMN write_scope TEXT NOT NULL DEFAULT 'handoff' CHECK(write_scope IN ('none','handoff','workspace'))")
-        # v0.8: agent execution is a separate, explicit, fail-closed policy. Every
-        # fresh or migrated workspace defaults to disabled; MCP cannot enable it.
-        if "agent_enabled" not in columns:
-            with self.db:
-                self.db.execute("ALTER TABLE workspaces ADD COLUMN agent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(agent_enabled IN (0,1))")
-        # v0.8.4: session-continuation support. Per-run message boundary
-        # (integer milliseconds, matching OpenCode message timestamps), reuse
-        # flag and persisted per-run transcript snapshot. Fresh sessions keep
-        # floor 0 / not-reused / empty transcript. Safe for v0.8.3 data.
-        run_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_runs)")}
-        if "message_floor_ms" not in run_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_runs ADD COLUMN message_floor_ms INTEGER NOT NULL DEFAULT 0")
-        if "session_reused" not in run_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_runs ADD COLUMN session_reused INTEGER NOT NULL DEFAULT 0 CHECK(session_reused IN (0,1))")
-        if "transcript" not in run_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_runs ADD COLUMN transcript TEXT NOT NULL DEFAULT '[]'")
-        # 3B1: immutable Pi permission policy revision per run. Fresh Pi
-        # sessions record the current policy revision; continuation requires
-        # the source run revision to equal the current revision. Historical
-        # rows keep '' (unknown) and stay readable.
-        if "permission_revision" not in run_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_runs ADD COLUMN permission_revision TEXT NOT NULL DEFAULT ''")
-        # Permission generation routing: which wire endpoint owns the reply.
-        # "v1" (legacy GET /permission + POST /session/.../permissions/...)
-        # or "v2" (current GET /api/session/{sessionID}/permission + POST
-        # .../reply). Existing rows default to "v1" and keep working as V1;
-        # the reply path never guesses from request-id formatting.
-        request_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_requests)")}
-        if "generation" not in request_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_requests ADD COLUMN generation TEXT NOT NULL DEFAULT 'v1' CHECK(generation IN ('v1','v2'))")
-        # Neutral runtime-request identity. Pre-neutral databases lack the
-        # column; existing rows backfill runtime_request from the legacy
-        # opencode_request value (historically the exact native backend id),
-        # so no request/run/handoff data is lost. The legacy column and its
-        # UNIQUE(workspace, opencode_request) constraint stay untouched for
-        # DB compatibility; new rows carry a run-scoped storage key there.
-        # Fresh databases already carry the column via CREATE TABLE above.
-        if "runtime_request" not in request_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_requests ADD COLUMN runtime_request TEXT")
-                self.db.execute("UPDATE agent_requests SET runtime_request = opencode_request "
-                                "WHERE runtime_request IS NULL OR runtime_request = ''")
-        # Semantic identity: one native request id resolves within exactly
-        # one run. Partial index so only meaningful values are constrained.
         with self.db:
-            self.db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_requests_run_native "
-                "ON agent_requests(run, runtime_request) "
-                "WHERE runtime_request IS NOT NULL AND runtime_request <> ''")
-        # Runtime identity per agent run. Pre-neutral databases lack the
-        # column; the ADD COLUMN default backfills every historical row to
-        # "opencode" without rewriting or losing runs/requests/handoffs.
-        # Fresh databases already carry the column via CREATE TABLE above.
-        if "runtime" not in run_columns:
-            with self.db:
-                self.db.execute("ALTER TABLE agent_runs ADD COLUMN runtime TEXT NOT NULL DEFAULT 'opencode'")
-        # At most one non-terminal run may reference a given (runtime,
-        # session) pair, so a future backend may reuse the same native
-        # session id without collision. Terminal history may share freely.
-        # The index (not data) is rebuilt once from the legacy
-        # session-only shape; this touches no rows.
-        with self.db:
-            self.db.execute("DROP INDEX IF EXISTS ux_agent_runs_session_active")
-            self.db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_session_active "
-                "ON agent_runs(runtime, session) "
-                "WHERE state IN ('starting','running','waiting_permission','waiting_question') "
-                "AND session IS NOT NULL AND session <> ''")
-        # 3C1: persisted execution ledger + run audit/fingerprint metadata.
-        # agent_executions.seq stores the STABLE start cursor (global
-        # update-sequence value at the tool's start) for deterministic
-        # ordering; the moving update cursor lives only in
-        # agent_runs.execution_cursor. Historical rows hold start
-        # ordinals, which compare conservatively below any update-space
-        # floor and are therefore never misattributed to continued runs.
-        # Migration-safe: ADD COLUMN with defaults backfills historical rows
-        # to not_recorded/empty without rewriting evidence. Fresh databases
-        # carry the new columns via ALTER on first open (CREATE TABLE above
-        # stays minimal for compatibility; columns are added idempotently
-        # here). agent_executions holds one logical record per toolCallId
-        # per Bridge run (UNIQUE(run, tool_call_id), idempotent upsert).
-        run_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_runs)")}
-        for _ddl in (
-            "ALTER TABLE agent_runs ADD COLUMN execution_floor INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE agent_runs ADD COLUMN execution_cursor INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE agent_runs ADD COLUMN execution_audit_status TEXT NOT NULL DEFAULT 'not_recorded'",
-            "ALTER TABLE agent_runs ADD COLUMN execution_audit_error TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE agent_runs ADD COLUMN enforcement_fingerprint TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE agent_runs ADD COLUMN adapter_version TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE agent_runs ADD COLUMN pi_version TEXT NOT NULL DEFAULT ''",
-        ):
-            _col = _ddl.split("ADD COLUMN ")[1].split(" ")[0]
-            if _col not in run_columns:
-                with self.db:
-                    self.db.execute(_ddl)
-                run_columns.add(_col)
-        with self.db:
-            self.db.execute(
-                "CREATE TABLE IF NOT EXISTS agent_executions ("
-                "id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id), "
-                "workspace TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'pi', "
-                "session TEXT NOT NULL, tool_call_id TEXT NOT NULL, "
-                "seq INTEGER NOT NULL, tool TEXT NOT NULL, state TEXT NOT NULL, "
-                "started TEXT, ended TEXT, duration_ms INTEGER, "
-                "input_summary TEXT NOT NULL DEFAULT '{}', "
-                "result_summary TEXT NOT NULL DEFAULT '{}', "
-                "is_error INTEGER NOT NULL DEFAULT 0, "
-                "permission_effect TEXT NOT NULL DEFAULT '', "
-                "permission_decision TEXT NOT NULL DEFAULT '', "
-                "truncated INTEGER NOT NULL DEFAULT 0, "
-                "created TEXT NOT NULL, updated TEXT NOT NULL, "
-                "UNIQUE(run, tool_call_id))")
-            self.db.execute(
-                "CREATE INDEX IF NOT EXISTS ix_agent_executions_run_seq "
-                "ON agent_executions(run, seq)")
-        # 3C2: runtime-global extension policy revision + immutable active
-        # extension snapshot per run (bounded JSON rows, no host paths).
-        # Migration-safe: historical runs keep '' / '[]' and stay
-        # readable with an empty/not-recorded extension snapshot.
-        run_columns = {row[1] for row in self.db.execute("PRAGMA table_info(agent_runs)")}
-        for _ddl in (
-            "ALTER TABLE agent_runs ADD COLUMN extension_revision TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE agent_runs ADD COLUMN extension_snapshot TEXT NOT NULL DEFAULT '[]'",
-        ):
-            _col = _ddl.split("ADD COLUMN ")[1].split(" ")[0]
-            if _col not in run_columns:
-                with self.db:
-                    self.db.execute(_ddl)
-                run_columns.add(_col)
-        # Fail closed on the first v0.2 open of a v0.1 database. Existing mappings
-        # were authorized for separate credentials, not a shared credential.
-        with self.db:
-            inserted = self.db.execute(
-                "INSERT OR IGNORE INTO gateway VALUES(1,'',0,?)", (now(),)).rowcount
-            if inserted:
-                self.db.execute("UPDATE workspaces SET enabled=0")
+            self.db.execute("INSERT OR IGNORE INTO gateway VALUES(1,'',0,?)", (now(),))
         self.browser = Browser(self)
         if registry is None:
             self.runtime_registry = RuntimeRegistry()
         else:
             self.runtime_registry = registry
         # One orchestrator owns exactly one runtime. service.orchestrator
-        # stays the OpenCode compatibility path: the OpenCode orchestrator
-        # when configured, otherwise a runtime=None orchestrator so existing
-        # OpenCode tools fail runtime_unavailable rather than route to Pi.
+        # stays the Pi compatibility path: the Pi orchestrator
+        # when configured, otherwise a runtime=None orchestrator so agent
+        # tools fail runtime_unavailable rather than route elsewhere.
         self.orchestrators: dict[str, AgentOrchestrator] = {}
         for runtime_id, configured in self.runtime_registry.items():
             self.orchestrators[runtime_id] = AgentOrchestrator(
                 self, configured, notifier, background=orchestrator_background, clock=now)
-        if OPENCODE_RUNTIME_ID in self.orchestrators:
-            self.orchestrator = self.orchestrators[OPENCODE_RUNTIME_ID]
+        if PI_RUNTIME_ID in self.orchestrators:
+            self.orchestrator = self.orchestrators[PI_RUNTIME_ID]
         elif runtime is not None:
-            # Legacy single-runtime path with a non-OpenCode id: reuse the
+            # Legacy single-runtime path: reuse the
             # registry-built orchestrator so the runtime starts/stops once.
             try:
                 _legacy_id = runtime.runtime_id
@@ -355,9 +236,9 @@ class Service:
     def orchestrator_for_run(self, run_id: str, workspace: str | None = None) -> AgentOrchestrator:
         """Route one persisted run to its owning orchestrator.
 
-        Reads only the persisted ``agent_runs.runtime`` identity (legacy
-        fallback ``"opencode"``); unknown runs and unconfigured runtimes
-        fail closed.
+        Reads only the persisted ``agent_runs.runtime`` identity (missing
+        values fail closed as unknown); unknown runs and unconfigured
+        runtimes fail closed without attempting a backend call.
         """
         with self.lock:
             if workspace is not None:
@@ -369,15 +250,17 @@ class Service:
         if not row:
             from .security import BridgeError as _BridgeError
             raise _BridgeError("Run not found", "not_found")
-        persisted = row["runtime"] or OPENCODE_RUNTIME_ID
+        persisted = row["runtime"] or ""
+        if not persisted:
+            from .security import BridgeError as _BridgeError
+            raise _BridgeError("Run has no persisted runtime", "unknown_runtime")
         return self.orchestrator_for_runtime(persisted)
 
     def runtime_diagnostics(self) -> dict:
         """Additive sanitized diagnostics for configured runtimes.
 
         Bounded ids plus per-runtime health/capabilities; never paths,
-        tokens, or raw backend payloads. Old opencode/model_policy status
-        fields are reported separately and stay unchanged.
+        tokens, or raw backend payloads.
         """
         return self.runtime_registry.status()
 
@@ -506,7 +389,7 @@ class Service:
                 "truncated": row["truncated"],
             }))
         return {"workspace_id": ws["id"], "run_id": run_id,
-                "runtime": run.get("runtime") or "opencode",
+                "runtime": run.get("runtime") or "pi",
                 "executions": summaries,
                 "next_offset": offset + limit if len(rows) > limit else None}
 
@@ -546,7 +429,7 @@ class Service:
         })
         detail["workspace_id"] = ws["id"]
         detail["run_id"] = run_id
-        detail["runtime"] = run.get("runtime") or "opencode"
+        detail["runtime"] = run.get("runtime") or "pi"
         return detail
 
     def list_all_agent_runs(self, offset: int = 0, limit: int = 25,
@@ -694,9 +577,7 @@ class Service:
                 "SELECT count(*) FROM agent_requests WHERE run=? AND state='pending'",
                 (run["id"],)).fetchone()[0]
             requests = [dict(r) for r in self.db.execute(
-                "SELECT id,run,workspace,session,opencode_request,runtime_request,kind,action,"
-                "resource,pattern,metadata,explanation,redacted,state,decision,created,updated,"
-                "resolved,generation FROM agent_requests WHERE run=? ORDER BY created",
+                f"SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE run=? ORDER BY created",
                 (run["id"],)).fetchall()]
         view = neutral_run_summary(run)
         from .pi_executions import audit_counts as _audit_counts
@@ -765,9 +646,7 @@ class Service:
         run = self._persisted_run_row(ws, run_id)
         with self.lock:
             row = self.db.execute(
-                "SELECT id,run,workspace,session,opencode_request,runtime_request,kind,action,"
-                "resource,pattern,metadata,explanation,redacted,state,decision,created,updated,"
-                "resolved,generation FROM agent_requests "
+                f"SELECT {REQUEST_COLUMNS} FROM agent_requests "
                 "WHERE workspace=? AND run=? AND runtime_request=?",
                 (ws["id"], run_id, request_id)).fetchone()
         if not row:
@@ -1111,15 +990,11 @@ class Service:
         return dict(row)
     def handoff_summary(self, ws: dict, job: dict) -> dict:
         directory = str(Path(ws["root"]) / HANDOFF / "jobs" / job["id"])
-        legacy = "BASELINE.json" in json.loads(job["documents"])
-        legacy_note = ("This is a legacy handoff: any baseline, saved-result or audit instructions "
-                       "in its documents are superseded by this manual-return workflow. " if legacy else "")
         return {"id": job["id"], "title": job["title"], "state": job["state"], "created": job["created"],
-                "path": directory, "legacy_handoff": legacy, "completion_tracking": "not_tracked",
+                "path": directory, "completion_tracking": "not_tracked",
                 "copy_prompt": (
                     f"Work only in this project: {json.dumps(ws['root'])}. "
                     f"Read {json.dumps(directory + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md. "
-                    + legacy_note +
                     "Preserve pre-existing edits. Follow the ordered plan and acceptance criteria. "
                     "Stop and report a blocker rather than guess if code contradicts the plan, changes exceed scope, "
                     "or agreed checks still fail after a bounded in-scope correction. "
@@ -1180,8 +1055,8 @@ class Service:
                 file_text(text.encode("utf-8"))
             self.check_storage(sum(len(text.encode()) for text in docs.values()))
             with self.db:
-                self.db.execute("INSERT INTO jobs (id,workspace,request_id,request_hash,title,state,created,baseline,documents) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (ident, ws["id"], payload["request_id"], request_hash, payload["title"], "publishing", created, "{}", "{}"))
+                self.db.execute("INSERT INTO jobs (id,workspace,request_id,request_hash,title,state,created,documents) VALUES(?,?,?,?,?,?,?,?)",
+                    (ident, ws["id"], payload["request_id"], request_hash, payload["title"], "publishing", created, "{}"))
             hashes = {}
             try:
                 for name, text in docs.items():
@@ -1236,13 +1111,6 @@ class Service:
                 "glob": self.browser.glob, "grep_files": self.browser.grep_files, "list_handoffs": self.list_handoffs,
                 "read_handoff": self.read_handoff,
                 "write_file": self.write_file, "edit_file": self.edit_file,
-                "list_opencode_models": self.orchestrator.list_models,
-                "start_opencode_run": self.orchestrator.start_run,
-                "list_opencode_runs": self.orchestrator.list_runs,
-                "read_opencode_run": self.orchestrator.read_run,
-                "read_opencode_request": self.orchestrator.read_request,
-                "respond_opencode_permission": self.orchestrator.respond_permission,
-                "cancel_opencode_run": self.orchestrator.cancel_run,
                 "list_agent_models": self.list_agent_models,
                 "start_agent_run": self.start_agent_run,
                 "list_agent_runs": self.list_agent_runs,

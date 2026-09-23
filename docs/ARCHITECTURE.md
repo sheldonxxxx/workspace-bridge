@@ -9,11 +9,11 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
 - `api.py`: strict typed tool schemas, tools-only MCP adapter and loopback manager API.
 - `service.py`: shared auth, mappings, safe source access, planning publication,
   handoff reads, per-workspace write and agent policy, and metadata. No source snapshot or diff engine.
-- `orchestration.py`: the only long-running OpenCode lifecycle owner: handoff-bound
+- `orchestration.py`: the only long-running agent lifecycle owner: handoff-bound
   session creation, run/request persistence, event handling, permission decisions,
   cancellation and restart reconciliation.
-- `runtime.py`: narrow, bounded client boundary to the private SDK adapter; request
-  and metadata sanitization; no arbitrary command surface.
+- `runtime.py`: narrow, bounded client boundary to the private Pi host adapter;
+  request and metadata sanitization; no arbitrary command surface.
 - `notifications.py`: bounded Discord notifications from local runtime configuration,
   safe metadata only.
 - `security.py`: pinned roots, descriptor-relative no-follow traversal, exclusions,
@@ -26,8 +26,8 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
   project-lead guidance, retrieved on demand.
 - `static/`: local manager with workspace controls, plan/context/acceptance viewing,
   run/session views, permission approvals, shared-token controls and copyable manual handoffs.
-- `runtime/opencode-adapter/`: private Node client-only sidecar around
-  `@opencode-ai/sdk`; it connects to the externally managed host OpenCode server and
+- `runtime/pi-host-adapter/`: private Node client-only adapter around the
+  natively hosted Pi agent; it connects to the externally managed host agent and
   never creates one.
 
 ## Read and write boundaries
@@ -50,28 +50,29 @@ private same-directory temporary file, rechecks the target/parent, then publishe
 with no-clobber linking for creation or atomic replacement for an update. This is
 not an OS-atomic compare-and-swap against arbitrary external writers. The service
 lock serializes this process's tool calls, not other local programs. Notes are plain
-files; no status engine or audit subsystem is introduced. One checked policy column
-is added to workspaces; old mappings migrate to handoff-only.
+files; no status engine or audit subsystem is introduced. New mappings default to
+handoff-only writes.
 
 Normal file tools allow explicit handoff reads and scans; default source-root
 scans still exclude it. Published job hashes and metadata remain original and may
 therefore differ from a deliberately edited document.
 
-OpenCode remains an external actor owned by the host user. The manual path still
-travels through the user. The optional automated path uses a private client-only SDK
-adapter: a fresh start creates one native OpenCode session per prepared handoff
+Pi remains an external actor owned by the host user. The manual path still
+travels through the user. The optional automated path uses a private client-only
+Pi host adapter: a fresh start creates one native Pi session per prepared handoff
 under the exact mapped workspace directory, submits a server-generated prompt,
-and monitors runtime events. An explicit safe continuation instead creates a new
-Bridge run and handoff iteration that reuses a completed run's OpenCode session
-through promptAsync, keeping the same model. Only one active Bridge run owns a
+and reconciles runtime state through status/message polling (Pi exposes no
+event stream). An explicit safe continuation instead creates a new
+Bridge run and handoff iteration that reuses a completed run's Pi session,
+keeping the same model. Only one active Bridge run owns a
 session at a time, and continuation fails closed when binding, model, status or
 scope validation fails.
-The bridge never starts, supervises or packages an OpenCode server, and holds no
+The bridge never starts, supervises or packages a Pi agent, and holds no
 provider credentials. Runs have their own lifecycle (`starting`, `running`,
 `waiting_permission`, `waiting_question`, `completed`, `blocked`, `failed`,
 `cancelled`, `orphaned`) isolated from `jobs.state`. `waiting_permission` and
 `waiting_question` are non-terminal and resumable; `always` approvals pass through
-OpenCode's own proposed scope unchanged.
+Pi's own proposed scope unchanged.
 
 ## Agent execution boundary
 
@@ -80,9 +81,9 @@ prepared job in the same workspace and accepts no free-form prompt or path. Agen
 execution is a per-workspace local-admin policy (`agent_enabled`, default FALSE,
 independent from `write_scope`); MCP cannot change it. The runtime session directory
 is routing context plus an explicit binding check, not a hard filesystem sandbox —
-OpenCode permissions are not an OS sandbox and the native server has the host user's
+Pi permissions are not an OS sandbox and the native agent has the host user's
 authority. Pending requests are persisted with bounded, redacted review metadata and
-the OpenCode-proposed pattern; the bridge never broadens it. On startup, interrupted
+the Pi-proposed pattern; the bridge never broadens it. On startup, interrupted
 work is reconciled positively with the runtime or explicitly orphaned, and persisted
 pending waits stay answerable.
 
@@ -107,22 +108,14 @@ The worker neither receives workspace paths nor produces persistent preview file
 
 Fresh databases contain mappings, gateway auth, jobs and content-free operation
 events. Job publication uses `publishing`, `prepared` and `failed`; these states
-say nothing about implementation completion. The historical `jobs.baseline` column
-is retained only so existing v0.2 databases can be opened without rewriting them;
-new rows put `{}` there. Normal queries do not select old baseline blobs.
-
-Existing `reviews`/`audits` tables and old artifacts are preserved but never read,
-written or exposed by a retired tool. They are not created in a fresh database.
-No automatic cleanup or destructive migration runs. Existing mappings acquire a
-`write_scope` field defaulting to `handoff`; subsequent explicit values persist. Existing v0.2 mappings,
-tokens, endpoint and handoffs remain valid. The earlier fail-closed migration from
-v0.1 is unchanged. See the migration guides.
+say nothing about implementation completion. New mappings have a `write_scope`
+of `handoff` and agent execution disabled until configured locally.
 
 ## Intentional omissions
 
 No general shell execution, Git operation, automatic source-write enablement, snapshot
 audit, arbitrary binary reader, public OAuth, per-chat ACL, or background scheduling.
-Agent execution exists only through the bounded, opt-in OpenCode tools described
+Agent execution exists only through the bounded, opt-in Pi agent tools described
 above; there is no arbitrary command endpoint and no host-published adapter port.
 Skill following and review quality are model behavior, not enforced guarantees. The
 protocol adapter supports mixed text/image results; the tunnel profile is unchanged.
@@ -138,18 +131,22 @@ policy override, or MCP tool is added. The manager reports the published MCP por
 for host tunnel profiles. Native startup still binds 127.0.0.1.
 
 Compose uses a separate private state bind and a dedicated project-parent bind at
-the same absolute host path, preserving copyable OpenCode paths. State and the
+the same absolute host path, preserving copyable Pi agent paths. State and the
 parent must not overlap. Write scope remains none/handoff/workspace; read-only
 rootfs does not make the writable project bind read-only. The host tunnel remains
-separate, and the package-owned skill is version 1.6.1.
+separate, and the package-owned skill is version 2.2.0.
 
-## OpenCode runtime — v0.8
+## Pi runtime — v0.8 and later
 
-The Compose stack adds a private `opencode-adapter` sidecar with no published port.
-It imports `@opencode-ai/sdk`, builds `createOpencodeClient` against
-`WB_OPENCODE_SERVER_URL`, and exposes only health, model list, session create/get,
-prompt-async, bounded message read, permission reply, abort and an event long-poll.
-It never calls `createOpencode()`/`createOpencodeServer()`. The bridge reaches it at
-`http://opencode-adapter:8770` with a shared `WB_RUNTIME_TOKEN`; the host OpenCode
-server stays outside Compose. Docker Desktop uses `host.docker.internal`; Linux
-Engine needs an explicit reachable host URL. See [Docker](DOCKER.md).
+The Pi agent runs natively on the host and is managed by you; Compose adds no
+agent sidecar. The private Node Pi host adapter (`runtime/pi-host-adapter`)
+exposes health, model list, session create/get, prompt-async, bounded message
+read, permission snapshot/reply, abort, execution history, and extension
+inventory over a token-authenticated loopback HTTP surface with no published
+port. The bridge reaches it at `WB_PI_RUNTIME_URL` with a shared
+`WB_RUNTIME_TOKEN`; the host Pi agent stays outside Compose. Docker Desktop and
+OrbStack use `host.docker.internal`; Linux Engine needs an explicit reachable
+host URL. See [Docker](DOCKER.md).
+
+The Pi runtime uses a fresh database with native request identities in
+`agent_requests.runtime_request` and run identities in `agent_runs.runtime`.

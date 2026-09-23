@@ -13,9 +13,8 @@ import pytest
 
 from workspace_bridge.api import Handoff, TOOLS
 from workspace_bridge.registry import RuntimeRegistry, runtime_registry_from_environment
-from workspace_bridge.runtime import (HttpOpenCodeRuntime, HttpPiRuntime, OPENCODE_RUNTIME_ID,
-                                       PI_RUNTIME_ID, RuntimeRejected, RuntimeUnavailable,
-                                       RuntimeUnsupported, runtime_from_environment)
+from workspace_bridge.runtime import (HttpPiRuntime, PI_RUNTIME_ID, RuntimeRejected,
+                                       RuntimeUnavailable, RuntimeUnsupported)
 from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
 
@@ -62,7 +61,6 @@ def http_error(url, code, message="error"):
 # ------------------------------------------------------------------ identity
 def test_pi_identity_and_conservative_capabilities():
     assert PI_RUNTIME_ID == "pi"
-    assert OPENCODE_RUNTIME_ID == "opencode"
     caps = HttpPiRuntime("http://127.0.0.1:8780").capabilities
     assert caps.model_discovery is True
     assert caps.session_reuse is True
@@ -169,17 +167,13 @@ def test_pi_models_require_directory_fail_closed(monkeypatch):
     assert calls == []
 
 
-def test_opencode_models_accept_and_ignore_directory(monkeypatch):
-    def handler(record):
-        assert record["url"].endswith("/models")
-        return FakeResponse({"models": []})
-
-    calls = patch(monkeypatch, handler)
-    runtime = HttpOpenCodeRuntime("http://adapter:8770")
-    assert runtime.list_models() == []
-    assert runtime.list_models(None) == []
-    assert runtime.list_models("/projects/alpha") == []
-    assert all("directory" not in call["url"] for call in calls)
+def test_generic_fake_models_accept_any_directory():
+    # The scripted generic backend models global discovery: the workspace
+    # directory is accepted but never required.
+    runtime = FakeRuntime("/tmp")
+    assert runtime.list_models() != []
+    assert runtime.list_models(None) != []
+    assert runtime.list_models("/projects/alpha") != []
 
 
 def test_pi_get_session_none_only_on_404(monkeypatch):
@@ -270,25 +264,25 @@ def test_registry_duplicate_and_empty_ids_rejected():
     with pytest.raises(BridgeError):
         registry.get("nope")
     assert registry.optional("nope") is None
-    assert registry.get("opencode") is first
+    assert registry.get("pi") is first
 
 
 def test_registry_matching_explicit_id_succeeds():
     registry = RuntimeRegistry()
     runtime = FakeRuntime("/tmp")
-    assert registry.register(runtime, runtime_id="opencode") is runtime
-    assert registry.get("opencode") is runtime
+    assert registry.register(runtime, runtime_id="pi") is runtime
+    assert registry.get("pi") is runtime
 
 
 def test_registry_rejects_identity_mismatch():
     registry = RuntimeRegistry()
-    pi = FakeRuntime("/tmp")
-    pi._runtime_id = "pi"
+    aux = FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
     with pytest.raises(BridgeError) as exc:
-        registry.register(pi, runtime_id="opencode")
+        registry.register(aux, runtime_id="pi")
     assert exc.value.code == "runtime_mismatch"
     with pytest.raises(BridgeError) as exc:
-        registry.register(FakeRuntime("/tmp"), runtime_id="pi")
+        registry.register(FakeRuntime("/tmp"), runtime_id="aux")
     assert exc.value.code == "runtime_mismatch"
     # Nothing was registered by the failed calls.
     assert registry.ids() == []
@@ -318,11 +312,11 @@ def test_registry_rejects_empty_or_unimplemented_identity_even_with_key():
 
 
 def test_registry_dict_constructor_enforces_match():
-    pi = FakeRuntime("/tmp")
-    pi._runtime_id = "pi"
+    aux = FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
     with pytest.raises(BridgeError):
-        RuntimeRegistry({"opencode": pi})
-    assert RuntimeRegistry({"pi": pi}).ids() == ["pi"]
+        RuntimeRegistry({"pi": aux})
+    assert RuntimeRegistry({"aux": aux}).ids() == ["aux"]
 
 
 def test_service_runtimes_mapping_must_match_identity(tmp_path):
@@ -333,9 +327,9 @@ def test_service_runtimes_mapping_must_match_identity(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    mismatched = FakeRuntime(str(root))  # runtime_id "opencode", key "pi"
+    mismatched = FakeRuntime(str(root))  # runtime_id "pi", key "aux"
     with pytest.raises(BridgeError):
-        Service(state, cfg, runtimes={"pi": mismatched},
+        Service(state, cfg, runtimes={"aux": mismatched},
                 notifier=RecordingNotifier(), orchestrator_background=False)
     matched = FakeRuntime(str(root))
     matched._runtime_id = "pi"
@@ -358,36 +352,25 @@ def test_registry_close_is_safe_and_complete():
         def close(self):
             raise RuntimeError("boom")
 
-    opencode, pi = Closing("/tmp"), Failing("/tmp")
+    aux, pi = Closing("/tmp"), Failing("/tmp")
+    aux._runtime_id = "aux"
     pi._runtime_id = "pi"
-    registry = RuntimeRegistry({"opencode": opencode, "pi": pi})
+    registry = RuntimeRegistry({"aux": aux, "pi": pi})
     registry.close()
-    assert closed == ["opencode"]
+    assert closed == ["aux"]
 
 
-def test_environment_factory_either_both_neither_without_network(monkeypatch):
+def test_environment_factory_pi_only_without_network(monkeypatch):
     calls = patch(monkeypatch, lambda record: (_ for _ in ()).throw(AssertionError("no network")))
     assert runtime_registry_from_environment({}).ids() == []
-    only_open = runtime_registry_from_environment({"WB_OPENCODE_RUNTIME_URL": "http://a:8770",
-                                                   "WB_RUNTIME_TOKEN": "tok"})
-    assert only_open.ids() == ["opencode"]
-    assert only_open.get("opencode").token == "tok"
+    # Empty env configures no runtime and performs no network I/O.
+    assert runtime_registry_from_environment({"WB_RUNTIME_TOKEN": "tok"}).ids() == []
     only_pi = runtime_registry_from_environment({"WB_PI_RUNTIME_URL": "http://127.0.0.1:8780",
                                                  "WB_RUNTIME_TOKEN": "tok"})
     assert only_pi.ids() == ["pi"]
     assert only_pi.get("pi").token == "tok"
-    both = runtime_registry_from_environment({"WB_OPENCODE_RUNTIME_URL": "http://a:8770",
-                                              "WB_PI_RUNTIME_URL": "http://127.0.0.1:8780",
-                                              "WB_RUNTIME_TOKEN": "tok"})
-    assert both.ids() == ["opencode", "pi"]
+    assert isinstance(only_pi.get("pi"), HttpPiRuntime)
     assert calls == []
-    # runtime_from_environment stays OpenCode-only compatibility behavior.
-    assert runtime_from_environment({}) is None
-    legacy = runtime_from_environment({"WB_OPENCODE_RUNTIME_URL": "http://a:8770",
-                                       "WB_PI_RUNTIME_URL": "http://127.0.0.1:8780",
-                                       "WB_RUNTIME_TOKEN": "tok"})
-    assert isinstance(legacy, HttpOpenCodeRuntime)
-    assert "127.0.0.1" not in legacy.base_url
 
 
 # -------------------------------------------------------------------- service
@@ -405,13 +388,14 @@ def make_service(tmp_path, runtimes):
 
 
 def test_service_dual_orchestrators_and_compat_path(tmp_path):
-    opencode, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+    aux, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
     pi._runtime_id = "pi"
-    service, _, _ = make_service(tmp_path, {"opencode": opencode, "pi": pi})
+    service, _, _ = make_service(tmp_path, {"aux": aux, "pi": pi})
     try:
-        assert set(service.orchestrators) == {"opencode", "pi"}
-        assert service.orchestrator is service.orchestrators["opencode"]
-        assert service.orchestrator.runtime is opencode
+        assert set(service.orchestrators) == {"aux", "pi"}
+        assert service.orchestrator is service.orchestrators["pi"]
+        assert service.orchestrator.runtime is pi
         assert service.orchestrators["pi"].runtime is pi
         assert service.orchestrator_for_runtime("pi").runtime is pi
         with pytest.raises(BridgeError):
@@ -422,12 +406,10 @@ def test_service_dual_orchestrators_and_compat_path(tmp_path):
         service.close()
 
 
-def test_service_without_opencode_keeps_compat_orchestrator(tmp_path):
-    pi = FakeRuntime("/tmp")
-    pi._runtime_id = "pi"
-    service, _, _ = make_service(tmp_path, {"pi": pi})
+def test_service_without_runtime_keeps_unconfigured_compat_orchestrator(tmp_path):
+    service, _, _ = make_service(tmp_path, {})
     try:
-        assert set(service.orchestrators) == {"pi"}
+        assert set(service.orchestrators) == set()
         assert service.orchestrator.runtime is None
         assert service.orchestrator.configured is False
         with pytest.raises(BridgeError) as exc:
@@ -437,10 +419,24 @@ def test_service_without_opencode_keeps_compat_orchestrator(tmp_path):
         service.close()
 
 
-def test_orchestrator_for_run_routes_by_persisted_runtime(tmp_path):
-    opencode, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+def test_service_with_only_pi_points_compat_orchestrator_at_pi(tmp_path):
+    pi = FakeRuntime("/tmp")
     pi._runtime_id = "pi"
-    service, root, _ = make_service(tmp_path, {"opencode": opencode, "pi": pi})
+    service, _, _ = make_service(tmp_path, {"pi": pi})
+    try:
+        assert set(service.orchestrators) == {"pi"}
+        assert service.orchestrator is service.orchestrators["pi"]
+        assert service.orchestrator.runtime is pi
+        assert service.orchestrator.configured is True
+    finally:
+        service.close()
+
+
+def test_orchestrator_for_run_routes_by_persisted_runtime(tmp_path):
+    aux, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
+    pi._runtime_id = "pi"
+    service, root, _ = make_service(tmp_path, {"aux": aux, "pi": pi})
     try:
         ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
         service.manage_workspace(ws_id, "enable")
@@ -464,17 +460,18 @@ def test_orchestrator_for_run_routes_by_persisted_runtime(tmp_path):
         assert service.orchestrator_for_run("run_pi_1", ws_id).runtime is pi
         with pytest.raises(BridgeError):
             service.orchestrator_for_run("run_missing")
-        # OpenCode never owns the Pi row and vice versa.
-        assert service.orchestrators["opencode"]._is_owned_run({"runtime": "pi"}) is False
+        # Aux never owns the Pi row and vice versa.
+        assert service.orchestrators["aux"]._is_owned_run({"runtime": "pi"}) is False
         assert service.orchestrators["pi"]._is_owned_run({"runtime": "pi"}) is True
     finally:
         service.close()
 
 
 def test_service_close_stops_all_orchestrators_once(tmp_path):
-    opencode, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+    aux, pi = FakeRuntime("/tmp"), FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
     pi._runtime_id = "pi"
-    service, _, _ = make_service(tmp_path, {"opencode": opencode, "pi": pi})
+    service, _, _ = make_service(tmp_path, {"aux": aux, "pi": pi})
     stops = []
     for orch in service.orchestrators.values():
         original = orch.stop
@@ -490,24 +487,27 @@ def test_service_close_stops_all_orchestrators_once(tmp_path):
 
 
 def test_pi_policy_isolated_and_unconfigured(tmp_path):
-    opencode = FakeRuntime("/tmp")
+    aux = FakeRuntime("/tmp")
+    aux._runtime_id = "aux"
     pi = FakeRuntime("/tmp")
     pi._runtime_id = "pi"
-    service, root, _ = make_service(tmp_path, {"opencode": opencode, "pi": pi})
+    service, root, _ = make_service(tmp_path, {"aux": aux, "pi": pi})
     try:
         ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
         service.manage_workspace(ws_id, "enable")
         service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-        service.orchestrators["opencode"].set_model_policy(
-            ["anthropic/claude-sonnet"], "anthropic/claude-sonnet")
-        # Legacy key behavior is unchanged for OpenCode.
-        assert service.orchestrator.model_policy_status()["configured"] is True
+        ws = service.workspace(ws_id)
+        service.orchestrators["aux"].set_model_policy(
+            ["anthropic/claude-sonnet"], "anthropic/claude-sonnet", ws)
+        # Policies never leak across backends: Pi keeps the legacy key and
+        # stays unconfigured while aux is configured.
+        assert service.orchestrators["aux"]._policy_setting() == "model_policy:aux"
+        assert service.orchestrators["aux"].model_policy_status()["configured"] is True
         pi_orch = service.orchestrators["pi"]
-        assert pi_orch._policy_setting() == "model_policy:pi"
+        assert pi_orch._policy_setting() == "model_policy"
         assert pi_orch.model_policy_status() == {"configured": False, "enabled": [],
                                                  "default": None, "enabled_count": 0}
         assert pi_orch.get_model_policy() is None
-        ws = service.workspace(ws_id)
         job = service.call(ws_id, service.manage_bridge("rotate_token")["token"],
                            "prepare_handoff",
                            Handoff.model_validate({"request_id": "pi-pol-1", "title": "Pi",
@@ -517,15 +517,14 @@ def test_pi_policy_isolated_and_unconfigured(tmp_path):
         with pytest.raises(BridgeError) as exc:
             pi_orch.start_run(ws, job["id"], "pi-run-1")
         assert exc.value.code == "model_policy_unconfigured"
-        assert pi.sessions == [] and opencode.sessions == []
+        assert pi.sessions == [] and aux.sessions == []
     finally:
         service.close()
 
 
 def test_no_new_public_mcp_tools_in_3a2():
     # 3A2 pinned zero new public tools; 3A3 adds the seven neutral agent
-    # tools and 3C1 adds the two execution-audit tools alongside the
-    # unchanged OpenCode compatibility surface.
+    # tools and 3C1 adds the two execution-audit tools.
     from workspace_bridge.service import NEUTRAL_AGENT_TOOLS
     assert NEUTRAL_AGENT_TOOLS == {"list_agent_models", "start_agent_run", "list_agent_runs",
                                    "read_agent_run", "read_agent_request",
@@ -541,18 +540,20 @@ def test_compose_pi_url_empty_by_default_no_pi_service():
     import yaml
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
     cfg = yaml.safe_load((root / "compose.yaml").read_text())
-    assert set(cfg["services"]) == {"bridge", "mcp-tunnel", "opencode-adapter"}
+    assert set(cfg["services"]) == {"bridge", "mcp-tunnel"}
     env = cfg["services"]["bridge"]["environment"]
     assert "WB_PI_RUNTIME_URL" in env
-    assert "host.docker.internal" in (root / "compose.yaml").read_text()
+    assert "WB_RUNTIME_TOKEN" in env
+    assert "WB_LOG_LEVEL" in env
 
 
 def test_admin_status_additive_runtimes(tmp_path):
     import asyncio
     import httpx
     from workspace_bridge.api import make_admin
-    opencode = FakeRuntime("/tmp")
-    service, _, _ = make_service(tmp_path, {"opencode": opencode})
+    pi = FakeRuntime("/tmp")
+    pi._runtime_id = "pi"
+    service, _, _ = make_service(tmp_path, {"pi": pi})
     try:
         token = (service.state / "admin-token").read_text().strip()
 
@@ -565,12 +566,12 @@ def test_admin_status_additive_runtimes(tmp_path):
                 return (await client.get("/api/status")).json()
 
         status = asyncio.run(fetch())
-        # Old fields stay intact.
-        assert status["opencode"]["configured"] is True
+        # Pi fields stay intact.
+        assert status["pi"]["configured"] is True
         assert status["model_policy"]["configured"] is False
         # Additive bounded diagnostics.
-        assert status["runtimes"]["configured"] == ["opencode"]
-        assert status["runtimes"]["runtimes"]["opencode"]["healthy"] is True
+        assert status["runtimes"]["configured"] == ["pi"]
+        assert status["runtimes"]["runtimes"]["pi"]["healthy"] is True
         assert "token" not in json.dumps(status).lower()
     finally:
         service.close()

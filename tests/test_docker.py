@@ -250,7 +250,7 @@ def test_entrypoint_invokes_cli_with_explicit_container_flags(tmp_path,monkeypat
 
 def test_compose_security_and_same_host_path():
     cfg=yaml.safe_load((ROOT/'compose.yaml').read_text())
-    assert set(cfg['services'])=={'bridge','mcp-tunnel','opencode-adapter'}
+    assert set(cfg['services'])=={'bridge','mcp-tunnel'}
     svc=cfg['services']['bridge']
     assert svc['read_only'] and svc['init']
     assert svc['cap_drop']==['ALL'] and 'no-new-privileges:true' in svc['security_opt']
@@ -262,31 +262,18 @@ def test_compose_security_and_same_host_path():
     assert svc['restart']=='unless-stopped'
     assert svc['mem_limit']=='1536m' and svc['pids_limit']==64
     assert svc['healthcheck']['test']==['CMD','python','-m','workspace_bridge.container_health']
-    # The bridge only reaches the private adapter; the external OpenCode server
-    # (and its credentials) never enters the bridge container.
-    assert svc['environment']['WB_OPENCODE_RUNTIME_URL']=='http://opencode-adapter:8770'
-    assert 'WB_OPENCODE_SERVER_PASSWORD' not in svc['environment']
-    # Private client-only adapter: no host-published port, no project/state mounts,
-    # no Docker socket, and it reaches the host via host-gateway.
-    adapter=cfg['services']['opencode-adapter']
-    assert 'ports' not in adapter and 'network_mode' not in adapter and 'privileged' not in adapter
-    assert adapter['read_only'] and adapter['cap_drop']==['ALL']
-    assert 'no-new-privileges:true' in adapter['security_opt']
-    assert not any('docker.sock' in str(m) for m in adapter.get('volumes', []))
-    assert adapter['environment']['WB_ADAPTER_PORT']=='8770'
-    assert 'host.docker.internal:host-gateway' in adapter['extra_hosts']
-    # The adapter is locked until WB_RUNTIME_TOKEN is deliberately set (empty default).
-    assert 'WB_RUNTIME_TOKEN' in adapter['environment'] and 'WB_RUNTIME_TOKEN' in svc['environment']
-    # Compose starts the bridge before the adapter (bridge healthy gate); startup
-    # reconciliation must therefore tolerate a transient adapter-unavailable result.
-    assert adapter['depends_on']['bridge']['condition']=='service_healthy'
+    # The bridge only reaches the native Pi host adapter URL plus the shared
+    # runtime token; provider credentials stay on the host and never enter
+    # the bridge container.
+    assert 'WB_PI_RUNTIME_URL' in svc['environment']
+    assert 'WB_RUNTIME_TOKEN' in svc['environment']
+    assert set(cfg['services']) == {'bridge', 'mcp-tunnel'}
     # Tunnel sidecar: internal-only client, no published ports, no project/state mounts.
     tunnel=cfg['services']['mcp-tunnel']
     assert 'ports' not in tunnel and 'network_mode' not in tunnel and 'privileged' not in tunnel
     assert not any('docker.sock' in str(m) for m in tunnel.get('volumes', []))
-    for name in ('mcp-tunnel','opencode-adapter'):
-        assert all('WB_STATE_DIR' not in str(m) and 'WB_PROJECTS_DIR' not in str(m)
-                   for m in cfg['services'][name].get('volumes', []))
+    assert all('WB_STATE_DIR' not in str(m) and 'WB_PROJECTS_DIR' not in str(m)
+               for m in tunnel.get('volumes', []))
     assert tunnel['depends_on']['bridge']['condition']=='service_healthy'
     profile=yaml.safe_load((ROOT/'tunnel-client.yaml').read_text())
     urls=[row['url'] for row in profile['mcp']['server_urls']]
@@ -318,35 +305,26 @@ def test_dockerfile_dependency_layer_before_source():
     assert '!scripts/' not in ignore and '!.env' not in ignore
 
 
-def test_adapter_dockerfile_cached_lockfile_layer():
-    text = (ROOT/'runtime/opencode-adapter/Dockerfile').read_text()
-    lockfile_copy = text.index('COPY package.json package-lock.json')
-    install = text.index('npm ci --omit=dev')
-    assert lockfile_copy < install
-    assert '--mount=type=cache,target=/root/.npm' in text
-    assert 'npm cache clean' not in text, "The BuildKit cache mount owns the npm cache; do not delete it"
-    assert 'USER node' in text and '--omit=dev' in text
-
-
-def test_adapter_dockerfile_copies_every_local_module():
-    """The adapter Dockerfile uses an explicit COPY allowlist: every relative
-    .mjs import of the shipped entry modules must be listed, otherwise the
-    container crashes with ERR_MODULE_NOT_FOUND after a rebuild/restart."""
+def test_pi_adapter_is_native_without_container_image():
+    """The Pi host adapter runs natively on the host: no Dockerfile, no
+    Compose service, no published port. The bridge only holds the adapter
+    URL plus the shared runtime token."""
     import re
-    adapter_dir = ROOT/'runtime/opencode-adapter'
-    text = (adapter_dir/'Dockerfile').read_text()
-    copied = set()
-    for line in text.splitlines():
-        match = re.match(r'COPY\s+(.+?)\s+\./$', line.strip())
-        if match:
-            copied.update(match.group(1).split())
-    entry_modules = ['adapter.mjs', 'server.mjs', 'sdk-runtime.mjs']
+    adapter_dir = ROOT/'runtime/pi-host-adapter'
+    assert not list(adapter_dir.glob('Dockerfile*'))
+    assert (adapter_dir/'package.json').exists()
+    # Every relative .mjs import of the shipped entry modules must exist,
+    # otherwise the native adapter crashes with ERR_MODULE_NOT_FOUND.
+    entry_modules = ['adapter.mjs', 'server.mjs', 'main.mjs']
     for module in entry_modules:
-        assert module in copied, module
+        assert (adapter_dir/module).exists(), module
         source = (adapter_dir/module).read_text()
         for imported in re.findall(r'''from\s+["']\./([^"']+)["']''', source):
-            assert imported in copied, f"{module} imports ./{imported} which is not COPYed"
-            assert (adapter_dir/imported).exists(), imported
+            assert (adapter_dir/imported).exists(), f"{module} imports ./{imported} which is missing"
+    cfg = yaml.safe_load((ROOT/'compose.yaml').read_text())
+    assert set(cfg['services']) == {'bridge', 'mcp-tunnel'}
+    bridge_text = (ROOT/'Dockerfile').read_text()
+    assert 'pi-host-adapter' not in bridge_text
 
 
 def test_setup_generates_private_config_no_source_changes(tmp_path,monkeypatch):

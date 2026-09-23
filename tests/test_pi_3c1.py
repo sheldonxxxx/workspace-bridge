@@ -5,7 +5,7 @@ v2->v3 migration, shell deny/ask/allow with no command rules, DB
 migration, deployed execution capability, fresh/continuation floors,
 sync/upsert/final drain, incomplete gaps, permission linkage, MCP
 ownership/bounds/persisted-only reads, run summary, and shell policy
-revision/continuation. OpenCode/3A/3B behavior stays unchanged.
+revision/continuation. Generic 3A/3B behavior stays unchanged.
 """
 import json
 
@@ -34,21 +34,17 @@ def enabled_policy(**overrides):
     return policy
 
 
-def test_v2_migrates_losslessly_with_shell_deny(pi_env):  # noqa: F811
+def test_old_policy_fails_closed(pi_env):  # noqa: F811
     from workspace_bridge.pi_permissions import load_policy
     service = pi_env["service"]
     v2 = dict(safe_defaults())
     v2["version"] = 2
     del v2["shell_mode"]
     service.set_setting(PI_PERMISSION_POLICY_SETTING, json.dumps(v2))
-    policy, revision, configured, migrated_from = load_policy(service)
-    assert configured is True and migrated_from == 2
-    assert policy["version"] == 3
-    for key in ("write_tools_enabled", "tools", "protected_patterns",
-                "protected_template_exceptions", "allow_session_always",
-                "external_access"):
-        assert policy[key] == v2[key]
-    assert policy["shell_mode"] == "deny"
+    policy, revision, configured = load_policy(service)
+    assert configured is False
+    assert policy == safe_defaults()
+    assert revision == policy_revision(policy)
 
 
 def test_v3_shell_modes_validate_and_no_command_rules(pi_env):  # noqa: F811
@@ -67,7 +63,7 @@ def test_v3_shell_modes_validate_and_no_command_rules(pi_env):  # noqa: F811
         service.set_pi_permission_policy({**safe_defaults(), "version": 2})
 
 
-def test_db_migration_adds_ledger_tables(pi_env):  # noqa: F811
+def test_fresh_db_has_ledger_tables(pi_env):  # noqa: F811
     service = pi_env["service"]
     cols = {row[1] for row in service.db.execute("PRAGMA table_info(agent_runs)")}
     for col in ("execution_floor", "execution_cursor", "execution_audit_status",
@@ -541,14 +537,11 @@ def test_shell_policy_continuation_binding(pi_env):  # noqa: F811
     assert exc.value.code == "permission_scope_changed"
 
 
-def test_opencode_stays_not_recorded_and_unsupported(pi_env):  # noqa: F811
-    from workspace_bridge.runtime import RuntimeUnsupported as _Unsupported
-    job = publish(pi_env, "c1-oc")
-    run = call(pi_env, "start_opencode_run", job_id=job["id"], request_id="c1-oc-run")
-    detail = call(pi_env, "read_opencode_run", run_id=run["run_id"])
-    # OpenCode reads carry no execution audit (neutral key absent or not_recorded).
+def test_aux_run_stays_not_recorded_and_unsupported(pi_env):  # noqa: F811
+    job = publish(pi_env, "c1-aux")
+    run = call(pi_env, "start_agent_run", runtime="aux",
+                 job_id=job["id"], request_id="c1-aux-run")
+    detail = call(pi_env, "read_agent_run", run_id=run["run_id"])
+    # Non-Pi reads carry no execution audit (neutral key absent or not_recorded).
     assert detail.get("execution_audit", {"status": "not_recorded"})["status"] == "not_recorded"
-    with pytest.raises(_Unsupported):
-        pi_env["service"].orchestrator.read_executions if hasattr(
-            pi_env["service"].orchestrator, "read_executions") else (_ for _ in ()).throw(
-            _Unsupported("unsupported"))
+    assert pi_env["service"].orchestrators["aux"].runtime.capabilities.execution_history is False

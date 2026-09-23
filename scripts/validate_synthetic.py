@@ -270,4 +270,4 @@ with tempfile.TemporaryDirectory(prefix='workspace-bridge-v05-') as tmp:
             except subprocess.TimeoutExpired:proc.kill();proc.wait()
             if proc.returncode not in [0,-15]: print(serverlog.read_text())
             client.close();admin.close()
-PROJECT.joinpath('SMOKE_RESULTS.txt').write_text(f'Workspace Bridge {__version__} — Linux local validation\nSynthetic projects only; no real OpenAI tunnel or OpenCode execution.\n\n'+'\n'.join(logs)+'\n')
+PROJECT.joinpath('SMOKE_RESULTS.txt').write_text(f'Workspace Bridge {__version__} — Linux local validation\nSynthetic projects only; no real OpenAI tunnel or Pi agent execution.\n\n'+'\n'.join(logs)+'\n')

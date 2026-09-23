@@ -6,8 +6,8 @@ session, persists run/request state, mediates permission decisions, reconciles
 state after restart, and emits completion/attention notifications. It programs
 against the generic ``AgentRuntime`` contract (normalized ``RuntimeEvent`` /
 ``RuntimeInteraction`` objects plus explicit ``RuntimeCapabilities``); the
-currently installed OpenCode backend is selected at runtime and identified per
-run by its stable runtime id (``"opencode"``).
+currently installed Pi backend is selected at runtime and identified per
+run by its stable runtime id (``"pi"``).
 
 Trust model: the bridge is the orchestration client, not a sandbox. Agent
 claims are untrusted evidence. ``always`` approvals pass through the backend's
@@ -28,8 +28,8 @@ from typing import Any
 
 from .notifications import NOTIFIED_STATES, Notifier, NullNotifier
 from .oplog import emit, error_code
-from .runtime import (MAX_TRANSCRIPT_CHARS, OPENCODE_RUNTIME_ID, AgentRuntime, ModelInfo,
-                       OpenCodeRuntime, RuntimeEvent, RuntimeInteraction, RuntimeUnavailable,
+from .runtime import (MAX_TRANSCRIPT_CHARS, PI_RUNTIME_ID, AgentRuntime, ModelInfo,
+                       RuntimeEvent, RuntimeInteraction, RuntimeUnavailable,
                        coerce_runtime_event, is_valid_runtime_id, sanitize_metadata)
 from .security import BridgeError, HANDOFF, digest
 
@@ -81,30 +81,10 @@ RUN_COLUMNS = ("id,workspace,runtime,job,request_id,request_hash,parent_run,sess
                "execution_floor,execution_cursor,execution_audit_status,execution_audit_error,"
                "enforcement_fingerprint,adapter_version,pi_version,"
                "extension_revision,extension_snapshot")
-# Physical legacy storage column for request rows. Existing databases carry
-# this column and its UNIQUE(workspace, opencode_request) constraint; both are
-# retained verbatim for compatibility. Ordinary request logic never matches on
-# it: the neutral ``runtime_request`` identity (exact native backend request
-# id) is the semantic key, and this column holds only a collision-safe
-# run-scoped storage key (see _legacy_request_key). Only the storage helper,
-# the migration/backfill path in service.py, and a historical-row fallback in
-# _request_public may name it.
-LEGACY_REQUEST_STORAGE_COLUMN = "opencode_request"
-REQUEST_COLUMNS = (f"id,run,workspace,session,{LEGACY_REQUEST_STORAGE_COLUMN},runtime_request,"
+REQUEST_COLUMNS = ("id,run,workspace,session,runtime_request,"
                    "kind,action,resource,pattern,"
                    "metadata,explanation,redacted,state,decision,created,updated,resolved,"
                    "generation")
-
-
-def _legacy_request_key(run_id: str, native_id: str) -> str:
-    """Collision-safe legacy storage key for one request row.
-
-    Scoped by run id so identical native backend request ids in different
-    runs (or future runtimes) coexist without violating the retained
-    UNIQUE(workspace, opencode_request) constraint. Never used for request
-    resolution; that binds (workspace, run, runtime_request).
-    """
-    return f"{run_id}:{native_id}"[:400]
 
 
 def now() -> str:
@@ -144,8 +124,9 @@ def _bounded_str_list(value: Any, limit: int = 32) -> list[str]:
 
 def _label_for_runtime(runtime_id: str | None) -> str:
     """Short human label for a persisted runtime identity."""
-    return {"opencode": "OpenCode", "pi": "Pi"}.get(
-        runtime_id or OPENCODE_RUNTIME_ID, runtime_id or "OpenCode")
+    if not runtime_id:
+        return "Pi"
+    return {"pi": "Pi"}.get(runtime_id, runtime_id)
 
 
 def neutral_request_public(request: dict, label: str) -> dict:
@@ -170,10 +151,7 @@ def neutral_request_public(request: dict, label: str) -> dict:
     generation = request.get("generation")
     if generation not in ("v1", "v2"):
         generation = "v1"
-    # Public id is always the exact native backend request id. Historical
-    # rows predate the neutral column with opencode_request == native id;
-    # the storage column is only a fallback for such rows.
-    native_id = request.get("runtime_request") or request["opencode_request"]
+    native_id = request.get("runtime_request") or ""
     return {"request_id": native_id, "kind": request["kind"],
             "state": request["state"], "decision": request["decision"],
             "action": request["action"], "resource": request["resource"],
@@ -200,7 +178,7 @@ def neutral_run_summary(run: dict) -> dict:
         notification = {}
     reused = bool(run.get("session_reused"))
     return {"run_id": run["id"], "workspace_id": run["workspace"],
-            "runtime": run.get("runtime") or OPENCODE_RUNTIME_ID, "job_id": run["job"],
+            "runtime": run.get("runtime") or PI_RUNTIME_ID, "job_id": run["job"],
             "parent_run_id": run["parent_run"], "request_id": run["request_id"],
             "continue_from_run_id": run["parent_run"] if reused else None,
             "session_reused": reused,
@@ -274,19 +252,16 @@ class AgentOrchestrator:
     def _cursor_setting_keys(self) -> tuple[str, str]:
         """(instance_key, cursor_key) for persisted event-stream state.
 
-        OpenCode keeps the legacy ``runtime_instance``/``runtime_cursor``
-        keys byte-for-byte. Every other runtime uses its exact id as the
-        suffix, so two distinct configured ids can never collapse to the
-        same keys. Configured ids are canonical by registry construction;
-        an invalid id outside a registered path fails closed instead of
-        normalizing to a colliding key.
+        Every runtime uses its exact id as the suffix, so two distinct
+        configured ids can never collapse to the same keys. Configured ids
+        are canonical by registry construction; an invalid id outside a
+        registered path fails closed instead of normalizing to a colliding
+        key.
         """
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        if configured == OPENCODE_RUNTIME_ID:
-            return ("runtime_instance", "runtime_cursor")
+            configured = PI_RUNTIME_ID
         if not is_valid_runtime_id(configured):
             raise BridgeError(f"Runtime {configured!r} has an invalid identity "
                               "for cursor state", "invalid_arguments")
@@ -365,46 +340,39 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------ helpers
     def _require_runtime(self) -> AgentRuntime:
         if self.runtime is None:
-            raise BridgeError("OpenCode runtime is not configured for this bridge", "runtime_unavailable")
+            raise BridgeError("Agent runtime is not configured for this bridge", "runtime_unavailable")
         return self.runtime
 
     def _runtime_id(self) -> str:
-        """Stable identity of the configured backend (``"opencode"`` today)."""
+        """Stable identity of the configured backend (``"pi"`` today)."""
         runtime = self._require_runtime()
         try:
             return runtime.runtime_id
         except NotImplementedError:
-            return OPENCODE_RUNTIME_ID
+            return PI_RUNTIME_ID
 
     def _runtime_label(self) -> str:
-        """Short human label for the configured backend (``"OpenCode"`` today).
-
-        Used only for user-facing wording emitted for a non-OpenCode
-        runtime; the OpenCode label keeps every historical message
-        byte-for-byte identical.
-        """
+        """Short human label for the configured backend (``"Pi"`` today)."""
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
+            configured = PI_RUNTIME_ID
         return _label_for_runtime(configured)
 
     def _list_runtime_id(self) -> str:
         """Persisted-runtime filter for list paths.
 
-        The configured backend id when available; the legacy
-        ``"opencode"`` fallback for the unconfigured compatibility
-        orchestrator (which historically listed OpenCode rows without a
-        backend). Never raises.
+        The configured backend id when available; the ``"pi"`` fallback
+        for the unconfigured compatibility orchestrator. Never raises.
         """
         try:
             if self.runtime is None:
-                return OPENCODE_RUNTIME_ID
+                return PI_RUNTIME_ID
             return self.runtime.runtime_id
         except NotImplementedError:
-            return OPENCODE_RUNTIME_ID
+            return PI_RUNTIME_ID
         except BridgeError:
-            return OPENCODE_RUNTIME_ID
+            return PI_RUNTIME_ID
 
     def _is_owned_run(self, run: dict) -> bool:
         """Whether a persisted run belongs to the configured runtime.
@@ -417,14 +385,15 @@ class AgentOrchestrator:
         try:
             configured = self.runtime.runtime_id
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        return (run.get("runtime") or OPENCODE_RUNTIME_ID) == configured
+            configured = PI_RUNTIME_ID
+        return (run.get("runtime") or PI_RUNTIME_ID) == configured
 
     def _require_run_runtime(self, run: dict) -> str:
         """Fail closed unless a persisted run belongs to the configured runtime.
 
-        Compares run.runtime (legacy fallback ``"opencode"``) to the
-        configured AgentRuntime.runtime_id before any runtime API call.
+        Compares run.runtime (fallback ``"pi"`` for rows missing the column)
+        to the configured AgentRuntime.runtime_id before any runtime API
+        call.
         Returns the validated identity. Raises ``runtime_mismatch`` without
         touching the backend and without mutating or orphaning the run.
         """
@@ -432,8 +401,8 @@ class AgentOrchestrator:
         try:
             configured = runtime.runtime_id
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        persisted = run.get("runtime") or OPENCODE_RUNTIME_ID
+            configured = PI_RUNTIME_ID
+        persisted = run.get("runtime") or PI_RUNTIME_ID
         if persisted != configured:
             raise BridgeError(
                 f"Run belongs to runtime {persisted!r}; this bridge owns {configured!r}",
@@ -443,7 +412,7 @@ class AgentOrchestrator:
     def _require_capability(self, name: str) -> None:
         """Fail closed when the installed backend does not support a path.
 
-        The current OpenCode backend advertises every capability its
+        The current Pi backend advertises every capability its
         adapter/orchestration path actually supports, so these gates never
         trigger there; a future backend without the flag gets an explicit
         ``runtime_unsupported`` instead of a silent fallback.
@@ -604,7 +573,7 @@ class AgentOrchestrator:
                 "UPDATE agent_requests SET state='orphaned',resolved=?,updated=? "
                 "WHERE run=? AND state='pending'", (self._clock(), self._clock(), run["id"]))
         self._set_state(run["id"], "orphaned", error_code=code, error_message=message, finished=True)
-        self.service.event(run["workspace"], "opencode_orphaned", code)
+        self.service.event(run["workspace"], "agent_orphaned", code)
         emit(_ops_log, "INFO", "bridge", "run_state", run_id=run["id"],
              session_id=run.get("session"), workspace_id=run.get("workspace"),
              state="orphaned", code=str(code)[:80])
@@ -618,7 +587,7 @@ class AgentOrchestrator:
             self.service.db.execute("UPDATE agent_runs SET result=?,transcript=? WHERE id=?",
                                     (result, snapshot, run["id"]))
         self._set_state(run["id"], "completed", finished=True)
-        self.service.event(run["workspace"], "opencode_completed")
+        self.service.event(run["workspace"], "agent_completed")
         # Never include final response text or transcript contents: counts
         # and reason only.
         emit(_ops_log, "INFO", "bridge", "run_state", run_id=run["id"],
@@ -661,6 +630,24 @@ class AgentOrchestrator:
                 (run["id"],)).fetchone()[0]
         return (dict(final) if final else None), remaining
 
+    def _insert_pending_request(self, run: dict, native_id: str, kind: str,
+                                action: str, resource: str, pattern_json: str,
+                                metadata_json: str, explanation: str,
+                                redacted: int, generation: str) -> None:
+        """Insert one pending request row keyed by its native request id."""
+        request_id = uid("req_")
+        self.service.db.execute(
+            "INSERT OR IGNORE INTO agent_requests (id,run,workspace,session,"
+            "runtime_request,kind,"
+            "action,resource,pattern,metadata,explanation,redacted,state,decision,created,updated,resolved,"
+            "generation) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (request_id, run["id"], run["workspace"], run["session"],
+             native_id, kind,
+             action, resource, pattern_json, metadata_json,
+             explanation, redacted, "pending", None,
+             self._clock(), self._clock(), None, generation))
+
     def _notify(self, run: dict, state: str, *, request_kind: str = "", request_action: str = "") -> None:
         if state not in NOTIFIED_STATES:
             return
@@ -686,33 +673,26 @@ class AgentOrchestrator:
             pass
 
     # ------------------------------------------------------------------- models
-    # Model discovery is GLOBAL for the installed OpenCode backend: the
-    # native server/provider configuration is the source of available models
-    # and no workspace directory influences it.
-    # ``ws`` is accepted on list_models only so the existing project-facing MCP
-    # schema (which requires workspace_id on every tool) keeps working; it is
-    # never used for OpenCode discovery and the result always states
-    # scope="global". Workspace-scoped backends (Pi) resolve the mapped root
-    # via _model_directory instead.
+    # Model discovery is workspace-scoped for the installed Pi backend: the
+    # mapped workspace directory resolves Pi configuration per workspace.
+    # ``ws`` is accepted on list_models because the project-facing MCP
+    # schema requires workspace_id on every tool; the result always states
+    # scope="workspace".
     MODEL_POLICY_SETTING = "model_policy"
     MAX_POLICY_MODELS = 200
 
     def _policy_setting(self) -> str:
         """Storage key for this orchestrator's model policy.
 
-        The OpenCode compatibility orchestrator keeps the legacy
-        ``model_policy`` key byte-for-byte. Every other runtime uses a
-        runtime-scoped key (``model_policy:<runtime_id>``) so Pi can never
-        inherit OpenCode's enabled/default set. Pi stays unconfigured in
-        3A2: its scoped key is never written by any UI/API path, so a
-        direct Pi start fails ``model_policy_unconfigured`` before any
-        session is created.
+        Every runtime uses a runtime-scoped key
+        (``model_policy:<runtime_id>``) so policies never leak across
+        backends.
         """
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        if configured == OPENCODE_RUNTIME_ID:
+            configured = PI_RUNTIME_ID
+        if configured == PI_RUNTIME_ID:
             return self.MODEL_POLICY_SETTING
         return f"{self.MODEL_POLICY_SETTING}:{configured}"
 
@@ -737,17 +717,9 @@ class AgentOrchestrator:
     def _model_directory(self, ws: dict | None) -> str | None:
         """Discovery directory for the configured runtime.
 
-        OpenCode discovery stays global: always None, preserving every
-        existing caller/test. Workspace-scoped runtimes (Pi) resolve the
-        mapped workspace root; without a workspace they fail closed
-        downstream.
+        Pi discovery is workspace-scoped: resolve the mapped workspace
+        root; without a workspace return None and fail closed downstream.
         """
-        try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
-        except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        if configured == OPENCODE_RUNTIME_ID:
-            return None
         if ws is None:
             return None
         return self._directory(ws)
@@ -756,8 +728,8 @@ class AgentOrchestrator:
         """Return the saved global policy or None when never configured.
 
         The legacy ``default_model`` setting is deliberately never consulted:
-        it must not silently grant a model after upgrade. Non-OpenCode
-        orchestrators read their runtime-scoped key (see _policy_setting).
+        it must not silently grant a model after upgrade. Orchestrators read
+        their runtime-scoped key (see _policy_setting).
         """
         raw = self.service.setting(self._policy_setting())
         if not raw:
@@ -793,12 +765,12 @@ class AgentOrchestrator:
         has no mutation path). Every selector must currently exist in the
         runtime model list; the default must be enabled.
 
-        The policy stays GLOBAL per runtime (``model_policy`` for OpenCode,
-        ``model_policy:<runtime>`` otherwise). Because Pi discovery is
-        workspace-bound in the Bridge contract, saving a Pi policy requires
-        an explicit enabled workspace as validation context. This does NOT
-        create a per-workspace policy: at run time each Pi run revalidates
-        against that run's own workspace directory.
+        The policy stays GLOBAL per runtime (``model_policy:<runtime>``).
+        Because Pi discovery is workspace-bound in the Bridge contract,
+        saving a Pi policy requires an explicit enabled workspace as
+        validation context. This does NOT create a per-workspace policy:
+        at run time each Pi run revalidates against that run's own
+        workspace directory.
         """
         if not isinstance(enabled, list) or not enabled or len(enabled) > self.MAX_POLICY_MODELS:
             raise BridgeError("Model policy requires 1..200 enabled selectors", "invalid_arguments")
@@ -811,14 +783,12 @@ class AgentOrchestrator:
                               "invalid_arguments")
         label = self._runtime_label()
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        if configured == OPENCODE_RUNTIME_ID:
-            available = {m.selector for m in self._global_models()}
-            missing_code: str = "model_unavailable"
-            missing_message = ("OpenCode model {selector!r} is not available globally")
-        else:
+            configured = PI_RUNTIME_ID
+        if configured == PI_RUNTIME_ID:
+            # Pi discovery is workspace-scoped: saving the Pi policy
+            # requires an enabled workspace as validation context.
             if ws is None or not isinstance(ws, dict) or not ws.get("id"):
                 raise BridgeError(
                     f"Saving the {label} model policy requires an enabled workspace "
@@ -830,6 +800,10 @@ class AgentOrchestrator:
             missing_code = "model_unavailable"
             missing_message = (f"{label} model {{selector!r}} is not available "
                                "for this workspace")
+        else:
+            available = {m.selector for m in self._global_models()}
+            missing_code: str = "model_unavailable"
+            missing_message = (f"{label} model {{selector!r}} is not available globally")
         for selector in clean:
             if selector not in available:
                 raise BridgeError(missing_message.format(selector=selector),
@@ -851,9 +825,9 @@ class AgentOrchestrator:
     def _is_pi_runtime(self) -> bool:
         """Whether this orchestrator owns the Pi backend."""
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
+            configured = PI_RUNTIME_ID
         try:
             from .runtime import PI_RUNTIME_ID as _PI
         except ImportError:  # pragma: no cover - defensive
@@ -1289,14 +1263,14 @@ class AgentOrchestrator:
         models = models[:max(1, min(int(limit), 100))]
         policy = self.model_policy_status()
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        discovery_scope = "global" if configured == OPENCODE_RUNTIME_ID else "workspace"
+            configured = PI_RUNTIME_ID
+        discovery_scope = "workspace"
         result: dict = {"runtime": configured,
                         "discovery_scope": discovery_scope,
                         "policy_scope": "runtime_global",
-                        "scope": "global" if configured == OPENCODE_RUNTIME_ID else "workspace",
+                        "scope": "workspace",
                         "query": query, "count": len(models),
                         "models": self._policy_public(models),
                         "policy": policy,
@@ -1319,11 +1293,11 @@ class AgentOrchestrator:
         hint = ", ".join(candidates) or "none"
         label = self._runtime_label()
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        if configured == OPENCODE_RUNTIME_ID:
-            raise BridgeError(f"OpenCode model {selector!r} is not available globally; "
+            configured = PI_RUNTIME_ID
+        if configured == PI_RUNTIME_ID:
+            raise BridgeError(f"{label} model {selector!r} is not available for this workspace; "
                               f"candidates: {hint}", "model_unavailable")
         raise BridgeError(f"{label} model {selector!r} is not available for this workspace; "
                           f"candidates: {hint}", "model_unavailable")
@@ -1346,17 +1320,17 @@ class AgentOrchestrator:
                               "model_policy_unconfigured")
         label = self._runtime_label()
         try:
-            configured = self.runtime.runtime_id if self.runtime is not None else OPENCODE_RUNTIME_ID
+            configured = self.runtime.runtime_id if self.runtime is not None else PI_RUNTIME_ID
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
-        scope_word = "global" if configured == OPENCODE_RUNTIME_ID else "workspace"
+            configured = PI_RUNTIME_ID
+        scope_word = "workspace"
         if model is None:
             selector = policy["default"]
         else:
             selector = self._check_selector_shape(model)
             if selector not in policy["enabled"]:
-                if configured == OPENCODE_RUNTIME_ID:
-                    raise BridgeError(f"OpenCode model {selector!r} is not enabled in the global policy; "
+                if configured == PI_RUNTIME_ID:
+                    raise BridgeError(f"{label} model {selector!r} is not enabled in the runtime-global policy; "
                                       "the local administrator must enable it or choose an enabled model",
                                       "model_not_enabled")
                 raise BridgeError(f"{label} model {selector!r} is not enabled in the runtime-global policy; "
@@ -1369,8 +1343,8 @@ class AgentOrchestrator:
             if selector == policy["default"] or model is None:
                 raise BridgeError("The configured default model is no longer enabled",
                                   "model_disabled")
-            if configured == OPENCODE_RUNTIME_ID:
-                raise BridgeError(f"OpenCode model {selector!r} is enabled but currently unavailable",
+            if configured == PI_RUNTIME_ID:
+                raise BridgeError(f"{label} model {selector!r} is enabled but currently unavailable",
                                   "model_unavailable")
             raise BridgeError(f"{label} model {selector!r} is enabled but currently unavailable "
                               f"in this {scope_word}",
@@ -1390,7 +1364,7 @@ class AgentOrchestrator:
             return self._start_continuation(ws, job, request_id, model=model,
                                              parent_run_id=parent_run_id,
                                              continue_from_run_id=continue_from_run_id)
-        # Fail closed before any OpenCode session is created: the global
+        # Fail closed before any agent session is created: the global
         # enabled allowlist + default decides the exact model. The unconfigured
         # check runs before the runtime is required so a missing policy is
         # reported even when the adapter is down. Workspace-scoped runtimes
@@ -1409,10 +1383,10 @@ class AgentOrchestrator:
             # an idempotent replay may only return a run owned by the
             # selected runtime. The same request_id under a different
             # runtime fails closed even when job/model/hash match.
-            if (existing["runtime"] or OPENCODE_RUNTIME_ID) != self._runtime_id():
+            if (existing["runtime"] or PI_RUNTIME_ID) != self._runtime_id():
                 raise BridgeError(
                     f"request_id is already used by a run owned by runtime "
-                    f"{(existing['runtime'] or OPENCODE_RUNTIME_ID)!r}",
+                    f"{(existing['runtime'] or PI_RUNTIME_ID)!r}",
                     "runtime_mismatch")
             if existing["request_hash"] != request_hash:
                 raise BridgeError("request_id already used with different content", "conflict")
@@ -1429,7 +1403,7 @@ class AgentOrchestrator:
 
         directory = self._directory(ws)
         # 3B1: Pi sessions carry the immutable permission policy snapshot.
-        # OpenCode sessions pass no options (unchanged wire behavior).
+        # Pi sessions carry the immutable policy snapshot as options.
         session_options = self._pi_session_options() if self._is_pi_runtime() else None
         session = runtime.create_session(directory, title=job["title"], options=session_options)
         if not _same_directory(session.directory, directory):
@@ -1467,7 +1441,7 @@ class AgentOrchestrator:
                 extension_snapshot = "[]"
         # 3C1 execution audit init: fresh sessions start at floor/cursor 0.
         # Managed Pi runs are pending (require final drain for complete);
-        # OpenCode/legacy stay not_recorded. Fingerprint/versions persist
+        # legacy stay not_recorded. Fingerprint/versions persist
         # with the run (no full paths); a changed fingerprint is evidence,
         # not an automatic refusal.
         is_pi = self._is_pi_runtime()
@@ -1497,7 +1471,7 @@ class AgentOrchestrator:
             self._mark_event_stream_degraded(run_id)
         except Exception:  # noqa: BLE001 - a probe failure must never fail start
             pass
-        self.service.event(ws["id"], "start_opencode_run")
+        self.service.event(ws["id"], "start_agent_run")
         emit(_ops_log, "INFO", "bridge", "run_created", run_id=run_id,
              session_id=session.id, job_id=job_id, workspace_id=ws["id"],
              model=selector, session_reused=False)
@@ -1515,7 +1489,7 @@ class AgentOrchestrator:
     def _start_continuation(self, ws: dict, job: dict, request_id: str, *,
                             model: str | None, parent_run_id: str | None,
                             continue_from_run_id: str) -> dict:
-        """Create a new Bridge run that reuses a completed run's OpenCode session.
+        """Create a new Bridge run that reuses a completed run's agent session.
 
         Never creates a session and never falls back to a fresh one: every
         validation failure raises before any row, session or prompt exists.
@@ -1539,7 +1513,7 @@ class AgentOrchestrator:
         # Runtime identity is part of the continuation binding: a session id
         # from another backend must never be reused here. Fail closed.
         self._require_capability("session_reuse")
-        if (source.get("runtime") or OPENCODE_RUNTIME_ID) != self._runtime_id():
+        if (source.get("runtime") or PI_RUNTIME_ID) != self._runtime_id():
             raise BridgeError("Continuation source run belongs to another runtime; "
                               "continuation refused", "continuation_unavailable")
         if self._pending(source):
@@ -1577,10 +1551,10 @@ class AgentOrchestrator:
             # an idempotent replay may only return a run owned by the
             # selected runtime. The same request_id under a different
             # runtime fails closed even when job/model/hash match.
-            if (existing["runtime"] or OPENCODE_RUNTIME_ID) != self._runtime_id():
+            if (existing["runtime"] or PI_RUNTIME_ID) != self._runtime_id():
                 raise BridgeError(
                     f"request_id is already used by a run owned by runtime "
-                    f"{(existing['runtime'] or OPENCODE_RUNTIME_ID)!r}",
+                    f"{(existing['runtime'] or PI_RUNTIME_ID)!r}",
                     "runtime_mismatch")
             if existing["request_hash"] != request_hash:
                 raise BridgeError("request_id already used with different content", "conflict")
@@ -1724,7 +1698,7 @@ class AgentOrchestrator:
             self._mark_event_stream_degraded(run_id)
         except Exception:  # noqa: BLE001 - a probe failure must never fail start
             pass
-        self.service.event(ws["id"], "start_opencode_run")
+        self.service.event(ws["id"], "start_agent_run")
         emit(_ops_log, "INFO", "bridge", "run_created", run_id=run_id,
              session_id=source["session"], job_id=job["id"], workspace_id=ws["id"],
              model=selector, session_reused=True)
@@ -1878,7 +1852,7 @@ class AgentOrchestrator:
                 try:
                     self.handle_event(event)
                 except BridgeError as exc:
-                    self.service.event(None, "opencode_event_rejected", "failed")
+                    self.service.event(None, "agent_event_rejected", "failed")
                     emit(_ops_log, "WARNING", "bridge", "event_rejected",
                          code=exc.code or "rejected")
                 except Exception:  # noqa: BLE001 - one bad event never breaks the pump
@@ -1914,7 +1888,7 @@ class AgentOrchestrator:
                         last_question = tick
                     self._update_functional_health()
             except BridgeError:
-                self.service.event(None, "opencode_reconcile", "failed")
+                self.service.event(None, "agent_reconcile", "failed")
             except Exception:  # noqa: BLE001 - background recovery never breaks the loop
                 pass
             self._stop.wait(RECONCILE_POLL_TICK)
@@ -1938,7 +1912,7 @@ class AgentOrchestrator:
         try:
             configured = self.runtime.runtime_id
         except NotImplementedError:
-            configured = OPENCODE_RUNTIME_ID
+            configured = PI_RUNTIME_ID
         try:
             sweep_limit = max(PERMISSION_RESYNC_SESSION_LIMIT,
                               COMPLETION_RECONCILE_SESSION_LIMIT,
@@ -2122,7 +2096,7 @@ class AgentOrchestrator:
         if not rows:
             return None
         if len(rows) > 1:
-            self.service.event(None, "opencode_ambiguous_session", "failed")
+            self.service.event(None, "agent_ambiguous_session", "failed")
             return None
         return dict(rows[0])
 
@@ -2158,7 +2132,7 @@ class AgentOrchestrator:
             try:
                 configured = self.runtime.runtime_id
             except NotImplementedError:
-                configured = OPENCODE_RUNTIME_ID
+                configured = PI_RUNTIME_ID
             with self.service.lock:
                 row = self.service.db.execute(
                     "SELECT count(*) FROM agent_runs WHERE runtime=? AND state IN "
@@ -2312,7 +2286,7 @@ class AgentOrchestrator:
                                    "code": str(status)[:80], "matched": None})
 
     def _resync_permissions(self, ws: dict, run: dict, *, via: str = "read") -> str:
-        """Recover a missed permission.asked from OpenCode's pending list.
+        """Recover a missed permission.asked from the backend's pending list.
 
         `via="sweep"` marks background-loop calls so repeats log at DEBUG
         with throttled WARNINGs; direct reads keep immediate semantics.
@@ -2328,7 +2302,7 @@ class AgentOrchestrator:
         unchanged and stays retryable. Absence from the listing never
         resolves an already persisted request. Every non-skipped outcome is
         recorded as a bounded sanitized diagnostic (ok with matched count,
-        list failure, or binding mismatch/missing) so read_opencode_run can
+        list failure, or binding mismatch/missing) so read_agent_run can
         distinguish a successful empty list from a failed listing without
         overloading terminal completion/failure semantics. A later
         successful resync replaces the transient failure diagnostic.
@@ -2452,14 +2426,14 @@ class AgentOrchestrator:
             return dict(current) if current is not None else None
 
     def _resync_questions(self, ws: dict, run: dict, *, via: str = "read") -> str:
-        """Recover a missed question.asked from OpenCode's official snapshot.
+        """Recover a missed question.asked from the backend's snapshot.
 
         `via="sweep"` marks background-loop calls so repeats log at DEBUG
         with throttled WARNINGs; direct reads keep immediate semantics.
 
         Uses only the verified V2 session-scoped surface
         (GET /api/session/{sessionID}/question on installed
-        @opencode-ai/sdk 1.18.31): exact-session binding, dedupe by
+        the backend SDK): exact-session binding, dedupe by
         request id, persistence with waiting_question state and
         notification — mirroring the permission path. Idempotent:
         already-persisted or repeated listings create nothing new.
@@ -2541,7 +2515,7 @@ class AgentOrchestrator:
         """Persist one official snapshot question idempotently.
 
         Strict exact-session binding (another session's request is never
-        attached) and dedupe by OpenCode request id. Only the request id,
+        attached) and dedupe by backend request id. Only the request id,
         question count and tool call reference are persisted; question
         text/options/answers are never stored or logged.
         """
@@ -2568,22 +2542,15 @@ class AgentOrchestrator:
         metadata = {"question_count": max(0, min(count, 100))}
         if isinstance(call_id, str) and call_id:
             metadata["call_id"] = call_id[:200]
-        request_id = uid("req_")
         with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "INSERT OR IGNORE INTO agent_requests (id,run,workspace,session,opencode_request,"
-                "runtime_request,kind,"
-                "action,resource,pattern,metadata,explanation,redacted,state,decision,created,updated,resolved,"
-                "generation) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (request_id, run["id"], run["workspace"], run["session"],
-                 _legacy_request_key(run["id"], question_id), question_id, "question",
-                 "question", "", "[]", json.dumps(metadata)[:8000],
-                 "Question waits are visible but the installed OpenCode API exposes no question reply; "
-                 "inspect the session transcript locally.", 0, "pending", None,
-                 self._clock(), self._clock(), None, "v2"))
+            self._insert_pending_request(
+                run, question_id, "question",
+                "question", "", "[]", json.dumps(metadata)[:8000],
+                "Question waits are visible but the installed runtime API exposes no question reply; "
+                "inspect the session transcript locally.",
+                0, "v2")
         self._set_state(run["id"], "waiting_question")
-        self.service.event(run["workspace"], "opencode_waiting_question")
+        self.service.event(run["workspace"], "agent_waiting_question")
         # Request id + count + source only: never question bodies/options.
         emit(_ops_log, "INFO", "bridge", "question_resync", run_id=run["id"],
              session_id=run.get("session"), workspace_id=run.get("workspace"),
@@ -2660,7 +2627,7 @@ class AgentOrchestrator:
         action = str(interaction.action or "")[:120]
         origin = source if source in ("event", "resync") else "event"
         # Wire generation owning the reply endpoint. Persisted verbatim so
-        # respond_opencode_permission routes without guessing from the
+        # respond_agent_permission routes without guessing from the
         # request id. Unknown values fail closed to "v1" only when absent
         # (legacy rows); an explicitly unknown generation is rejected below.
         generation = interaction.generation or "v1"
@@ -2733,24 +2700,16 @@ class AgentOrchestrator:
             else:
                 resource = ""
                 explanation = ""
-            request_id = uid("req_")
             with self.service.lock, self.service.db:
-                self.service.db.execute(
-                    "INSERT OR IGNORE INTO agent_requests (id,run,workspace,session,opencode_request,"
-                    "runtime_request,kind,"
-                    "action,resource,pattern,metadata,explanation,redacted,state,decision,created,updated,resolved,"
-                    "generation) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (request_id, run["id"], run["workspace"], run["session"],
-                     _legacy_request_key(run["id"], permission_id), permission_id, "permission",
-                     str(interaction.action or "")[:120],
-                     resource,
-                     json.dumps(scope)[:4000], metadata_json,
-                     explanation, 1 if interaction.redacted else 0,
-                     "pending", None, self._clock(), self._clock(), None,
-                     generation))
+                self._insert_pending_request(
+                    run, permission_id, "permission",
+                    str(interaction.action or "")[:120],
+                    resource,
+                    json.dumps(scope)[:4000], metadata_json,
+                    explanation, 1 if interaction.redacted else 0,
+                    generation)
             self._set_state(run["id"], "waiting_permission")
-            self.service.event(run["workspace"], "opencode_waiting_permission")
+            self.service.event(run["workspace"], "agent_waiting_permission")
             # Generation + request id + action + source only: never resource,
             # patterns, paths, metadata or tool arguments.
             emit(_ops_log, "INFO", "bridge", "permission_asked", run_id=run["id"],
@@ -2775,23 +2734,16 @@ class AgentOrchestrator:
         if not isinstance(event, RuntimeEvent):
             return
         data = event.data if isinstance(event.data, dict) else {}
-        request_id = uid("req_")
-        native_request = str(event.event_id or data.get("id") or request_id)[:200]
+        _hint_id = uid("req_")
+        native_request = str(event.event_id or data.get("id") or _hint_id)[:200]
         with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "INSERT OR IGNORE INTO agent_requests (id,run,workspace,session,opencode_request,"
-                "runtime_request,kind,"
-                "action,resource,pattern,metadata,explanation,redacted,state,decision,created,updated,resolved,"
-                "generation) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (request_id, run["id"], run["workspace"], run["session"],
-                 _legacy_request_key(run["id"], native_request), native_request, "question",
-                 str(data.get("action") or event.type or "question")[:120], "", "[]", "{}",
-                 "Question waits are visible but the installed OpenCode API exposes no question reply; "
-                 "inspect the session transcript locally.", 0, "pending", None,
-                 self._clock(), self._clock(), None, "v1"))
+            self._insert_pending_request(
+                run, native_request, "question",
+                str(data.get("action") or event.type or "question")[:120], "", "[]", "{}",
+                "Question waits are visible but the installed runtime API exposes no question reply; "
+                "inspect the session transcript locally.", 0, "v1")
         self._set_state(run["id"], "waiting_question")
-        self.service.event(run["workspace"], "opencode_waiting_question")
+        self.service.event(run["workspace"], "agent_waiting_question")
         emit(_ops_log, "INFO", "bridge", "run_state", run_id=run["id"],
              session_id=run.get("session"), workspace_id=run.get("workspace"),
              state="waiting_question", reason="question")
@@ -2869,7 +2821,7 @@ class AgentOrchestrator:
         message = str(error.get("message") or f"{self._runtime_label()} session error")[:300]
         self._set_state(run["id"], "failed", error_code=name or "session_error",
                         error_message=message, finished=True)
-        self.service.event(run["workspace"], "opencode_failed")
+        self.service.event(run["workspace"], "agent_failed")
         emit(_ops_log, "INFO", "bridge", "run_state", run_id=run["id"],
              session_id=run.get("session"), workspace_id=run.get("workspace"),
              state="failed", code=name or "session_error")
@@ -3067,7 +3019,7 @@ class AgentOrchestrator:
             emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
                  session_id=run.get("session"), workspace_id=ws["id"],
                  state="running", reason="permission_reply")
-        self.service.event(ws["id"], "respond_opencode_permission", decision)
+        self.service.event(ws["id"], "respond_agent_permission", decision)
         emit(_ops_log, "INFO", "bridge", "permission_replied", run_id=run_id,
              session_id=run.get("session"), workspace_id=ws["id"],
              request_id=str(request_id)[:200], decision=decision,
@@ -3119,10 +3071,10 @@ class AgentOrchestrator:
                 self.service.db.execute(
                     "UPDATE agent_runs SET error_code='abort_uncertain',error_message=? WHERE id=?",
                     ("Abort outcome was not confirmed", run_id))
-            self.service.event(ws["id"], "cancel_opencode_run", "abort_uncertain")
+            self.service.event(ws["id"], "cancel_agent_run", "abort_uncertain")
             raise BridgeError("Abort outcome was not confirmed; run state is unchanged", "abort_uncertain")
         self._set_state(run_id, "cancelled", finished=True)
-        self.service.event(ws["id"], "cancel_opencode_run")
+        self.service.event(ws["id"], "cancel_agent_run")
         emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
              session_id=run.get("session"), workspace_id=ws["id"],
              state="cancelled", reason="cancel")
@@ -3146,7 +3098,7 @@ class AgentOrchestrator:
         return view
 
     def list_runs(self, ws: dict, offset: int = 0, limit: int = 20) -> dict:
-        """List runs owned by the configured runtime only (legacy OpenCode view).
+        """List runs owned by the configured runtime only (legacy Pi view).
 
         An orchestrator enumerates only rows persisted with its own runtime
         identity, so this compatibility path never surfaces another
@@ -3168,9 +3120,9 @@ class AgentOrchestrator:
         """Global operational overview: Bridge-owned runs across all workspaces.
 
         Newest first, bounded. Only rows the bridge persisted itself are
-        returned; sessions created directly in the native OpenCode server are
+        returned; sessions created directly in the native agent server are
         never enumerated and no arbitrary session IDs are accepted here.
-        Scoped to rows owned by the configured runtime (OpenCode
+        Scoped to rows owned by the configured runtime (agent
         compatibility view); the neutral cross-runtime overview lives in
         ``Service.list_agent_runs``.
         """
@@ -3203,7 +3155,7 @@ class AgentOrchestrator:
         # runtime before any backend or state work.
         self._require_run_runtime(run)
         if run["state"] in ACTIVE_RUN_STATES and self.runtime is not None:
-            # A status check repairs a lost ask: resync OpenCode-side
+            # A status check repairs a lost ask: resync backend-side
             # pending permissions and official pending questions for this
             # exact session before reporting.
             self._resync_permissions(ws, run)
@@ -3281,7 +3233,7 @@ class AgentOrchestrator:
         with self.service.lock:
             count = self.service.db.execute(
                 "SELECT count(*) FROM agent_runs WHERE runtime=? AND session=? AND id<>? AND created>?",
-                (run.get("runtime") or OPENCODE_RUNTIME_ID, run["session"],
+                (run.get("runtime") or PI_RUNTIME_ID, run["session"],
                  run["id"], run["created"])).fetchone()[0]
         return count > 0
 
@@ -3381,7 +3333,7 @@ class AgentOrchestrator:
             try:
                 configured = self.runtime.runtime_id
             except NotImplementedError:
-                configured = OPENCODE_RUNTIME_ID
+                configured = PI_RUNTIME_ID
             with self.service.lock:
                 rows = [dict(r) for r in self.service.db.execute(
                     f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE runtime=? AND state IN "
@@ -3453,7 +3405,7 @@ class AgentOrchestrator:
             try:
                 self.retry_reconcile()
             except BridgeError:
-                self.service.event(None, "opencode_reconcile", "failed")
+                self.service.event(None, "agent_reconcile", "failed")
 
     def _reconcile_run(self, run: dict) -> bool:
         """Return True when resolved (no further retry needed), False to retry later.
@@ -3479,7 +3431,7 @@ class AgentOrchestrator:
             self._orphan(run, "session_mismatch",
                          f"{self._runtime_label()} session is bound to another directory")
             return True
-        # Restart reconciliation also repairs a missed ask while OpenCode
+        # Restart reconciliation also repairs a missed ask while the backend
         # still holds it; absence from the listing resolves nothing.
         self._resync_permissions(ws, run)
         run = self._row(ws, run["id"])
@@ -3515,4 +3467,3 @@ class AgentOrchestrator:
 
 
 #: Compatibility alias for the pre-neutral name; new code uses AgentOrchestrator.
-OpenCodeOrchestrator = AgentOrchestrator

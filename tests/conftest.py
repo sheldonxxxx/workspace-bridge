@@ -44,10 +44,11 @@ def agent_env(tmp_path):
     ws_id, token = result["workspace"]["id"], service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    # New runs are fail-closed until the local administrator saves a global
+    # New runs are fail-closed until the local administrator saves a
     # model policy; this fixture mirrors a configured bridge.
+    ws = service.workspace(ws_id)
     service.orchestrator.set_model_policy(
-        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet")
+        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet", ws)
     yield {"service": service, "runtime": runtime, "notifier": notifier, "root": root,
            "parent": parent, "state": state, "config": cfg, "id": ws_id, "token": token,
            "tmp": tmp_path}

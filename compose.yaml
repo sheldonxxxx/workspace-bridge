@@ -1,7 +1,7 @@
-# Bridge + internal tunnel sidecar + private OpenCode SDK adapter on the shared
+# Bridge + internal tunnel sidecar + native Pi host adapter on the shared
 # Compose network. The tunnel sidecar reaches the bridge at http://bridge:8765/mcp;
 # the bridge allowlist trusts those Compose DNS names on the internal MCP port only.
-# The OpenCode server itself runs NATIVELY on the host and is managed by the user:
+# The Pi agent itself runs NATIVELY on the host and is managed by the user:
 # this Compose stack never starts, packages or publishes it.
 # Run scripts/configure_docker.py first, or follow the manual .env.example setup.
 services:
@@ -32,14 +32,12 @@ services:
       # listener binds 0.0.0.0 inside the container and allows those Host values.
       # MCP is unaffected. Prefer SSH forwarding/VPN; never tunnel the manager.
       WB_ADMIN_ALLOWED_HOSTS: ${WB_ADMIN_ALLOWED_HOSTS:-}
-      # Client boundary to the private OpenCode SDK adapter; the bridge never
-      # reaches the host OpenCode server directly and never starts one.
+      # Client boundary to the native Pi host adapter; the bridge never
+      # reaches the host Pi agent directly and never starts one.
       # WB_RUNTIME_TOKEN must be set for agent operations; empty locks the adapter.
-      WB_OPENCODE_RUNTIME_URL: http://opencode-adapter:8770
-      # Optional native macOS Pi host-adapter URL, e.g. http://host.docker.internal:8780.
-      # Empty (default) leaves Pi unconfigured. No Pi Compose service exists:
-      # the adapter runs natively on the Mac and the bridge only holds this
-      # URL plus the shared runtime token (provider credentials stay on the Mac).
+      # No Pi Compose service exists: the adapter runs natively on the Mac
+      # and the bridge only holds this URL plus the shared runtime token
+      # (provider credentials stay on the Mac).
       # The adapter must stay bound narrowly; verified on this host under
       # OrbStack 29.4.0: the container host.docker.internal gateway reached
       # the native 127.0.0.1-bound adapter. Docker Desktop behavior may
@@ -75,48 +73,6 @@ services:
       timeout: 6s
       start_period: 15s
       retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  opencode-adapter:
-    # Client-only @opencode-ai/sdk adapter. No published ports; it is reachable
-    # only on the private Compose network. It CONNECTS to the externally managed
-    # host OpenCode server and never creates/starts one.
-    build:
-      context: ./runtime/opencode-adapter
-    image: workspace-bridge-opencode-adapter:0.1.9
-    container_name: workspace-bridge-opencode-adapter
-    init: true
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    pids_limit: 64
-    mem_limit: 512m
-    cpus: 1.0
-    environment:
-      # Docker Desktop: http://host.docker.internal:<port>. Linux Docker Engine:
-      # set an explicit reachable host URL (see docs/DOCKER.md).
-      WB_OPENCODE_SERVER_URL: ${WB_OPENCODE_SERVER_URL:-}
-      WB_OPENCODE_SERVER_USERNAME: ${WB_OPENCODE_SERVER_USERNAME:-}
-      WB_OPENCODE_SERVER_PASSWORD: ${WB_OPENCODE_SERVER_PASSWORD:-}
-      # Empty token locks every adapter endpoint (fail closed); set it to enable runs.
-      WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
-      WB_ADAPTER_PORT: "8770"
-      # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.
-      # Invalid values safely fall back to INFO with a warning record.
-      WB_LOG_LEVEL: ${WB_LOG_LEVEL:-INFO}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # No ports: the adapter must never be host-published.
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
-    depends_on:
-      bridge:
-        condition: service_healthy
     logging:
       driver: json-file
       options:

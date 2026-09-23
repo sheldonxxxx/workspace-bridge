@@ -3,12 +3,9 @@
 <!--
   Workspace Bridge Pi host adapter LaunchAgent template (native macOS only).
 
-  This file is an EXAMPLE. It is never installed automatically: the adapter
-  implementation does not load/unload launchd, write ~/Library/LaunchAgents,
-  create directories, or alter shell rc files. To use it, copy it to
-  ~/Library/LaunchAgents/ yourself after replacing EVERY __HOME__ placeholder
-  with your real absolute home path (launchd performs no shell expansion, so
-  $HOME must not appear here), then set the required environment values below.
+  This file is an EXAMPLE. Install the adapter under the user's home directory
+  before loading this LaunchAgent. Replace every placeholder with an absolute
+  path or value; launchd performs no shell expansion.
 
   Required:
     WB_RUNTIME_TOKEN      shared token; empty locks every operational endpoint.
@@ -26,17 +23,17 @@
   <string>com.workspace-bridge.pi-host-adapter</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
-    <string>__HOME__/workspace-bridge/runtime/pi-host-adapter/main.mjs</string>
+    <string>__NODE_BINARY__</string>
+    <string>__HOME__/Library/Application Support/workspace-bridge/pi-host-adapter/main.mjs</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>WB_RUNTIME_TOKEN</key>
     <string>REPLACE_WITH_SHARED_TOKEN</string>
     <key>WB_PI_PROJECTS_DIR</key>
-    <string>__HOME__/Projects</string>
+    <string>__PROJECTS_DIR__</string>
     <key>WB_PI_BINARY</key>
-    <string>pi</string>
+    <string>__PI_BINARY__</string>
     <key>PI_CODING_AGENT_DIR</key>
     <string>__HOME__/.pi/workspace-bridge</string>
     <key>WB_PI_ADAPTER_HOST</key>
@@ -55,6 +52,6 @@
   <key>StandardErrorPath</key>
   <string>__HOME__/Library/Logs/workspace-bridge-pi-adapter.err</string>
   <key>WorkingDirectory</key>
-  <string>__HOME__/workspace-bridge/runtime/pi-host-adapter</string>
+  <string>__HOME__/Library/Application Support/workspace-bridge/pi-host-adapter</string>
 </dict>
 </plist>

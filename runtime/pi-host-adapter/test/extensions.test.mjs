@@ -1,19 +1,18 @@
-// 3C2 extension inventory/policy/spawn/audit: fixture agentDir +
+// 3C2 extension inventory/policy/loadout/audit: fixture agentDir +
 // managed npm package fixtures, identity parsing, object/string settings
 // forms, bounds, manifest/conventional extensions, missing/symlink/
 // malformed cases, no path leaks, GET /extensions auth + capability,
-// explicit repeated -e loading with --no-extensions against installed
-// Pi 0.86.1, --exclude-tools spawn, permission pass-through, and generic
-// audit bounds.
+// explicit extension-root loading with auto-discovery off against
+// installed Pi 0.87.0, excludeTools loadout, permission pass-through, and
+// generic audit bounds.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { PiAdapter } from "../adapter.mjs";
-import { piRpcExcludesFor } from "../config.mjs";
+import { sdkExcludeTools } from "../config.mjs";
 import {
   canonicalizeEnabledOrder,
   defaultExtensionPolicy,
@@ -33,10 +32,9 @@ import {
   summarizeExtensionResult,
 } from "../executions.mjs";
 import { MANAGED_TOOLS } from "../trusted-permission-extension.mjs";
-import { PiRpcProcess } from "../rpc.mjs";
 import { createPiAdapterServer } from "../server.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
-import { createFakeSpawn } from "./helpers.mjs";
+import { createFakeTransport } from "./fake-sdk.mjs";
 
 // ------------------------------------------------------------ fixtures
 function writePackage(root, name, { version = "1.0.0", manifest = null, conventional = false, index = false } = {}) {
@@ -681,39 +679,29 @@ test("resolveEnabledExtensionRoots keeps inventory order and fails closed", () =
   assert.deepEqual(empty, { roots: [], snapshot: [] });
 });
 
-// ------------------------------------------------------------ spawn
-test("managed argv uses --exclude-tools with repeated -e once extensions are enabled", () => {
-  const argv = piRpcExcludesFor({ writable: false, shellMode: "deny" });
-  assert.ok(argv.includes("edit") && argv.includes("bash") && argv.includes("powershell"));
-  const writable = piRpcExcludesFor({ writable: true, shellMode: "allow" });
+// ------------------------------------------------------------ loadout
+test("managed loadout uses excludeTools and no allowlist once extensions are enabled", () => {
+  const excludes = sdkExcludeTools({ writable: false, shellMode: "deny" });
+  assert.ok(excludes.includes("edit") && excludes.includes("bash") && excludes.includes("powershell"));
+  const writable = sdkExcludeTools({ writable: true, shellMode: "allow" });
   assert.ok(!writable.split(",").includes("edit"));
   assert.ok(!writable.split(",").includes("bash"));
   assert.ok(writable.split(",").includes("powershell"));
 });
 
-test("PiRpcProcess argv supports repeated -e with --exclude-tools and no --tools", () => {
-  const rpc = new PiRpcProcess({
-    binary: "pi", cwd: "/tmp", agentDir: "/tmp/agent",
-    extensionPaths: ["/pkg/trusted.mjs", "/pkg/alpha"],
-    excludeTools: "edit,write,bash,powershell",
+test("SDK loadout passes explicit extension roots with no tools allowlist", async () => {
+  const { sdkToolLoadout } = await import("../config.mjs");
+  const loadout = sdkToolLoadout({
+    writable: false, shellMode: "deny", extensionRoots: ["/pkg/alpha"],
   });
-  const argv = rpc.argv();
-  assert.ok(!argv.includes("--tools"));
-  assert.ok(argv.includes("--exclude-tools"));
-  assert.ok(argv.includes("--no-extensions"));
-  const flags = argv.map((a, i) => (a === "-e" ? argv[i + 1] : null)).filter(Boolean);
-  assert.deepEqual(flags, ["/pkg/trusted.mjs", "/pkg/alpha"]);
-});
-
-test("PiRpcProcess legacy argv is unchanged without exclude-tools", () => {
-  const rpc = new PiRpcProcess({
-    binary: "pi", cwd: "/tmp", agentDir: "/tmp/agent",
-    extensionPath: "/pkg/trusted.mjs", tools: "read,grep,find,ls",
-  });
-  assert.deepEqual(rpc.argv(),
-    ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions",
-      "-e", "/pkg/trusted.mjs"]);
-});
+  assert.equal(loadout.tools, null);
+  assert.ok(loadout.excludeTools.includes("edit"));
+  assert.deepEqual(loadout.extensionPaths, ["/pkg/alpha"]);
+  const plain = sdkToolLoadout({ writable: false });
+  assert.deepEqual(plain.tools, ["read", "grep", "find", "ls"]);
+  assert.equal(plain.excludeTools, null);
+  assert.deepEqual(plain.extensionPaths, []);
+})
 
 // ------------------------------------------------------------ adapter session
 function makeProjects() {
@@ -723,36 +711,14 @@ function makeProjects() {
   return { tmp, root: canonicalizeProjectsDir(path.join(tmp, "Projects")), app: fs.realpathSync(app) };
 }
 
-function autoSpawn() {
-  const bag = createFakeSpawn();
-  let n = 0;
-  function spawnFn(binary, args, opts) {
-    const child = bag.spawnFn(binary, args, opts);
-    child.autoExitCode = 0;
-    n += 1;
-    const sid = `ses-ext-${n}`;
-    child.on("stdin", (line) => {
-      for (const raw of String(line).split("\n").filter(Boolean)) {
-        const req = JSON.parse(raw);
-        setImmediate(() => {
-          if (req.type === "get_state") {
-            child.respond({ id: req.id, type: "response", command: "get_state", success: true,
-              data: { sessionId: sid, sessionFile: null, isStreaming: false } });
-          }
-        });
-      }
-    });
-    return child;
-  }
-  return { ...bag, spawnFn };
-}
-
 async function managedCreate(agentDir, extensionPolicy) {
   const projects = makeProjects();
-  const bag = autoSpawn();
+  const transport = createFakeTransport();
   const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi", agentDir,
-    timeoutMs: 1000, spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
+    projectsRoot: projects.root, agentDir,
+    createSessionFn: transport.createSdkSession,
+    listModelsFn: transport.listModelsFn,
+    piUsable: true, piVersion: "0.87.0",
   });
   const { validatePolicy } = await import("../policy.mjs");
   const { policyRevision, canonicalJson } = await import("../policy.mjs");
@@ -768,34 +734,34 @@ async function managedCreate(agentDir, extensionPolicy) {
     permission_policy: permission, policy_revision: policyRevision(permission),
     extension_policy: extensionPolicy, extension_revision: extensionRevision(extensionPolicy),
   });
-  await adapter.shutdown({ graceMs: 0 });
-  return { session, args: bag.calls[0].args };
+  const created = transport.lastCreated();
+  await adapter.shutdown();
+  return { session, created };
 }
 
-test("managed session with enabled extension uses --exclude-tools and snapshots", async () => {
+test("managed session with enabled extension uses excludeTools and snapshots", async () => {
   const agentDir = makeAgentDir(["npm:alpha"]);
   writePackage(agentDir, "alpha", { manifest: ["./ext.js"] });
-  const { session, args } = await managedCreate(agentDir, { version: 1, enabled: ["npm:alpha"] });
-  assert.ok(!args.includes("--tools"));
-  const excl = args[args.indexOf("--exclude-tools") + 1];
-  assert.ok(excl.includes("edit") && excl.includes("bash"));
-  assert.ok(args.includes("--no-extensions"));
-  const flags = args.map((a, i) => (a === "-e" ? args[i + 1] : null)).filter(Boolean);
-  assert.equal(flags.length, 2);
-  assert.ok(flags[0].endsWith("trusted-permission-extension.mjs"));
-  assert.ok(flags[1].includes("alpha"));
+  const { session, created } = await managedCreate(agentDir, { version: 1, enabled: ["npm:alpha"] });
+  assert.equal(created.tools, null);
+  assert.ok(created.excludeTools.includes("edit") && created.excludeTools.includes("bash"));
+  // Exactly the resolved package root loads explicitly; the trusted
+  // permission extension loads as an inline factory, never a path.
+  assert.equal(created.extensionPaths.length, 1);
+  assert.ok(created.extensionPaths[0].includes("alpha"));
+  assert.ok(created.uiContext);
   assert.equal(session.extension_revision.length, 64);
   assert.equal(session.extensions.length, 1);
   assert.equal(session.extensions[0].id, "npm:alpha");
   assert.ok(!JSON.stringify(session).includes(agentDir));
 });
 
-test("managed session with empty extension policy keeps the 3C1 --tools argv", async () => {
+test("managed session with empty extension policy keeps the 3C1 tools allowlist", async () => {
   const agentDir = makeAgentDir([]);
-  const { args } = await managedCreate(agentDir, { version: 1, enabled: [] });
-  assert.ok(args.includes("--tools"));
-  assert.ok(!args.includes("--exclude-tools"));
-  assert.equal(args.filter((a) => a === "-e").length, 1);
+  const { created } = await managedCreate(agentDir, { version: 1, enabled: [] });
+  assert.deepEqual(created.tools, ["read", "grep", "find", "ls"]);
+  assert.equal(created.excludeTools, null);
+  assert.deepEqual(created.extensionPaths, []);
 });
 
 test("managed session fails clearly when an enabled package disappeared", async () => {
@@ -810,10 +776,12 @@ test("extension tools pass preflight without permission ask when enabled", async
   const agentDir = makeAgentDir(["npm:alpha"]);
   writePackage(agentDir, "alpha", { manifest: ["./ext.js"] });
   const projects = makeProjects();
-  const bag = autoSpawn();
+  const transport = createFakeTransport();
   const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi", agentDir,
-    timeoutMs: 1000, spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
+    projectsRoot: projects.root, agentDir,
+    createSessionFn: transport.createSdkSession,
+    listModelsFn: transport.listModelsFn,
+    piUsable: true, piVersion: "0.87.0",
   });
   const { validatePolicy, policyRevision } = await import("../policy.mjs");
   const permission = {
@@ -835,16 +803,18 @@ test("extension tools pass preflight without permission ask when enabled", async
   // Managed built-ins keep existing semantics.
   const read = adapter._evaluate(entry, "read", { path: "notes.txt" });
   assert.equal(read.effect, "allow");
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
 test("unknown tools still deny when no extension is enabled", async () => {
   const agentDir = makeAgentDir([]);
   const projects = makeProjects();
-  const bag = autoSpawn();
+  const transport = createFakeTransport();
   const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi", agentDir,
-    timeoutMs: 1000, spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
+    projectsRoot: projects.root, agentDir,
+    createSessionFn: transport.createSdkSession,
+    listModelsFn: transport.listModelsFn,
+    piUsable: true, piVersion: "0.87.0",
   });
   const { policyRevision } = await import("../policy.mjs");
   const { safeDefaultPolicy } = await import("../policy.mjs");
@@ -856,7 +826,7 @@ test("unknown tools still deny when no extension is enabled", async () => {
   });
   const verdict = adapter._evaluate(adapter._entry(session.id), "mystery-tool", {});
   assert.equal(verdict.effect, "deny");
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
 // ------------------------------------------------------------ trusted extension
@@ -884,6 +854,28 @@ test("trusted permission hook passes extension tools, blocks malformed calls", a
   } finally {
     delete process.env.WB_PI_POLICY_JSON;
   }
+});
+
+test("parameterized trusted factory closes over per-session policy and cwd", async () => {
+  const { safeDefaultPolicy } = await import("../policy.mjs");
+  const { createTrustedPermissionExtension } = await import("../trusted-permission-extension.mjs");
+  const factory = createTrustedPermissionExtension({
+    policy: safeDefaultPolicy(), cwd: "/sessions/app",
+  });
+  let handler = null;
+  factory({ on: (event, fn) => { if (event === "tool_call") handler = fn; } });
+  assert.ok(handler);
+  // Ask-path needs a UI context; deny/allow resolve without one.
+  const read = await handler(
+    { toolName: "read", toolCallId: "call-1", input: { path: "notes.txt" } }, {});
+  assert.equal(read, undefined);
+  // A null policy fails every call closed without a UI context.
+  const broken = createTrustedPermissionExtension({ policy: null, cwd: "/sessions/app" });
+  let brokenHandler = null;
+  broken({ on: (event, fn) => { if (event === "tool_call") brokenHandler = fn; } });
+  const denied = await brokenHandler(
+    { toolName: "read", toolCallId: "call-1", input: { path: "notes.txt" } }, {});
+  assert.equal(denied.block, true);
 });
 
 // ------------------------------------------------------------ generic audit
@@ -921,7 +913,7 @@ test("GET /extensions requires auth and returns bounded rows", async () => {
   };
   const server = createPiAdapterServer({
     adapter: fake, token: "tok", adapterVersion: "0.3.0", instance: "i",
-    piUsable: true, piVersion: "0.86.1",
+    piUsable: true, piVersion: "0.87.0",
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -943,14 +935,15 @@ test("GET /extensions requires auth and returns bounded rows", async () => {
   }
 });
 
-// ------------------------------------------------------------ live Pi fixture
-test("installed Pi 0.86.1 loads a fixture package root and exposes its registrations", async (t) => {
-  const check = spawn("pi", ["--version"]);
-  const usable = await new Promise((resolve) => {
-    check.on("error", () => resolve(false));
-    check.on("exit", (code) => resolve(code === 0));
-  });
-  if (!usable) t.skip("pi binary is unavailable");
+// ------------------------------------------------------------ SDK fixture
+test("installed Pi SDK loads a fixture package root and exposes its registrations", async () => {
+  // Provider-free: creates a real in-process AgentSession against
+  // throwaway dirs, never sends an LLM prompt, consumes no quota.
+  // The factory proves native loading with a marker side effect first,
+  // then registers a tool. Unlike the old RPC surface (which exposed no
+  // tool enumeration route), the SDK enumerates tools directly via
+  // getAllTools(), so tool availability itself is the proof; real tool
+  // execution stays a post-deploy smoke requirement.
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-live-agent-"));
   const pkgRoot = path.join(agentDir, "npm", "node_modules", "fixture-ext");
   fs.mkdirSync(pkgRoot, { recursive: true });
@@ -960,7 +953,7 @@ test("installed Pi 0.86.1 loads a fixture package root and exposes its registrat
   // The factory proves native loading with a marker side effect first,
   // then registers a tool and a command (both guarded so a future
   // registration-API change cannot mask the load proof). Tools have no
-  // provider-free RPC enumeration route in Pi 0.86.1 (only commands,
+  // provider-free enumeration route in older Pi RPC (only commands,
   // skills, and prompts are enumerable via get_commands), so command
   // visibility is the strongest provider-free availability proof; real
   // tool execution stays a post-deploy smoke requirement.
@@ -981,92 +974,65 @@ test("installed Pi 0.86.1 loads a fixture package root and exposes its registrat
     `  } catch {}\n` +
     `}\n`);
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-live-cwd-"));
-  // Managed-session flags: auto-discovery off, explicit package root,
-  // built-ins hidden via denylist (no --tools allowlist).
-  const child = spawn("pi", ["--mode", "rpc", "--no-approve", "--no-extensions",
-    "--exclude-tools", "edit,write,bash,powershell", "-e", pkgRoot], {
-    cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
-    stdio: ["pipe", "pipe", "pipe"],
+  const scratchAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-live-sdk-agent-"));
+  // Managed-session boundary: auto-discovery off, explicit package
+  // root, built-ins hidden via denylist (no tools allowlist).
+  const { createSdkSession } = await import("../sdk-transport.mjs");
+  const { safeDefaultPolicy } = await import("../policy.mjs");
+  const { session, resourceLoader } = await createSdkSession({
+    cwd,
+    agentDir: scratchAgentDir,
+    tools: null,
+    excludeTools: "edit,write,bash,powershell",
+    extensionPaths: [pkgRoot],
+    policy: safeDefaultPolicy(),
+    uiContext: {
+      select: async () => undefined,
+      confirm: async () => false,
+      input: async () => undefined,
+      notify: () => {},
+      onTerminalInput: () => () => {},
+      setStatus: () => {},
+      setWorkingMessage: () => {},
+      setWorkingVisible: () => {},
+      setWorkingIndicator: () => {},
+      setHiddenThinkingLabel: () => {},
+      setWidget: () => {},
+      setFooter: () => {},
+    },
+    onEvent: null,
   });
-  const done = new Promise((resolve) => {
-    let buf = Buffer.alloc(0);
-    let settled = false;
-    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
-    child.stdout.on("data", (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      for (;;) {
-        const lf = buf.indexOf(0x0a);
-        if (lf === -1) break;
-        const line = buf.subarray(0, lf).toString("utf8");
-        buf = buf.subarray(lf + 1);
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "response" && (msg.id === "cmd-1" || msg.id === "cmd-2")) {
-            finish({ ok: msg.success, data: msg.data, id: msg.id });
-          }
-        } catch { /* ignore */ }
-      }
-    });
-    child.on("error", () => finish({ ok: false }));
-    child.stdin.write(JSON.stringify({ type: "get_state", id: "cmd-1" }) + "\n");
-    setTimeout(() => finish({ ok: false, timeout: true }), 25000);
-  });
-  const result = await done;
-  assert.equal(result.ok, true);
-  assert.ok(result.data && typeof result.data.sessionId === "string");
-  // The fixture package root resolved through Pi's own manifest
-  // semantics (pi.extensions) and its factory executed natively: the
-  // marker side effect proves the extension loaded without provider quota.
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(marker) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
+  try {
+    assert.ok(session && typeof session.sessionId === "string" && session.sessionId);
+    // The fixture package root resolved through Pi's own manifest
+    // semantics (pi.extensions) and its factory executed natively: the
+    // marker side effect proves the extension loaded without provider
+    // quota. Auto-discovery stayed off: no skills or context files.
+    const deadline = Date.now() + 15000;
+    while (!fs.existsSync(marker) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.ok(fs.existsSync(marker), "fixture extension factory did not execute");
+    assert.deepEqual(resourceLoader.getSkills().skills, []);
+    assert.deepEqual(resourceLoader.getAgentsFiles().agentsFiles, []);
+    // Provider-free availability proof: the extension's registered tool
+    // is enumerable on the live session.
+    const names = session.getAllTools().map((t) => t && t.name).filter(Boolean);
+    assert.ok(names.includes("fixture_ping"), "fixture extension tool is not registered");
+  } finally {
+    try {
+      session.dispose();
+    } catch { /* best effort */ }
   }
-  assert.ok(fs.existsSync(marker), "fixture extension factory did not execute");
-  // Provider-free availability proof: the extension's registered command
-  // is enumerable via the official get_commands RPC route while running
-  // under --no-extensions -e <package-root> --exclude-tools semantics
-  // (the same flags managed sessions use). Pi 0.86.1 exposes no RPC
-  // route to enumerate tools, so real tool execution remains a
-  // post-deploy smoke requirement (see README).
-  const commands = await new Promise((resolveCmd) => {
-    let buf = Buffer.alloc(0);
-    let settled = false;
-    const timer = setTimeout(() => { if (!settled) { settled = true; resolveCmd(null); } }, 15000);
-    const onData = (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      for (;;) {
-        const lf = buf.indexOf(0x0a);
-        if (lf === -1) break;
-        const line = buf.subarray(0, lf).toString("utf8");
-        buf = buf.subarray(lf + 1);
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "response" && msg.id === "cmd-2" && !settled) {
-            settled = true;
-            clearTimeout(timer);
-            child.stdout.off("data", onData);
-            resolveCmd(msg.success ? msg.data : null);
-          }
-        } catch { /* ignore */ }
-      }
-    };
-    child.stdout.on("data", onData);
-    child.stdin.write(JSON.stringify({ type: "get_commands", id: "cmd-2" }) + "\n");
-  });
-  child.kill("SIGKILL");
-  assert.ok(commands && Array.isArray(commands.commands),
-    "get_commands did not return a command list");
-  const ping = commands.commands.find((c) => c && c.name === "fixture_ping_cmd");
-  assert.ok(ping, "fixture extension command is not registered");
-  assert.equal(ping.source, "extension");
 });
 
 // ------------------------------------------- real isolated-profile check
 test("real isolated-profile pi-web-access inventory + load (gated)", async (t) => {
   // Provider-free validation against the REAL isolated Bridge profile.
   // Read-only: never modifies the installed package or its settings
-  // (loading uses a throwaway agentDir plus an explicit -e root).
-  // Run with WB_REAL_PROFILE_CHECK=1; skipped otherwise.
+  // (loading runs in-process against a throwaway agentDir plus the
+  // explicit package root). Run with WB_REAL_PROFILE_CHECK=1; skipped
+  // otherwise.
   if (process.env.WB_REAL_PROFILE_CHECK !== "1") {
     t.skip("set WB_REAL_PROFILE_CHECK=1 to check the real isolated profile");
   }
@@ -1088,39 +1054,41 @@ test("real isolated-profile pi-web-access inventory + load (gated)", async (t) =
   const realRoot = fs.realpathSync(managedRoot);
   assert.ok(realRoot.startsWith(fs.realpathSync(path.join(agentDir, "npm", "node_modules"))));
   const scratchAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-real-agent-"));
-  const child = spawn("pi", ["--mode", "rpc", "--no-approve", "--no-extensions",
-    "--exclude-tools", "edit,write,bash,powershell", "-e", realRoot], {
+  const { createSdkSession } = await import("../sdk-transport.mjs");
+  const { safeDefaultPolicy } = await import("../policy.mjs");
+  const noopUi = {
+    select: async () => undefined,
+    confirm: async () => false,
+    input: async () => undefined,
+    notify: () => {},
+    onTerminalInput: () => () => {},
+    setStatus: () => {},
+    setWorkingMessage: () => {},
+    setWorkingVisible: () => {},
+    setWorkingIndicator: () => {},
+    setHiddenThinkingLabel: () => {},
+    setWidget: () => {},
+    setFooter: () => {},
+  };
+  // createSdkSession throws on any extension load error, so a resolved
+  // session proves the real package root loaded under the managed
+  // boundary (auto-discovery off, denylist exposure).
+  const { session } = await createSdkSession({
     cwd: os.tmpdir(),
-    env: { ...process.env, PI_CODING_AGENT_DIR: scratchAgentDir },
-    stdio: ["pipe", "pipe", "pipe"],
+    agentDir: scratchAgentDir,
+    tools: null,
+    excludeTools: "edit,write,bash,powershell",
+    extensionPaths: [realRoot],
+    policy: safeDefaultPolicy(),
+    uiContext: noopUi,
+    onEvent: null,
   });
-  const outcome = await new Promise((resolveOut) => {
-    let buf = Buffer.alloc(0);
-    let stderrText = "";
-    let settled = false;
-    const finish = (value) => { if (!settled) { settled = true; resolveOut(value); } };
-    child.stdout.on("data", (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      for (;;) {
-        const lf = buf.indexOf(0x0a);
-        if (lf === -1) break;
-        let msg = null;
-        try {
-          msg = JSON.parse(buf.subarray(0, lf).toString("utf8"));
-        } catch { /* ignore */ }
-        buf = buf.subarray(lf + 1);
-        if (msg && msg.type === "response" && msg.id === "cmd-1") {
-          finish({ state: msg, stderrText });
-        }
-      }
-    });
-    child.stderr.on("data", (chunk) => { stderrText += chunk.toString(); });
-    child.on("error", () => finish({ state: null, stderrText }));
-    child.stdin.write(JSON.stringify({ type: "get_state", id: "cmd-1" }) + "\n");
-    setTimeout(() => finish({ state: null, stderrText, timeout: true }), 30000);
-  });
-  child.kill("SIGKILL");
-  assert.ok(outcome.state && outcome.state.success, "real package session did not start");
-  assert.ok(!/Failed to load extension/i.test(outcome.stderrText),
-    `real package failed to load: ${outcome.stderrText.slice(0, 300)}`);
+  try {
+    assert.ok(session && typeof session.sessionId === "string" && session.sessionId);
+    assert.ok(Array.isArray(session.getAllTools()));
+  } finally {
+    try {
+      session.dispose();
+    } catch { /* best effort */ }
+  }
 });

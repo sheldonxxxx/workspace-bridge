@@ -22,7 +22,6 @@ import { timingSafeEqual } from "node:crypto";
 import { AdapterError } from "./adapter.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { PathError } from "./paths.mjs";
-import { RpcError } from "./rpc.mjs";
 
 const DEFAULT_BODY_LIMIT = 256 * 1024;
 
@@ -42,9 +41,6 @@ function fail(res, error) {
   }
   if (error instanceof PathError) {
     return send(res, error.status, { error: error.message, code: error.code });
-  }
-  if (error instanceof RpcError) {
-    return send(res, error.status, { error: "Pi runtime is unavailable", code: error.code });
   }
   return send(res, 502, { error: "Pi runtime is unavailable", code: "runtime_unavailable" });
 }
@@ -127,6 +123,10 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
       adapter_version: adapterVersion,
       instance,
       sessions: adapter ? adapter.sessionCount : 0,
+      // Managed sessions run in-process on the Pi AgentSession SDK, not
+      // as pi --mode rpc subprocesses. The transport marker plus
+      // pi_version diagnose deployment without exposing paths.
+      transport: "agentsession-sdk",
       capabilities: {
         pending_snapshot: true, permission_response: true,
         execution_history: true, extension_inventory: true,

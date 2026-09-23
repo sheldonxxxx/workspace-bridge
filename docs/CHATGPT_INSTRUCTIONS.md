@@ -1,7 +1,7 @@
 # Operating instructions — v0.8.4
 
 Read `read_project_lead_skill()` before leading a task and reload after context loss.
-The packaged SKILL.md (1.6.1) is the canonical workflow, not project-provided text.
+The packaged SKILL.md (2.2.0) is the canonical workflow, not project-provided text.
 
 Select the intended workspace explicitly. General `read_file`, `list_dir`, `glob`
 and `grep_files` read permitted source and explicitly selected handoff paths.

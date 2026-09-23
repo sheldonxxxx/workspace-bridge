@@ -7,8 +7,9 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const ADAPTER_VERSION = "0.3.1";
+export const ADAPTER_VERSION = "0.4.0";
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 8780;
 export const DEFAULT_PI_BINARY = "pi";
@@ -145,15 +146,39 @@ export function checkPiBinary(binary, timeoutMs = PI_VERSION_TIMEOUT_MS) {
   }
 }
 
-// Legacy read-only argv without the trusted extension. Kept only for the
-// legacy no-policy session-creation compatibility path; normal v2 sessions
-// (read-only or writable) always use piRpcArgvFor(), which adds the
-// package-owned trusted extension. No shell is ever used.
-// --no-approve overrides project trust for the run and --no-extensions
-// disables extension discovery, so project-local resources cannot enable
-// extensions inside this milestone's read-only spike.
-export function piRpcArgv() {
-  return ["--mode", "rpc", "--tools", READONLY_TOOLS.join(","), "--no-approve", "--no-extensions"];
+// In-process AgentSession tool loadout (3C1, v3), centralized here:
+// - writable=false: read/grep/find/ls plus exactly one package-owned
+//   trusted extension (read policy is enforced in read-only mode too).
+// - writable=true: + edit/write.
+// - shellMode != deny: + bash (Pi built-in bash only, no powershell).
+//   deny removes bash; ask keeps bash with suspended-call approval;
+//   allow keeps bash without prompt. No command rules. Throws when the
+//   trusted extension is missing.
+// - 3C2: extensionRoots (resolved native package roots) switches the
+//   managed loadout to excludeTools with the trusted permission extension
+//   loaded as an inline factory plus enabled packages in deterministic
+//   inventory order. No tools allowlist is passed then (the SDK allowlist
+//   would hide extension tools); the transport activates the intended
+//   built-ins explicitly alongside registered extension tools.
+// Returns { tools, excludeTools, extensionPaths } for createSdkSession.
+export function sdkToolLoadout({ writable = false, shellMode = "deny", extensionRoots = [] } = {}) {
+  const extension = trustedExtensionPath();
+  if (!isTrustedExtensionUsable(extension)) {
+    throw new Error("Trusted permission extension is unavailable");
+  }
+  const extra = Array.isArray(extensionRoots)
+    ? extensionRoots.filter((p) => typeof p === "string" && p)
+    : [];
+  if (extra.length) {
+    return {
+      tools: null,
+      excludeTools: sdkExcludeTools({ writable, shellMode }),
+      extensionPaths: extra,
+    };
+  }
+  const tools = [...(writable ? WRITABLE_TOOLS : READONLY_TOOLS)];
+  if (shellMode !== "deny") tools.push("bash");
+  return { tools, excludeTools: null, extensionPaths: [] };
 }
 
 export const WRITABLE_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
@@ -162,7 +187,7 @@ export const WRITABLE_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
 // package's own module location: never admin/project/env-selectable, so a
 // hostile project or environment cannot substitute its own extension.
 export function trustedExtensionPath() {
-  return path.join(path.dirname(new URL(import.meta.url).pathname),
+  return path.join(path.dirname(fileURLToPath(import.meta.url)),
     "trusted-permission-extension.mjs");
 }
 
@@ -179,51 +204,15 @@ export function isTrustedExtensionUsable(candidate) {
   }
 }
 
-// Built-ins hidden via --exclude-tools once third-party extensions are
-// enabled (3C2). Official Pi --tools is an allowlist across built-in AND
-// extension/custom tools, so managed sessions drop --tools then and hide
-// only: edit/write when write_tools_enabled=false; bash when
-// shell_mode=deny; powershell on macOS if applicable (never loaded by Pi
-// on macOS, excluded defensively).
-export function piRpcExcludesFor({ writable = false, shellMode = "deny" } = {}) {
+// Built-ins hidden via excludeTools once third-party extensions are
+// enabled (3C2). The SDK tools allowlist covers built-in AND
+// extension/custom tools, so managed sessions drop the allowlist then and
+// hide only: edit/write when write_tools_enabled=false; bash when
+// shell_mode=deny; powershell defensively (never exposed by this adapter).
+export function sdkExcludeTools({ writable = false, shellMode = "deny" } = {}) {
   const hidden = [];
   if (!writable) hidden.push("edit", "write");
   if (shellMode === "deny") hidden.push("bash");
   hidden.push("powershell");
   return hidden.join(",");
-}
-
-// Centralized spawn contract (3C1, v3):
-// - writable=false: read/grep/find/ls plus exactly one package-owned
-//   trusted extension (read policy is enforced in read-only mode too).
-// - writable=true: + edit/write.
-// - shellMode != deny: + bash (Pi built-in bash only, no powershell).
-//   deny removes bash; ask keeps bash with suspended-call approval;
-//   allow keeps bash without prompt. No command rules. Throws when the
-//   trusted extension is missing.
-// - piRpcArgv() stays as the legacy no-extension read-only argv, used only
-//   for the legacy no-policy compatibility path.
-// - 3C2: extensionPaths (resolved native package roots) switches the
-//   managed argv to --exclude-tools with repeated explicit -e (trusted
-//   permission extension first, then enabled packages in deterministic
-//   inventory order). --no-extensions stays on; Bridge never sends a host
-//   path. With no enabled packages the 3C1 --tools argv is unchanged.
-export function piRpcArgvFor({ writable = false, shellMode = "deny", extensionPaths = [] } = {}) {
-  const extension = trustedExtensionPath();
-  if (!isTrustedExtensionUsable(extension)) {
-    throw new Error("Trusted permission extension is unavailable");
-  }
-  const extra = Array.isArray(extensionPaths)
-    ? extensionPaths.filter((p) => typeof p === "string" && p)
-    : [];
-  if (extra.length) {
-    return ["--mode", "rpc",
-      "--exclude-tools", piRpcExcludesFor({ writable, shellMode }),
-      "--no-approve", "--no-extensions",
-      "-e", extension, ...extra.flatMap((p) => ["-e", p])];
-  }
-  const tools = [...(writable ? WRITABLE_TOOLS : READONLY_TOOLS)];
-  if (shellMode !== "deny") tools.push("bash");
-  return ["--mode", "rpc", "--tools", tools.join(","),
-    "--no-approve", "--no-extensions", "-e", extension];
 }

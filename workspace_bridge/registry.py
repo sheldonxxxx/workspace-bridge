@@ -1,6 +1,6 @@
 """Package-owned multi-runtime registry (milestone 3A2).
 
-Maps stable runtime ids (``"opencode"``, ``"pi"``) to configured
+Maps stable runtime ids (``"pi"`` today) to configured
 ``AgentRuntime`` instances. Entries are constructed only from local
 environment configuration by ``runtime_registry_from_environment``; there is
 no dynamic plugin loading and project content can never register entries.
@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import os
 
-from .runtime import (OPENCODE_RUNTIME_ID, PI_RUNTIME_ID, AgentRuntime, HttpOpenCodeRuntime,
-                       HttpPiRuntime, is_valid_runtime_id)
+from .runtime import (PI_RUNTIME_ID, AgentRuntime, HttpPiRuntime, is_valid_runtime_id)
 from .security import BridgeError
 
 
@@ -37,7 +36,7 @@ class RuntimeRegistry:
         the runtime's own stable identity fails closed
         (``runtime_mismatch``) without registering, so a miswired mapping
         can never undermine the persisted runtime-ownership invariant (e.g.
-        ``"pi"`` pointing at an OpenCode runtime). An empty or
+        ``"pi"`` pointing at the wrong backend). An empty or
         unimplemented runtime identity can never be aliased into the
         registry via an explicit key either.
         """
@@ -141,7 +140,6 @@ class RuntimeRegistry:
 def runtime_registry_from_environment(environ: dict | None = None) -> RuntimeRegistry:
     """Build the configured registry from local environment only.
 
-    - ``WB_OPENCODE_RUNTIME_URL`` -> ``HttpOpenCodeRuntime``
     - ``WB_PI_RUNTIME_URL`` -> ``HttpPiRuntime``
     - shared ``WB_RUNTIME_TOKEN`` is supplied to each configured adapter.
 
@@ -150,12 +148,8 @@ def runtime_registry_from_environment(environ: dict | None = None) -> RuntimeReg
     """
     env = environ if environ is not None else os.environ
     registry = RuntimeRegistry()
-    opencode_url = (env.get("WB_OPENCODE_RUNTIME_URL") or "").strip()
     pi_url = (env.get("WB_PI_RUNTIME_URL") or "").strip()
     token = (env.get("WB_RUNTIME_TOKEN") or "").strip()
-    if opencode_url:
-        registry.register(HttpOpenCodeRuntime(opencode_url, token),
-                           runtime_id=OPENCODE_RUNTIME_ID)
     if pi_url:
         registry.register(HttpPiRuntime(pi_url, token), runtime_id=PI_RUNTIME_ID)
     return registry

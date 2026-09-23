@@ -9,6 +9,27 @@ import pytest
 
 from workspace_bridge.api import Handoff, make_admin
 from workspace_bridge.security import BridgeError
+from workspace_bridge.service import Service
+
+from runtime_fakes import FakeRuntime, RecordingNotifier
+
+
+def _pi_service_no_policy(tmp_path):
+    """A Pi-backed service with agent execution enabled but no model policy."""
+    from workspace_bridge.cli import initialize
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    root = parent / "alpha"
+    root.mkdir()
+    state = tmp_path / "private-state"
+    cfg = initialize(state, [str(parent)], 8765, 8766)
+    service = Service(state, cfg, runtime=FakeRuntime(str(root)),
+                      notifier=RecordingNotifier(), orchestrator_background=False)
+    ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
+    token = service.manage_bridge("rotate_token")["token"]
+    service.manage_workspace(ws_id, "enable")
+    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
+    return service, ws_id, token
 
 
 def publish(agent_env, payload, **overrides):
@@ -18,8 +39,8 @@ def publish(agent_env, payload, **overrides):
 
 
 def start(agent_env, job_id, request_id="run-request-1", model=None, parent_run_id=None):
-    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                                     {"job_id": job_id, "request_id": request_id,
+    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_agent_run",
+                                     {"runtime": "pi", "job_id": job_id, "request_id": request_id,
                                       "model": model, "parent_run_id": parent_run_id})
 
 
@@ -28,32 +49,38 @@ def call(agent_env, tool, **args):
 
 
 # ------------------------------------------------------- fail-closed default
-def test_unconfigured_policy_rejects_new_runs_without_a_session(env, payload):
-    service = env["service"]
-    service.manage_workspace(env["id"], "set_agent_enabled", agent_enabled=True)
-    job = service.call(env["id"], env["token"], "prepare_handoff",
-                       Handoff.model_validate(payload).model_dump())
-    assert service.orchestrator.model_policy_status() == {
-        "configured": False, "enabled": [], "default": None, "enabled_count": 0}
-    with pytest.raises(BridgeError) as exc:
-        service.call(env["id"], env["token"], "start_opencode_run",
-                     {"job_id": job["id"], "request_id": "r1", "model": None, "parent_run_id": None})
-    assert exc.value.code == "model_policy_unconfigured"
-    assert service.db.execute("SELECT count(*) FROM agent_runs").fetchone()[0] == 0
+def test_unconfigured_policy_rejects_new_runs_without_a_session(tmp_path, payload):
+    service, ws_id, token = _pi_service_no_policy(tmp_path)
+    try:
+        job = service.call(ws_id, token, "prepare_handoff",
+                           Handoff.model_validate(payload).model_dump())
+        assert service.orchestrator.model_policy_status() == {
+            "configured": False, "enabled": [], "default": None, "enabled_count": 0}
+        with pytest.raises(BridgeError) as exc:
+            service.call(ws_id, token, "start_agent_run",
+                         {"runtime": "pi", "job_id": job["id"], "request_id": "r1",
+                          "model": None, "parent_run_id": None})
+        assert exc.value.code == "model_policy_unconfigured"
+        assert service.db.execute("SELECT count(*) FROM agent_runs").fetchone()[0] == 0
+    finally:
+        service.close()
 
 
-def test_legacy_default_model_alone_never_configures_policy(env, payload):
-    service = env["service"]
-    service.manage_workspace(env["id"], "set_agent_enabled", agent_enabled=True)
-    service.set_setting("default_model", "anthropic/claude-sonnet")
-    service.set_setting("default_model_name", "Claude Sonnet")
-    job = service.call(env["id"], env["token"], "prepare_handoff",
-                       Handoff.model_validate(payload).model_dump())
-    assert service.orchestrator.model_policy_status()["configured"] is False
-    with pytest.raises(BridgeError) as exc:
-        service.call(env["id"], env["token"], "start_opencode_run",
-                     {"job_id": job["id"], "request_id": "r1", "model": None, "parent_run_id": None})
-    assert exc.value.code == "model_policy_unconfigured"
+def test_legacy_default_model_alone_never_configures_policy(tmp_path, payload):
+    service, ws_id, token = _pi_service_no_policy(tmp_path)
+    try:
+        service.set_setting("default_model", "anthropic/claude-sonnet")
+        service.set_setting("default_model_name", "Claude Sonnet")
+        job = service.call(ws_id, token, "prepare_handoff",
+                           Handoff.model_validate(payload).model_dump())
+        assert service.orchestrator.model_policy_status()["configured"] is False
+        with pytest.raises(BridgeError) as exc:
+            service.call(ws_id, token, "start_agent_run",
+                         {"runtime": "pi", "job_id": job["id"], "request_id": "r1",
+                          "model": None, "parent_run_id": None})
+        assert exc.value.code == "model_policy_unconfigured"
+    finally:
+        service.close()
 
 
 def test_corrupt_policy_setting_fails_closed(agent_env, payload):
@@ -69,22 +96,23 @@ def test_corrupt_policy_setting_fails_closed(agent_env, payload):
 def test_set_policy_validation(agent_env):
     orchestrator = agent_env["service"].orchestrator
     with pytest.raises(BridgeError) as exc:
-        orchestrator.set_model_policy([], "anthropic/claude-sonnet")
+        orchestrator.set_model_policy([], "anthropic/claude-sonnet", agent_env['service'].workspace(agent_env['id']))
     assert exc.value.code == "invalid_arguments"
     with pytest.raises(BridgeError) as exc:
         orchestrator.set_model_policy(["anthropic/claude-sonnet",
-                                       "anthropic/claude-sonnet"], "anthropic/claude-sonnet")
+                                       "anthropic/claude-sonnet"], "anthropic/claude-sonnet",
+                                      agent_env['service'].workspace(agent_env['id']))
     assert exc.value.code == "invalid_arguments"
     with pytest.raises(BridgeError) as exc:
-        orchestrator.set_model_policy(["anthropic/claude-sonnet"], "glm/zai-glm-5.2")
+        orchestrator.set_model_policy(["anthropic/claude-sonnet"], "glm/zai-glm-5.2", agent_env['service'].workspace(agent_env['id']))
     assert exc.value.code == "invalid_arguments"
     with pytest.raises(BridgeError) as exc:
-        orchestrator.set_model_policy(["bad selector!"], "bad selector!")
+        orchestrator.set_model_policy(["bad selector!"], "bad selector!", agent_env['service'].workspace(agent_env['id']))
     assert exc.value.code == "invalid_arguments"
     with pytest.raises(BridgeError) as exc:
-        orchestrator.set_model_policy(["anthropic/no-such-model"], "anthropic/no-such-model")
+        orchestrator.set_model_policy(["anthropic/no-such-model"], "anthropic/no-such-model", agent_env['service'].workspace(agent_env['id']))
     assert exc.value.code == "model_unavailable"
-    status = orchestrator.set_model_policy(["glm/zai-glm-5.2"], "glm/zai-glm-5.2")
+    status = orchestrator.set_model_policy(["glm/zai-glm-5.2"], "glm/zai-glm-5.2", agent_env['service'].workspace(agent_env['id']))
     assert status == {"configured": True, "enabled": ["glm/zai-glm-5.2"],
                       "default": "glm/zai-glm-5.2", "enabled_count": 1}
     # No secret material is exposed through the status surface.
@@ -95,7 +123,7 @@ def test_policy_save_is_atomic_on_rejection(agent_env):
     orchestrator = agent_env["service"].orchestrator
     before = orchestrator.model_policy_status()
     with pytest.raises(BridgeError):
-        orchestrator.set_model_policy(["anthropic/missing"], "anthropic/missing")
+        orchestrator.set_model_policy(["anthropic/missing"], "anthropic/missing", agent_env['service'].workspace(agent_env['id']))
     assert orchestrator.model_policy_status() == before
 
 
@@ -116,9 +144,9 @@ def test_enabled_allowlist_and_default_resolution(agent_env, payload):
     # Restrict the policy to the default only; the other model stays
     # discoverable but cannot start new runs.
     agent_env["service"].orchestrator.set_model_policy(
-        ["anthropic/claude-sonnet"], "anthropic/claude-sonnet")
-    listed = call(agent_env, "list_opencode_models")
-    assert listed["scope"] == "global"
+        ["anthropic/claude-sonnet"], "anthropic/claude-sonnet", agent_env['service'].workspace(agent_env['id']))
+    listed = call(agent_env, "list_agent_models", runtime="pi")
+    assert listed["scope"] == "workspace"
     by_selector = {m["selector"]: m for m in listed["models"]}
     assert by_selector["glm/zai-glm-5.2"]["enabled"] is False
     assert by_selector["anthropic/claude-sonnet"]["policy_default"] is True
@@ -174,16 +202,19 @@ def test_two_workspaces_share_one_global_policy(agent_env, payload):
     beta = agent_env["service"].add_workspace("Beta", str(other_root), [])["workspace"]["id"]
     agent_env["service"].manage_workspace(beta, "enable")
     agent_env["service"].manage_workspace(beta, "set_agent_enabled", agent_enabled=True)
-    alpha_models = call(agent_env, "list_opencode_models")
+    alpha_models = call(agent_env, "list_agent_models", runtime="pi")
     beta_models = agent_env["service"].call(
-        beta, agent_env["token"], "list_opencode_models", {"query": "", "limit": 25})
-    assert alpha_models["scope"] == "global" == beta_models["scope"]
+        beta, agent_env["token"], "list_agent_models",
+        {"runtime": "pi", "query": "", "limit": 25})
+    assert alpha_models["scope"] == "workspace" == beta_models["scope"]
     assert [m["selector"] for m in alpha_models["models"]] == \
         [m["selector"] for m in beta_models["models"]]
     assert [m["enabled"] for m in alpha_models["models"]] == \
         [m["enabled"] for m in beta_models["models"]]
+    # One runtime-global policy serves every workspace; discovery resolves
+    # each workspace directory separately.
     assert agent_env["runtime"].model_calls and all(
-        call_directory is None for call_directory in agent_env["runtime"].model_calls)
+        call_directory for call_directory in agent_env["runtime"].model_calls)
 
 
 def test_mcp_surface_has_no_policy_mutation_or_bypass():
@@ -210,18 +241,18 @@ async def test_global_sessions_endpoint_covers_all_workspaces(agent_env, payload
     agent_env["service"].manage_workspace(beta, "set_agent_enabled", agent_enabled=True)
     other_job = agent_env["service"].call(beta, agent_env["token"], "prepare_handoff",
                                           Handoff.model_validate(payload).model_dump())
-    other_run = agent_env["service"].call(beta, agent_env["token"], "start_opencode_run",
-                                          {"job_id": other_job["id"], "request_id": "beta-run",
-                                           "model": None, "parent_run_id": None})
+    other_run = agent_env["service"].call(beta, agent_env["token"], "start_agent_run",
+                                          {"runtime": "pi", "job_id": other_job["id"], "request_id": "beta-run",
+                                           "runtime": "pi", "model": None, "parent_run_id": None})
     token = (agent_env["state"] / "admin-token").read_text().strip()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(
             app=make_admin(agent_env["service"], agent_env["config"]["admin_token_hash"])),
             base_url="http://127.0.0.1:8766") as anonymous:
-        assert (await anonymous.get("/api/opencode/sessions")).status_code == 401
+        assert (await anonymous.get("/api/sessions")).status_code == 401
     async with httpx.AsyncClient(transport=httpx.ASGITransport(
             app=make_admin(agent_env["service"], agent_env["config"]["admin_token_hash"])),
             base_url="http://127.0.0.1:8766", headers={"Authorization": "Bearer " + token}) as client:
-        body = (await client.get("/api/opencode/sessions")).json()
+        body = (await client.get("/api/sessions")).json()
         assert body["scope"] == "global"
         ids = [row["run_id"] for row in body["runs"]]
         assert run["run_id"] in ids and other_run["run_id"] in ids
@@ -231,13 +262,13 @@ async def test_global_sessions_endpoint_covers_all_workspaces(agent_env, payload
         first = body["runs"][0]
         for key in ("run_id", "state", "workspace_id", "workspace_name", "job_id",
                     "handoff_title", "model", "session_id", "created", "started",
-                    "updated", "finished", "duration_seconds", "pending_request_count",
+                    "updated", "finished", "duration_seconds",
                     "notification", "active"):
             assert key in first, key
         assert first["model"] == "anthropic/claude-sonnet"
         assert first["workspace_name"] in ("Alpha", "Beta")
         assert first["handoff_title"] == payload["title"]
-        bounded = await client.get("/api/opencode/sessions", params={"limit": 1})
+        bounded = await client.get("/api/sessions", params={"limit": 1})
         assert len(bounded.json()["runs"]) == 1
         assert bounded.json()["next_offset"] == 1
         stopped = await client.post(f"/api/runs/{other_run['run_id']}/stop")

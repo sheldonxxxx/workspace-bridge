@@ -1,8 +1,9 @@
 # Docker Compose — v0.8.4
 
-Runs **Workspace Bridge** with an internal tunnel sidecar and a private, client-only
-OpenCode SDK adapter on the shared Compose network. The images are built locally from
-this source; no public Workspace Bridge image has been published. The OpenCode server
+Runs **Workspace Bridge** with an internal tunnel sidecar on the shared Compose
+network. The Pi agent runs natively on the host and is reached through a
+private client-only Pi host adapter URL. The image is built locally from
+this source; no public Workspace Bridge image has been published. The Pi agent
 itself is **not** part of this stack: it runs natively on the host and is managed by you.
 
 ## Requirements and scope
@@ -20,14 +21,13 @@ are installed in the image. Builds require access to the Python image registry
 and Python package index. The Docker base tag can be pinned to a reviewed digest
 with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 
-**Validation boundary:** `docker compose config` validated, both the bridge
-(`workspace-bridge:0.8.4`) and adapter (`workspace-bridge-opencode-adapter:0.1.8`)
-images built, and a disposable bridge+adapter container smoke passed here: the bridge
-served MCP (401 unauthenticated) and the loopback manager, the adapter reported
-`server_configured=false`/locked with **no published port**, settings/health resolved,
-and a new workspace defaulted to disabled/handoff/agent-disabled. The full Compose
-stack with the tunnel sidecar and a live host OpenCode server was **not** run in this
-environment. `scripts/test_docker.py` performs the real Compose build/start/health
+**Validation boundary:** `docker compose config` validated, the bridge
+(`workspace-bridge:0.8.4`) image built, and a disposable bridge container smoke
+passed here: the bridge served MCP (401 unauthenticated) and the loopback
+manager, settings/health resolved, and a new workspace defaulted to
+disabled/handoff/agent-disabled. The full Compose stack with the tunnel sidecar
+and a live host Pi agent was **not** run in this environment.
+`scripts/test_docker.py` performs the real Compose build/start/health
 checks on a Docker-equipped host; do not confuse a successful image build or YAML
 parse with a successful end-to-end run.
 
@@ -60,7 +60,7 @@ deliberately; rerunning the helper is not required.
 Open **http://127.0.0.1:8766/** and enter the admin token locally. Register each
 actual host project path, create one bridge token, then enable only intended
 mappings. The project parent is mounted at the **same absolute path inside the
-container**, so copied handoff paths also work in host OpenCode. Register a project
+container**, so copied handoff paths also work in the host Pi agent. Register a project
 child, not the parent itself. Do not use `/state` or invented `/workspace` aliases.
 
 The first startup initializes **only fresh** Docker state. It refuses incomplete
@@ -92,10 +92,10 @@ docker compose up -d --build
 
 The bind sources must exist; Compose does not silently create them as root-owned
 folders (`create_host_path: false`). On Linux, use the same UID/GID as the normal
-OpenCode user so that mode-0600 handoff files are readable on the host. On Docker
+Pi agent user so that mode-0600 handoff files are readable on the host. On Docker
 Desktop, verify bind ownership and read/write behavior with a disposable project;
-file-sharing implementations can differ. Do not work around failures with root,
-privileged mode or world-writable state.
+file-sharing implementations can differ. Do not work
+around failures with root, privileged mode or world-writable state.
 
 ## Ports and the single tunnel
 
@@ -163,40 +163,35 @@ tunnel using the existing setup guide. They are not image build arguments or
 Compose environment variables. The container's admin token is available with the
 explicit `exec ... show-admin-token` command, never printed in startup logs.
 
-## OpenCode runtime (optional)
+## Pi runtime (optional)
 
-Agent execution is off until you enable it per workspace. The private adapter stays
-**locked** until `WB_RUNTIME_TOKEN` is set: with an empty token every operational
-endpoint (`/models`, `/sessions`, prompt, permission reply, abort, `/events`) returns
-401 and the bridge fails closed. `/health` remains readable and reports
-`locked: true` / `token_configured: false` without revealing any secret. To connect
-the host OpenCode server:
+Agent execution is off until you enable it per workspace. The private Pi host
+adapter stays **locked** until `WB_RUNTIME_TOKEN` is set: with an empty token every
+operational endpoint returns 401 and the bridge fails closed. `/health` remains
+readable and reports `locked: true` without revealing any secret. To connect the
+host Pi agent:
 
-1. Start the server natively on the host with Basic Auth, e.g.
-   `OPENCODE_SERVER_PASSWORD=<secret> opencode serve --hostname 127.0.0.1 --port 4096`.
-   Keep it bound as narrowly as your setup allows.
-2. In `.env` set `WB_OPENCODE_SERVER_URL` and the matching username/password, plus a
-   random `WB_RUNTIME_TOKEN` shared between the bridge and its adapter. The token is
-   **required** to unlock agent operations; an empty value never means allow.
-   - Docker Desktop: `WB_OPENCODE_SERVER_URL=http://host.docker.internal:4096`.
-   - Linux Docker Engine: set an explicit reachable host URL. The adapter declares
-     `host.docker.internal:host-gateway`; if that does not resolve your server, use
-     the host's bridge address or a reachable DNS name. Do **not** assume `localhost`
-     inside a container means the host.
-3. `docker compose up -d` (recreates the adapter and bridge). The manager's
-   **OpenCode runtime** panel shows health/version and the locked state;
-   `docker compose logs opencode-adapter` shows `server_configured`/`locked` without
-   printing credentials.
+1. Start the Pi host adapter natively on the host. On macOS, the
+   [LaunchAgent setup](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd)
+   starts it after user login and restarts it if it exits. Keep it bound to
+   loopback.
+2. In `.env` set `WB_PI_RUNTIME_URL` plus a random `WB_RUNTIME_TOKEN` shared
+   between the bridge and the adapter. The token is **required** to unlock agent
+   operations; an empty value never means allow.
+   - Docker Desktop or OrbStack: `WB_PI_RUNTIME_URL=http://host.docker.internal:<port>`.
+   - Linux Docker Engine: set an explicit reachable host URL. Do **not** assume
+     `localhost` inside a container means the host.
+3. `docker compose up -d` (recreates the bridge). The manager's **Pi runtime**
+   panel shows health/version and the locked state; `docker compose logs bridge`
+   shows adapter reachability without printing credentials.
 
-Docker Compose starts the bridge before the adapter. That ordering is safe: a
-transient adapter-unavailable result during startup reconciliation never orphans an
-active run. Reconciliation retries until the runtime is reachable and only orphans a
-run after a positive missing-session result.
+A transient adapter-unavailable result during startup reconciliation never orphans
+an active run. Reconciliation retries until the runtime is reachable and only
+orphans a run after a positive missing-session result.
 
-The adapter has **no published port** and is reachable only on the private Compose
-network at `http://opencode-adapter:8770`. The bridge never receives provider
-credentials or the OpenCode URL. Never add a `ports:` entry to the adapter and never
-put the OpenCode server in this Compose file.
+The Pi adapter runs natively on the host with **no published port** and no Compose
+service. The bridge never receives provider credentials. Never put the Pi agent
+in this Compose file.
 
 ## Operational container logs
 
@@ -205,9 +200,8 @@ with `max-size: 10m` / `max-file: 3` rotation is already configured in
 `compose.yaml`):
 
 ```sh
-docker compose logs -f bridge opencode-adapter
+docker compose logs -f bridge
 docker compose logs --tail=200 bridge
-docker compose logs --tail=200 opencode-adapter
 ```
 
 Both processes emit one-line JSON records with stable event names and bounded
@@ -218,14 +212,11 @@ IDs/secrets):
 {"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"runtime_configured":true,"workspace_count":3}
 {"component":"bridge","event":"run_created","level":"INFO","job_id":"job_…","model":"provider/model","run_id":"run_…","session_id":"ses_…","workspace_id":"ws_…"}
 {"component":"bridge","event":"permission_asked","level":"INFO","action":"external_directory","request_id":"per_…","run_id":"run_…","source":"event","session_id":"ses_…"}
-{"component":"bridge","event":"run_state","level":"INFO","run_id":"run_…","state":"completed","reason":"idle"}
-{"component":"adapter","event":"eventhub_transition","level":"INFO","status":"subscribed","transitions":4}
-{"component":"adapter","event":"permission_list","level":"WARNING","code":"runtime_error","session_id":"ses_…","status":"degraded"}
+{"component":"bridge","event":"run_state","level":"INFO","run_id":"run_…","state":"completed","reason":"read_reconcile"}
 ```
 
-`WB_LOG_LEVEL` (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`) controls both
-services. An invalid value fails fast at bridge startup (`BridgeError`); the
-adapter safely falls back to `INFO` with a warning record. Uvicorn access logs
+`WB_LOG_LEVEL` (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`) controls the
+bridge. An invalid value fails fast at bridge startup (`BridgeError`). Uvicorn access logs
 stay disabled — routine lifecycle is covered by the records above, not by
 request logs.
 
@@ -235,13 +226,12 @@ workspace roots/names, tokens, usernames/passwords, or raw error bodies — only
 IDs, state/event names, counts, durations, sanitized codes and boolean health
 flags.
 
-Troubleshooting a stale `running` session (TUI says completed but the Bridge
-still shows running): look for the `event_stream` status in the bridge
-`bridge_ready` record and adapter `eventhub_transition` lines (is the stream
-`subscribed` or stuck `reconnecting`?), the run's `permission_sync` outcome in
+Troubleshooting a stale `running` session (the agent says completed but the Bridge
+still shows running): check the run's `permission_sync` outcome in
 the API versus `permission_resync` log lines (`ok` with `matched` count means a
 successful listing; `degraded` with a sanitized `code` means the listing
-failed and stays retryable), and the startup `reconcile_start` /
+failed and stays retryable), the completion-probe lines for durable-evidence
+decisions, and the startup `reconcile_start` /
 `reconcile_result` lines for the reconcile outcome.
 
 ## Image layering
@@ -250,10 +240,9 @@ The bridge image builds third-party Python wheels in a dependency-only layer
 (dependencies extracted from `pyproject.toml` with stdlib `tomllib`) before any
 Workspace Bridge source is copied, so source/static/test edits reuse the cached
 dependency layer. The builder uses a BuildKit pip cache mount; the runtime stage
-still installs offline (`--no-index`) from prebuilt wheels with no cache. The
-adapter installs from its lockfile with a BuildKit npm cache mount and keeps
-`node_modules` (no dev dependencies) inside the image. Both images stay minimal:
-explicit `COPY` allowlists, non-root runtime, read-only rootfs, and health checks.
+still installs offline (`--no-index`) from prebuilt wheels with no cache. The image
+stays minimal: explicit `COPY` allowlists, non-root runtime, read-only rootfs, and
+health checks.
 
 Discord notifications are optional: set `WB_DISCORD_WEBHOOK_URL` in `.env` (kept out
 of the repo and never returned by any API). Waiting and completion states are
@@ -340,28 +329,17 @@ Docker marks unhealthy containers; health checks alone do not restart them.
 `restart: unless-stopped` restarts processes that exit and resumes them with Docker,
 but a manual stop remains a stop.
 
-For upgrades, replace the source package outside projects while preserving your
-`.env`, optional override and private state. Run `docker compose up -d --build`.
-Do not rerun initialization. Back up stopped private state and workspace handoff
-folders together, preserving permissions and all SQLite files. The Docker source
-archive includes no image layers, tokens or user project data.
+Back up stopped private state and workspace handoff folders together, preserving
+permissions and all SQLite files. The Docker source archive includes no image
+layers, tokens or user project data.
 
-## Existing native installation
+## Fresh state
 
-The default Docker state directory is **separate** from the native one. Do not run
-native and Docker services against the same state concurrently. A host-to-container
-mount may change device/inode identities even at the same path; the same
-configured path stays usable and each request re-validates the current root
-with containment still enforced. The simplest switch is to preserve the native
-state as an archive, start fresh Docker state, register intended mappings, and
-update the host tunnel's shared credential. Old handoff files remain on the host,
-but fresh state does not import their job records.
-
-A state-preserving native-to-container migration requires reviewing paths and
-internal-port configuration on the actual host. No automatic
-migration/import is supplied. For an already-working
-Compose deployment, ordinary recreate/upgrade uses the existing Docker state;
-a genuinely missing root still fails as unavailable.
+The Docker state directory is separate from the native one. Starting with a fresh
+database clears registered mappings, handoff records, run history and gateway
+authorization. Existing handoff files remain on the host until removed separately.
+Register intended mappings and configure the shared bridge token in the local
+manager before connecting ChatGPT.
 
 ## Validation on your host
 
@@ -376,7 +354,7 @@ paths, protected writes, stale hashes, hostile Origin rejection and retained
 credentials/mappings after recreation. It tears down only its own temporary Compose
 project. It requires Docker and fails rather than claiming success when absent.
 The CI workflow runs the same script. Neither checks actual ChatGPT pixel recognition,
-OpenCode execution or tunnel authentication; those remain separate live checks.
+Pi execution or tunnel authentication; those remain separate live checks.
 
 ## Primary references
 

@@ -87,17 +87,14 @@ def test_mcp_instructions_match_skill_model_rule():
     assert "scope" in TOOLS["list_agent_models"][1]
 
 
-def test_skill_defaults_silent_dispatch_to_pi_without_legacy_aliases():
+def test_skill_defaults_silent_dispatch_to_pi():
     content = read_project_lead_skill()["content"]
     assert "a silent user \u2192 Pi" in content
-    assert "silent user \u2192 OpenCode" not in content
-    for alias in ("list_opencode_models", "start_opencode_run", "list_opencode_runs",
-                  "read_opencode_run", "respond_opencode_permission",
-                  "cancel_opencode_run", "read_opencode_request"):
-        assert alias not in content, alias
+    for tool in ("list_agent_models", "start_agent_run", "read_agent_run",
+                 "respond_agent_permission", "list_agent_executions"):
+        assert tool in content, tool
     assert "silent/default runtime is Pi" in INSTRUCTIONS or \
         "silent user choice means runtime pi" in INSTRUCTIONS
-    assert "Legacy list_opencode" not in INSTRUCTIONS
 
 
 def test_tool_schema_is_read_only_unscoped_and_empty():

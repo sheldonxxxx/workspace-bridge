@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 import pytest
 
 from workspace_bridge.api import Handoff
-from workspace_bridge.orchestration import AgentOrchestrator, OpenCodeOrchestrator
-from workspace_bridge.runtime import (OPENCODE_RUNTIME_ID, AgentRuntime, HttpOpenCodeRuntime,
-                                      OpenCodeRuntime, PendingPermission, PendingQuestion,
+from workspace_bridge.orchestration import AgentOrchestrator
+from workspace_bridge.runtime import (PI_RUNTIME_ID, AgentRuntime, HttpPiRuntime,
+                                      PendingPermission, PendingQuestion,
                                       RuntimeCapabilities, RuntimeEvent, RuntimeInteraction,
                                       coerce_runtime_event)
 from workspace_bridge.security import BridgeError
@@ -28,8 +28,9 @@ def publish(agent_env, payload, **overrides):
 
 
 def start(agent_env, job_id, request_id="run-request-1", **kwargs):
-    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                                     {"job_id": job_id, "request_id": request_id, **kwargs})
+    return agent_env["service"].call(agent_env["id"], agent_env["token"], "start_agent_run",
+                                     {"runtime": "pi", "job_id": job_id, "request_id": request_id,
+                                      **kwargs})
 
 
 def call(agent_env, tool, **args):
@@ -38,28 +39,24 @@ def call(agent_env, tool, **args):
 
 # ------------------------------------------------------- internal architecture
 def test_neutral_contract_and_installed_backend(agent_env):
-    assert OPENCODE_RUNTIME_ID == "opencode"
-    assert issubclass(HttpOpenCodeRuntime, AgentRuntime)
-    assert issubclass(OpenCodeRuntime, AgentRuntime)
+    assert PI_RUNTIME_ID == "pi"
+    assert issubclass(HttpPiRuntime, AgentRuntime)
     assert isinstance(agent_env["runtime"], AgentRuntime)
-    assert agent_env["runtime"].runtime_id == "opencode"
+    assert agent_env["runtime"].runtime_id == "pi"
     assert isinstance(agent_env["service"].orchestrator, AgentOrchestrator)
-    # Compatibility alias only; implementation uses the neutral name.
-    assert OpenCodeOrchestrator is AgentOrchestrator
-    # OpenCode remains the sole backend: no Pi/ACP/other runtime exists.
-    import workspace_bridge.runtime as runtime_module
-    assert not hasattr(runtime_module, "PiRuntime")
-    assert not hasattr(runtime_module, "ACPRuntime")
-    assert not hasattr(runtime_module, "ClineRuntime")
+    # Pi is the configured backend exposed through the neutral seam.
+    assert agent_env["runtime"].runtime_id == PI_RUNTIME_ID
+    assert HttpPiRuntime("http://127.0.0.1:8780").runtime_id == PI_RUNTIME_ID
 
 
 def test_installed_backend_capabilities_are_explicit():
-    caps = HttpOpenCodeRuntime("http://adapter:8770").capabilities
+    caps = HttpPiRuntime("http://127.0.0.1:8780").capabilities
     assert isinstance(caps, RuntimeCapabilities)
-    assert caps.model_discovery and caps.session_reuse and caps.event_polling
+    assert caps.model_discovery and caps.session_reuse
     assert caps.session_status and caps.pending_snapshot and caps.permission_response
-    assert caps.question_detection
     # Deliberately unsupported: never claimed, fail-closed downstream.
+    assert caps.event_polling is False
+    assert caps.question_detection is False
     assert caps.question_response is False
     assert caps.session_branching is False
 
@@ -70,10 +67,10 @@ def test_capability_gates_fail_closed(agent_env, payload):
     agent_env["runtime"].messages_script = []
     event = permission_event(run["session_id"], "per_cap", pattern=["/x/**"])
     agent_env["service"].orchestrator.handle_event(event)
-    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] == "waiting_permission"
+    assert call(agent_env, "read_agent_run", run_id=run["run_id"])["state"] == "waiting_permission"
     agent_env["runtime"]._capabilities = RuntimeCapabilities(permission_response=False)
     with pytest.raises(BridgeError) as exc:
-        call(agent_env, "respond_opencode_permission", run_id=run["run_id"],
+        call(agent_env, "respond_agent_permission", run_id=run["run_id"],
              request_id="per_cap", decision="once")
     assert exc.value.code == "runtime_unsupported"
 
@@ -81,7 +78,7 @@ def test_capability_gates_fail_closed(agent_env, payload):
 def test_session_reuse_capability_gates_continuation(agent_env, payload):
     job = publish(agent_env, payload)
     first = start(agent_env, job["id"], "cap-first")
-    assert call(agent_env, "read_opencode_run", run_id=first["run_id"])["state"] == "completed"
+    assert call(agent_env, "read_agent_run", run_id=first["run_id"])["state"] == "completed"
     job2 = publish(agent_env, payload, request_id="example-2", title="Follow-up")
     agent_env["runtime"]._capabilities = RuntimeCapabilities(session_reuse=False)
     with pytest.raises(BridgeError) as exc:
@@ -89,76 +86,20 @@ def test_session_reuse_capability_gates_continuation(agent_env, payload):
     assert exc.value.code == "runtime_unsupported"
 
 
-# ------------------------------------------------- runtime identity / migration
-def test_new_runs_persist_opencode_identity(agent_env, payload):
+# ------------------------------------------------- runtime identity
+def test_new_runs_persist_pi_identity(agent_env, payload):
     job = publish(agent_env, payload)
     run = start(agent_env, job["id"])
-    assert run["runtime"] == "opencode"
+    assert run["runtime"] == "pi"
     row = agent_env["service"].db.execute(
         "SELECT runtime FROM agent_runs WHERE id=?", (run["run_id"],)).fetchone()
-    assert row["runtime"] == "opencode"
-
-
-def test_legacy_database_backfills_runtime_without_loss(tmp_path):
-    from workspace_bridge.cli import initialize
-    from runtime_fakes import RecordingNotifier
-    parent = tmp_path / "projects"
-    parent.mkdir()
-    root = parent / "alpha"
-    root.mkdir()
-    state = tmp_path / "private-state"
-    cfg = initialize(state, [str(parent)], 8765, 8766)
-    runtime = FakeRuntime(str(root))
-    service = Service(state, cfg, runtime=runtime, notifier=RecordingNotifier(),
-                      orchestrator_background=False)
-    ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
-    token = service.manage_bridge("rotate_token")["token"]
-    service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.orchestrator.set_model_policy(
-        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet")
-    ws = service.workspace(ws_id)
-    job = service.call(ws_id, token, "prepare_handoff",
-                       Handoff.model_validate({"request_id": "legacy-1", "title": "Legacy",
-                                               "goal": "g", "plan": "p", "acceptance": "a",
-                                               "constraints": "c", "context": "x",
-                                               "context_hashes": {}}).model_dump())
-    run = service.call(ws_id, token, "start_opencode_run",
-                       {"job_id": job["id"], "request_id": "legacy-run-1"})
-    # Downgrade to the pre-neutral shape: no runtime column, session-only index.
-    service.db.execute("DROP INDEX IF EXISTS ux_agent_runs_session_active")
-    service.db.execute("ALTER TABLE agent_runs DROP COLUMN runtime")
-    service.db.execute(
-        "CREATE UNIQUE INDEX ux_agent_runs_session_active ON agent_runs(session) "
-        "WHERE state IN ('starting','running','waiting_permission','waiting_question') "
-        "AND session IS NOT NULL AND session <> ''")
-    service.db.commit()
-    assert "runtime" not in {row[1] for row in service.db.execute("PRAGMA table_info(agent_runs)")}
-    service.close()
-    # Reopen: non-destructive migration backfills identity, keeps rows.
-    reopened = Service(state, cfg, runtime=FakeRuntime(str(root)),
-                       notifier=RecordingNotifier(), orchestrator_background=False)
-    try:
-        assert "runtime" in {row[1] for row in reopened.db.execute("PRAGMA table_info(agent_runs)")}
-        row = reopened.db.execute(
-            "SELECT runtime, session, model, state FROM agent_runs WHERE id=?",
-            (run["run_id"],)).fetchone()
-        assert row["runtime"] == "opencode"
-        assert row["session"] == run["session_id"] and row["state"] in ("starting", "running")
-        index_sql = reopened.db.execute(
-            "SELECT sql FROM sqlite_master WHERE name='ux_agent_runs_session_active'").fetchone()[0]
-        assert "(runtime, session)" in index_sql
-        detail = reopened.call(ws_id, token, "read_opencode_run", {"run_id": run["run_id"]})
-        assert detail["runtime"] == "opencode"
-        assert detail["session_id"] == run["session_id"]
-    finally:
-        reopened.close()
+    assert row["runtime"] == "pi"
 
 
 def test_continuation_refuses_foreign_runtime(agent_env, payload):
     job = publish(agent_env, payload)
     first = start(agent_env, job["id"], "rt-first")
-    assert call(agent_env, "read_opencode_run", run_id=first["run_id"])["state"] == "completed"
+    assert call(agent_env, "read_agent_run", run_id=first["run_id"])["state"] == "completed"
     with agent_env["service"].lock, agent_env["service"].db:
         agent_env["service"].db.execute("UPDATE agent_runs SET runtime='other' WHERE id=?",
                                         (first["run_id"],))
@@ -182,7 +123,7 @@ def test_active_session_uniqueness_is_runtime_scoped(agent_env, payload):
                 "parent_run,session,model,state,error_code,error_message,result,notification,"
                 "created,started,updated,finished,message_floor_ms,session_reused,transcript) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("run_sameruntime", agent_env["id"], "opencode", job["id"], "uniq-other",
+                ("run_sameruntime", agent_env["id"], "pi", job["id"], "uniq-other",
                  "hash", None, session, "anthropic/claude-sonnet", "running", None, None,
                  "{}", "{}", "2026-09-21T00:00:00+00:00", None, "2026-09-21T00:00:00+00:00",
                  None, 0, 0, "[]"))
@@ -216,7 +157,7 @@ def test_permission_interaction_preserves_scope_and_routing(agent_env, payload):
     assert isinstance(staged, RuntimeInteraction)
     assert staged.kind == "permission" and staged.generation == "v2"
     agent_env["runtime"].add_pending_permission(session, staged)
-    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    detail = call(agent_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] == "waiting_permission"
     pending = detail["pending_requests"][0]
     assert pending["pattern"] == ["/data/always/**"]
@@ -238,7 +179,7 @@ def test_question_interaction_carries_no_content(agent_env, payload):
     staged = pending_question(session, "q_quiet", question_count=3, call_id="call_q")
     assert isinstance(staged, RuntimeInteraction) and staged.kind == "question"
     agent_env["runtime"].add_pending_question(session, staged)
-    detail = call(agent_env, "read_opencode_run", run_id=run["run_id"])
+    detail = call(agent_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] == "waiting_question"
     stored = agent_env["service"].db.execute(
         "SELECT metadata, explanation FROM agent_requests WHERE runtime_request='q_quiet'").fetchone()
@@ -272,7 +213,7 @@ def test_runtime_boundary_yields_typed_events(agent_env, payload):
     assert ask.permission.pattern == ("/x/**",)
     # The orchestrator consumes the typed event directly.
     agent_env["service"].orchestrator.handle_event(ask)
-    assert call(agent_env, "read_opencode_run", run_id=run["run_id"])["state"] == "waiting_permission"
+    assert call(agent_env, "read_agent_run", run_id=run["run_id"])["state"] == "waiting_permission"
 
 
 def test_wire_event_coercion_preserves_evidence_bounds():
@@ -309,7 +250,7 @@ def _insert_run_row(service, ws_id, job_id, run_id, session, runtime, created,
 def test_later_run_check_ignores_other_runtime_sessions(agent_env, payload):
     job = publish(agent_env, payload)
     first = start(agent_env, job["id"], "later-first")
-    assert call(agent_env, "read_opencode_run", run_id=first["run_id"])["state"] == "completed"
+    assert call(agent_env, "read_agent_run", run_id=first["run_id"])["state"] == "completed"
     service = agent_env["service"]
     # Legacy shape: completed without a persisted transcript snapshot.
     with service.lock, service.db:
@@ -329,7 +270,7 @@ def test_later_run_check_ignores_other_runtime_sessions(agent_env, payload):
     assert transcript_view["transcript"] != [{"error": "transcript unavailable"}]
     # A same-runtime later run still counts for transcript safety.
     _insert_run_row(service, agent_env["id"], job["id"], "run_same_rt",
-                    first["session_id"], "opencode", later)
+                    first["session_id"], "pi", later)
     assert service.orchestrator._session_has_later_run(dict(run_row)) is True
 
 
@@ -407,11 +348,11 @@ def test_startup_reconcile_ignores_foreign_runtime_rows(agent_env, payload):
 def _insert_request_row(service, ws_id, run_id, session, native_id, kind="permission"):
     with service.lock, service.db:
         service.db.execute(
-            "INSERT INTO agent_requests (id,run,workspace,session,opencode_request,"
+            "INSERT INTO agent_requests (id,run,workspace,session,"
             "runtime_request,kind,action,resource,pattern,metadata,explanation,redacted,"
             "state,decision,created,updated,resolved,generation) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"req_{native_id}", run_id, ws_id, session, f"{run_id}:{native_id}",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"req_{native_id}", run_id, ws_id, session,
              native_id, kind, "edit", "t", '["/x/**"]', "{}", "t", 0,
              "pending", None, "2026-09-21T00:00:00+00:00", "2026-09-21T00:00:00+00:00",
              None, "v1"))
@@ -439,7 +380,7 @@ def test_direct_paths_never_call_backend_for_foreign_runs(agent_env, payload):
     runtime.respond_calls.clear()
     runtime.abort_calls.clear()
     runtime.messages_calls.clear()
-    # Legacy read, cancel, respond, and request reads all refuse foreign
+    # Neutral read, cancel, respond, and request reads all refuse foreign
     # rows without backend calls.
     with pytest.raises(BridgeError) as exc:
         service.orchestrator.cancel_run(ws, "run_foreign_direct")
@@ -469,69 +410,6 @@ def test_direct_paths_never_call_backend_for_foreign_runs(agent_env, payload):
 
 
 # ------------------------------------------- audit: neutral request identity
-def test_request_migration_backfills_runtime_request(tmp_path):
-    from workspace_bridge.cli import initialize
-    from runtime_fakes import RecordingNotifier
-    parent = tmp_path / "projects"
-    parent.mkdir()
-    root = parent / "alpha"
-    root.mkdir()
-    state = tmp_path / "private-state"
-    cfg = initialize(state, [str(parent)], 8765, 8766)
-    runtime = FakeRuntime(str(root))
-    service = Service(state, cfg, runtime=runtime, notifier=RecordingNotifier(),
-                      orchestrator_background=False)
-    ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
-    token = service.manage_bridge("rotate_token")["token"]
-    service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.orchestrator.set_model_policy(
-        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet")
-    job = service.call(ws_id, token, "prepare_handoff",
-                       Handoff.model_validate({"request_id": "reqmig-1", "title": "ReqMig",
-                                               "goal": "g", "plan": "p", "acceptance": "a",
-                                               "constraints": "c", "context": "x",
-                                               "context_hashes": {}}).model_dump())
-    run = service.call(ws_id, token, "start_opencode_run",
-                       {"job_id": job["id"], "request_id": "reqmig-run-1"})
-    runtime.messages_script = []
-    ws = service.workspace(ws_id)
-    service.orchestrator.handle_event(permission_event(run["session_id"], "per_legacy"))
-    current = service.db.execute(
-        "SELECT opencode_request, runtime_request FROM agent_requests").fetchone()
-    assert current["runtime_request"] == "per_legacy"
-    assert current["opencode_request"] == f"{run['run_id']}:per_legacy"
-    # Rewrite the row to the genuine pre-neutral shape (native id stored
-    # directly in opencode_request), then downgrade and reopen (migration).
-    with service.lock, service.db:
-        service.db.execute("UPDATE agent_requests SET opencode_request='per_legacy'")
-    # Downgrade to the pre-neutral request shape, then reopen (migration).
-    service.db.execute("DROP INDEX IF EXISTS ux_agent_requests_run_native")
-    service.db.execute("ALTER TABLE agent_requests DROP COLUMN runtime_request")
-    service.db.commit()
-    assert "runtime_request" not in {
-        row[1] for row in service.db.execute("PRAGMA table_info(agent_requests)")}
-    service.close()
-    reopened = Service(state, cfg, runtime=FakeRuntime(str(root)),
-                       notifier=RecordingNotifier(), orchestrator_background=False)
-    try:
-        assert "runtime_request" in {
-            row[1] for row in reopened.db.execute("PRAGMA table_info(agent_requests)")}
-        row = reopened.db.execute(
-            "SELECT opencode_request, runtime_request, kind, state FROM agent_requests").fetchone()
-        assert row["runtime_request"] == "per_legacy" == row["opencode_request"]
-        assert row["kind"] == "permission" and row["state"] == "pending"
-        index_sql = reopened.db.execute(
-            "SELECT sql FROM sqlite_master WHERE name='ux_agent_requests_run_native'").fetchone()[0]
-        assert "(run, runtime_request)" in index_sql
-        # The historical row resolves by its native id within its run.
-        view = reopened.call(ws_id, token, "read_opencode_request",
-                             {"run_id": run["run_id"], "request_id": "per_legacy"})
-        assert view["request_id"] == "per_legacy"
-    finally:
-        reopened.close()
-
-
 def test_same_native_request_id_coexists_across_runs(agent_env, payload):
     job1 = publish(agent_env, payload)
     run1 = start(agent_env, job1["id"], "dup-first")
@@ -543,34 +421,35 @@ def test_same_native_request_id_coexists_across_runs(agent_env, payload):
     orch.handle_event(permission_event_v2(run2["session_id"], "per_dup",
                                            resources=["/data/requested/**"],
                                            save=["/data/always/**"]))
-    assert call(agent_env, "read_opencode_run", run_id=run1["run_id"])["state"] == "waiting_permission"
-    assert call(agent_env, "read_opencode_run", run_id=run2["run_id"])["state"] == "waiting_permission"
+    assert call(agent_env, "read_agent_run", run_id=run1["run_id"])["state"] == "waiting_permission"
+    assert call(agent_env, "read_agent_run", run_id=run2["run_id"])["state"] == "waiting_permission"
     rows = agent_env["service"].db.execute(
-        "SELECT opencode_request, runtime_request, run FROM agent_requests "
+        "SELECT id, runtime_request, run FROM agent_requests "
         "WHERE runtime_request='per_dup' ORDER BY run").fetchall()
     assert len(rows) == 2
-    # Native identity is identical; legacy storage keys are run-scoped.
+    # Native identity is identical; rows stay distinct per run.
     assert {r["runtime_request"] for r in rows} == {"per_dup"}
-    assert len({r["opencode_request"] for r in rows}) == 2
-    assert call(agent_env, "read_opencode_request", run_id=run1["run_id"],
+    assert len({r["id"] for r in rows}) == 2
+    assert len({r["run"] for r in rows}) == 2
+    assert call(agent_env, "read_agent_request", run_id=run1["run_id"],
                 request_id="per_dup")["request_id"] == "per_dup"
     # Wrong-run lookups and responses stay rejected.
     with pytest.raises(BridgeError) as exc:
-        call(agent_env, "read_opencode_request", run_id=run1["run_id"],
+        call(agent_env, "read_agent_request", run_id=run1["run_id"],
              request_id="nope")
     assert exc.value.code == "not_found"
     with pytest.raises(BridgeError) as exc:
-        call(agent_env, "respond_opencode_permission", run_id=run1["run_id"],
+        call(agent_env, "respond_agent_permission", run_id=run1["run_id"],
              request_id="nope", decision="once")
     assert exc.value.code == "not_found"
     # Resolving run1's ask leaves run2's identical native id untouched.
-    answered = call(agent_env, "respond_opencode_permission", run_id=run1["run_id"],
+    answered = call(agent_env, "respond_agent_permission", run_id=run1["run_id"],
                     request_id="per_dup", decision="once")
     assert answered["request_state"] == "approved" and answered["run_state"] == "running"
-    detail2 = call(agent_env, "read_opencode_run", run_id=run2["run_id"])
+    detail2 = call(agent_env, "read_agent_run", run_id=run2["run_id"])
     assert detail2["state"] == "waiting_permission"
     assert detail2["pending_requests"][0]["request_id"] == "per_dup"
-    answered2 = call(agent_env, "respond_opencode_permission", run_id=run2["run_id"],
+    answered2 = call(agent_env, "respond_agent_permission", run_id=run2["run_id"],
                      request_id="per_dup", decision="reject")
     assert answered2["request_state"] == "rejected"
 
@@ -586,9 +465,9 @@ def test_reply_routing_uses_native_id_with_generation(agent_env, payload):
     orch.handle_event(permission_event_v2(run2["session_id"], "per_v2",
                                            resources=["/data/requested/**"],
                                            save=["/data/always/**"]))
-    call(agent_env, "respond_opencode_permission", run_id=run1["run_id"],
+    call(agent_env, "respond_agent_permission", run_id=run1["run_id"],
          request_id="per_v1", decision="once")
-    call(agent_env, "respond_opencode_permission", run_id=run2["run_id"],
+    call(agent_env, "respond_agent_permission", run_id=run2["run_id"],
          request_id="per_v2", decision="always")
     # The backend receives the exact native ids with verbatim generation.
     assert agent_env["runtime"].respond_calls == [

@@ -1,15 +1,15 @@
-"""Runtime-neutral agent boundary with the OpenCode backend installed.
+"""Runtime-neutral agent boundary with the Pi backend installed.
 
 Workspace Bridge never starts or supervises an agent server. In the Docker
-deployment a small package-owned Node SDK adapter (``runtime/opencode-adapter``)
+deployment the native Pi host adapter (``runtime/pi-host-adapter``)
 is the only process that holds provider/network credentials and talks to the
 external host server. This module defines the generic internal contract
 (``AgentRuntime`` / ``RuntimeCapabilities`` / ``RuntimeInteraction`` /
-``RuntimeEvent``) and the currently installed OpenCode backend
-(``HttpOpenCodeRuntime``, identity ``"opencode"``) that implements it.
+``RuntimeEvent``) and the currently installed Pi backend
+(``HttpPiRuntime``, identity ``"pi"``) that implements it.
 
-The orchestrator programs against the neutral contract only. OpenCode-specific
-transport details (endpoint names, V1/V2 permission generations, raw event
+The orchestrator programs against the neutral contract only. Backend-specific
+transport details (endpoint names, permission generations, raw event
 shapes) are normalized here. Sanitization happens here and again in the
 orchestrator: no credentials, webhook URLs, external paths beyond the mapped
 workspace root, or hidden reasoning may cross this boundary into persisted
@@ -17,9 +17,7 @@ state or MCP output.
 """
 from __future__ import annotations
 
-import base64
 import json
-import os
 import re
 import socket
 import urllib.error
@@ -39,9 +37,9 @@ MAX_TRANSCRIPT_CHARS = 60000
 
 
 class RuntimeUnavailable(BridgeError):
-    """The adapter or the upstream OpenCode server could not be reached."""
+    """The adapter or the upstream agent server could not be reached."""
 
-    def __init__(self, message: str = "OpenCode runtime is unavailable"):
+    def __init__(self, message: str = "Agent runtime is unavailable"):
         super().__init__(message, "runtime_unavailable")
 
 
@@ -129,14 +127,14 @@ class SessionInfo:
     id: str
     directory: str
     title: str = ""
-    # Pi 3C1 enforcement/audit metadata (empty for OpenCode/legacy).
+    # Pi 3C1 enforcement/audit metadata (empty for legacy runs).
     # Persisted with the run: fingerprint(s), adapter/Pi versions and
     # permission revision identify the enforcement build without paths.
     enforcement_fingerprint: str = ""
     adapter_version: str = ""
     pi_version: str = ""
     policy_revision: str = ""
-    # Pi 3C2 extension snapshot metadata (empty for OpenCode/legacy and
+    # Pi 3C2 extension snapshot metadata (empty for legacy runs and
     # for Pi sessions created without enabled extensions). The revision
     # binds continuation; the snapshot rows carry id/name/version/
     # fingerprint with no host paths.
@@ -153,12 +151,6 @@ class MessageInfo:
     text: str = ""
     tools: tuple[str, ...] = ()
     error: str | None = None
-
-
-#: Stable identity of the currently installed backend. Persisted per agent
-#: run so a future multi-runtime bridge can refuse cross-runtime session
-#: reuse fail-closed instead of attaching one backend's session to another.
-OPENCODE_RUNTIME_ID = "opencode"
 
 
 #: Canonical package-owned runtime identity grammar, shared by the MCP
@@ -179,13 +171,13 @@ class RuntimeCapabilities:
     """Explicit capability advertisement for one AgentRuntime backend.
 
     The orchestrator must consult these flags instead of assuming every
-    future backend supports the current OpenCode flows. All ``True`` defaults
-    below describe the installed OpenCode adapter; unsupported futures stay
-    ``False`` and fail closed (``runtime_unsupported``), never silently fall
-    back. Deliberately unsupported today: ``question_response`` (the
+    future backend supports the current agent flows. Capability defaults
+    below are conservative; unsupported backends stay ``False`` and fail
+    closed (``runtime_unsupported``), never silently fall back.
+    Deliberately unsupported today: ``question_response`` (the
     installed API exposes no question reply) and ``session_branching``.
     ``execution_history`` is the clean execution-history capability:
-    Pi implements it, OpenCode remains unsupported and unchanged.
+    Pi implements it.
     """
 
     model_discovery: bool = True
@@ -198,8 +190,7 @@ class RuntimeCapabilities:
     question_response: bool = False
     session_branching: bool = False
     execution_history: bool = False
-    # 3C2: native extension inventory (GET /extensions). Pi implements
-    # it; OpenCode remains unsupported and unchanged.
+    # 3C2: native extension inventory (GET /extensions). Pi implements it.
     extension_inventory: bool = False
 
 
@@ -272,14 +263,9 @@ class PendingPermission(RuntimeInteraction):
 class PendingQuestion(RuntimeInteraction):
     """One official pending question request owned by exactly one session.
 
-    Verified against installed @opencode-ai/sdk 1.18.31: the V2
-    session-scoped snapshot (GET /api/session/{sessionID}/question)
-    returns Array<QuestionV2Request> = {id, sessionID,
-    questions: [{question, header, options, multiple, custom}],
-    tool?: {messageID, callID}}. Only the request id, owning session,
-    question count and tool call reference cross this boundary: question
-    bodies, headers, options and answers are never carried, persisted or
-    logged by the bridge.
+    Only the request id, owning session, question count and tool call
+    reference cross this boundary: question bodies, headers, options and
+    answers are never carried, persisted or logged by the bridge.
     """
 
     kind: str = "question"
@@ -367,7 +353,7 @@ class AgentRuntime:
 
     @property
     def runtime_id(self) -> str:
-        """Stable backend identity persisted per agent run (e.g. ``"opencode"``)."""
+        """Stable backend identity persisted per agent run (e.g. ``"pi"``)."""
         raise NotImplementedError
 
     @property
@@ -381,8 +367,7 @@ class AgentRuntime:
     def list_models(self, directory: str | None = None) -> list[ModelInfo]:
         """List models known to the backend.
 
-        ``directory`` is workspace-scoped discovery context. The installed
-        OpenCode backend ignores it (global discovery); workspace-scoped
+        ``directory`` is workspace-scoped discovery context. Workspace-scoped
         backends such as Pi require a non-empty directory and fail closed
         without one.
         """
@@ -412,8 +397,7 @@ class AgentRuntime:
     def session_status(self, directory: str, session_id: str) -> str:
         """Return the native session status: idle, busy or retry.
 
-        A missing map entry is idle under the installed OpenCode v1.18.31
-        semantics; malformed/unknown statuses raise so callers fail closed.
+        Malformed/unknown statuses raise so callers fail closed.
         """
         raise NotImplementedError
 
@@ -430,8 +414,7 @@ class AgentRuntime:
     def list_pending_questions(self, directory: str, session_id: str) -> list[RuntimeInteraction]:
         """Return the backend's currently pending questions for exactly one session.
 
-        Official V2 session-scoped snapshot only
-        (GET /api/session/{sessionID}/question). Used only to recover a
+        Session-scoped snapshot only. Used only to recover a
         question.asked event that was never observed. Transport/API
         failures raise (fail closed) and must never be treated as an empty
         list; absence from a successful list never resolves an already
@@ -447,429 +430,13 @@ class AgentRuntime:
         """Clean execution-history journal read (3C1).
 
         Pi implements it via the token-authenticated exact-session
-        endpoint; OpenCode remains unsupported and unchanged
-        (RuntimeUnsupported, no HTTP call).
+        endpoint (RuntimeUnsupported when the deployed adapter lacks it,
+        no HTTP call).
         """
         raise NotImplementedError
 
     def close(self) -> None:
         return None
-
-
-class OpenCodeRuntime(AgentRuntime):
-    """Compatibility base for the OpenCode backend; new code uses AgentRuntime."""
-
-    name = "runtime"
-
-    @property
-    def runtime_id(self) -> str:
-        return OPENCODE_RUNTIME_ID
-
-    @property
-    def capabilities(self) -> RuntimeCapabilities:
-        return RuntimeCapabilities()
-
-    def read_executions(self, directory: str, session_id: str, *,
-                        after: int = 0, limit: int = 50) -> dict:
-        """OpenCode has no execution history (unchanged)."""
-        raise RuntimeUnsupported("OpenCode runtime does not support execution history")
-
-
-class HttpOpenCodeRuntime(OpenCodeRuntime):
-    """Bounded HTTP client for the private adapter sidecar (no host-published port)."""
-
-    name = "http-adapter"
-
-    def __init__(self, base_url: str, token: str = "", *,
-                 connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-                 read_timeout: float = DEFAULT_READ_TIMEOUT):
-        parsed = urllib.parse.urlparse(base_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise BridgeError("WB_OPENCODE_RUNTIME_URL must be an http(s) URL")
-        self.base_url = base_url.rstrip("/")
-        self.token = token or ""
-        self.connect_timeout = min(max(float(connect_timeout), 0.5), MAX_RUNTIME_TIMEOUT)
-        self.read_timeout = min(max(float(read_timeout), 0.5), MAX_RUNTIME_TIMEOUT)
-
-    def _request(self, method: str, path: str, *, query: dict | None = None,
-                 body: dict | None = None, timeout: float | None = None) -> Any:
-        url = self.base_url + path
-        if query:
-            clean = {k: str(v) for k, v in query.items() if v is not None}
-            if clean:
-                url += "?" + urllib.parse.urlencode(clean)
-        data = None
-        headers = {"Accept": "application/json"}
-        if self.token:
-            headers["X-Runtime-Token"] = self.token
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        request.timeout = timeout if timeout is not None else self.read_timeout
-        try:
-            with urllib.request.urlopen(request, timeout=request.timeout) as response:
-                raw = response.read(2 * 1024 * 1024)
-                if not raw:
-                    return {}
-                return json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            detail = ""
-            try:
-                detail = json.loads(exc.read(8192)).get("error", "") if exc.fp else ""
-            except Exception:  # noqa: BLE001 - never surface raw bodies
-                detail = ""
-            if exc.code in (400, 409, 412, 422):
-                # 400 covers an upstream GET /permission encoding failure:
-                # a rejection, never an empty permission list.
-                raise RuntimeRejected(_bounded(detail, 300) or "Runtime rejected the request",
-                                      status=exc.code) from None
-            if exc.code == 501:
-                raise RuntimeUnsupported(_bounded(detail, 300) or "Runtime capability unsupported") from None
-            if exc.code in (404,):
-                raise RuntimeRejected("Runtime resource not found", "not_found", status=404) from None
-            raise RuntimeUnavailable("OpenCode runtime returned an error") from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError):
-            raise RuntimeUnavailable("OpenCode runtime is unavailable") from None
-        except (ValueError, UnicodeError):
-            raise RuntimeUnavailable("OpenCode runtime returned an invalid response") from None
-
-    def health(self) -> dict:
-        value = self._request("GET", "/health", timeout=self.connect_timeout)
-        if not isinstance(value, dict):
-            raise RuntimeUnavailable("OpenCode runtime health response was invalid")
-        return {"ok": bool(value.get("ok")), "version": _bounded(value.get("version"), 80),
-                "adapter_version": _bounded(value.get("adapter_version"), 40),
-                "server_configured": bool(value.get("server_configured")),
-                "locked": bool(value.get("locked")),
-                "instance": _bounded(value.get("instance"), 80),
-                "cursor": value.get("cursor") if isinstance(value.get("cursor"), int) else 0,
-                "event_stream": self._normalize_event_stream(value.get("event_stream"))}
-
-    @staticmethod
-    def _normalize_event_stream(raw: Any) -> dict | None:
-        # Sanitized adapter EventHub health only: status/transitions/timing.
-        # Never event contents or secrets. Unknown shapes -> None (unknown),
-        # never a fabricated "subscribed".
-        if not isinstance(raw, dict):
-            return None
-        status = raw.get("status")
-        if not isinstance(status, str):
-            return None
-        status = _bounded(status, 40)
-        if status not in ("starting", "subscribed", "reconnecting", "degraded"):
-            status = "degraded" if status else "starting"
-            if not status:
-                return None
-        transitions = raw.get("transitions")
-        failures = raw.get("consecutiveFailures", raw.get("consecutive_failures"))
-
-        def _count(*names: str) -> int | None:
-            for name in names:
-                value = raw.get(name)
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                    return value
-            return None
-
-        def _moment(*names: str) -> str | None:
-            for name in names:
-                value = raw.get(name)
-                if isinstance(value, str) and value:
-                    return _bounded(value, 60)
-            return None
-
-        return {"status": status,
-                "transitions": transitions if isinstance(transitions, int) and transitions >= 0 else 0,
-                "last_transition": _bounded(raw.get("lastTransition", raw.get("last_transition")), 60)
-                if isinstance(raw.get("lastTransition", raw.get("last_transition")), str) else None,
-                "consecutive_failures": failures if isinstance(failures, int) and failures >= 0 else 0,
-                # Functional event-stream health: bounded counters/timestamps
-                # only, never event contents. Absent on older adapters
-                # (unknown, never fabricated).
-                "raw_event_count": _count("rawEventCount", "raw_event_count"),
-                "control_event_count": _count("controlEventCount", "control_event_count"),
-                "functional_event_count": _count("functionalEventCount", "functional_event_count"),
-                "last_raw_event_at": _moment("lastRawEventAt", "last_raw_event_at"),
-                "last_functional_event_at": _moment("lastFunctionalEventAt",
-                                                   "last_functional_event_at")}
-
-    def list_models(self, directory: str | None = None) -> list[ModelInfo]:
-        # Global discovery: the adapter /models endpoint takes no workspace
-        # directory. Model availability never depends on a workspace. The
-        # optional directory is accepted for the directory-aware contract
-        # and deliberately ignored here.
-        value = self._request("GET", "/models")
-        rows = value.get("models") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeUnavailable("OpenCode model list was invalid")
-        result: list[ModelInfo] = []
-        for row in rows[:2000]:
-            if not isinstance(row, dict):
-                continue
-            provider = _bounded(row.get("provider"), 120)
-            model = _bounded(row.get("model"), 200)
-            if not provider or not model:
-                continue
-            variants = tuple(_bounded(v, 80) for v in (row.get("variants") or []) if isinstance(v, str))[:16]
-            result.append(ModelInfo(selector=_bounded(row.get("selector"), 260) or f"{provider}/{model}",
-                                    provider=provider, model=model,
-                                    name=_bounded(row.get("name"), 200),
-                                    default=bool(row.get("default")), variants=variants))
-        return result
-
-    def create_session(self, directory: str, title: str,
-                       options: dict | None = None) -> SessionInfo:
-        value = self._request("POST", "/sessions", body={"directory": directory, "title": title})
-        session = value.get("session") if isinstance(value, dict) else None
-        if not isinstance(session, dict) or not session.get("id"):
-            raise RuntimeUnavailable("OpenCode session creation returned no session id")
-        # Never substitute the requested directory for a missing observed one:
-        # callers must fail closed on an unknown/mismatched session directory.
-        return SessionInfo(id=_bounded(session["id"], 200),
-                           directory=_bounded(session.get("directory"), 1024),
-                           title=_bounded(session.get("title"), 200))
-
-    def get_session(self, directory: str, session_id: str) -> SessionInfo | None:
-        try:
-            value = self._request("GET", f"/sessions/{urllib.parse.quote(session_id)}",
-                                  query={"directory": directory})
-        except RuntimeRejected as exc:
-            if exc.code == "not_found":
-                return None
-            raise
-        session = value.get("session") if isinstance(value, dict) else None
-        if not isinstance(session, dict) or not session.get("id"):
-            return None
-        return SessionInfo(id=_bounded(session["id"], 200),
-                           directory=_bounded(session.get("directory"), 1024),
-                           title=_bounded(session.get("title"), 200))
-
-    def prompt_async(self, directory: str, session_id: str, text: str,
-                     model: dict | None = None) -> None:
-        body: dict[str, Any] = {"directory": directory, "text": _bounded(text, 60000)}
-        if model:
-            body["model"] = {"providerID": _bounded(model.get("providerID"), 120),
-                             "modelID": _bounded(model.get("modelID"), 200)}
-        value = self._request("POST", f"/sessions/{urllib.parse.quote(session_id)}/prompt-async",
-                              body=body, timeout=self.read_timeout)
-        if not isinstance(value, dict) or not value.get("accepted"):
-            raise RuntimeUnavailable("OpenCode runtime did not accept the prompt")
-
-    def messages(self, directory: str, session_id: str, limit: int = 40) -> list[MessageInfo]:
-        value = self._request("GET", f"/sessions/{urllib.parse.quote(session_id)}/messages",
-                              query={"directory": directory, "limit": max(1, min(int(limit), 100))})
-        rows = value.get("messages") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeUnavailable("OpenCode message list was invalid")
-        result: list[MessageInfo] = []
-        for row in rows[-100:]:
-            if not isinstance(row, dict):
-                continue
-            tools = tuple(_bounded(t, 120) for t in (row.get("tools") or []) if isinstance(t, str))[:24]
-            error = row.get("error")
-            result.append(MessageInfo(id=_bounded(row.get("id"), 200),
-                                      role=_bounded(row.get("role"), 40),
-                                      created=row.get("created") if isinstance(row.get("created"), int) else None,
-                                      completed=row.get("completed") if isinstance(row.get("completed"), int) else None,
-                                      text=_bounded(row.get("text"), MAX_MESSAGE_TEXT),
-                                      tools=tools,
-                                      error=_bounded(error, 300) if error else None))
-        return result
-
-    def respond_permission(self, directory: str, session_id: str, permission_id: str,
-                           response: str, generation: str = "v1") -> bool:
-        if response not in ("once", "always", "reject"):
-            raise BridgeError("Permission response must be once, always or reject", "invalid_arguments")
-        if generation not in ("v1", "v2"):
-            raise BridgeError("Unknown permission generation for reply routing", "invalid_arguments")
-        value = self._request(
-            "POST",
-            f"/sessions/{urllib.parse.quote(session_id)}/permissions/{urllib.parse.quote(permission_id)}",
-            body={"directory": directory, "response": response, "generation": generation})
-        return bool(value.get("ok")) if isinstance(value, dict) else False
-
-    def abort_session(self, directory: str, session_id: str) -> bool:
-        value = self._request("POST", f"/sessions/{urllib.parse.quote(session_id)}/abort",
-                              body={"directory": directory})
-        return bool(value.get("ok")) if isinstance(value, dict) else False
-
-    def session_status(self, directory: str, session_id: str) -> str:
-        value = self._request("GET", f"/sessions/{urllib.parse.quote(session_id)}/status",
-                              query={"directory": directory})
-        status = value.get("status") if isinstance(value, dict) else None
-        # The adapter already normalizes the native status map: a session id
-        # absent from the map is reported as idle under the installed
-        # v1.18.31 semantics. Anything else unknown here is malformed and
-        # must fail validation rather than guess.
-        if status in ("idle", "busy", "retry"):
-            return status
-        raise RuntimeUnavailable("OpenCode session status was invalid")
-
-    # Last pending-list source reported by the adapter ("v2" primary or
-    # "v1" compatibility fallback). Set by list_pending_permissions; read by
-    # the orchestrator for generation-aware diagnostics. None when unknown.
-    last_permission_source: str | None = None
-
-    def list_pending_permissions(self, directory: str, session_id: str) -> list[RuntimeInteraction]:
-        if not session_id:
-            raise RuntimeUnavailable("OpenCode permission list required a session id")
-        value = self._request("GET", f"/sessions/{urllib.parse.quote(session_id)}/permissions",
-                              query={"directory": directory})
-        rows = value.get("permissions") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeUnavailable("OpenCode permission list was invalid")
-        result: list[PendingPermission] = []
-        for row in rows[:100]:
-            permission = self._normalize_pending(row, session_id)
-            if permission is not None:
-                result.append(permission)
-        reported = value.get("source") if isinstance(value, dict) else None
-        if reported in ("v1", "v2"):
-            self.last_permission_source = reported
-        elif any(p.generation == "v2" for p in result):
-            self.last_permission_source = "v2"
-        elif result:
-            self.last_permission_source = "v1"
-        else:
-            self.last_permission_source = None
-        return result
-
-    # Last pending-list source reported by the adapter ("v2" primary or
-    # "v1" compatibility fallback). Set by list_pending_questions; read by
-    # the orchestrator for source-aware diagnostics. None when unknown.
-    last_question_source: str | None = None
-
-    def list_pending_questions(self, directory: str, session_id: str) -> list[RuntimeInteraction]:
-        if not session_id:
-            raise RuntimeUnavailable("OpenCode question list required a session id")
-        value = self._request("GET", f"/sessions/{urllib.parse.quote(session_id)}/questions",
-                              query={"directory": directory})
-        rows = value.get("questions") if isinstance(value, dict) else None
-        if not isinstance(rows, list):
-            raise RuntimeUnavailable("OpenCode question list was invalid")
-        result: list[PendingQuestion] = []
-        for row in rows[:100]:
-            question = self._normalize_pending_question(row, session_id)
-            if question is not None:
-                result.append(question)
-        reported = value.get("source") if isinstance(value, dict) else None
-        self.last_question_source = reported if reported in ("v1", "v2") else None
-        return result
-
-    @staticmethod
-    def _normalize_pending_question(raw: Any, session_id: str) -> PendingQuestion | None:
-        # Canonical pending-question item from the adapter (same shape as
-        # the official V2 snapshot row): strict session scoping, bounded
-        # counts/references only. Question bodies, headers, options and
-        # answers never cross this boundary.
-        if not isinstance(raw, dict):
-            return None
-        question_id = _bounded(raw.get("id"), 200)
-        owner = _bounded(raw.get("session_id"), 200)
-        if not question_id or owner != session_id:
-            return None
-        try:
-            count = int(raw.get("question_count") or 0)
-        except (TypeError, ValueError):
-            return None
-        if count < 0:
-            return None
-        call_id = _bounded(raw.get("call_id"), 200) or None
-        return PendingQuestion(id=question_id, session_id=owner,
-                               question_count=min(count, 100), call_id=call_id)
-
-    @staticmethod
-    def _normalize_pending(raw: Any, session_id: str) -> PendingPermission | None:
-        # Canonical pending-permission item from the adapter (same shape as
-        # the normalized ask event): strict session scoping, bounded and
-        # sanitized fields, exact always scope preserved in `pattern`.
-        if not isinstance(raw, dict):
-            return None
-        permission_id = _bounded(raw.get("id"), 200)
-        owner = _bounded(raw.get("session_id"), 200)
-        if not permission_id or owner != session_id:
-            return None
-
-        def _str_list(value: Any, limit: int = 32) -> list[str]:
-            if isinstance(value, str):
-                return [value[:400]]
-            if isinstance(value, list):
-                return [_bounded(p, 400) for p in value if isinstance(p, str)][:limit]
-            return []
-
-        if "requested_patterns" in raw:
-            requested = _str_list(raw.get("requested_patterns"))
-        elif "patterns" in raw:
-            requested = _str_list(raw.get("patterns"))
-        elif "resources" in raw:
-            # Defensive V2 raw shape: resources are the requested targets.
-            requested = _str_list(raw.get("resources"))
-        else:
-            requested = _str_list(raw.get("pattern"))
-        if "pattern" in raw:
-            scope = _str_list(raw.get("pattern"))
-        elif "always" in raw:
-            scope = _str_list(raw.get("always"))
-        elif "save" in raw:
-            # Defensive V2 raw shape: save is the exact proposed always scope.
-            scope = _str_list(raw.get("save"))
-        else:
-            scope = []
-        raw_tool = raw.get("tool")
-        if isinstance(raw_tool, str):
-            tool: Any = _bounded(raw_tool, 200)
-        elif isinstance(raw_tool, (dict, list)):
-            tool, _ = sanitize_metadata(raw_tool)
-        else:
-            tool = None
-        raw_source = raw.get("source")
-        if tool is None and isinstance(raw_source, dict):
-            tool, _ = sanitize_metadata(raw_source)
-        call_id = (_bounded(raw.get("call_id"), 200) or _bounded(raw.get("callID"), 200)
-                   or None)
-        if call_id is None and isinstance(raw_source, dict):
-            call_id = (_bounded(raw_source.get("callID"), 200)
-                       or _bounded(raw_source.get("call_id"), 200) or None)
-        metadata, metadata_redacted = sanitize_metadata(raw.get("metadata"))
-        if not isinstance(metadata, dict):
-            metadata = {}
-        generation = raw.get("generation")
-        if generation not in ("v1", "v2"):
-            # Backward compatibility: rows persisted or served without the
-            # generation marker are V1. Anything else fails closed upstream
-            # (reply routing rejects unknown generations explicitly).
-            generation = "v1"
-        return PendingPermission(
-            id=permission_id, session_id=owner,
-            action=(_bounded(raw.get("action"), 120) or _bounded(raw.get("permission"), 120)
-                    or _bounded(raw.get("type"), 120)),
-            title=_bounded(raw.get("title"), 300),
-            pattern=tuple(scope), requested_patterns=tuple(requested), tool=tool,
-            call_id=call_id, metadata=metadata,
-            redacted=bool(raw.get("redacted")) or metadata_redacted,
-            created=_bounded(raw.get("created"), 60),
-            generation=generation)
-
-    def poll_events(self, cursor: int, timeout: float = 25.0) -> tuple[list[RuntimeEvent], int]:
-        value = self._request("GET", "/events",
-                              query={"cursor": max(0, int(cursor)),
-                                     "timeout": min(max(float(timeout), 1.0), 30.0)},
-                              timeout=min(max(float(timeout), 1.0), 30.0) + 8.0)
-        events = value.get("events") if isinstance(value, dict) else None
-        next_cursor = value.get("cursor") if isinstance(value, dict) else None
-        if not isinstance(events, list):
-            raise RuntimeUnavailable("OpenCode event poll was invalid")
-        normalized = [event for event in (self._normalize_event(item) for item in events) if event is not None]
-        return normalized, int(next_cursor) if isinstance(next_cursor, int) else cursor
-
-    @staticmethod
-    def _normalize_event(raw: Any) -> RuntimeEvent | None:
-        """Normalize one raw adapter event; compatibility wrapper around coerce_runtime_event."""
-        return coerce_runtime_event(raw)
-
-    @staticmethod
-    def _coerce_event(raw: Any) -> RuntimeEvent | None:
-        return coerce_runtime_event(raw)
 
 
 #: Stable identity of the Pi native host-adapter backend (milestone 3A).
@@ -1360,8 +927,7 @@ class HttpPiRuntime(AgentRuntime):
 def coerce_runtime_event(raw: Any) -> RuntimeEvent | None:
     """Normalize one raw adapter event dict into a RuntimeEvent.
 
-    Neutral boundary helper shared by ``HttpOpenCodeRuntime`` (whose
-    ``_normalize_event`` delegates here) and the orchestrator's
+    Neutral boundary helper shared by HTTP runtimes and the orchestrator's
     compatibility path for scripted/test events. Returns ``None`` for
     malformed input. Permission asks become a normalized
     ``RuntimeInteraction``; replies keep id/response only; session
@@ -1380,17 +946,15 @@ def coerce_runtime_event(raw: Any) -> RuntimeEvent | None:
     cursor=raw.get("cursor") if isinstance(raw.get("cursor"), int) else None)
     if kind in ("permission.asked", "permission.updated", "permission.v2.asked"):
         # Canonical internal ask event is "permission.asked".
-        # "permission.updated" is a V1 compatibility alias and
-        # "permission.v2.asked" (verified V2 shape: action, resources,
+        # "permission.updated" is a compatibility alias and
+        # "permission.v2.asked" (shape: action, resources,
         # save, source) is normalized through the same branch so callers
-        # have one ask branch. The adapter normally performs this V2
+        # have one ask branch. The adapter normally performs this
         # normalization; the mapping here is a defensive second boundary.
         #
-        # Real V1 ask fields: id, permission, patterns (requested),
-        # always (exact proposed always scope), metadata, tool.
-        # Real V2 ask fields: id, action, resources (requested),
-        # save (exact proposed always scope), metadata, source.
-        # `pattern` holds exactly OpenCode's proposed always scope and is
+        # Ask fields: id, permission/action, patterns/resources (requested),
+        # always/save (exact proposed always scope), metadata, tool/source.
+        # `pattern` holds exactly the backend's proposed always scope and is
         # never synthesized; `requested_patterns` stays separately
         # reviewable.
         event.type = "permission.asked"
@@ -1527,22 +1091,3 @@ def coerce_runtime_event(raw: Any) -> RuntimeEvent | None:
         if request_hint:
             event.event_id = _bounded(request_hint, 200)
     return event
-
-
-def runtime_from_environment(environ: dict | None = None) -> AgentRuntime | None:
-    """Build the runtime client from local runtime configuration only.
-
-    No credentials are read from MCP, project files, manager JSON or handoffs.
-    """
-    env = environ if environ is not None else os.environ
-    url = (env.get("WB_OPENCODE_RUNTIME_URL") or "").strip()
-    if not url:
-        return None
-    token = (env.get("WB_RUNTIME_TOKEN") or "").strip()
-    return HttpOpenCodeRuntime(url, token)
-
-
-def basic_auth_header(username: str, password: str) -> str:
-    """Small helper for adapter configuration/tests; never logged or persisted."""
-    raw = f"{username}:{password}".encode("utf-8")
-    return "Basic " + base64.b64encode(raw).decode("ascii")

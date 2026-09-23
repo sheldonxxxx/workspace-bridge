@@ -69,7 +69,7 @@ Follow the current official developer-mode app/Plugins flow, choose **Connection
 
 Start with `list_workspaces`, then `workspace_info` and `read_file` with the selected ID. Validate another enabled project through **the same connection**. Test that disabled mappings disappear, wrong-workspace job IDs fail, global pause denies requests, and rotation revokes the old credential. Only synthetic/nonsensitive data should be used for initial validation.
 
-Adding workspaces afterward only changes local mappings; no new tunnel/app, extra channel, credential or bridge restart is necessary. Upgrading from v0.1 requires refreshing the changed tool schemas once; see `MIGRATION_0.2.md`.
+Adding workspaces afterward only changes local mappings; no new tunnel/app, extra channel, credential or bridge restart is necessary.
 
 ## Troubleshooting without weakening controls
 

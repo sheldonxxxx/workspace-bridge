@@ -40,6 +40,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const POLICY_VERSION = 3;
 export const SUPPORTED_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
@@ -813,5 +814,5 @@ export function evaluateToolCall({
 // fingerprint/identity diagnostics only; v3 performs no fixed filesystem
 // deny on it (ordinary configurable file/external policy applies).
 export function selfProtectionDir() {
-  return path.dirname(new URL(import.meta.url).pathname);
+  return path.dirname(fileURLToPath(import.meta.url));
 }

@@ -1,6 +1,6 @@
 // Audit corrections: HTTP policy transport, revision binding, opaque
 // marker grammar, missing-preflight approval refusal, minimal preflight
-// retention, and confirmed UI writes.
+// retention, and infallible in-process select resolution.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
@@ -13,7 +13,7 @@ import { canonicalizeProjectsDir } from "../paths.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "../policy.mjs";
 import { OPTION_ALWAYS, OPTION_ONCE, OPTION_REJECT } from "../trusted-permission-extension.mjs";
 import { createPiAdapterServer } from "../server.mjs";
-import { createFakeSpawn, respondState } from "./helpers.mjs";
+import { askPermission, createFakeTransport, trackSelect } from "./fake-sdk.mjs";
 
 const TOKEN = "shared-private-token";
 const AUTH = { "X-Runtime-Token": TOKEN };
@@ -40,35 +40,15 @@ function writablePolicy() {
   });
 }
 
-function autoSpawn() {
-  const bag = createFakeSpawn();
-  let n = 0;
-  function spawnFn(binary, args, opts) {
-    const child = bag.spawnFn(binary, args, opts);
-    child.autoExitCode = 0;
-    n += 1;
-    const sid = `ses-corr-${n}`;
-    child.on("stdin", (line) => {
-      for (const raw of String(line).split("\n").filter(Boolean)) {
-        let req;
-        try {
-          req = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        if (req && req.type === "extension_ui_response") continue;
-        setImmediate(() => {
-          if (!req || typeof req !== "object") return;
-          if (req.type === "get_state") respondState(child, req.id, { sessionId: sid });
-          else if (req.type === "abort") {
-            child.respond({ id: req.id, type: "response", command: "abort", success: true });
-          }
-        });
-      }
-    });
-    return child;
-  }
-  return { ...bag, spawnFn };
+function makeAdapter(projects, transport) {
+  return new PiAdapter({
+    projectsRoot: projects.root,
+    agentDir: path.join(projects.tmp, "agent-dir"),
+    createSessionFn: transport.createSdkSession,
+    listModelsFn: transport.listModelsFn,
+    piUsable: true,
+    piVersion: "0.87.0",
+  });
 }
 
 function post(base, urlPath, body, headers = {}) {
@@ -92,7 +72,7 @@ test("server POST /sessions forwards exactly policy + revision", async () => {
   };
   const server = createPiAdapterServer({
     adapter: fake, token: TOKEN, adapterVersion: "0.2.0", instance: "inst-1",
-    piUsable: true, piVersion: "0.86.1",
+    piUsable: true, piVersion: "0.87.0",
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -115,21 +95,13 @@ test("server POST /sessions forwards exactly policy + revision", async () => {
   }
 });
 
-test("writable policy over HTTP yields an editing child; read-only still loads the trusted extension", async () => {
+test("writable policy over HTTP yields an editing loadout; read-only loads the trusted extension", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root,
-    piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"),
-    timeoutMs: 2000,
-    spawnFn: bag.spawnFn,
-    piUsable: true,
-    piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const server = createPiAdapterServer({
     adapter, token: TOKEN, adapterVersion: "0.2.0", instance: "inst-1",
-    piUsable: true, piVersion: "0.86.1",
+    piUsable: true, piVersion: "0.87.0",
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -140,10 +112,9 @@ test("writable policy over HTTP yields an editing child; read-only still loads t
       permission_policy: policy, policy_revision: policyRevision(policy),
     }, AUTH);
     assert.equal(created.status, 200);
-    const writableArgs = bag.calls[0].args;
-    assert.ok(writableArgs.includes("read,grep,find,ls,edit,write"));
-    assert.ok(writableArgs.includes("-e"));
-    assert.ok(bag.calls[0].opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":true'));
+    assert.deepEqual(transport.created[0].tools, ["read", "grep", "find", "ls", "edit", "write"]);
+    assert.deepEqual(transport.created[0].policy, policy);
+    assert.ok(transport.created[0].uiContext);
     const readOnly = safeDefaultPolicy();
     const created2 = await post(base, "/sessions", {
       directory: projects.app, title: "r",
@@ -151,11 +122,9 @@ test("writable policy over HTTP yields an editing child; read-only still loads t
     }, AUTH);
     assert.equal(created2.status, 200);
     // Read-only v2 sessions enforce read policy through the trusted
-    // extension too: read-family tools plus exactly one -e.
-    assert.deepEqual(bag.calls[1].args.slice(0, 5),
-      ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve"]);
-    assert.ok(bag.calls[1].args.includes("--no-extensions"));
-    assert.equal(bag.calls[1].args.filter((a) => a === "-e").length, 1);
+    // extension too: read-family allowlist plus a bound UI context.
+    assert.deepEqual(transport.created[1].tools, ["read", "grep", "find", "ls"]);
+    assert.ok(transport.created[1].uiContext);
     // Mismatched revision fails closed at the HTTP boundary.
     const bad = await post(base, "/sessions", {
       directory: projects.app, title: "x",
@@ -164,7 +133,7 @@ test("writable policy over HTTP yields an editing child; read-only still loads t
     assert.equal(bad.status, 409);
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    await adapter.shutdown({ graceMs: 0 });
+    await adapter.shutdown();
   }
 });
 
@@ -182,216 +151,163 @@ test("opaque marker grammar accepts only prefix + bare toolCallId", () => {
 
 test("suffixed or malformed marker titles fail closed without pending", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "m", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
-  child.respond({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit",
+  const entry = adapter.sessions.get(session.id);
+  const ui = entry.session.boundUiContext;
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit",
     args: { path: "notes.txt" } });
   await new Promise((resolve) => setImmediate(resolve));
-  // Old suffixed shape is rejected: cancelled, never pending.
-  child.respond({ type: "extension_ui_request", id: "ui-old", method: "select",
-    title: "WB_PERMISSION_V1:call-1 edit notes.txt",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
+  // Old suffixed shape is rejected: resolves undefined, never pending.
+  const old = await ui.select("WB_PERMISSION_V1:call-1 edit notes.txt",
+    [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]);
+  assert.equal(old, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
   // Empty id is rejected the same way.
-  child.respond({ type: "extension_ui_request", id: "ui-empty", method: "select",
-    title: "WB_PERMISSION_V1:",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
+  const empty = await ui.select("WB_PERMISSION_V1:",
+    [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]);
+  assert.equal(empty, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
-  // Foreign (non-marker) UI is ignored without any write.
-  const writesBefore = child.requests().length;
-  child.respond({ type: "extension_ui_request", id: "ui-foreign", method: "select",
-    title: "Pick a model:", options: ["a", "b"] });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(child.requests().length, writesBefore);
+  // Foreign (non-marker) UI is ignored without suspension.
+  const foreign = await ui.select("Pick a model:", ["a", "b"]);
+  assert.equal(foreign, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
-  const writes = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.ok(writes.some((r) => r.id === "ui-old" && r.cancelled === true));
-  assert.ok(writes.some((r) => r.id === "ui-empty" && r.cancelled === true));
   // Preflight metadata (not title text) still identifies the pending call.
-  child.respond({ type: "extension_ui_request", id: "ui-good", method: "select",
-    title: "WB_PERMISSION_V1:call-1",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.app, session.id);
+  const { selectPromise, listed } = await askPermission(adapter, projects.app, session.id, {
+    toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" },
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
   assert.equal(listed.length, 1);
   assert.equal(listed[0].resource, "notes.txt");
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.respondPermission(projects.app, session.id, listed[0].id, "once");
+  assert.equal(await selectPromise, OPTION_ONCE);
+  await adapter.shutdown();
 });
 
 // --------------------------------------- 3. missing preflight at approval
-test("once/always without the exact preflight cannot send an allow response", async () => {
+test("once/always without the exact preflight cannot approve", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "s", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
   const entry = adapter.sessions.get(session.id);
-  async function askOnce(callId, uiId) {
-    child.respond({ type: "tool_execution_start", toolCallId: callId, toolName: "edit",
-      args: { path: "notes.txt" } });
-    await new Promise((resolve) => setImmediate(resolve));
-    child.respond({ type: "extension_ui_request", id: uiId, method: "select",
-      title: `WB_PERMISSION_V1:${callId}`,
-      options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-    await new Promise((resolve) => setImmediate(resolve));
-    const listed = await adapter.listPermissions(projects.app, session.id);
+  async function askOnce(callId) {
+    const { selectPromise, listed } = await askPermission(adapter, projects.app, session.id, {
+      toolCallId: callId, toolName: "edit", args: { path: "notes.txt" },
+      options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+    });
     assert.equal(listed.length, 1);
-    return listed[0];
+    return { selectPromise, tracked: trackSelect(selectPromise), pending: listed[0] };
   }
-  const pending = await askOnce("call-1", "ui-1");
-  // Evict the preflight (tool end raced, map overflow, restart): once and
-  // always must conflict and must NOT write an allow value.
+  const first = await askOnce("call-1");
+  // Evict the preflight (tool end raced, map overflow): once and always
+  // must conflict and must NOT resolve an approval value.
   entry.preflights.delete("call-1");
   await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, pending.id, "once"), /scope changed/i);
+    adapter.respondPermission(projects.app, session.id, first.pending.id, "once"), /scope changed/i);
   await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, pending.id, "always"),
+    adapter.respondPermission(projects.app, session.id, first.pending.id, "always"),
     /not found|scope changed/i);
-  const writes = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.ok(writes.every((r) => r.cancelled === true));
-  assert.ok(!writes.some((r) => r.value === OPTION_ONCE || r.value === OPTION_ALWAYS));
+  await first.selectPromise;
+  assert.equal(first.tracked.settled, true);
+  assert.equal(first.tracked.value, undefined);
+  assert.ok(first.tracked.value !== OPTION_ONCE && first.tracked.value !== OPTION_ALWAYS);
   assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
   // Duplicate/late request stays rejected.
   await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, pending.id, "once"), /not found/i);
-  // Stale reject only cancels: ok:true, never an approval.
-  const pending2 = await askOnce("call-2", "ui-2");
+    adapter.respondPermission(projects.app, session.id, first.pending.id, "once"), /not found/i);
+  // Stale reject still resumes the suspended call as rejected.
+  const second = await askOnce("call-2");
   entry.preflights.delete("call-2");
-  const rejected = await adapter.respondPermission(projects.app, session.id, pending2.id, "reject");
+  const rejected = await adapter.respondPermission(projects.app, session.id, second.pending.id, "reject");
   assert.deepEqual(rejected, { ok: true, decision: "reject" });
-  const writes2 = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.ok(writes2.some((r) => r.id === "ui-2" && r.cancelled === true));
-  assert.ok(!writes2.some((r) => r.value === OPTION_ONCE || r.value === OPTION_ALWAYS));
-  await adapter.shutdown({ graceMs: 0 });
+  await second.selectPromise;
+  assert.equal(second.tracked.value, undefined);
+  await adapter.shutdown();
 });
 
-// ------------------------- stale resolution requires confirmed delivery
-test("stale waits keep pending on failed cancel and clear on later reject", async () => {
+// ------------------------- stale resolution always settles in-process
+test("stale responds clear pending and settle the suspended select", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "st", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
   const entry = adapter.sessions.get(session.id);
-  async function askOnce(callId, uiId) {
-    child.respond({ type: "tool_execution_start", toolCallId: callId, toolName: "edit",
-      args: { path: "notes.txt" } });
-    await new Promise((resolve) => setImmediate(resolve));
-    child.respond({ type: "extension_ui_request", id: uiId, method: "select",
-      title: `WB_PERMISSION_V1:${callId}`,
-      options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-    await new Promise((resolve) => setImmediate(resolve));
-    const listed = await adapter.listPermissions(projects.app, session.id);
-    assert.equal(listed.length, 1);
-    return listed[0];
-  }
-  const pending = await askOnce("call-1", "ui-1");
+  const { selectPromise, listed } = await askPermission(adapter, projects.app, session.id, {
+    toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" },
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
+  const tracked = trackSelect(selectPromise);
   entry.preflights.delete("call-1");
-  // Break stdin delivery: stale once must not succeed and keeps pending.
-  const goodWrite = child.stdin.write;
-  child.stdin.write = (line, cb) => {
-    if (typeof cb === "function") cb(new Error("EPIPE"));
-    return false;
-  };
+  // In-process resolution cannot fail: stale once conflicts but still
+  // settles the suspended call as rejected and clears pending.
   await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, pending.id, "once"),
-    /unavailable/i);
-  // Stale reject with broken delivery also fails: never ok:true.
-  await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, pending.id, "reject"),
-    /unavailable/i);
-  assert.equal((await adapter.listPermissions(projects.app, session.id)).length, 1);
-  assert.ok(!child.requests().some((r) => r.type === "extension_ui_response"
-    && (r.value === OPTION_ONCE || r.value === OPTION_ALWAYS)));
-  // Delivery restored: a later reject confirms cancellation and clears it.
-  child.stdin.write = goodWrite;
-  const rejected = await adapter.respondPermission(projects.app, session.id, pending.id, "reject");
-  assert.deepEqual(rejected, { ok: true, decision: "reject" });
+    adapter.respondPermission(projects.app, session.id, listed[0].id, "once"),
+    /scope changed/i);
+  await selectPromise;
+  assert.equal(tracked.settled, true);
+  assert.equal(tracked.value, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
-test("malformed trusted UI that cannot be cancelled fail-closes the session", async () => {
+test("malformed selects never suspend and leave the session usable", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "fc", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
   const entry = adapter.sessions.get(session.id);
-  child.respond({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit",
+  const ui = entry.session.boundUiContext;
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit",
     args: { path: "notes.txt" } });
   await new Promise((resolve) => setImmediate(resolve));
-  // Break stdin delivery, then send a malformed trusted-shaped ask: the
-  // owned session must fail closed rather than hang untracked.
-  child.stdin.write = (line, cb) => {
-    if (typeof cb === "function") cb(new Error("EPIPE"));
-    return false;
-  };
-  child.respond({ type: "extension_ui_request", id: "ui-broken", method: "select",
-    title: "WB_PERMISSION_V1:call-1 edit notes.txt",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(entry.rpc.dead, true);
-  // No permission is exposed after the fail-closed session death.
-  await assert.rejects(
-    adapter.listPermissions(projects.app, session.id), /not found/i);
-  await adapter.shutdown({ graceMs: 0 });
+  // A malformed trusted-shaped ask resolves undefined immediately: no
+  // untracked suspension, no session death.
+  const malformed = await ui.select("WB_PERMISSION_V1:call-1 edit notes.txt",
+    [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]);
+  assert.equal(malformed, undefined);
+  assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
+  // The session stays usable: a well-formed ask still suspends and
+  // resolves afterwards.
+  const { selectPromise, listed } = await askPermission(adapter, projects.app, session.id, {
+    toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" },
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
+  assert.equal(listed.length, 1);
+  await adapter.respondPermission(projects.app, session.id, listed[0].id, "once");
+  assert.equal(await selectPromise, OPTION_ONCE);
+  await adapter.shutdown();
 });
 
 // ------------------------------------------------------- 5. minimal data
 test("preflight and public state retain only bounded path identity", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "d", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
   const entry = adapter.sessions.get(session.id);
   const secret = "sk-live-secret-" + "y".repeat(20000);
-  child.respond({ type: "tool_execution_start", toolCallId: "call-w", toolName: "write",
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-w", toolName: "write",
     args: { path: "notes.txt", content: secret } });
-  child.respond({ type: "tool_execution_start", toolCallId: "call-e", toolName: "edit",
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-e", toolName: "edit",
     args: { path: "notes.txt", edits: [{ oldText: secret, newText: secret }] } });
-  child.respond({ type: "tool_execution_start", toolCallId: "call-g", toolName: "grep",
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-g", toolName: "grep",
     args: { pattern: secret, path: "notes.txt", unrelated: { nested: secret } } });
   await new Promise((resolve) => setImmediate(resolve));
   const stored = JSON.stringify([...entry.preflights.entries()]);
@@ -400,47 +316,32 @@ test("preflight and public state retain only bounded path identity", async () =>
   assert.deepEqual(entry.preflights.get("call-w").input, { path: "notes.txt" });
   assert.deepEqual(entry.preflights.get("call-e").input, { path: "notes.txt" });
   assert.deepEqual(entry.preflights.get("call-g").input, { path: "notes.txt" });
-  child.respond({ type: "extension_ui_request", id: "ui-w", method: "select",
-    title: "WB_PERMISSION_V1:call-w",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.app, session.id);
+  const { listed } = await askPermission(adapter, projects.app, session.id, {
+    toolCallId: "call-w", toolName: "write", args: { path: "notes.txt", content: secret },
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
   assert.ok(!JSON.stringify(listed).includes("sk-live-secret"));
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
-// ------------------------------------------------------- 6. confirmed write
-test("unconfirmed UI write keeps pending and reports unavailable", async () => {
+// ------------------------------------------------------- 6. settled resolve
+test("respond always settles the suspended select in-process", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = new PiAdapter({
-    projectsRoot: projects.root, piBinary: "pi",
-    agentDir: path.join(projects.tmp, "agent-dir"), timeoutMs: 2000,
-    spawnFn: bag.spawnFn, piUsable: true, piVersion: "0.86.1",
-  });
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const session = await adapter.createSession(projects.app, "u", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
-  const child = bag.children[0];
-  child.respond({ type: "tool_execution_start", toolCallId: "call-1", toolName: "edit",
-    args: { path: "notes.txt" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  child.respond({ type: "extension_ui_request", id: "ui-1", method: "select",
-    title: "WB_PERMISSION_V1:call-1",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.app, session.id);
+  const { selectPromise, listed } = await askPermission(adapter, projects.app, session.id, {
+    toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" },
+    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  });
   assert.equal(listed.length, 1);
-  // Break stdin delivery: the callback reports failure.
-  child.stdin.write = (line, cb) => {
-    if (typeof cb === "function") cb(new Error("EPIPE"));
-    return false;
-  };
-  await assert.rejects(
-    adapter.respondPermission(projects.app, session.id, listed[0].id, "once"),
-    /unavailable/i);
-  // Pending stays present: never removed without confirmed delivery.
-  assert.equal((await adapter.listPermissions(projects.app, session.id)).length, 1);
-  await adapter.shutdown({ graceMs: 0 });
+  // In-process resolution is infallible: the suspended select always
+  // settles and pending is always removed on response.
+  await adapter.respondPermission(projects.app, session.id, listed[0].id, "once");
+  assert.equal(await selectPromise, OPTION_ONCE);
+  assert.deepEqual(await adapter.listPermissions(projects.app, session.id), []);
+  await adapter.shutdown();
 });

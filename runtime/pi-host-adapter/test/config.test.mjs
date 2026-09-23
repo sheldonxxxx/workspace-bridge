@@ -6,7 +6,7 @@ import path from "node:path";
 
 import {
   ADAPTER_VERSION, DEFAULT_HOST, DEFAULT_PORT, expandAgentDir, resolveAgentDir,
-  isAgentDirAllowed, loadConfig, checkPiBinary, piRpcArgv, defaultAgentDir,
+  isAgentDirAllowed, loadConfig, checkPiBinary, defaultAgentDir, sdkToolLoadout,
 } from "../config.mjs";
 
 test("default host/port and token locking", () => {
@@ -113,8 +113,9 @@ test("agent dir rejects physical target when ~/.pi/agent itself is a symlink", (
   assert.deepEqual(fs.readdirSync(physical), []);
 });
 
-test("legacy spawn argv is read-only, untrusted, extension-free, and shell-free", () => {
-  assert.deepEqual(piRpcArgv(), ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"]);
+test("legacy tool loadout is read-only, extension-free, and shell-free", () => {
+  assert.deepEqual(sdkToolLoadout({ writable: false }),
+    { tools: ["read", "grep", "find", "ls"], excludeTools: null, extensionPaths: [] });
 });
 
 test("checkPiBinary reports usable pi and unusable missing binary", () => {

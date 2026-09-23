@@ -19,7 +19,6 @@ from workspace_bridge.pi_permissions import (
     PI_PERMISSION_POLICY_SETTING,
     SUPPORTED_PI_PERMISSION_TOOLS,
     canonical_json,
-    migrate_v1_policy,
     policy_revision,
     safe_defaults,
 )
@@ -86,19 +85,22 @@ def make_pi_runtime(directory):
 @pytest.fixture
 def pi_env(tmp_path):
     from workspace_bridge.cli import initialize  # noqa: F401
-    opencode = FakeRuntime("/tmp")
+    aux = FakeRuntime("/tmp")
+    # Second configured backend for cross-runtime coverage alongside Pi.
+    aux._runtime_id = "aux"
     pi = make_pi_runtime("/tmp")
-    service, root = make_service(tmp_path, {"opencode": opencode, "pi": pi})
+    service, root = make_service(tmp_path, {"aux": aux, "pi": pi})
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.orchestrators["opencode"].set_model_policy(
-        ["anthropic/claude-sonnet"], "anthropic/claude-sonnet")
+    ws = service.workspace(ws_id)
+    service.orchestrators["aux"].set_model_policy(
+        ["anthropic/claude-sonnet"], "anthropic/claude-sonnet", ws)
     service.orchestrators["pi"].set_model_policy(
         ["anthropic/claude-sonnet"], "anthropic/claude-sonnet",
         service.workspace(ws_id))
-    yield {"service": service, "opencode": opencode, "pi": pi,
+    yield {"service": service, "aux": aux, "pi": pi,
            "root": root, "state": service.state, "config": service.config,
            "id": ws_id, "token": token}
     service.close()
@@ -232,54 +234,6 @@ def test_set_and_get_round_trip_with_revision(pi_env):
     assert configured is False and fallback == safe_defaults()
 
 
-# ------------------------------------------- v1/v2 -> v3 migration (3C1)
-def test_v1_stored_policy_migrates_without_losing_admin_settings(pi_env):
-    from workspace_bridge.pi_permissions import load_policy
-    service = pi_env["service"]
-    v1 = v1_enabled_policy()
-    service.set_setting(PI_PERMISSION_POLICY_SETTING, json.dumps(v1))
-    policy, revision, configured, migrated_from = load_policy(service)
-    assert configured is True and migrated_from == 1
-    assert policy["version"] == 3
-    assert policy["write_tools_enabled"] is True
-    assert policy["tools"] == v1["tools"]
-    assert policy["protected_patterns"] == v1["protected_patterns"]
-    assert policy["protected_template_exceptions"] == v1["protected_template_exceptions"]
-    assert policy["allow_session_always"] is False
-    assert policy["external_access"] == {"default_mode": "deny", "roots": []}
-    assert policy["shell_mode"] == "deny"
-    # Migration is in memory only: storage still holds v1 until a v3 save.
-    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 1
-    # Revision is computed from the migrated v3 object (pre-upgrade
-    # sessions cannot continue under a silently changed scope).
-    assert revision == policy_revision(policy)
-    assert revision == policy_revision(migrate_v1_policy(v1))
-    # Public triple stays compatible.
-    triple = service.get_pi_permission_policy()
-    assert triple == (policy, revision, True)
-    # Admin GET reports the migration without mutating storage.
-    view = service.pi_permission_view()
-    assert view["policy"] == policy and view["migrated_from_version"] == 1
-    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 1
-    # First v3 save persists v3 and clears the migration marker.
-    saved = service.set_pi_permission_policy(policy)
-    assert saved["policy"]["version"] == 3
-    assert json.loads(service.setting(PI_PERMISSION_POLICY_SETTING))["version"] == 3
-    assert "migrated_from_version" not in service.pi_permission_view()
-
-
-def test_v1_migration_preserves_disabled_policy(pi_env):
-    from workspace_bridge.pi_permissions import load_policy
-    service = pi_env["service"]
-    v1 = v1_enabled_policy()
-    v1["enabled"] = False
-    service.set_setting(PI_PERMISSION_POLICY_SETTING, json.dumps(v1))
-    policy, _, configured, migrated_from = load_policy(service)
-    assert configured is True and migrated_from == 1
-    assert policy["write_tools_enabled"] is False
-    assert service.pi_permission_status()["effective_writable"] is False
-
-
 def test_status_hides_roots_but_reports_mode_and_count(pi_env):
     service = pi_env["service"]
     policy = enabled_policy(external_access={
@@ -361,7 +315,7 @@ def test_admin_permission_policy_routes_and_auth(pi_env):
                 reread = (await authed.get("/api/runtimes/pi/permission-policy")).json()
                 assert reread["policy"] == saved["policy"]
                 # Unknown runtime fails cleanly; other runtimes unsupported.
-                assert (await authed.get("/api/runtimes/opencode/permission-policy")).status_code == 404
+                assert (await authed.get("/api/runtimes/aux/permission-policy")).status_code == 404
                 assert (await authed.get("/api/runtimes/nope/permission-policy")).status_code == 400
                 status = (await authed.get("/api/status")).json()
                 assert status["runtime_permissions"]["pi"]["enabled"] is True
@@ -483,7 +437,7 @@ def test_create_session_sends_policy_snapshot(monkeypatch):
     assert session.id == "pi_ses_9"
     assert seen["permission_policy"] == policy
     assert seen["policy_revision"] == revision
-    # OpenCode-shaped calls without options stay unchanged on the wire.
+    # Pi calls without options stay unchanged on the wire.
     seen.clear()
     runtime.create_session("/projects/alpha", "Handoff")
     assert "permission_policy" not in seen and "policy_revision" not in seen

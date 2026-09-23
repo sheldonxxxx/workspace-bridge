@@ -3,8 +3,8 @@
 ## Responsibilities
 
 ChatGPT owns understanding, technical decisions, scoped instructions, acceptance
-criteria and code review. OpenCode implements and runs checks locally. The user
-manually carries instructions to OpenCode and pastes its response back into ChatGPT,
+criteria and code review. The Pi agent implements and runs checks locally. The user
+manually carries instructions to the agent and pastes its response back into ChatGPT,
 or — when the local administrator enabled agent execution — ChatGPT starts one
 bounded run for the prepared handoff and reads the final result itself. Run state is
 tracked independently of handoff publication state.
@@ -41,15 +41,15 @@ of prepare_handoff restores earlier file contents.
 Edit dispatched plans only after the local agent has stopped, explain the revision,
 and tell the user which path to resend. Never silently rewrite completed acceptance
 criteria. Use a new corrective handoff for a new milestone. The user still pastes
-OpenCode's normal reply into ChatGPT; no report file is required.
+the agent’s normal reply into ChatGPT; no report file is required.
 
-## OpenCode's reply
+## The agent's reply
 
 Use normal prose, not a required file or machine schema. Include the handoff path,
 what changed and affected file paths, actual check commands and outcomes, failures
 or checks not run, remaining risks, and blockers. Do not invent success, weaken
 tests, rewrite handoffs or mark the work independently audited. Stop when complete.
-See `examples/OPENCODE_REPLY.md` for an illustrative response, not a file to create.
+Keep the reply to normal prose in the conversation; no report file is required.
 
 ## ChatGPT's audit
 
@@ -72,7 +72,7 @@ state is not a completion signal.
 
 When a workspace has agent execution enabled, `start_agent_run` requires a
 prepared handoff in the same workspace and accepts no free-form prompt or path. A run
-is bound to one OpenCode session under the canonical mapped workspace root and stores
+is bound to one Pi session under the canonical mapped workspace root and stores
 its exact model selector (the configured default when `model` is omitted, or an
 explicit admin-enabled selector per the project-lead skill model-choice rule;
 MCP cannot change the policy), lifecycle state, timestamps and notification status.
@@ -81,7 +81,7 @@ MCP cannot change the policy), lifecycle state, timestamps and notification stat
 `waiting_permission`/`waiting_question` are resumable and never imply failure.
 
 `once`/`always`/`reject` answer only a still-pending request bound to that exact
-workspace/run/session and resume the SAME session. `always` passes OpenCode's own
+workspace/run/session and resume the SAME session. `always` passes Pi’s own
 proposed pattern through unchanged and fails closed when it cannot be reviewed. The
 manager can stop an active session; abort is recorded as `cancelled` only after a
 positive result, otherwise the run stays explicit. A corrective iteration is a new

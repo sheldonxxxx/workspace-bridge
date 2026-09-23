@@ -6,11 +6,10 @@ Checked 2026-09-18. References establish external interfaces, not proof of a rea
 - Official tunnel client: https://github.com/openai/tunnel-client — installation and operation.
 - Official profile schema: https://github.com/openai/tunnel-client/blob/master/docs/configuration.md — `server_urls`, channels, `extra_headers`, `discovery_extra_headers`, `env:` secrets. Workspace Bridge uses one endpoint/channel.
 - MCP Streamable HTTP: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http — current protocol transport; this project retains legacy 2025 support in a small explicit adapter, not an externally certified SDK.
-- OpenCode tools: https://opencode.ai/docs/tools/ — documented read ranges, filename globs and regex search inspired the browsing capabilities. The bridge does not claim exact API/engine parity, ripgrep invocation, modification-time sorting or repository-ignore behavior.
 - Codex official repository: https://github.com/openai/codex — coding-agent workflow reference, not an integrated dependency or claim of exact internal tool compatibility.
 - Python regex maintainer documentation: https://pypi.org/project/regex/ — matching timeout support used by bounded `grep_files`.
 
-No shell, Codex/OpenCode SDK, ripgrep process, automatic agent control, OpenAI model client, or remote-fetch operation is imported by the MCP service. `scripts/run_tunnel.py` is a separately invoked local setup convenience, not an MCP execution path.
+No shell, Codex/Pi SDK, ripgrep process, automatic agent control, OpenAI model client, or remote-fetch operation is imported by the MCP service. `scripts/run_tunnel.py` is a separately invoked local setup convenience, not an MCP execution path.
 
 ## Image implementation — checked 2026-09-18
 

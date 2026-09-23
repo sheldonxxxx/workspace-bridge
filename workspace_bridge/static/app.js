@@ -10,7 +10,7 @@ let config = {};
 let bridgeState = {};
 let settings = {model_policy: {configured: false, enabled: [], default: null, enabled_count: 0}, runtime_policies: {}};
 let globalModels = [];
-let modelRuntime = "opencode";
+let modelRuntime = "pi";
 let discoveryWorkspaceId = null;
 let allWorkspaces = [];
 let sessionsOffset = 0;
@@ -27,13 +27,33 @@ $("theme-toggle").onclick = () => {
 };
 renderTheme();
 function node(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
+// Data labels let CSS restack table cells as labelled cards on narrow screens
+// while the real <table>/<thead> structure stays intact for desktop and tests.
+function tdLabel(cell, name) { cell.dataset.label = name; return cell; }
 function message(text) { $("message").textContent = text; $("message").style.display = "block"; setTimeout(() => { $("message").style.display = "none"; }, 6000); }
 async function api(path, method = "GET", body) {
   const r = await fetch(path, {method, credentials: "same-origin", headers: {...(body ? {"Content-Type": "application/json"} : {})}, body: body ? JSON.stringify(body) : undefined});
   const value = await r.json(); if (!r.ok) throw new Error(value.error || `HTTP ${r.status}`); return value;
 }
 function button(text, fn, cls = "secondary") { const b = node("button", text, cls); b.type = "button"; b.onclick = () => Promise.resolve().then(fn).catch(e => message(e.message)); return b; }
-function show(title, value) { $("output-title").textContent = title; $("output").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2); $("output-panel").hidden = false; $("output-panel").scrollIntoView({behavior: "smooth", block: "center"}); }
+function openOutputPanel() {
+  $("output-panel").hidden = false;
+  $("output-backdrop").hidden = false;
+  $("output-panel").scrollIntoView({behavior: "smooth", block: "center"});
+}
+function closeOutputPanel() {
+  $("output-panel").hidden = true;
+  $("output-backdrop").hidden = true;
+  $("output").replaceChildren();
+  $("output").textContent = "";
+}
+function show(title, value) {
+  $("output-title").textContent = title;
+  $("output").replaceChildren();
+  if (value instanceof Node) $("output").append(value);
+  else $("output").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  openOutputPanel();
+}
 function credential(value) { show("Shared bridge credential — shown once", `This credential authorizes ALL enabled workspace mappings. Save it in your local tunnel environment, NOT in ChatGPT.\n\n${value.token}\n\nAfter rotation, update the tunnel environment and restart tunnel-client. The old token is revoked for subsequent calls.`); }
 async function manage(id, operation, extra) {
   const result = await api(`/api/workspaces/${id}`, "POST", {operation, ...(extra || {})});
@@ -45,35 +65,21 @@ function tunnelProfile() {
 }
 
 function renderRuntime(status) {
-  const runtime = status.opencode || {};
-  const pill = $("opencode-status");
-  const label = !runtime.configured ? "Not configured" : runtime.locked ? "Locked" : runtime.healthy ? "Healthy" : "Unavailable";
-  pill.textContent = label;
-  pill.className = runtime.configured && runtime.healthy ? "pill enabled" : "pill";
-  $("opencode-endpoint").textContent = runtime.configured ? "Adapter connected · host OpenCode" : "Adapter not configured";
-  const parts = [];
-  if (runtime.version) parts.push(`OpenCode ${runtime.version}`);
-  if (runtime.adapter_version) parts.push(`adapter ${runtime.adapter_version}`);
-  if (runtime.locked) parts.push("Adapter locked");
-  if (runtime.configured && !runtime.healthy && runtime.detail) parts.push(runtime.detail);
-  if (!runtime.configured) parts.push("Agent runs are off by default");
-  $("opencode-meta").textContent = parts.join(" · ");
-  $("discord-status").textContent = runtime.discord_configured
-    ? "Discord notifications on"
-    : "Discord notifications off";
-  const policy = settings.model_policy || {configured: false, enabled: [], default: null, enabled_count: 0};
-  $("policy-status").textContent = policy.configured
-    ? `Policy: ${policy.enabled_count} enabled · default ${policy.default}`
-    : "Policy: not configured · choose an enabled model and default";
   const runtimes = (status.runtimes && status.runtimes.runtimes) || {};
-  const pi = runtimes.pi || {};
+  const pi = runtimes.pi || status.pi || {};
   const piPolicies = status.runtime_policies || settings.runtime_policies || {};
   const piPolicy = piPolicies.pi || {configured: false, enabled: [], default: null, enabled_count: 0};
+  const piLabel = !pi.configured ? "Not configured" : pi.locked ? "Locked" : pi.healthy ? "Healthy" : "Unavailable";
+  const piClass = pi.configured && pi.healthy ? "pill enabled" : "pill";
   if ($("pi-status")) {
     const piPill = $("pi-status");
-    const piLabel = !pi.configured ? "Not configured" : pi.locked ? "Locked" : pi.healthy ? "Healthy" : "Unavailable";
     piPill.textContent = piLabel;
-    piPill.className = pi.configured && pi.healthy ? "pill enabled" : "pill";
+    piPill.className = piClass;
+  }
+  if ($("pi-top-status")) {
+    const topPill = $("pi-top-status");
+    topPill.textContent = piLabel;
+    topPill.className = piClass + " signal-value";
   }
   if ($("pi-endpoint")) $("pi-endpoint").textContent = pi.configured ? "Adapter connected · host Pi" : "Pi adapter not configured";
   if ($("pi-meta")) {
@@ -144,7 +150,7 @@ let piPermDraft = null;
 function piPermDraftFrom(policy) {
   const external = policy.external_access || {};
   return {
-    enabled: Boolean(policy.write_tools_enabled ?? policy.enabled),
+    enabled: Boolean(policy.write_tools_enabled),
     tools: {...policy.tools},
     protected_patterns: [...(policy.protected_patterns || [])],
     protected_template_exceptions: [...(policy.protected_template_exceptions || [])],
@@ -156,7 +162,6 @@ function piPermDraftFrom(policy) {
       mode: ["allow", "ask", "deny"].includes(r.mode) ? r.mode : "deny",
     })),
     // v3 shell authority: single Deny/Ask/Allow selector, no command rules.
-    // v2 policies migrate in memory with shell deny.
     shell_mode: ["deny", "ask", "allow"].includes(policy.shell_mode) ? policy.shell_mode : "deny",
   };
 }
@@ -539,29 +544,21 @@ function renderModelPolicy() {
 }
 
 async function openModels(runtime) {
-  modelRuntime = runtime || "opencode";
+  modelRuntime = runtime || "pi";
   try {
     await loadModels();
   } catch (e) { message(e.message); }
   const policies = settings.runtime_policies || {};
-  const policy = modelRuntime === "opencode"
-    ? (settings.model_policy || {enabled: [], default: null})
-    : (policies[modelRuntime] || {enabled: [], default: null});
+  const policy = (policies[modelRuntime] || {enabled: [], default: null});
   draftEnabled = new Set(policy.enabled || []);
   draftDefault = policy.default || null;
   if ($("model-filter")) $("model-filter").value = "";
-  $("models-runtime-eyebrow").textContent = modelRuntime === "opencode" ? "OpenCode runtime" : "Pi runtime";
-  $("models-hint").textContent = modelRuntime === "opencode"
-    ? "Global discovery: identical for every workspace."
-    : "Workspace-bound discovery: models are listed through the selected workspace. The saved policy stays runtime-global.";
+  $("models-runtime-eyebrow").textContent = "Pi runtime";
+  $("models-hint").textContent = "Workspace-bound discovery: models are listed through the selected workspace. The saved policy stays runtime-global.";
   const discoveryRow = $("discovery-workspace-row");
-  if (modelRuntime === "opencode") {
-    discoveryRow.hidden = true;
-  } else {
-    discoveryRow.hidden = false;
-    renderDiscoveryWorkspaces();
-  }
-  $("load-models").textContent = modelRuntime === "opencode" ? "Refresh global models" : "Refresh Pi models";
+  discoveryRow.hidden = false;
+  renderDiscoveryWorkspaces();
+  $("load-models").textContent = "Refresh Pi models";
   renderModelPolicy();
   const dialog = $("models-dialog");
   if (dialog && typeof dialog.showModal === "function") dialog.showModal();
@@ -588,22 +585,17 @@ function renderDiscoveryWorkspaces() {
 
 async function loadModels() {
   let url = `/api/runtimes/${modelRuntime}/models?limit=100`;
-  if (modelRuntime !== "opencode") {
-    const wsId = discoveryWorkspaceId || (currentWorkspace && currentWorkspace.id);
-    if (!wsId) throw new Error("Select an enabled discovery workspace for Pi models.");
-    url += `&workspace_id=${encodeURIComponent(wsId)}`;
-  }
+  const wsId = discoveryWorkspaceId || (currentWorkspace && currentWorkspace.id);
+  if (!wsId) throw new Error("Select an enabled discovery workspace for Pi models.");
+  url += `&workspace_id=${encodeURIComponent(wsId)}`;
   const data = await api(url);
   globalModels = data.models || [];
   if (data.policy) {
-    if (modelRuntime === "opencode") settings.model_policy = data.policy;
-    else settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: data.policy};
+    settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: data.policy};
   }
   renderModelPolicy();
   renderRuntime(config);
-  if (!globalModels.length) message(modelRuntime === "opencode"
-    ? "No models are available in the current global OpenCode runtime."
-    : "No models are available through the selected Pi discovery workspace.");
+  if (!globalModels.length) message("No models are available through the selected Pi discovery workspace.");
 }
 
 async function saveModelPolicy() {
@@ -612,15 +604,12 @@ async function saveModelPolicy() {
   if (!enabled.length) { message("Enable at least one model before saving."); return; }
   if (!def || !draftEnabled.has(def)) { message("Choose the mandatory default among the enabled models."); return; }
   const body = {enabled, default: def};
-  if (modelRuntime !== "opencode") {
-    const wsId = $("discovery-workspace").value || discoveryWorkspaceId;
-    if (!wsId) { message("Select an enabled discovery workspace before saving the Pi policy."); return; }
-    body.workspace_id = wsId;
-  }
+  const wsId = $("discovery-workspace").value || discoveryWorkspaceId;
+  if (!wsId) { message("Select an enabled discovery workspace before saving the Pi policy."); return; }
+  body.workspace_id = wsId;
   if (!confirm(`Save ${modelRuntime} model policy with ${enabled.length} enabled model(s) and mandatory default ${def}? Runs without a model use the default; explicit models must be enabled.`)) return;
   const saved = await api(`/api/runtimes/${modelRuntime}/model-policy`, "POST", body);
-  if (modelRuntime === "opencode") settings.model_policy = saved;
-  else settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: saved};
+  settings.runtime_policies = {...(settings.runtime_policies || {}), [modelRuntime]: saved};
   draftEnabled = new Set(saved.enabled || []);
   draftDefault = saved.default || null;
   const dialog = $("models-dialog");
@@ -639,28 +628,37 @@ function auditLabel(run) {
 }
 async function executionView(runId) {
   const data = await api(`/api/runs/${runId}/executions?${new URLSearchParams({offset: "0", limit: "50"})}`);
-  const container = node("div");
+  const container = node("div", undefined, "exec-log");
   container.append(node("p", `Runtime ${(data.runtime || "")} · ${data.executions.length} shown (bounded summaries; no output bodies).`, "muted"));
   for (const ex of data.executions || []) {
-    const line = `${ex.sequence || ex.seq} · ${ex.tool} · ${ex.state}${ex.is_error ? " · ERROR" : ""} · ${ex.target_preview || "—"} · ${ex.permission_effect || ""}${ex.permission_decision ? "/" + ex.permission_decision : ""}${ex.truncated ? " · truncated" : ""}`;
-    const row = node("div", undefined, "job");
-    row.append(node("div", line, "path"));
-    const detailBtn = button("Execution detail", async () => {
+    const row = node("div", undefined, "job exec-entry");
+    const head = node("div", undefined, "exec-head");
+    head.append(node("span", `#${ex.sequence || ex.seq || "?"}`, "exec-seq"));
+    head.append(node("span", ex.tool || "—", "exec-tool"));
+    head.append(node("span", `${ex.state || "—"}${ex.is_error ? " · ERROR" : ""}`, ex.is_error ? "exec-state is-error" : "exec-state"));
+    row.append(head);
+    row.append(node("div", ex.target_preview || "—", "path"));
+    const bits = [];
+    const permission = [ex.permission_effect, ex.permission_decision].filter(Boolean).join("/");
+    if (permission) bits.push(permission);
+    if (ex.truncated) bits.push("truncated");
+    if (bits.length) row.append(node("div", bits.join(" · "), "muted"));
+    const actions = node("div", undefined, "actions");
+    actions.append(button("Execution detail", async () => {
       const detail = await api(`/api/runs/${runId}/executions/${encodeURIComponent(ex.execution_id)}`);
       // Safe DOM/textContent only: bounded/truncated potentially
       // sensitive local output is rendered as text, never HTML.
       show(`Execution ${ex.execution_id} (bounded, may be sensitive)`, detail);
-    });
-    row.append(detailBtn);
+    }));
+    row.append(actions);
     container.append(row);
   }
   if (!(data.executions || []).length) container.append(node("p", "No executions recorded.", "muted"));
-  $("output-title").textContent = `Execution history for ${runId}`;
-  $("output").textContent = ""; $("output").append(container); $("output-panel").hidden = false; $("output-panel").scrollIntoView({behavior: "smooth", block: "center"});
+  show(`Execution history for ${runId}`, container);
 }
 function runRow(ws, run) {
   const row = node("div", undefined, "job");
-  const runtimeLabel = run.runtime || "opencode";
+  const runtimeLabel = run.runtime || "pi";
   const title = node("h3", `${run.state} · ${run.model || "Default model"} · ${runtimeLabel}`);
   row.append(title, node("div", `Run ${run.run_id} · Runtime ${runtimeLabel} · Session ${run.session_id || "—"} · Job ${run.job_id} · Request ${run.request_id}`, "path"));
   if (run.session_reused) row.append(node("div", `Reused ${runtimeLabel} session · Continued from ${run.continue_from_run_id || run.parent_run_id || "—"}`, "muted"));
@@ -690,15 +688,15 @@ async function stopRun(runId) {
 
 function sessionRow(run) {
   const row = node("tr");
-  row.append(node("td", run.state || "—"));
-  row.append(node("td", run.runtime || "opencode"));
-  row.append(node("td", run.workspace_name || run.workspace_id || "—"));
-  const handoffCell = node("td");
+  row.append(tdLabel(node("td", run.state || "—"), "State"));
+  row.append(tdLabel(node("td", run.runtime || "pi"), "Runtime"));
+  row.append(tdLabel(node("td", run.workspace_name || run.workspace_id || "—"), "Workspace"));
+  const handoffCell = tdLabel(node("td"), "Handoff");
   handoffCell.append(node("div", run.handoff_title || run.job_id || "—"));
   if (run.session_reused) handoffCell.append(node("div", `Continued from ${run.continue_from_run_id || run.parent_run_id || "—"}`, "muted"));
   row.append(handoffCell);
-  row.append(node("td", run.model || "—"));
-  const sessionCell = node("td");
+  row.append(tdLabel(node("td", run.model || "—"), "Model"));
+  const sessionCell = tdLabel(node("td"), "Session");
   sessionCell.append(node("div", run.session_id || "—"));
   if (run.session_reused) sessionCell.append(node("div", "reused", "muted"));
   row.append(sessionCell);
@@ -707,13 +705,13 @@ function sessionRow(run) {
   if (run.finished) times.push(`finished ${new Date(run.finished).toLocaleString()}`);
   else if (run.updated) times.push(`updated ${new Date(run.updated).toLocaleString()}`);
   if (run.duration_seconds !== null && run.duration_seconds !== undefined) times.push(`${run.duration_seconds}s`);
-  row.append(node("td", times.join(" · "), "muted"));
+  row.append(tdLabel(node("td", times.join(" · "), "muted"), "Timing"));
   const pending = run.pending_request_count || 0;
-  const pendingCell = node("td", pending > 0 ? `${pending} pending · needs attention` : "0");
+  const pendingCell = tdLabel(node("td", pending > 0 ? `${pending} pending · needs attention` : "0"), "Pending/Attention");
   if (pending > 0) pendingCell.className = "attention";
   row.append(pendingCell);
-  row.append(node("td", (run.notification && run.notification.status) || "none"));
-  const actionsCell = node("td");
+  row.append(tdLabel(node("td", (run.notification && run.notification.status) || "none"), "Notification"));
+  const actionsCell = tdLabel(node("td"), "Actions");
   const actions = node("div", undefined, "actions");
   actions.append(button("View details", async () => { const data = await api(`/api/runs/${run.run_id}/session`); show(`Session ${run.session_id || ""} (escaped, bounded)`, data); }));
   actions.append(button("Executions", () => executionView(run.run_id)));
@@ -750,8 +748,7 @@ async function requestView(ws, runId) {
     container.append(actions);
   }
   if (!(run.pending_requests || []).length) container.append(node("p", "No pending requests.", "muted"));
-  $("output-title").textContent = `Pending requests for ${runId}`;
-  $("output").textContent = ""; $("output").append(container); $("output-panel").hidden = false; $("output-panel").scrollIntoView({behavior: "smooth", block: "center"});
+  show(`Pending requests for ${runId}`, container);
 }
 
 async function respond(runId, requestId, decision) {
@@ -772,7 +769,7 @@ async function jobs(ws) {
   $("jobs").append(node("h3", "Handoffs"));
   if (!data.handoffs.length) $("jobs").append(node("p", "No handoffs yet. Ask ChatGPT to inspect the project and prepare a handoff.", "muted"));
   for (const j of data.handoffs) {
-    const row = node("div", undefined, "job"); row.append(node("h3", `${j.title} · ${j.legacy_handoff ? "legacy" : j.state === "prepared" ? "published" : j.state}`), node("div", j.path, "path"));
+    const row = node("div", undefined, "job"); row.append(node("h3", `${j.title} · ${j.state === "prepared" ? "published" : j.state}`), node("div", j.path, "path"));
     const actions = node("div", undefined, "actions");
     actions.append(button("Copy agent prompt", async () => { try { await navigator.clipboard.writeText(j.copy_prompt); message("Handoff prompt copied. Paste it into the agent yourself."); } catch { show("Copy this prompt", j.copy_prompt); } }));
     for (const [label, doc] of [["Plan", "TASK.md"], ["Context", "CONTEXT.md"], ["Acceptance", "ACCEPTANCE.md"]]) {
@@ -841,7 +838,8 @@ async function refresh() {
   }
   filterWorkspaces();
   const names = Object.fromEntries(data.workspaces.map(w => [w.id, w.name])); $("events").replaceChildren();
-  for (const e of history.events) { const tr = node("tr"); for (const value of [new Date(e.at).toLocaleString(), names[e.workspace] || "Admin", e.action, e.outcome]) tr.append(node("td", value)); $("events").append(tr); }
+  const eventLabels = ["Time", "Workspace", "Operation", "Outcome"];
+  for (const e of history.events) { const tr = node("tr"); [new Date(e.at).toLocaleString(), names[e.workspace] || "Admin", e.action, e.outcome].forEach((value, i) => tr.append(tdLabel(node("td", value), eventLabels[i]))); $("events").append(tr); }
   if (!history.events.length) {
     const row = node("tr");
     const cell = node("td", "No activity yet. Access and configuration changes will appear here.", "muted");
@@ -887,11 +885,11 @@ tryRestoreSession();
 $("logout").onclick = async () => {
   try { await fetch("/api/logout", {method: "POST", credentials: "same-origin"}); } catch {}
   currentWorkspace = null; globalModels = []; sessionsOffset = 0;
-  $("dashboard").hidden = true; $("boot").hidden = true; $("login").hidden = false; $("output-panel").hidden = true; $("output").replaceChildren(); $("output").textContent = ""; $("workspaces").replaceChildren(); $("jobs").replaceChildren(); $("events").replaceChildren(); $("sessions").replaceChildren(); $("jobs-panel").hidden = true;
+  $("dashboard").hidden = true; $("boot").hidden = true; $("login").hidden = false; closeOutputPanel(); $("workspaces").replaceChildren(); $("jobs").replaceChildren(); $("events").replaceChildren(); $("sessions").replaceChildren(); $("jobs-panel").hidden = true;
 };
-$("close-output").onclick = () => { $("output-panel").hidden = true; $("output").textContent = ""; };
+$("close-output").onclick = () => closeOutputPanel();
+$("output-backdrop").onclick = () => closeOutputPanel();
 $("refresh").onclick = () => refresh().catch(e=>message(e.message));
-$("open-models").onclick = () => openModels("opencode").catch(e=>message(e.message));
 $("open-pi-models").onclick = () => openModels("pi").catch(e=>message(e.message));
 $("open-pi-permissions").onclick = () => openPiPermissions().catch(e=>message(e.message));
 $("open-pi-extensions").onclick = () => openPiExtensions().catch(e=>message(e.message));

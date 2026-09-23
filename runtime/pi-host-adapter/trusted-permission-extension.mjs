@@ -1,23 +1,27 @@
 // Package-owned trusted Pi permission extension (milestone 3C1, policy v3).
 //
-// Loaded explicitly via `-e <this file>` for EVERY managed v3 session --
-// including read-only sessions, so read/grep/find/ls policy, protected
-// patterns, and external rules are enforced in both modes. Never discovered
-// from project/global locations (--no-extensions stays on). Pi itself has
-// no sandbox: this is pre-tool policy/approval with exact suspended-call
-// resume, not OS containment. Shell Allow runs with native macOS-user
-// authority and can bypass structured file path controls.
+// Loaded explicitly for EVERY managed v3 session -- including read-only
+// sessions, so read/grep/find/ls policy, protected patterns, and external
+// rules are enforced in both modes. Since adapter 0.4.0 it loads as an
+// inline extension factory built by createTrustedPermissionExtension()
+// with the immutable per-session policy snapshot and canonical session
+// cwd closed over (previously via `-e <this file>` plus a
+// WB_PI_POLICY_JSON environment variable). Never discovered from
+// project/global locations. Pi itself has no sandbox: this is pre-tool
+// policy/approval with exact suspended-call resume, not OS containment.
+// Shell Allow runs with native macOS-user authority and can bypass
+// structured file path controls.
 //
-// Protocol with the adapter (over Pi RPC UI):
+// Protocol with the adapter (over the bound ExtensionUIContext):
 // - tool_call pre-execution interception uses the shared evaluator.
 // - deny => {block: true, reason}; allow => continue.
 // - ask => await ctx.ui.select(markerTitle, OPTIONS). The marker title is
 //   EXACTLY `WB_PERMISSION_V1:<toolCallId>` (opaque: no tool, resource,
-//   command, or path text) so the adapter can correlate the
-//   extension_ui_request to the exact preflighted call. All human-readable
-//   permission metadata comes ONLY from adapter preflight/evaluator state,
-//   never from this title. The suspended invocation resumes with the UI
-//   response; the LLM never retries.
+//   command, or path text) so the adapter can correlate the select to the
+//   exact preflighted call. All human-readable permission metadata comes
+//   ONLY from adapter preflight/evaluator state, never from this title.
+//   The suspended invocation resumes with the UI response; the LLM never
+//   retries.
 // - Options are shared constants below. "always" is offered only when the
 //   immutable session policy has allow_session_always=true. For bash,
 //   always stays session-local and exact-command scoped (hash + timeout).
@@ -66,9 +70,33 @@ function markerTitle(toolCallId) {
   return `${MARKER_PREFIX}${id}`;
 }
 
+// Parameterized factory for in-process AgentSession loading (adapter
+// 0.4.0+). The Bridge adapter loads this package-owned extension as an
+// inline extension factory with the immutable per-session policy snapshot
+// and canonical session cwd closed over -- no environment variable, so
+// concurrent sessions with different policies never collide, and the
+// evaluator always sees the exact session workspace (never the adapter
+// process cwd). Semantics are identical to the default export below.
+export function createTrustedPermissionExtension({ policy: rawPolicy, cwd }) {
+  let policy = null;
+  try {
+    policy = rawPolicy && typeof rawPolicy === "object" ? validatePolicy(rawPolicy) : null;
+  } catch {
+    policy = null;
+  }
+  const sessionCwd = typeof cwd === "string" && cwd ? cwd : process.cwd();
+  return (pi) => {
+    bindToolCall(pi, policy, sessionCwd);
+  };
+}
+
 export default function (pi) {
   const policy = loadSnapshot();
   const sessionCwd = process.cwd();
+  bindToolCall(pi, policy, sessionCwd);
+}
+
+function bindToolCall(pi, policy, sessionCwd) {
   // Exact in-memory grants for this session only: grantKey strings from
   // the shared evaluator (file tools "<tool>\n<target>"; bash
   // "bash\n<commandHash>\n<timeoutMs>").

@@ -2,11 +2,11 @@
 
 ## State, secrets, backups
 
-Default state: `~/.local/state/workspace-bridge`, mode 0700. Configuration, SQLite database and the admin-token file are private. Back up this state **and** project handoff folders together; the database holds mapping/authentication state, handoff metadata and publication hashes. Older installations can retain source snapshots and historical reviews; treat all backups as sensitive.
+Default state: `~/.local/state/workspace-bridge`, mode 0700. Configuration, SQLite database and the admin-token file are private. Back up this state **and** project handoff folders together; the database holds mapping/authentication state, handoff metadata and publication hashes. Treat all backups as sensitive.
 
 Stop the service before a plain filesystem copy; preserve any SQLite WAL/SHM files with the database. Alternatively use an explicitly managed SQLite online backup procedure. Do not copy only a live database file and assume it is consistent. No automatic backup or pruning is configured.
 
-Keep the package and tunnel profiles outside mapped projects. State cannot overlap a project. `--state` is a global CLI option, before the subcommand. Configure approved parent roots at initialization; to change them later, stop the daemon, back up state, edit config.json locally while preserving its private permissions, then restart and run doctor. The first service open against v0.1 state (including doctor) triggers the fail-closed gateway migration; see MIGRATION_0.2.md. Removed parents cause old mappings to fail access checks.
+Keep the package and tunnel profiles outside mapped projects. State cannot overlap a project. `--state` is a global CLI option, before the subcommand. Configure approved parent roots at initialization; to change them later, stop the daemon, back up state, edit config.json locally while preserving its private permissions, then restart and run doctor. Removed parents cause old mappings to fail access checks.
 
 ## Revocation
 
@@ -25,7 +25,7 @@ scopes. A genuinely missing root fails as unavailable, and a symlink/file
 replacement fails closed. Existing mappings, including disabled mappings,
 cannot be overlapped. There is no destructive delete/remap operation and no
 automatic fallback search for moved repositories; use fresh state with a
-preserved archive, or implement and review a deliberate state migration.
+preserved archive when a mapping must be recreated.
 
 ## Limits and incomplete coverage
 
@@ -45,28 +45,28 @@ may still consume space after upgrading, even though new handoffs create none.
 
 Native startup remains foreground-only; no launchd/systemd or reverse proxy is installed.
 v0.8 adds Dockerfile/Compose with restart policy, health check, non-root UID/GID,
-private persistent state, explicit project binds and a private client-only OpenCode
-adapter with no published port. See DOCKER.md. Native listeners
+private persistent state, explicit project binds and the native Pi host adapter
+(no Compose service, no published port). See DOCKER.md. Native listeners
 remain loopback-only by default; only explicit container startup binds 0.0.0.0 inside the
 container, with both Docker-published host ports restricted to 127.0.0.1.
 Setting `WB_ADMIN_ALLOWED_HOSTS` widens only the admin listener to 0.0.0.0 with
 those `Host` values allowed (MCP unaffected); invalid values fail closed.
 The tunnel client stays on the host; no Docker socket is mounted into the bridge.
 
-The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. OpenCode execution is available only through the bounded, opt-in agent tools and the separate host runtime; the server never exposes a shell or arbitrary command tool.
+The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. Pi execution is available only through the bounded, opt-in agent tools and the separate host runtime; the server never exposes a shell or arbitrary command tool.
 
-## OpenCode runs and restart recovery (v0.8)
+## Pi agent runs and restart recovery (v0.8)
 
 Agent execution is enabled per workspace in the local manager (Agent execution,
 default off, independent from write scope). The manager shows runtime health/version,
 the Discord configured/not-configured state, the global model policy (enabled models
 plus the mandatory default, saved atomically in a "Manage models" modal; MCP cannot change it),
 linked runs
-(status, handoff/job, bridge run id, OpenCode session id, exact model, timestamps,
-notification status), a global Bridge-owned "OpenCode sessions" table across all
+(status, handoff/job, bridge run id, Pi session id, exact model, timestamps,
+notification status), a global Bridge-owned agent sessions table across all
 workspaces (newest first, bounded pagination, View/Stop on owned records only),
 a bounded escaped session transcript, and any pending
-permission/question requests with the exact OpenCode-proposed `always` scope. It can
+permission/question requests with the exact Pi-proposed `always` scope. It can
 stop an active session and answer `once`/`always`/`reject`. None of these admin routes
 exist on the MCP listener.
 
@@ -75,39 +75,29 @@ answerable; a run whose session still exists is kept running; a session that is 
 becomes `orphaned`; and a final assistant message is only accepted as `completed` when
 the runtime positively shows a completed, non-error response. An interrupted worker is
 never assumed to have finished, and a transient adapter-unavailable result at startup
-(e.g. Compose starts the bridge before the adapter) leaves the run active and retries
-until the runtime is reachable rather than orphaning it. Pending requests are
+(e.g. the bridge starts before the native Pi adapter is reachable) leaves the run
+active and retries until the runtime is reachable rather than orphaning it. Pending requests are
 re-verified against the recorded session so a positively missing session becomes an
 explicit orphan instead of an indefinitely answerable wait.
 
-The OpenCode SSE/event stream is treated as optional best-effort
-acceleration: direct live validation in this environment (`curl -N` against
-the native event endpoint) produced only `server.connected`/`server.heartbeat`
-while a real session ran, so events are latency hints only and are never
-required for correctness. A dedicated reconciliation loop (independent of
-the 25s event long poll) owns authoritative state convergence while runs
-are active, sharing one run enumeration per sweep across checks but never
+The installed Pi backend exposes no event stream, so a dedicated
+reconciliation loop owns authoritative state convergence while runs are
+active, sharing one run enumeration per sweep across checks but never
 merging their failure semantics:
 
-- Permissions: exact-session pending snapshot (V2 session-scoped primary
-  with V1 compatibility fallback) every ~4s for `starting`/`running` runs.
-  A successful empty snapshot is not a failure; a persisted request is
-  never resolved merely because it disappeared from a snapshot.
+- Permissions: exact-session pending snapshot every ~4s for
+  `starting`/`running` runs, capability-gated to adapters that advertise
+  the permission surface. A successful empty snapshot is not a failure;
+  a persisted request is never resolved merely because it disappeared
+  from a snapshot.
 - Completion: durable bounded session messages after the run floor every
   ~7s (`starting`/`running` only, prompt acceptance proven, no pending
   request). The latest in-scope completed non-error assistant message is
   the only completion evidence; session status/idle never gate or prove it.
-- Questions: V2 session-scoped snapshot primary
-  (`GET /api/session/{sessionID}/question`), verified V1 global fallback
-  (`GET /question`, strictly filtered by exact owning `sessionID`) only
-  when V2 is explicitly unsupported/not-found (missing method, 404/405/501
-  or not-supported), every ~4s with the same strict binding/dedupe/
-  persistence semantics. A successful V2 response (even empty) never
-  consults V1; generic failures fail closed without fallback. Post-restart
-  live validation showed the deployed server not serving the V2 question
-  route while completion/permission polling worked, so the fallback is the
-  live-compatible path there. No TUI scraping, internal state reads,
-  private endpoints, text inference, or ownership guessing exist.
+- Questions: snapshot resync applies only to backends advertising question
+detection; the installed Pi backend does not, so question resync stays
+silent there. No TUI scraping, internal state reads, private endpoints,
+text inference, or ownership guessing exist.
 
 Each sweep covers at most 50 distinct sessions, issues no work when no
 relevant active run exists, and stops polling terminal runs immediately.
@@ -119,14 +109,12 @@ immediate permission resync, question resync and completion self-heal
 pre-continuation history never complete a run, and completion notifies
 exactly once under repeated reads, sweeps and duplicate events.
 
-Event-stream health is functional, not just transport: the adapter counts
-raw/control (`server.connected`/`server.heartbeat`)/functional frames
-(`event_stream` in `/health`, counters and timestamps only, never
-contents). While runs are active, subscribed transport with no functional
-event for 45s reports `functional_status=degraded`
-(`reason=no_functional_events`); a never-subscribed transport reports
-`unknown` (`transport_not_subscribed`) instead of a false healthy. This
-diagnostic never blocks runs because polling is authoritative; degraded /
+Runtime health is capability-based, not transport-based: `/health` reports
+which surfaces the connected adapter actually serves (permission snapshot
+and reply, execution history, extension inventory; counters and timestamps
+only, never contents). Unsupported surfaces fail closed as
+`runtime_unsupported` without any network call. This diagnostic never blocks
+runs because polling is authoritative; degraded /
 recovered transitions log once at WARNING / INFO (DEBUG aggregate counts
 only). If the adapter is still starting, background loops back off safely
 (DEBUG inside the first 30s, throttled WARNINGs after) and recover
@@ -198,4 +186,4 @@ mutation including prepare_handoff; workspace allows bounded permitted source
 text. Both old and new mappings default to handoff. Scope changes take effect on
 subsequent calls with no tunnel/schema change or restart. OS permissions remain
 an additional requirement; enabling scope does not grant filesystem privileges.
-See FILE_ACCESS.md for mode/ACL/ownership limits and MIGRATION_0.5.md for upgrade.
+See FILE_ACCESS.md for mode/ACL/ownership limits.

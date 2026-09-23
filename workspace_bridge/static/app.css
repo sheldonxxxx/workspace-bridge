@@ -572,6 +572,14 @@ td button {
   min-height:34px;
   padding:6px 9px;
 }
+/* Actions column keeps room for two buttons side by side without forcing
+   the table wider than the panel (other columns absorb the space). */
+#sessions td:last-child {
+  min-width:200px;
+}
+#sessions td[data-label="Timing"] {
+  min-width:124px;
+}
 .table-actions {
   padding:0 24px 24px;
 }
@@ -584,6 +592,62 @@ td button {
 }
 #jobs>h3,#jobs>p,#jobs>button {
   margin:16px 24px;
+}
+/* Execution log entries: scannable head + wrapped target line. */
+.exec-log {
+  display:grid;
+  gap:0;
+}
+.exec-entry {
+  font-family:"Avenir Next","Segoe UI",sans-serif;
+  font-size:13px;
+  line-height:1.55;
+}
+.exec-head {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  margin-bottom:8px;
+}
+.exec-seq {
+  font-weight:700;
+  color:var(--accent);
+  font-size:12px;
+}
+.exec-tool,.exec-state {
+  display:inline-flex;
+  align-items:center;
+  font-size:11px;
+  font-weight:600;
+  padding:3px 8px;
+  border-radius:5px;
+  background:var(--raised);
+  color:var(--muted);
+}
+.exec-state.is-error {
+  background:var(--danger-bg);
+  color:var(--danger);
+}
+.exec-entry .path {
+  margin-bottom:4px;
+}
+.exec-entry .actions {
+  margin-top:12px;
+}
+.output-panel .section-title {
+  position:sticky;
+  top:0;
+  background:var(--surface);
+  border-bottom:1px solid var(--line);
+  z-index:2;
+}
+.output-panel .section-title h2 {
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+.output-panel .section-title button {
+  flex:none;
 }
 dialog {
   width:min(620px,calc(100vw - 32px));
@@ -660,18 +724,18 @@ dialog::backdrop {
 .pi-ext-row.is-disabled:hover {
   background:transparent;
 }
+#output-backdrop {
+  position:fixed;
+  inset:0;
+  z-index:29;
+  background:#11172d50;
+}
 .output-panel {
   position:fixed;
   inset:8vh 4vw 8vh auto;
   width:min(760px,92vw);
   z-index:30;
-  box-shadow:0 0 0 100vmax #11172d50;
   overflow:auto;
-}
-.output-panel .section-title {
-  position:sticky;
-  top:0;
-  background:var(--surface);
 }
 pre {
   padding:24px;
@@ -763,6 +827,85 @@ pre {
   }
   .system-grid {
     grid-template-columns:1fr;
+  }
+}
+@media(max-width:900px) {
+  /* Sessions/activity tables restack into labelled cards: no sideways
+     scrolling, each row reads top-to-bottom with its column name visible. */
+  .table-wrap {
+    overflow:visible;
+    max-height:none;
+    padding:0 24px 8px;
+  }
+  .table-wrap table,.table-wrap tbody {
+    display:block;
+    width:100%;
+  }
+  .table-wrap thead {
+    position:absolute;
+    width:1px;
+    height:1px;
+    padding:0;
+    margin:-1px;
+    overflow:hidden;
+    clip:rect(0,0,0,0);
+    white-space:nowrap;
+    border:0;
+  }
+  .table-wrap tr {
+    display:block;
+    margin:0 0 12px;
+    padding:6px 8px 2px;
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:var(--surface);
+  }
+  .table-wrap td {
+    display:grid;
+    grid-template-columns:minmax(92px,34%) minmax(0,1fr);
+    gap:12px;
+    align-items:start;
+    max-width:none;
+    padding:10px 8px;
+    border-bottom:1px solid var(--line);
+  }
+  .table-wrap td:last-child {
+    border-bottom:0;
+  }
+  .table-wrap td[data-label]::before {
+    content:attr(data-label);
+    font-size:11px;
+    font-weight:600;
+    line-height:1.5;
+    color:var(--muted);
+  }
+  /* Value content stays in the right column; follow-up lines (reused,
+     continued-from) stack beneath the value, never under the label. */
+  .table-wrap td[data-label]>* {
+    grid-column:2;
+  }
+  .table-wrap td[data-label="Actions"] {
+    display:block;
+    padding:12px 4px 10px;
+  }
+  .table-wrap td[data-label="Actions"]::before {
+    display:block;
+    margin-bottom:8px;
+  }
+  .table-wrap td:not([data-label]) {
+    display:block;
+    padding:20px 12px;
+    text-align:center;
+    border-bottom:0;
+  }
+  .table-wrap td .actions {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+  .table-wrap td .actions button {
+    flex:1 1 calc(50% - 4px);
+    min-height:42px;
   }
 }
 @media(max-width:760px) {
@@ -877,7 +1020,29 @@ pre {
     font-size:10px;
   }
   .output-panel {
-    inset:4vh 4vw;
+    inset:0;
+    width:100%;
+    border:0;
+    border-radius:0;
+  }
+  .table-wrap {
+    padding:0 20px 8px;
+  }
+  .output-panel .section-title {
+    padding:16px;
+  }
+  .output-panel .actions button,
+  #output .job .actions button {
+    flex:1 1 100%;
+  }
+  .job {
+    padding:20px;
+  }
+  .job .actions button {
+    flex:1 1 calc(50% - 4px);
+  }
+  pre {
+    padding:16px;
   }
   .table-actions {
     padding:0 20px 20px;

@@ -1,6 +1,7 @@
-// 3B1 adapter permission surface: snapshot immutability, spawn contract,
-// RPC preflight/UI correlation with fail-closed malformed handling,
-// list/respond/abort/session isolation, and no-leak public records.
+// 3B1 adapter permission surface: snapshot immutability, SDK loadout,
+// in-process preflight/select correlation with fail-closed malformed
+// handling, list/respond/abort/session isolation, and no-leak public
+// records.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
@@ -11,7 +12,7 @@ import { PiAdapter } from "../adapter.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "../policy.mjs";
 import { OPTION_ALWAYS, OPTION_ONCE, OPTION_REJECT } from "../trusted-permission-extension.mjs";
-import { createFakeSpawn, respondState } from "./helpers.mjs";
+import { askPermission, createFakeTransport, trackSelect } from "./fake-sdk.mjs";
 
 function makeProjects() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-perm-"));
@@ -42,102 +43,64 @@ function writableOptions() {
   return { permission_policy: policy, policy_revision: policyRevision(policy) };
 }
 
-function autoSpawn() {
-  const bag = createFakeSpawn();
-  let n = 0;
-  function spawnFn(binary, args, opts) {
-    const child = bag.spawnFn(binary, args, opts);
-    child.autoExitCode = 0;
-    n += 1;
-    const sid = `ses-perm-${n}`;
-    child.on("stdin", (line) => {
-      for (const raw of String(line).split("\n").filter(Boolean)) {
-        let req;
-        try {
-          req = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        // extension_ui_response lines are recorded, never answered.
-        if (req && req.type === "extension_ui_response") continue;
-        setImmediate(() => {
-          if (!req || typeof req !== "object") return;
-          if (req.type === "get_state") respondState(child, req.id, { sessionId: sid });
-          else if (req.type === "abort") {
-            child.respond({ id: req.id, type: "response", command: "abort", success: true });
-          }
-        });
-      }
-    });
-    return child;
-  }
-  return { ...bag, spawnFn };
-}
-
-function makeAdapter(projects, spawnBag, opts = {}) {
+function makeAdapter(projects, transport, opts = {}) {
   return new PiAdapter({
     projectsRoot: projects.root,
-    piBinary: "pi",
     agentDir: path.join(projects.tmp, "agent-dir"),
-    timeoutMs: 2000,
-    spawnFn: spawnBag.spawnFn,
+    createSessionFn: transport.createSdkSession,
+    listModelsFn: transport.listModelsFn,
     piUsable: true,
-    piVersion: "0.86.1",
+    piVersion: "0.87.0",
     ...opts,
   });
 }
 
 async function createSession(adapter, projects, dir, options) {
-  const promise = adapter.createSession(dir, "perm", options);
-  await Promise.resolve();
-  return promise;
+  return adapter.createSession(dir, "perm", options);
 }
 
-function emit(child, message) {
-  child.respond(message);
-}
+const ASK_OPTIONS = [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT];
 
 test("missing policy starts a legacy read-only session with safe defaults", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const session = await createSession(adapter, projects, projects.appA);
   const entry = adapter.sessions.get(session.id);
   assert.equal(entry.writable, false);
   assert.deepEqual(entry.permissionPolicy, safeDefaultPolicy());
   assert.equal(entry.policyRevision, policyRevision(safeDefaultPolicy()));
-  const call = bag.calls[0];
-  assert.deepEqual(call.args, ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve", "--no-extensions"]);
-  assert.ok(!call.args.includes("-e"));
-  assert.ok(!call.args.join(" ").includes("bash"));
-  await adapter.shutdown({ graceMs: 0 });
+  const created = transport.lastCreated();
+  assert.deepEqual(created.tools, ["read", "grep", "find", "ls"]);
+  assert.equal(created.excludeTools, null);
+  assert.deepEqual(created.extensionPaths, []);
+  assert.equal(created.policy, null);
+  await adapter.shutdown();
 });
 
 test("read-only v2 session loads the trusted extension without edit/write", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = safeDefaultPolicy();
   const session = await createSession(adapter, projects, projects.appA,
     { permission_policy: policy, policy_revision: policyRevision(policy) });
   const entry = adapter.sessions.get(session.id);
   assert.equal(entry.writable, false);
-  const call = bag.calls[0];
-  assert.deepEqual(call.args.slice(0, 5),
-    ["--mode", "rpc", "--tools", "read,grep,find,ls", "--no-approve"]);
-  assert.ok(call.args.includes("--no-extensions"));
-  assert.equal(call.args.filter((a) => a === "-e").length, 1);
-  assert.ok(call.args[call.args.indexOf("-e") + 1].endsWith("trusted-permission-extension.mjs"));
-  assert.ok(!call.args.join(" ").includes("bash"));
-  assert.ok(call.opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":false'));
-  await adapter.shutdown({ graceMs: 0 });
+  const created = transport.lastCreated();
+  assert.deepEqual(created.tools, ["read", "grep", "find", "ls"]);
+  assert.equal(created.excludeTools, null);
+  assert.deepEqual(created.extensionPaths, []);
+  assert.ok(created.uiContext);
+  assert.deepEqual(created.policy, policy);
+  await adapter.shutdown();
 });
 
 test("v1 policy payloads fail clearly instead of being reinterpreted", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
-  const before = bag.calls.length;
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
+  const before = transport.created.length;
   await assert.rejects(
     createSession(adapter, projects, projects.appA, {
       permission_policy: {
@@ -151,14 +114,14 @@ test("v1 policy payloads fail clearly instead of being reinterpreted", async () 
       policy_revision: "0".repeat(64),
     }),
     /coordinated|invalid_policy/i);
-  assert.equal(bag.calls.length, before);
-  await adapter.shutdown({ graceMs: 0 });
+  assert.equal(transport.created.length, before);
+  await adapter.shutdown();
 });
 
 test("unresolvable or duplicate external roots fail session creation", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const missing = writablePolicy();
   missing.external_access = { default_mode: "deny", roots: [{ path: "/no-such-pi-root-xyz", mode: "ask" }] };
   await assert.rejects(
@@ -182,35 +145,30 @@ test("unresolvable or duplicate external roots fail session creation", async () 
     createSession(adapter, projects, projects.appA,
       { permission_policy: dup, policy_revision: policyRevision(dup) }),
     /external roots/i);
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
 test("writable policy loads the trusted extension with edit/write and no bash", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const session = await createSession(adapter, projects, projects.appA, writableOptions());
   const entry = adapter.sessions.get(session.id);
   assert.equal(entry.writable, true);
-  const call = bag.calls[0];
-  assert.ok(call.args.includes("read,grep,find,ls,edit,write"));
-  assert.ok(call.args.includes("--no-approve") && call.args.includes("--no-extensions"));
-  assert.ok(!call.args.join(" ").includes("bash"));
-  const extIndex = call.args.indexOf("-e");
-  assert.ok(extIndex >= 0);
-  const extPath = call.args[extIndex + 1];
-  assert.ok(extPath.endsWith("trusted-permission-extension.mjs"));
+  const created = transport.lastCreated();
+  assert.deepEqual(created.tools, ["read", "grep", "find", "ls", "edit", "write"]);
+  assert.equal(created.excludeTools, null);
+  assert.ok(created.uiContext);
+  assert.deepEqual(created.policy, writablePolicy());
   // Snapshot survives in the entry and is never the raw caller object.
   assert.equal(entry.permissionPolicy.write_tools_enabled, true);
-  // Policy travels to the child via environment, never in logs.
-  assert.ok(call.opts.env.WB_PI_POLICY_JSON.includes('"write_tools_enabled":true'));
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
 test("supplied policy requires an equal valid revision or creation fails", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = writablePolicy();
   const revision = policyRevision(policy);
   // Match succeeds.
@@ -218,8 +176,8 @@ test("supplied policy requires an equal valid revision or creation fails", async
     { permission_policy: policy, policy_revision: revision });
   assert.equal(adapter.sessions.get(session.id).writable, true);
   assert.equal(adapter.sessions.get(session.id).policyRevision, revision);
-  // Mismatch fails as conflict; nothing is spawned.
-  const before = bag.calls.length;
+  // Mismatch fails as conflict; nothing is created.
+  const before = transport.created.length;
   await assert.rejects(
     createSession(adapter, projects, projects.appA,
       { permission_policy: policy, policy_revision: "0".repeat(64) }),
@@ -243,31 +201,24 @@ test("supplied policy requires an equal valid revision or creation fails", async
     createSession(adapter, projects, projects.appA,
       { permission_policy: { version: 2 }, policy_revision: "0".repeat(64) }),
     /invalid/i);
-  assert.equal(bag.calls.length, before);
-  await adapter.shutdown({ graceMs: 0 });
+  assert.equal(transport.created.length, before);
+  await adapter.shutdown();
 });
 
-test("start -> UI ask -> respond -> end correlation with exact resume", async () => {
+test("start -> select ask -> respond -> end correlation with exact resume", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const session = await createSession(adapter, projects, projects.appA, writableOptions());
-  const child = bag.children[0];
   const entry = adapter.sessions.get(session.id);
 
-  // Preflight: the exact suspended invocation.
-  emit(child, { type: "tool_execution_start", toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(entry.preflights.has("call-1"));
-
-  // UI ask from the trusted extension with the exact marker/options.
-  emit(child, {
-    type: "extension_ui_request", id: "ui-1", method: "select",
-    title: "WB_PERMISSION_V1:call-1",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  // Preflight arrives with the tool start event; the trusted extension's
+  // select() suspends the exact invocation on the adapter's UI context.
+  const { selectPromise, listed } = await askPermission(adapter, projects.appA, session.id, {
+    toolCallId: "call-1", toolName: "edit", args: { path: "notes.txt" }, options: ASK_OPTIONS,
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.appA, session.id);
+  const tracked = trackSelect(selectPromise);
+  assert.ok(entry.preflights.has("call-1"));
   assert.equal(listed.length, 1);
   const pending = listed[0];
   assert.equal(pending.tool, "edit");
@@ -280,186 +231,150 @@ test("start -> UI ask -> respond -> end correlation with exact resume", async ()
   const serialized = JSON.stringify(listed);
   assert.ok(!serialized.includes("hello"));
   assert.ok(!serialized.includes(projects.tmp));
-  assert.ok(!serialized.includes("WB_PI_POLICY_JSON"));
 
-  // Respond once: the exact UI request is answered, pending is removed.
+  // Respond once: the suspended select resolves with the once value, the
+  // SAME invocation resumes, and pending is removed.
   const result = await adapter.respondPermission(projects.appA, session.id, pending.id, "once");
   assert.deepEqual(result, { ok: true, decision: "once" });
-  const written = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.equal(written.length, 1);
-  assert.deepEqual(written[0], { type: "extension_ui_response", id: "ui-1", value: OPTION_ONCE });
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
+  await selectPromise;
+  assert.equal(tracked.settled, true);
+  assert.equal(tracked.value, OPTION_ONCE);
   // Duplicate/late response fails closed as not_found.
   await assert.rejects(
     adapter.respondPermission(projects.appA, session.id, pending.id, "once"), /not found/i);
 
   // Tool end cleans the preflight.
-  emit(child, { type: "tool_execution_end", toolCallId: "call-1", toolName: "edit", result: {}, isError: false });
+  entry.session.emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "edit",
+    result: {}, isError: false });
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(!entry.preflights.has("call-1"));
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
-test("malformed, duplicate, and mismatched UI requests fail closed", async () => {
+test("malformed, duplicate, and mismatched selects fail closed", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const session = await createSession(adapter, projects, projects.appA, writableOptions());
-  const child = bag.children[0];
+  const entry = adapter.sessions.get(session.id);
+  const ui = entry.session.boundUiContext;
 
-  // No preflight for this call: cancelled, never allowed.
-  emit(child, {
-    type: "extension_ui_request", id: "ui-bad", method: "select",
-    title: "WB_PERMISSION_V1:call-unknown",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
+  // No preflight for this call: select resolves undefined, never pending.
+  const stray = await ui.select("WB_PERMISSION_V1:call-unknown", ASK_OPTIONS);
+  assert.equal(stray, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  let uiWrites = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.equal(uiWrites.length, 1);
-  assert.deepEqual(uiWrites[0], { type: "extension_ui_response", id: "ui-bad", cancelled: true });
 
-  // Wrong options shape: cancelled, never allowed.
-  emit(child, { type: "tool_execution_start", toolCallId: "call-2", toolName: "edit", args: { path: "notes.txt" } });
+  // Wrong options shape: blocked without pending.
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-2",
+    toolName: "edit", args: { path: "notes.txt" } });
   await new Promise((resolve) => setImmediate(resolve));
-  emit(child, {
-    type: "extension_ui_request", id: "ui-wrong", method: "select",
-    title: "WB_PERMISSION_V1:call-2",
-    options: ["Yes", "No"],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
+  const wrong = await ui.select("WB_PERMISSION_V1:call-2", ["Yes", "No"]);
+  assert.equal(wrong, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  uiWrites = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.ok(uiWrites.some((r) => r.id === "ui-wrong" && r.cancelled === true));
 
-  // Non-marker UI (notify) is ignored without a write.
-  const before = child.requests().length;
-  emit(child, { type: "extension_ui_request", id: "ui-n", method: "notify", message: "hi" });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(child.requests().length, before);
+  // Non-marker UI is ignored without suspension.
+  const foreign = await ui.select("Pick a model:", ["a", "b"]);
+  assert.equal(foreign, undefined);
 
-  // Unknown tool preflight still correlates structurally but evaluates deny:
-  // the UI ask for a deny effect is cancelled fail-closed.
-  emit(child, { type: "tool_execution_start", toolCallId: "call-3", toolName: "bash", args: { command: "ls" } });
+  // Unknown tool preflight still correlates structurally but evaluates
+  // deny under shell_mode=deny: the select for a deny effect resolves
+  // undefined without pending.
+  entry.session.emit({ type: "tool_execution_start", toolCallId: "call-3",
+    toolName: "bash", args: { command: "ls" } });
   await new Promise((resolve) => setImmediate(resolve));
-  emit(child, {
-    type: "extension_ui_request", id: "ui-deny", method: "select",
-    title: "WB_PERMISSION_V1:call-3",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
+  const denied = await ui.select("WB_PERMISSION_V1:call-3", ASK_OPTIONS);
+  assert.equal(denied, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
 test("always is rejected when the session policy disables it", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const policy = validatePolicy({
     ...writableOptions().permission_policy, allow_session_always: false,
   });
   const session = await createSession(
     adapter, projects, projects.appA,
     { permission_policy: policy, policy_revision: policyRevision(policy) });
-  const child = bag.children[0];
-  emit(child, { type: "tool_execution_start", toolCallId: "call-9", toolName: "edit", args: { path: "notes.txt" } });
-  await new Promise((resolve) => setImmediate(resolve));
   // Extension offers once/reject only in this mode.
-  emit(child, {
-    type: "extension_ui_request", id: "ui-9", method: "select",
-    title: "WB_PERMISSION_V1:call-9",
+  const { selectPromise, listed } = await askPermission(adapter, projects.appA, session.id, {
+    toolCallId: "call-9", toolName: "edit", args: { path: "notes.txt" },
     options: [OPTION_ONCE, OPTION_REJECT],
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.appA, session.id);
+  const tracked = trackSelect(selectPromise);
   assert.equal(listed.length, 1);
   await assert.rejects(
     adapter.respondPermission(projects.appA, session.id, listed[0].id, "always"), /always/i);
-  // once still works and answers with the once value.
+  // once still works and resolves the suspended select with once.
   await adapter.respondPermission(projects.appA, session.id, listed[0].id, "once");
-  const written = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.deepEqual(written[0], { type: "extension_ui_response", id: "ui-9", value: OPTION_ONCE });
-  await adapter.shutdown({ graceMs: 0 });
+  await selectPromise;
+  assert.equal(tracked.value, OPTION_ONCE);
+  await adapter.shutdown();
 });
 
 test("permission state is isolated per session", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const sessionA = await createSession(adapter, projects, projects.appA, writableOptions());
   const sessionB = await createSession(adapter, projects, projects.appB, writableOptions());
-  const childA = bag.children[0];
-  emit(childA, { type: "tool_execution_start", toolCallId: "call-a", toolName: "edit", args: { path: "notes.txt" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  emit(childA, {
-    type: "extension_ui_request", id: "ui-a", method: "select",
-    title: "WB_PERMISSION_V1:call-a",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  await askPermission(adapter, projects.appA, sessionA.id, {
+    toolCallId: "call-a", toolName: "edit", args: { path: "notes.txt" }, options: ASK_OPTIONS,
   });
-  await new Promise((resolve) => setImmediate(resolve));
   assert.equal((await adapter.listPermissions(projects.appA, sessionA.id)).length, 1);
   assert.deepEqual(await adapter.listPermissions(projects.appB, sessionB.id), []);
   // Foreign directory or unknown id fails closed.
   const foreign = (await adapter.listPermissions(projects.appA, sessionA.id))[0];
   await assert.rejects(
     adapter.respondPermission(projects.appB, sessionB.id, foreign.id, "once"), /not found/i);
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });
 
-test("abort resolves owned pending UI first, then aborts Pi", async () => {
+test("abort resolves owned suspended selects first, then aborts the run", async () => {
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   const session = await createSession(adapter, projects, projects.appA, writableOptions());
-  const child = bag.children[0];
-  emit(child, { type: "tool_execution_start", toolCallId: "call-z", toolName: "edit", args: { path: "notes.txt" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  emit(child, {
-    type: "extension_ui_request", id: "ui-z", method: "select",
-    title: "WB_PERMISSION_V1:call-z",
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  const { selectPromise, listed } = await askPermission(adapter, projects.appA, session.id, {
+    toolCallId: "call-z", toolName: "edit", args: { path: "notes.txt" }, options: ASK_OPTIONS,
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal((await adapter.listPermissions(projects.appA, session.id)).length, 1);
+  const tracked = trackSelect(selectPromise);
+  assert.equal(listed.length, 1);
   assert.equal(await adapter.abortSession(projects.appA, session.id), true);
-  const writes = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.ok(writes.some((r) => r.id === "ui-z" && r.cancelled === true));
+  // The suspended select resolved as rejected (undefined), never approved.
+  await selectPromise;
+  assert.equal(tracked.settled, true);
+  assert.equal(tracked.value, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  await adapter.shutdown({ graceMs: 0 });
+  assert.equal(transport.lastSession().abortCalls, 1);
+  await adapter.shutdown();
 });
 
 test("3D4 live shape: pending carries canonical session_id for the Bridge contract", async () => {
-  // Regression for the live 0.87.0 correlation blocker (run_4f5a7700):
-  // the execution journal persisted permission_effect=ask while Bridge
-  // saw zero pendings. Root cause was the adapter pending row carrying
-  // only the legacy `session` key while the Bridge normalizer requires
-  // the canonical `session_id` for strict session scoping, so every Pi
-  // pending was dropped (matched=0). The adapter must emit session_id.
-  // Wire shape mirrors the verified Pi 0.87.0 transport: UUID UI id,
-  // opaque WB_PERMISSION_V1:<toolCallId> marker (pipe-form call id as
-  // seen live), exact 3-option ask shape, start observed before UI.
+  // Regression for the live correlation blocker (run_4f5a7700): the
+  // execution journal persisted permission_effect=ask while Bridge saw
+  // zero pendings. The adapter pending row must carry the canonical
+  // session_id the Bridge normalizer requires for strict session scoping.
+  // Wire shape mirrors the verified transport: opaque
+  // WB_PERMISSION_V1:<toolCallId> marker (pipe-form call id as seen
+  // live), exact 3-option ask shape, start observed before select.
   const projects = makeProjects();
-  const bag = autoSpawn();
-  const adapter = makeAdapter(projects, bag);
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
   // External-read ask policy mirrors the live run: /etc/hosts outside
   // the workspace evaluates to ask (not deny) under default_mode=ask.
   const base = writablePolicy();
   base.external_access = { default_mode: "ask", roots: [] };
   const session = await createSession(adapter, projects, projects.appA,
     { permission_policy: base, policy_revision: policyRevision(base) });
-  const child = bag.children[0];
   const liveCallId = "call_01a0c749a17876808c7659bb3c8645c4|fc_01a0c749a17876808c7659bb3c8645c4";
-  emit(child, { type: "tool_execution_start", toolCallId: liveCallId, toolName: "read",
-    args: { path: "/etc/hosts" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  emit(child, {
-    type: "extension_ui_request", id: "d5ec6467-aaaa-4bbb-8ccc-0123456789ab", method: "select",
-    title: `WB_PERMISSION_V1:${liveCallId}`,
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
+  const { selectPromise, listed } = await askPermission(adapter, projects.appA, session.id, {
+    toolCallId: liveCallId, toolName: "read", args: { path: "/etc/hosts" }, options: ASK_OPTIONS,
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  const listed = await adapter.listPermissions(projects.appA, session.id);
+  const tracked = trackSelect(selectPromise);
   assert.equal(listed.length, 1);
   const pending = listed[0];
   // Canonical Bridge contract key: strict session scoping depends on it.
@@ -473,30 +388,20 @@ test("3D4 live shape: pending carries canonical session_id for the Bridge contra
   const serialized = JSON.stringify(pending);
   assert.ok(serialized.includes('"session_id"'));
   assert.ok(!serialized.includes("/etc/hosts".repeat(2)));
-  // once answers the exact UUID UI request.
+  // once resolves the exact suspended select with the once value.
   const result = await adapter.respondPermission(projects.appA, session.id, pending.id, "once");
   assert.deepEqual(result, { ok: true, decision: "once" });
-  const written = child.requests().filter((r) => r.type === "extension_ui_response");
-  assert.equal(written.length, 1);
-  assert.deepEqual(written[0], {
-    type: "extension_ui_response",
-    id: "d5ec6467-aaaa-4bbb-8ccc-0123456789ab",
-    value: OPTION_ONCE,
-  });
+  await selectPromise;
+  assert.equal(tracked.value, OPTION_ONCE);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  // Stale UI for an ended call still fails closed with a cancel write.
-  emit(child, { type: "tool_execution_end", toolCallId: liveCallId, toolName: "read",
+  // Stale select for an ended call resolves undefined without pending.
+  const entry = adapter.sessions.get(session.id);
+  entry.session.emit({ type: "tool_execution_end", toolCallId: liveCallId, toolName: "read",
     result: {}, isError: false });
   await new Promise((resolve) => setImmediate(resolve));
-  emit(child, {
-    type: "extension_ui_request", id: "stale-ui-1", method: "select",
-    title: `WB_PERMISSION_V1:${liveCallId}`,
-    options: [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
+  const stale = await entry.session.boundUiContext.select(
+    `WB_PERMISSION_V1:${liveCallId}`, ASK_OPTIONS);
+  assert.equal(stale, undefined);
   assert.deepEqual(await adapter.listPermissions(projects.appA, session.id), []);
-  const stale = child.requests().filter((r) => r.type === "extension_ui_response" && r.id === "stale-ui-1");
-  assert.equal(stale.length, 1);
-  assert.deepEqual(stale[0], { type: "extension_ui_response", id: "stale-ui-1", cancelled: true });
-  await adapter.shutdown({ graceMs: 0 });
+  await adapter.shutdown();
 });

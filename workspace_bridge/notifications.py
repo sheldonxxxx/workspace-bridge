@@ -131,7 +131,7 @@ class DiscordNotifier(Notifier):
     def _payload(self, *, state: str, workspace_name: str, handoff_title: str,
                  run_id: str, request_kind: str, request_action: str, at: str) -> dict:
         attention = state in ATTENTION_STATES
-        headline = "OpenCode run needs attention" if attention else f"OpenCode run {state}"
+        headline = "Agent run needs attention" if attention else f"Agent run {state}"
         fields = [
             {"name": "Workspace", "value": (workspace_name or "unknown")[:100], "inline": True},
             {"name": "Handoff", "value": (handoff_title or "unknown")[:100], "inline": True},

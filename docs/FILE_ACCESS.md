@@ -26,8 +26,7 @@ that workspace or bypass exclusions. `read_scope` remains `workspace` in all mod
 | `handoff` | Only allowed paths inside `.workspace-handoff/`; the default |
 | `workspace` | Allowed source and handoff text files inside the selected mapping |
 
-Each new mapping starts disabled and handoff-only. Existing v0.4 mappings migrate
-to handoff-only; enabled state, credentials and records are preserved. Only the
+Each new mapping starts disabled and handoff-only. Only the
 local manager, authenticated with the separate admin token, can change permission.
 There is no MCP `write_scope`, `force`, permission-changing tool or bypass parameter.
 
@@ -42,7 +41,7 @@ serialized operation; it cannot undo a completed write.
 
 Workspace-wide grants source-edit capability to every authorized chat using the
 shared connection. It is not a request to edit arbitrary source. The project-lead
-skill continues manual OpenCode delegation unless the user asks for direct edits.
+skill continues manual agent delegation unless the user asks for direct edits.
 OS filesystem permissions must also permit the operation; the setting does not
 grant extra OS privileges. Keep the server installation/state and tunnel profile
 outside mapped projects. Stop agents/watchers that could conflict with edits.
@@ -110,6 +109,6 @@ Errors/termination can leave empty parent directories or hidden staging files.
 or job record. Edited generated plans retain original publication hashes;
 `matches_published=false` can be an intentional revision, not an audit failure.
 Replaying a handoff does not restore old documents. Never rewrite an active plan
-or move acceptance criteria after implementation. The user pastes OpenCode's normal
+or move acceptance criteria after implementation. The user pastes the agent's normal
 reply into ChatGPT, which audits current source with general tools. No snapshots,
 review IDs, required result files or server-verified verdicts are restored.

@@ -124,32 +124,6 @@ def test_cross_project_handoff_id_rejected(env, payload):
 
 
 
-def test_legacy_database_migrates_fail_closed_once_and_keeps_jobs(env, payload):
-    s = env["service"]
-    job = s.call(env["id"], env["token"], "prepare_handoff", Handoff.model_validate(payload).model_dump())
-    # Reproduce the v0.1 schema: workspace token column but no shared-gateway table.
-    with s.db:
-        s.db.execute("DROP TABLE gateway")
-        s.db.execute("UPDATE workspaces SET token_hash='legacy-hash',enabled=1")
-    migrated = Service(env["state"], env["config"])
-    try:
-        assert not migrated.workspace(env["id"], False)["enabled"]
-        assert not migrated.bridge_status()["configured"]
-        assert migrated.db.execute("SELECT id FROM jobs WHERE id=?", (job["id"],)).fetchone()
-        with pytest.raises(BridgeError):
-            migrated.authenticate_bridge(env["token"])
-        migrated.manage_workspace(env["id"], "enable")
-        token = migrated.manage_bridge("rotate_token")["token"]
-    finally:
-        migrated.close()
-    reopened = Service(env["state"], env["config"])
-    try:
-        assert reopened.authenticate(env["id"], token)["enabled"]
-        assert reopened.db.execute("SELECT id FROM jobs WHERE id=?", (job["id"],)).fetchone()
-    finally:
-        reopened.close()
-
-
 async def test_read_offsets_hashes_and_metadata(env):
     args = {"workspace_id": env["id"], "path": "src/main.py", "offset": 2, "limit": 1}
     read = value(await request(env, "read_file", args))

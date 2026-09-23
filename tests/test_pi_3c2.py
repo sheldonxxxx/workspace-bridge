@@ -6,7 +6,7 @@ scripted inventory, status without names, runtime capability/deployed
 negotiation and list_extensions normalization, session creation sending
 extension policy/revision and persisting the active snapshot,
 continuation binding, migration-safe historical reads, web dialog static
-shape, and unchanged OpenCode/3C1 behavior.
+shape, and unchanged generic/3C1 behavior.
 """
 import hashlib
 import json
@@ -548,10 +548,11 @@ def test_web_dialog_shape_no_innerhtml():
     assert "install" not in segment.lower() or "Install packages" not in segment
 
 
-def test_opencode_and_permission_behavior_unchanged(ext_env):
-    job = publish(ext_env, "c2-oc")
-    run = call(ext_env, "start_opencode_run", job_id=job["id"], request_id="c2-oc-run")
-    detail = call(ext_env, "read_opencode_run", run_id=run["run_id"])
+def test_aux_and_permission_behavior_unchanged(ext_env):
+    job = publish(ext_env, "c2-aux")
+    run = call(ext_env, "start_agent_run", runtime="aux",
+                 job_id=job["id"], request_id="c2-aux-run")
+    detail = call(ext_env, "read_agent_run", run_id=run["run_id"])
     assert detail.get("execution_audit", {"status": "not_recorded"})["status"] == "not_recorded"
     assert detail["execution_audit"].get("extensions", []) == []
     # Permission policy save still validates strictly (3C1 untouched).

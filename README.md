@@ -17,8 +17,8 @@ There are no source snapshots, automatic changed-file lists, frozen diffs, revie
 IDs, server-verified audit verdicts, or required result files. Source is read-only by
 default; a local administrator can explicitly enable text writes per workspace and
 separately enable agent execution (default off). The bridge never runs shell commands,
-never exposes an arbitrary command tool, and never starts or hosts an OpenCode server:
-a private client-only adapter connects to the OpenCode server you run natively on the host.
+never exposes an arbitrary command tool, and never starts or hosts an agent server:
+a private client-only adapter connects to the Pi agent you run natively on the host.
 
 ## Connection and management
 
@@ -43,12 +43,12 @@ no mutable shared active-workspace setting.
 The manager adds mappings, enables/disables access, edits exclusions, copies
 workspace IDs and handoff prompts, sets each workspace's write permission **and its
 separate agent-execution policy** (default off), shows the three planning documents
-and access events, lists linked OpenCode runs with their session IDs, model, state
+and access events, lists linked agent runs with their session IDs, model, state
 and notification status, shows a bounded escaped session transcript with any pending
 permission/question requests, lets the admin approve `once`/`always`/`reject` or stop
 an active session, enforces a global model policy (enabled models plus one
-mandatory default that MCP cannot override), shows a global Bridge-owned OpenCode
-sessions table, creates/rotates the shared
+mandatory default that MCP cannot override), shows a global Bridge-owned
+agent sessions table, creates/rotates the shared
 credential, pauses MCP access, and generates a single tunnel profile.
 
 ## Twenty-one tools
@@ -76,8 +76,7 @@ See [tool reference](docs/MCP_TOOLS.md) and [file access](docs/FILE_ACCESS.md).
 | Handoff only (default) | `handoff` | Writes under `.workspace-handoff/` only |
 | Workspace-wide | `workspace` | Writes to permitted text files inside that mapping |
 
-New mappings and migrations from pre-v0.5 default to handoff-only; existing
-explicitly configured policies survive subsequent upgrades. Nothing auto-enables source
+New mappings default to handoff-only. Nothing auto-enables source
 writes. To broaden a project later, open its **Exclusions & policy → Write
 permission** in the local manager, select **Workspace-wide**, and explicitly save
 and confirm. Only local administrator credentials can change this setting; MCP
@@ -90,7 +89,7 @@ capability to every chat using the shared connection, not just one conversation.
 
 Docker support is now included. Run the bridge in Compose and keep your existing
 secure tunnel client on the **host**. See [Docker guide](docs/DOCKER.md) for manual
-setup, persistent state, migration limits and security details.
+setup, persistent state and security details.
 
 ```sh
 # From this package directory, OUTSIDE the projects being mapped:
@@ -102,7 +101,7 @@ docker compose exec bridge workspace-bridge --state /state show-admin-token
 
 Open `http://127.0.0.1:8766/`, add your actual host project paths, create a bridge
 token and enable intended mappings. The same absolute project paths are mounted
-inside the container, so OpenCode can read copied handoff paths on the host.
+inside the container, so the Pi agent can read copied handoff paths on the host.
 Point the host tunnel to `http://127.0.0.1:8875/mcp` (or your configured host port).
 Both published ports bind to host loopback only. Internal ports remain 8765/8766.
 
@@ -120,7 +119,7 @@ delivery environment `docker compose config` validated, both the bridge and adap
 images built successfully, and a disposable bridge+adapter container smoke passed
 (loopback-only published ports, adapter with no published port, new workspace
 disabled/handoff/agent-disabled). The full Compose stack with the tunnel sidecar and
-a live host OpenCode server was not run here; `scripts/test_docker.py` exercises the
+a live host Pi agent was not run here; `scripts/test_docker.py` exercises the
 real container on a Docker-equipped host. See [Docker guide](docs/DOCKER.md).
 
 ## Install
@@ -152,7 +151,7 @@ workspace-bridge show-admin-token
 Open `http://127.0.0.1:8766/`, enter the admin token, add individual mappings, create
 one bridge token, and enable only intended projects. Generate the tunnel profile
 and follow [tunnel setup](docs/TUNNEL_SETUP.md). Neither token belongs in ChatGPT,
-OpenCode, project files, or handoffs. Only `/mcp` is tunnelled; the management page
+the Pi agent, project files, or handoffs. Only `/mcp` is tunnelled; the management page
 stays local. The endpoint, token format and tunnel profile are unchanged from v0.2.
 
 ## Daily loop
@@ -234,23 +233,23 @@ or handoff path in every write mode. The user still pastes the agent's reply int
 ChatGPT for general-tool review; workspace permission alone does not authorize
 ChatGPT to take over implementation. See [file access guide](docs/FILE_ACCESS.md).
 
-## OpenCode agent execution (opt-in)
+## Pi agent execution (opt-in)
 
-Agent execution is a separate, explicit, fail-closed policy. Fresh and migrated
+Agent execution is a separate, explicit, fail-closed policy. New
 workspaces default to **disabled**; `workspace_info.agent_execution` reports it, and
 only the loopback manager can change it. Enabling a workspace for MCP or granting
 workspace-wide writes does **not** enable agent execution. Once enabled, any holder
 of the shared bridge credential can start bounded runs for prepared handoffs in that
 workspace (and only that workspace).
 
-The OpenCode server runs **natively on the host** and is managed by you. It must not
+The Pi agent runs **natively on the host** and is managed by you. It must not
 be started or packaged inside Docker/Compose. Workspace Bridge ships a private,
-client-only `@opencode-ai/sdk` adapter sidecar; the adapter connects to your existing
-server and has no host-published port. Set `WB_OPENCODE_SERVER_URL` (Docker Desktop:
-`http://host.docker.internal:<port>`; Linux Engine: an explicit reachable host URL)
-plus optional Basic Auth and a shared `WB_RUNTIME_TOKEN`. The token is **required to
+client-only Pi host adapter; the adapter connects to your existing agent
+and has no host-published port. Set `WB_PI_RUNTIME_URL` (Docker Desktop or
+OrbStack: `http://host.docker.internal:<port>`; Linux Engine: an explicit
+reachable host URL) plus a shared `WB_RUNTIME_TOKEN`. The token is **required to
 unlock** the adapter: with an empty token every adapter operational endpoint is
-denied (401) and agent operations fail closed. Provider credentials and the server
+denied (401) and agent operations fail closed. Provider credentials and the agent
 URL never enter the bridge container, MCP, the manager, events or logs.
 
 The loop is handoff-bound: `prepare_handoff` → optionally
@@ -268,54 +267,32 @@ bridge records run state independently of handoff publication state. On completi
 ChatGPT reads the bounded final result with `read_agent_run`; the agent's report is
 **unverified evidence**, not independent proof.
 
-Permission handling preserves OpenCode's normal configuration. When OpenCode asks
+Permission handling preserves Pi's normal configuration. When Pi asks
 (for example `external_directory`), the run moves to the non-terminal
 `waiting_permission` state, the request is persisted, and a Discord attention
 notification is sent. `read_agent_request` exposes the exact pending scope; when
 the user asks, ChatGPT calls `respond_agent_permission` with `once`, `always` or
-`reject`, which resumes the **same** session. `always` passes through OpenCode's own
-proposed pattern unchanged and fails closed when no reviewable scope exists. OpenCode
-permissions are **not an OS sandbox**: the native server has the host user's
+`reject`, which resumes the **same** session. `always` passes through Pi's own
+proposed pattern unchanged and fails closed when no reviewable scope exists. Pi
+permissions are **not an OS sandbox**: the native agent has the host user's
 authority. Stronger OS/container isolation is optional hardening, not a Phase-2
-requirement. Explicit OpenCode `deny` is a policy rejection and is not remotely
+requirement. An explicit Pi `deny` is a policy rejection and is not remotely
 approvable.
 
 Missed-ask recovery is best-effort: `read_agent_run` resyncs the official
-pending-permission listing before reporting, but upstream `GET /permission` can
-itself fail (one malformed pending request can break the whole listing), in
-which case the run stays active with `pending_request_count=0` and a visible
+pending-permission listing before reporting, but an upstream listing failure
+leaves the run active with `pending_request_count=0` and a visible
 non-terminal `permission_sync: degraded` diagnostic instead of a silent zero.
 A later successful listing recovers the exact session ask and clears the
-diagnostic. Adapter event-stream health (`subscribed`/`reconnecting`) is
-exposed through runtime status; a run started while the stream is unconfirmed
-is marked degraded. Live revalidation with a real external-directory ask is
+diagnostic. Runtime health is exposed through runtime status; only
+capability-advertised surfaces are used, and anything unadvertised fails
+closed. Live revalidation with a real external-directory ask is
 still required after upgrades.
 
 If `WB_DISCORD_WEBHOOK_URL` is set locally, waiting and completion states produce
 notifications with safe metadata only (workspace name, handoff title, run id, request
 kind/action, timestamp). No external paths, command bodies, source snippets, prompt
 text or secrets are sent, and notification failures never change run state.
-
-## Upgrade from earlier releases
-
-Stop the bridge, back up its private state and handoff folders, reinstall this
-release, and restart with the **same state directory**. Do not reinitialize.
-Refresh ChatGPT's tool discovery (nineteen tools) and reload the skill (1.6.1).
-No new tunnel or credential is needed. Existing mappings and handoffs are retained.
-v0.8 adds `agent_enabled` (default disabled) and isolated `agent_runs`/`agent_requests`
-tables; existing explicit write policies, credentials, enabled flags and handoffs are
-unchanged. From releases earlier than v0.5, the existing write-scope migration still
-defaults to `handoff`. Install normally to include the new Pillow dependency; do not
-use `--no-deps` unless it is already installed.
-
-Old baseline/review records and on-disk artifacts are preserved for history, but
-are not used or exposed by the retired tools. They are not automatically erased
-or reclaimed. New handoffs store no project-source snapshots. The old database
-`baseline` column remains inert for compatibility. Start a fresh handoff for new
-work; older copies may still contain superseded workflow instructions.
-
-See [v0.6 upgrade](docs/MIGRATION_0.6.md) and [v0.5 upgrade](docs/MIGRATION_0.5.md); the [v0.3 migration](docs/MIGRATION_0.3.md) explains retired review features. For a v0.1 installation also follow the
-[earlier gateway migration](docs/MIGRATION_0.2.md).
 
 ## Boundaries
 
@@ -324,11 +301,11 @@ bounded reads, heuristic secret redaction, separate local-admin credentials, and
 shared-token revocation remain. Repository ignore files are not access policy.
 This is not an OS sandbox, complete secret detection, or per-chat authorization.
 Source read by ChatGPT leaves your computer through the connection. No general shell
-or Git execution tool was added. OpenCode execution occurs only through the bounded
+or Git execution tool was added. Pi execution occurs only through the bounded
 agent tools and a client-only adapter to the host runtime, only after a local
 administrator enables agent execution for the workspace. Source writes stay disabled
-unless the local administrator explicitly selects workspace-wide permission. OpenCode
-permissions are not an OS sandbox; the host server runs with your user's authority.
+unless the local administrator explicitly selects workspace-wide permission. Pi
+permissions are not an OS sandbox; the host agent runs with your user's authority.
 
 See [security](docs/SECURITY.md), [operations](docs/OPERATIONS.md),
 [architecture](docs/ARCHITECTURE.md) and [validation](VALIDATION.md).

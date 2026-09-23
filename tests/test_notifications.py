@@ -171,8 +171,8 @@ def test_environment_configuration_never_returns_or_logs_the_secret(monkeypatch)
 def test_orchestrator_notifies_on_wait_and_completion(agent_env, payload):
     job = agent_env["service"].call(agent_env["id"], agent_env["token"], "prepare_handoff",
                                     Handoff.model_validate(payload).model_dump())
-    run = agent_env["service"].call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                                    {"job_id": job["id"], "request_id": "n1", "model": None,
+    run = agent_env["service"].call(agent_env["id"], agent_env["token"], "start_agent_run",
+                                    {"runtime": "pi", "job_id": job["id"], "request_id": "n1", "model": None,
                                      "parent_run_id": None})
     agent_env["service"].orchestrator.handle_event(permission_event(run["session_id"], "per_n", pattern=["/x/**"]))
     states = [c["state"] for c in agent_env["notifier"].calls]
@@ -183,7 +183,7 @@ def test_orchestrator_notifies_on_wait_and_completion(agent_env, payload):
                                                          run["run_id"], "per_n", "once")
     agent_env["service"].orchestrator.handle_event({"type": "session.idle", "session_id": run["session_id"]})
     assert [c["state"] for c in agent_env["notifier"].calls] == ["waiting_permission", "completed"]
-    persisted = agent_env["service"].call(agent_env["id"], agent_env["token"], "read_opencode_run",
+    persisted = agent_env["service"].call(agent_env["id"], agent_env["token"], "read_agent_run",
                                           {"run_id": run["run_id"]})
     assert persisted["notification"]["status"] == "sent"
     assert "discord" not in json.dumps(persisted).lower()
@@ -195,11 +195,11 @@ def test_notification_failure_does_not_change_run_state(agent_env, payload):
         result_factory=lambda **kw: NotificationResult(status="failed", attempts=3, code="unreachable"))
     job = agent_env["service"].call(agent_env["id"], agent_env["token"], "prepare_handoff",
                                     Handoff.model_validate(payload).model_dump())
-    run = agent_env["service"].call(agent_env["id"], agent_env["token"], "start_opencode_run",
-                                    {"job_id": job["id"], "request_id": "nf", "model": None,
+    run = agent_env["service"].call(agent_env["id"], agent_env["token"], "start_agent_run",
+                                    {"runtime": "pi", "job_id": job["id"], "request_id": "nf", "model": None,
                                      "parent_run_id": None})
     agent_env["service"].orchestrator.handle_event({"type": "session.idle", "session_id": run["session_id"]})
-    detail = agent_env["service"].call(agent_env["id"], agent_env["token"], "read_opencode_run",
+    detail = agent_env["service"].call(agent_env["id"], agent_env["token"], "read_agent_run",
                                        {"run_id": run["run_id"]})
     assert detail["state"] == "completed"
     assert detail["notification"]["status"] == "failed"

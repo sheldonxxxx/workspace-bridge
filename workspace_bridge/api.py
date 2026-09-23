@@ -36,9 +36,9 @@ HashString = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 JobID = Annotated[str, StringConstraints(pattern=r"^job_[0-9a-f]{24}$")]
 WorkspaceID = Annotated[str, StringConstraints(pattern=r"^ws_[0-9a-f]{24}$")]
 RunID = Annotated[str, StringConstraints(pattern=r"^run_[0-9a-f]{24}$")]
-OpenCodeRequestID = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+AgentRequestID = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 # Runtime-neutral agent identity. Only package-known configured runtime ids
-# (e.g. "opencode", "pi") are accepted downstream: Service/RuntimeRegistry
+# (e.g. "pi") are accepted downstream: Service/RuntimeRegistry
 # validates against configured ids and fails unknown_runtime. Project
 # content can never register new runtimes. The grammar is the shared
 # package constant from workspace_bridge.runtime (same source the registry
@@ -123,13 +123,13 @@ class Grep(Input):
 
 
 class AgentModelQuery(Input):
-    runtime: RuntimeID = Field(description="Explicit runtime id (e.g. opencode, pi). Unknown or unconfigured runtimes fail unknown_runtime before any backend call.")
+    runtime: RuntimeID = Field(description="Explicit runtime id (e.g. pi). Unknown or unconfigured runtimes fail unknown_runtime before any backend call.")
     query: str = Field(default="", max_length=120, description="Optional nickname/fragment to filter or rank candidates. It never selects a model.")
     limit: int = Field(default=25, ge=1, le=100)
 
 
 class AgentStartRun(Input):
-    runtime: RuntimeID = Field(description="Explicit runtime id (e.g. opencode, pi). The run is persisted under this runtime; idempotent replay never crosses runtimes.")
+    runtime: RuntimeID = Field(description="Explicit runtime id (e.g. pi). The run is persisted under this runtime; idempotent replay never crosses runtimes.")
     job_id: JobID = Field(description="Prepared handoff owned by this workspace. No arbitrary prompt or path is accepted.")
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$", description="Idempotency key; an exact retry returns the same run without a second session. Never replays a run owned by another runtime.")
     model: str | None = Field(default=None, max_length=260, description="Optional exact canonical selector from list_agent_models for the selected runtime. Omit to use that runtime's configured global default. Follow the project-lead skill model-choice rule before choosing a non-default.")
@@ -146,7 +146,7 @@ class AgentRunRef(Input):
 
 
 class AgentRunRequest(AgentRunRef):
-    request_id: OpenCodeRequestID = Field(description="Exact pending request id returned by read_agent_run/read_agent_request.")
+    request_id: AgentRequestID = Field(description="Exact pending request id returned by read_agent_run/read_agent_request.")
 
 
 class AgentPermissionDecision(AgentRunRequest):
@@ -515,14 +515,14 @@ class ManageBridge(Input):
 
 class ModelPolicy(Input):
     enabled: list[str] = Field(min_length=1, max_length=200,
-                               description="Exact canonical provider/model selectors to allow for NEW runs (>=1). Every selector must currently exist in the global runtime model list.")
+                               description="Exact canonical provider/model selectors to allow for NEW runs (>=1). Every selector must currently exist in the runtime model list for the discovery workspace.")
     default: str = Field(min_length=1, max_length=260,
                          description="Mandatory default selector; must be a member of enabled. New runs use it when model is omitted; explicit enabled models are allowed per the skill rule. MCP cannot change it.")
 
 
 class RuntimeModelPolicy(ModelPolicy):
     workspace_id: WorkspaceID | None = Field(default=None,
-        description="Discovery workspace for workspace-scoped runtimes (Pi): required there, ignored for OpenCode.")
+        description="Discovery workspace for workspace-scoped runtimes (Pi): required there.")
 
 
 class PermissionReply(Input):
@@ -650,17 +650,13 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     "admin_port": public_port or port,
                     "listen_mode": listen_mode,
                     "admin_allowed_hosts": list(extra_hosts),
-                    "mcp_endpoint": "/mcp", "bridge": service.bridge_status(), "open_code_integration": True,
-                    "opencode": await run_in_threadpool(service.orchestrator.runtime_status),
+                    "mcp_endpoint": "/mcp", "bridge": service.bridge_status(),
+                    "pi": await run_in_threadpool(service.orchestrator.runtime_status),
                     "model_policy": await run_in_threadpool(service.orchestrator.model_policy_status),
-                    # Additive 3A2 diagnostics: configured runtime ids plus
-                    # sanitized health/capabilities. Existing opencode and
-                    # model_policy fields above stay unchanged; no Pi run
-                    # start or model-policy controls are exposed here.
+                    # Neutral diagnostics: configured runtime ids plus
+                    # sanitized health/capabilities.
                     "runtimes": await run_in_threadpool(service.runtime_diagnostics),
-                    # Additive 3A3: runtime-global policy summary per
-                    # configured runtime. The top-level model_policy stays
-                    # the OpenCode compatibility view.
+                    # Runtime-global policy summary per configured runtime.
                     "runtime_policies": await run_in_threadpool(service.runtime_policy_summaries),
                     # Additive 3B1: Pi file-tool permission policy summary
                     # (modes/counts/revision only; no patterns, paths, or
@@ -680,28 +676,11 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     return JSONResponse({"model_policy": await run_in_threadpool(
                         service.orchestrator.model_policy_status)})
                 model = ModelPolicy.model_validate(await body_json(request))
-                return JSONResponse(await run_in_threadpool(
-                    service.orchestrator.set_model_policy, model.enabled, model.default))
-            if path == "/api/opencode/models":
-                # Global discovery: no workspace parameter is accepted or required.
-                query = request.query_params.get("query", "")
                 try:
-                    limit = max(1, min(int(request.query_params.get("limit", "25")), 100))
-                except ValueError:
-                    limit = 25
-                return JSONResponse(await run_in_threadpool(
-                    service.orchestrator.list_models, None, query, limit))
-            if path == "/api/opencode/sessions":
-                # Global Bridge-owned sessions overview (local admin only).
-                # OpenCode-only compatibility route: rows of other runtimes
-                # never appear here; use GET /api/sessions for all runtimes.
-                try:
-                    offset = max(0, int(request.query_params.get("offset", "0")))
-                    limit = max(1, min(int(request.query_params.get("limit", "25")), 50))
-                except ValueError:
-                    offset, limit = 0, 25
-                return JSONResponse(await run_in_threadpool(
-                    service.orchestrator.list_all_runs, offset, limit))
+                    return JSONResponse(await run_in_threadpool(
+                        service.orchestrator.set_model_policy, model.enabled, model.default))
+                except BridgeError as exc:
+                    return JSONResponse({"error": str(exc) or "Invalid policy"}, 400)
             if path == "/api/sessions":
                 # Neutral all-runtime Bridge-owned sessions overview.
                 try:
@@ -772,9 +751,8 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                                          "policy_scope": "runtime_global", **status})
                 if leaf == "permission-policy":
                     # 3C1: Pi-only operational permission policy (v3). Full
-                    # validated v3 object on POST (not patch semantics); GET
-                    # migrates stored v1/v2 in memory and reports
-                    # migrated_from_version. No MCP mutation path:
+                    # validated v3 object on POST (not patch semantics).
+                    # No MCP mutation path:
                     # local-admin only. Other runtimes fail cleanly as
                     # unsupported.
                     if runtime_id != "pi":
@@ -891,8 +869,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     offset, limit = 0, 20
                 with service.lock:
                     ws = service.workspace(ws_id, False)
-                    # Intentional cross-runtime project view; the OpenCode-only
-                    # compatibility surface is /api/opencode/sessions.
+                    # Intentional cross-runtime project view.
                     return JSONResponse(service.list_agent_runs(ws, offset, limit))
             model = ManageWorkspace.model_validate(await body_json(request))
             return JSONResponse(await run_in_threadpool(service.manage_workspace, ws_id, **model.model_dump()))
@@ -907,8 +884,6 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/login", login, methods=["POST"]),
         Route("/api/logout", logout, methods=["POST"]),
         Route("/api/status", api), Route("/api/events", api), Route("/api/settings", api, methods=["GET", "POST"]),
-        Route("/api/opencode/models", api),
-        Route("/api/opencode/sessions", api),
         Route("/api/sessions", api),
         Route("/api/runtimes/{runtime}/models", api),
         Route("/api/runtimes/{runtime}/model-policy", api, methods=["GET", "POST"]),

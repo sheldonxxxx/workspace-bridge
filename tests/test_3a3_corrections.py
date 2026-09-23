@@ -56,17 +56,19 @@ def dual_env(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    opencode = FakeRuntime(str(root))
+    aux = FakeRuntime(str(root))
+    aux._runtime_id = "aux"
     pi = FakePiRuntime(str(root))
-    service = Service(state, cfg, runtimes={"opencode": opencode, "pi": pi},
+    service = Service(state, cfg, runtimes={"aux": aux, "pi": pi},
                       notifier=RecordingNotifier(), orchestrator_background=False)
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.orchestrators["opencode"].set_model_policy(
-        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet")
-    yield {"service": service, "opencode": opencode, "pi": pi, "root": root,
+    ws = service.workspace(ws_id)
+    service.orchestrators["aux"].set_model_policy(
+        ["anthropic/claude-sonnet", "glm/zai-glm-5.2"], "anthropic/claude-sonnet", ws)
+    yield {"service": service, "aux": aux, "pi": pi, "root": root,
            "state": state, "config": cfg, "id": ws_id, "token": token, "tmp": tmp_path}
     service.close()
 
@@ -121,12 +123,12 @@ def test_pi_busy_with_terminal_message_stays_running(dual_env):
     assert detail["result"]["summary"] == "Done."
 
 
-def test_opencode_busy_still_completes_from_durable_evidence(dual_env):
-    job = publish(dual_env, "oc-busy-1")
-    run = call(dual_env, "start_agent_run", runtime="opencode",
-               job_id=job["id"], request_id="oc-busy-run")
-    dual_env["opencode"].set_session_status("busy", run["session_id"])
-    # Eventful behavior is unchanged: durable evidence completes even busy.
+def test_aux_busy_still_completes_from_durable_evidence(dual_env):
+    job = publish(dual_env, "aux-busy-1")
+    run = call(dual_env, "start_agent_run", runtime="aux",
+               job_id=job["id"], request_id="aux-busy-run")
+    dual_env["aux"].set_session_status("busy", run["session_id"])
+    # Generic behavior is unchanged: durable evidence completes even busy.
     detail = call(dual_env, "read_agent_run", run_id=run["run_id"])
     assert detail["state"] == "completed"
 
@@ -165,33 +167,36 @@ def test_cursor_keys_are_runtime_scoped_and_pi_starts_no_pump(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    opencode = FakeRuntime(str(root))
+    aux = FakeRuntime(str(root))
+    aux._runtime_id = "aux"
     pi = FakePiRuntime(str(root))
     other = FakeRuntime(str(root))
     other._runtime_id = "b2"
     service = Service(state, cfg,
-                      runtimes={"opencode": opencode, "pi": pi, "b2": other},
+                      runtimes={"aux": aux, "pi": pi, "b2": other},
                       notifier=RecordingNotifier(), orchestrator_background=True)
     try:
-        oc, pi_orch, b2 = (service.orchestrators["opencode"], service.orchestrators["pi"],
-                           service.orchestrators["b2"])
-        assert oc._cursor_setting_keys() == ("runtime_instance", "runtime_cursor")
+        aux_orch, pi_orch, b2 = (service.orchestrators["aux"], service.orchestrators["pi"],
+                                 service.orchestrators["b2"])
+        assert aux_orch._cursor_setting_keys() == ("runtime_instance:aux", "runtime_cursor:aux")
         assert pi_orch._cursor_setting_keys() == ("runtime_instance:pi", "runtime_cursor:pi")
         assert b2._cursor_setting_keys() == ("runtime_instance:b2", "runtime_cursor:b2")
         assert pi_orch._event_polling_supported() is False
-        assert oc._event_polling_supported() is True
-        oc.start()
+        assert aux_orch._event_polling_supported() is True
+        aux_orch.start()
         pi_orch.start()
         try:
-            # OpenCode keeps legacy keys; Pi writes nothing event-related.
-            assert service.setting("runtime_instance") == "adapter-1"
+            # Every runtime uses its exact id as the cursor-key suffix;
+            # Pi writes nothing event-related.
+            assert service.setting("runtime_instance:aux") == "adapter-1"
+            assert service.setting("runtime_instance") is None
             assert service.setting("runtime_instance:pi") is None
             assert service.setting("runtime_cursor:pi") is None
-            assert oc._pump is not None and pi_orch._pump is None
+            assert aux_orch._pump is not None and pi_orch._pump is None
             assert pi_orch._poll is not None
             assert pi.poll_calls == []
         finally:
-            oc.stop()
+            aux_orch.stop()
             pi_orch.stop()
     finally:
         service.close()
@@ -204,12 +209,12 @@ async def test_admin_run_routes_serve_pi_through_owner(dual_env):
     service = dual_env["service"]
     token = (dual_env["state"] / "admin-token").read_text().strip()
     job = publish(dual_env, "admin-pi-1")
-    oc_run = call(dual_env, "start_agent_run", runtime="opencode",
-                  job_id=job["id"], request_id="admin-pi-oc")
+    aux_run = call(dual_env, "start_agent_run", runtime="aux",
+                  job_id=job["id"], request_id="admin-pi-aux")
     pi_run = call(dual_env, "start_agent_run", runtime="pi",
                   job_id=job["id"], request_id="admin-pi-run")
     dual_env["pi"].messages_script = []
-    dual_env["opencode"].messages_script = []
+    dual_env["aux"].messages_script = []
     dual_env["pi"].messages_script = []
     async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
@@ -229,18 +234,18 @@ async def test_admin_run_routes_serve_pi_through_owner(dual_env):
                                    json={"decision": "once"})
         assert denied.status_code == 400
         assert dual_env["pi"].respond_calls == []
-        # OpenCode through the same generic routes is unchanged.
-        oc_detail = (await client.get(f"/api/runs/{oc_run['run_id']}")).json()
-        assert oc_detail["runtime"] == "opencode"
-        oc_stopped = (await client.post(f"/api/runs/{oc_run['run_id']}/stop")).json()
-        assert oc_stopped["state"] == "cancelled"
+        # Aux through the same generic routes is unchanged.
+        aux_detail = (await client.get(f"/api/runs/{aux_run['run_id']}")).json()
+        assert aux_detail["runtime"] == "aux"
+        aux_stopped = (await client.post(f"/api/runs/{aux_run['run_id']}/stop")).json()
+        assert aux_stopped["state"] == "cancelled"
         # Project run listing is intentionally cross-runtime.
         ws_runs = (await client.get(f"/api/workspaces/{dual_env['id']}/runs")).json()
-        assert {r["run_id"] for r in ws_runs["runs"]} >= {oc_run["run_id"], pi_run["run_id"]}
-        assert {r["runtime"] for r in ws_runs["runs"]} >= {"opencode", "pi"}
-        # OpenCode-only compatibility route stays scoped.
-        scoped = (await client.get("/api/opencode/sessions")).json()
-        assert all(r["runtime"] == "opencode" for r in scoped["runs"])
+        assert {r["run_id"] for r in ws_runs["runs"]} >= {aux_run["run_id"], pi_run["run_id"]}
+        assert {r["runtime"] for r in ws_runs["runs"]} >= {"aux", "pi"}
+        # Runtime filter stays scoped.
+        scoped = (await client.get("/api/sessions", params={"runtime": "aux"})).json()
+        assert all(r["runtime"] == "aux" for r in scoped["runs"])
 
 
 # --------------------------------------------- persisted history readability
@@ -260,11 +265,11 @@ def _insert_hist_pi(service, ws_id, job_id, run_id="run_hist_pi2", state="comple
              '[{"id": "m2", "role": "assistant", "text": "old work", "tools": ["read"], '
              '"error": null, "created": 11, "completed": 12}]'))
         service.db.execute(
-            "INSERT INTO agent_requests (id,run,workspace,session,opencode_request,"
+            "INSERT INTO agent_requests (id,run,workspace,session,"
             "runtime_request,kind,action,resource,pattern,metadata,explanation,redacted,"
             "state,decision,created,updated,resolved,generation) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"req_{run_id}", run_id, ws_id, "ses_hist", f"{run_id}:per_hist",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"req_{run_id}", run_id, ws_id, "ses_hist",
              "per_hist", "permission", "edit", "notes", '["/x/**"]',
              '{"requested_patterns": ["/x/**"]}', "notes", 0,
              "approved", "once", "2026-09-21T00:00:01+00:00", "2026-09-21T00:00:02+00:00",
@@ -280,7 +285,10 @@ def _hist_service(tmp_path):
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
     runtime = FakeRuntime(str(root))
-    service = Service(state, cfg, runtimes={"opencode": runtime},
+    # Registered under a foreign id so the inserted Pi rows exercise the
+    # unconfigured-runtime persisted-history path with zero backend contact.
+    runtime._runtime_id = "aux"
+    service = Service(state, cfg, runtimes={"aux": runtime},
                       notifier=RecordingNotifier(), orchestrator_background=False)
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
@@ -383,7 +391,7 @@ def test_registry_rejects_noncanonical_ids():
         assert exc.value.code == "invalid_arguments", bad
         assert not is_valid_runtime_id(bad), bad
     good_ids = ["a", "0", "ab", "a-b", "a_b", "a-b_c9", "x" * 32,
-                "opencode", "pi"]
+                "aux", "pi"]
     for good in good_ids:
         candidate = FakeRuntime("/tmp")
         candidate._runtime_id = good
@@ -479,7 +487,9 @@ def test_historical_noncanonical_id_rows_unaffected(tmp_path):
     root.mkdir()
     state = tmp_path / "private-state"
     cfg = initialize(state, [str(parent)], 8765, 8766)
-    service = Service(state, cfg, runtimes={"opencode": FakeRuntime(str(root))},
+    aux = FakeRuntime(str(root))
+    aux._runtime_id = "aux"
+    service = Service(state, cfg, runtimes={"aux": aux},
                       notifier=RecordingNotifier(), orchestrator_background=False)
     try:
         ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]

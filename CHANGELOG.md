@@ -1,4 +1,26 @@
-# Unreleased — Pi default runtime, OpenCode MCP aliases removed
+# Unreleased — Pi adapter in-process AgentSession SDK (0.4.0)
+
+- `runtime/pi-host-adapter` 0.4.0 replaces owned `pi --mode rpc`
+  subprocesses and JSONL framing with Pi 0.87.0's direct Node
+  AgentSession SDK in-process (`@earendil-works/pi-coding-agent`
+  pinned exactly, with a lockfile). No frame-size ceiling can kill a
+  Bridge session; oversized tool payloads summarize to bounded audit
+  evidence while the session stays usable.
+- Bridge HTTP contract, Bridge-owned permission semantics (ask suspends
+  the same invocation; once/always/reject with exact scopes), extension
+  snapshots, model selection, execution audit, session lifecycle, and
+  the runtime-neutral Python layer are unchanged. The trusted
+  permission extension now loads as a parameterized inline factory with
+  the per-session policy snapshot closed over; `ctx.ui.select` is backed
+  directly by adapter pending-permission state.
+- Sessions are persistent (SessionManager files under the isolated
+  `PI_CODING_AGENT_DIR` session area, never in-memory) with
+  authoritative directory-bound identity; project trust stays disabled
+  and extension/skill/prompt/context-file auto-discovery stays off --
+  only the package-owned trusted extension and admin-enabled package
+  roots load. Health advertises `transport: "agentsession-sdk"`.
+
+# Unreleased — Pi-only runtime (OpenCode backend removed)
 
 - Public MCP surface no longer exposes the seven OpenCode-specific tools
   (`list_opencode_models`, `start_opencode_run`, `list_opencode_runs`,
@@ -8,10 +30,16 @@
   `respond_agent_permission` / `cancel_agent_run` with an explicit `runtime`.
 - Project-lead skill 2.2.0 defaults a silent runtime choice to Pi (explicit user
   runtime requests still win; runtime changes still require a fresh session).
-- OpenCode backend, admin HTTP compatibility routes, and historical run
-  compatibility are unchanged: persisted OpenCode runs remain readable through
-  `read_agent_run` / `list_agent_runs`, and explicit `runtime="opencode"` keeps
-  working through the runtime-neutral APIs.
+- Pi is the only configured runtime implementation. The OpenCode backend was
+  removed end to end: no `runtime/opencode-adapter` sidecar or Compose
+  service, no `WB_OPENCODE_*` configuration, no `/api/opencode/*` routes,
+  and no OpenCode backend construction/registration/transport. The generic
+  `AgentRuntime` / `RuntimeRegistry` architecture is unchanged for future
+  backends.
+- Fresh databases use `runtime='pi'` and `runtime_request` for native request
+  identities. Legacy OpenCode database migration has been removed.
+- Pi model provider selectors containing `opencode-go/*` are provider
+  identities used through Pi and are unchanged.
 
 # Unreleased — canonical runtime-id grammar for registry and cursor keys
 
