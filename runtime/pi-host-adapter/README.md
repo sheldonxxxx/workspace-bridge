@@ -133,7 +133,12 @@ The adapter emits structured `sdk_tool_event_trace` records for tool
 start/end delivery and terminal agent events. Records contain only the
 session ID, tool-call ID, event type, stage, pending-tool count, journal
 state/cursor, and dispatch duration; tool arguments and results are never
-logged. `extension_dispatch_stalled` is a warning emitted after 10 seconds
+logged. Routine stages (`extension_dispatch_start/end`, `session_subscriber`,
+`adapter_received`, `journal_started/completed`) are DEBUG, so default INFO
+launchd logs stay quiet; `extension_dispatch_stalled`, `adapter_event_error`,
+`adapter_event_unusable`, and `journal_missing_start` are WARNING. Use
+`WB_LOG_LEVEL=DEBUG` temporarily to trace a stalled tool call.
+`extension_dispatch_stalled` is a warning emitted after 10 seconds
 when Pi has not finished awaiting extension handlers for that event.
 
 For a stalled tool call, compare the stages for its call ID:
@@ -166,6 +171,7 @@ Optional environment:
 | `WB_PI_BINARY` | `pi` | Deployment signal only (checked for health); sessions run in-process and never spawn it. Never installed or upgraded by the adapter. |
 | `PI_CODING_AGENT_DIR` | `$HOME/.pi/workspace-bridge` | Isolated agent dir; `~`, `$HOME`, `${HOME}` prefixes expanded. Never the normal `~/.pi/agent` tree. |
 | `WB_PI_PROJECTS_DIR` (`WB_PROJECTS_DIR` fallback) | required | Canonicalized; must exist. Every session dir must realpath beneath it. |
+| `WB_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`; same semantics as the Docker Bridge. Invalid nonblank value fails adapter startup safely. Set independently from the Bridge (Compose does not configure the LaunchAgent). |
 
 `GET /health` is readable without a token and exposes booleans/version/status
 plus the `agentsession-sdk` transport marker. Every other endpoint requires

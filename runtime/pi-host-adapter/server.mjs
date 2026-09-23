@@ -21,6 +21,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import { AdapterError } from "./adapter.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
+import { sanitizedErrorCode } from "./logging.mjs";
 import { PathError } from "./paths.mjs";
 
 const DEFAULT_BODY_LIMIT = 256 * 1024;
@@ -192,7 +193,11 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
           }
           const session = await adapter.createSession(
             directory, String(body.title || "Workspace Bridge run"), options);
-          log("INFO", "session_create", { status: "ok" });
+          // Correlate Bridge and adapter records: safe created session_id
+          // only, never directory/title/model/prompt bodies.
+          log("INFO", "session_create", { status: "ok",
+            ...(session && session.id ? { session_id: String(session.id).slice(0, 200) } : {}),
+          });
           return send(res, 200, { session });
         }
         if (!sessionId) return send(res, 404, { error: "Unknown route", code: "not_found" });
@@ -258,8 +263,19 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
       }
       return send(res, 404, { error: "Unknown route", code: "not_found" });
     } catch (error) {
-      if ((error instanceof AdapterError || error instanceof PathError) && error.code !== "runtime_unavailable" && error.code !== "unavailable") {
-        log("INFO", "request_rejected", { code: error.code });
+      if (error instanceof AdapterError || error instanceof PathError) {
+        if (error.code !== "runtime_unavailable" && error.code !== "unavailable") {
+          // Bounded adapter/path/policy rejections worth operator attention.
+          // Never log directory/title/model prompt/tool args or token values.
+          log("WARNING", "request_rejected", { code: String(error.code || "rejected").slice(0, 80) });
+        }
+        // Known recoverable unavailability stays unlogged here to avoid
+        // duplicate poll noise handled/throttled by the Bridge.
+      } else {
+        // Unexpected exception: one sanitized ERROR record with a
+        // type-derived code only. Never error.message, URL/path,
+        // directory, model, body, token, tool args/results, or stacks.
+        log("ERROR", "request_error", { code: sanitizedErrorCode(error) });
       }
       return fail(res, error);
     }

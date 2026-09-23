@@ -280,6 +280,35 @@ def test_compose_security_and_same_host_path():
     assert urls==['http://bridge:8765/mcp']
 
 
+def test_tunnel_sidecar_logging_level_format_rotation():
+    """The tracked tunnel sidecar logs JSON at the mapped level with 10m x3 rotation.
+
+    Tracked compose.yaml is the canonical Compose contract. A local
+    deployment-specific compose-prod.yaml (ignored, host-specific paths)
+    may mirror it and is validated separately, never here."""
+    cfg = yaml.safe_load((ROOT/'compose.yaml').read_text())
+    tunnel = cfg['services']['mcp-tunnel']
+    env = tunnel.get('environment', {}) or {}
+    if isinstance(env, list):
+        env = dict(item.split('=', 1) for item in env)
+    assert env.get('LOG_FORMAT') == 'json'
+    level = str(env.get('LOG_LEVEL', ''))
+    assert 'WB_TUNNEL_LOG_LEVEL' in level and ':-info' in level
+    # Raw HTTP tunnel logging must never be enabled: it may expose
+    # sensitive headers/bodies. Do not inspect tunnel.env secret values.
+    assert 'LOG_HTTP_RAW_UNSAFE' not in env
+    assert 'LOG_HTTP_RAW_UNSAFE' not in json.dumps(tunnel)
+    logcfg = tunnel.get('logging', {}) or {}
+    assert logcfg.get('driver') == 'json-file'
+    assert logcfg.get('options', {}).get('max-size') == '10m'
+    assert logcfg.get('options', {}).get('max-file') == '3'
+
+
+def test_env_example_documents_tunnel_log_level():
+    text = (ROOT/'.env.example').read_text()
+    assert 'WB_TUNNEL_LOG_LEVEL' in text and 'info' in text
+
+
 def test_dockerfile_dependency_layer_before_source():
     """Third-party wheel work must not be invalidated by source-only changes."""
     text = (ROOT/'Dockerfile').read_text()
@@ -569,7 +598,8 @@ async def test_admin_proxy_still_rejects_wrong_port_and_evil(env, headers):
         assert r.status_code == 403
 
 
-async def test_boundary_reject_logs_host_and_reason(env, caplog):
+async def test_boundary_reject_is_structured_without_host_origin_path(env, caplog):
+    import json
     import logging
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
@@ -578,9 +608,21 @@ async def test_boundary_reject_logs_host_and_reason(env, caplog):
     token = (env['state'] / 'admin-token').read_text().strip()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
-        with caplog.at_level(logging.WARNING, logger="workspace_bridge.boundary"):
+        with caplog.at_level(logging.WARNING, logger="workspace_bridge.ops"):
             r = await client.get('/api/status', headers={
                 'Host': 'someone-else.example', 'Authorization': 'Bearer ' + token})
         assert r.status_code == 403
-        assert any("reason=untrusted-host" in rec.message and "someone-else.example" in rec.message
-                   for rec in caplog.records)
+        lines = [rec.message for rec in caplog.records
+                 if rec.name == "workspace_bridge.ops"]
+        assert lines, "expected a structured boundary_reject record"
+        dumped = "\n".join(lines)
+        assert "someone-else.example" not in dumped
+        assert "/api/status" not in dumped
+        parsed = [json.loads(line) for line in lines]
+        rejects = [p for p in parsed if p.get("event") == "boundary_reject"]
+        assert rejects and rejects[0]["level"] == "WARNING"
+        assert rejects[0]["reason"] == "untrusted-host"
+        assert set(rejects[0]) <= {"timestamp", "level", "component", "event",
+                                    "reason", "code", "source", "action",
+                                    "workspace_id", "request_id", "run_id", "session_id",
+                                    "status"}

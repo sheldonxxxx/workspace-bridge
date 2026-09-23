@@ -29,7 +29,9 @@ from .runtime import RUNTIME_ID_PATTERN
 from .security import BridgeError, MAX_OUTPUT, digest
 from .service import Service, encoded
 
-logger = logging.getLogger("workspace_bridge.boundary")
+from .oplog import emit as _emit_ops, error_code as _error_code
+
+_ops_log = logging.getLogger("workspace_bridge.ops")
 
 PathString = Annotated[str, StringConstraints(max_length=1024)]
 HashString = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -350,21 +352,12 @@ class Boundary:
                 reason = "untrusted-host"
             else:
                 reason = "untrusted-origin"
-            # Never log Authorization/token headers. Host/Origin plus the
-            # configured allowlist are enough to diagnose proxy mismatches
-            # (e.g. nginx sending a name missing from WB_ADMIN_ALLOWED_HOSTS).
+            # Structured boundary rejection: safe bounded classification
+            # fields only. Never log Host, Origin, HTTP path, auth headers,
+            # tokens, allowlist contents, ports, or arbitrary values.
             # Visible via `docker compose logs bridge`.
-            logger.warning(
-                "boundary reject reason=%s method=%s path=%s host=%r origin=%r "
-                "extra_hosts=%s ports=%s",
-                reason,
-                scope.get("method", ""),
-                scope.get("path", ""),
-                headers.get("host", "")[:200],
-                (origin_value or "")[:200],
-                sorted(self.extra_hosts),
-                sorted(self.ports),
-            )
+            _emit_ops(_ops_log, "WARNING", "bridge", "boundary_reject",
+                      reason=str(reason)[:80])
             return await JSONResponse({"error": "Untrusted Host or Origin"}, 403)(scope, receive, send)
         async def secured_send(message):
             if message["type"] == "http.response.start":
@@ -482,8 +475,12 @@ def make_mcp(service: Service, port: int = 8765, *, public_port: int | None = No
                         result = {"content": [{"type": "text", "text": text}], "isError": False}
                 except BridgeError as exc:
                     result = {"content": [{"type": "text", "text": json.dumps({"error": exc.code, "message": str(exc)})}], "isError": True}
-                except Exception:
+                except Exception as exc:
                     service.event(ident, "internal_error", "failed")
+                    _emit_ops(_ops_log, "ERROR", "bridge", "request_error",
+                              code=_error_code(exc), source="mcp",
+                              action=str(name)[:80],
+                              **({"workspace_id": ident} if ident else {}))
                     result = {"content": [{"type": "text", "text": '{"error":"internal_error","message":"Operation failed; inspect the target before retrying. The outcome may be uncertain."}'}], "isError": True}
         else:
             return rpc_error(call_id, -32601, "Method not supported by this tools-only server", 404 if modern else 200)
@@ -877,8 +874,10 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
             return JSONResponse({"error": "Invalid request fields"}, 400)
         except (BridgeError, TimeoutError) as exc:
             return JSONResponse({"error": str(exc) or "Request timed out"}, 400)
-        except Exception:
+        except Exception as exc:
             service.event(None, "admin_internal_error", "failed")
+            _emit_ops(_ops_log, "ERROR", "bridge", "request_error",
+                      code=_error_code(exc), source="admin")
             return JSONResponse({"error": "Operation failed"}, 500)
     app = Starlette(routes=[Route("/", home), Route("/static/{name}", asset),
         Route("/api/login", login, methods=["POST"]),

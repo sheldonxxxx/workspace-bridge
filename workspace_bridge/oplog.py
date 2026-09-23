@@ -3,6 +3,19 @@
 One-line JSON records for Docker json-file logs. No logging dependency beyond
 the standard library.
 
+Shared level semantics (Python Bridge and native Pi adapter):
+- DEBUG: high-frequency/repeated internals, polls/resyncs/probes, normal SDK
+  tool-event tracing. Temporary troubleshooting only.
+- INFO: healthy/expected lifecycle transitions (service ready, run/session
+  created, dispatch started, permission state transitions, successful
+  completion/recovery). Normal production level.
+- WARNING: recoverable degradation, policy/input rejection worth operator
+  attention, event-stream/runtime unavailability after grace, dispatch
+  refusal, orphaning, SDK dispatch stall/journal anomaly. Alert candidates.
+- ERROR: unexpected internal/runtime exception or unsafe startup condition
+  requiring operator action. Alert candidates.
+Supported levels are DEBUG/INFO/WARNING/ERROR with INFO default.
+
 Security boundary: only explicit allowlisted scalar fields are ever emitted.
 Prompts, message/final-response text, file contents, absolute paths,
 permission resource/pattern/requested_patterns/metadata, tool arguments,
@@ -32,6 +45,8 @@ EVENTS = frozenset({
     "run_created",
     "dispatch_started",
     "dispatch_failed",
+    "boundary_reject",
+    "request_error",
     "run_state",
     "permission_asked",
     "permission_replied",
@@ -45,6 +60,7 @@ EVENTS = frozenset({
     "reconcile_start",
     "reconcile_result",
     "startup_reconcile",
+    "process_error",
 })
 
 # Bounded scalar fields only. IDs/state names/counts/durations/sanitized
@@ -62,13 +78,18 @@ ALLOWED_FIELDS = frozenset({
 _MAX_STR = 200
 
 
+INVALID_LOG_LEVEL_CODE = "invalid_log_level"
+
+
 def parse_log_level(raw: Any) -> str:
     """Validate WB_LOG_LEVEL. Invalid values fail fast with BridgeError."""
     text = str(raw if raw is not None else DEFAULT_LOG_LEVEL).strip().upper()
     if text not in ALLOWED_LEVELS:
+        # Stable sanitized code; the bad value is never echoed (it could
+        # carry secrets in a misconfigured environment).
         raise BridgeError(
             f"{LOG_LEVEL_ENV} must be one of {', '.join(ALLOWED_LEVELS)} "
-            f"(default {DEFAULT_LOG_LEVEL})")
+            f"(default {DEFAULT_LOG_LEVEL})", INVALID_LOG_LEVEL_CODE)
     return text
 
 

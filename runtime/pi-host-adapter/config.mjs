@@ -10,6 +10,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ADAPTER_VERSION = "0.4.0";
+export const DEFAULT_LOG_LEVEL = "INFO";
+export const ALLOWED_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"];
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 8780;
 export const DEFAULT_PI_BINARY = "pi";
@@ -99,8 +101,23 @@ export function isAgentDirAllowed(resolvedAbsolute, homeDir) {
   return true;
 }
 
+export function parseLogLevel(raw) {
+  const text = String(raw ?? DEFAULT_LOG_LEVEL).trim().toUpperCase();
+  if (!ALLOWED_LOG_LEVELS.includes(text)) {
+    // Never echo the raw value in the error message.
+    throw new Error(
+      `WB_LOG_LEVEL must be one of ${ALLOWED_LOG_LEVELS.join(", ")} (default ${DEFAULT_LOG_LEVEL})`,
+    );
+  }
+  return text;
+}
+
 export function loadConfig(env = process.env, homeDir = os.homedir()) {
   const token = String(env.WB_RUNTIME_TOKEN || "");
+  const logRaw = env ? env.WB_LOG_LEVEL : undefined;
+  const logLevel = logRaw === undefined || logRaw === null
+    || (typeof logRaw === "string" && !logRaw.trim())
+    ? DEFAULT_LOG_LEVEL : parseLogLevel(logRaw);
   const host = String(env.WB_PI_ADAPTER_HOST || DEFAULT_HOST).trim() || DEFAULT_HOST;
   const portRaw = String(env.WB_PI_ADAPTER_PORT || DEFAULT_PORT).trim();
   const port = Number(portRaw);
@@ -121,6 +138,7 @@ export function loadConfig(env = process.env, homeDir = os.homedir()) {
     // path is never logged or returned; health exposes booleans only.
     agentDir: resolveAgentDir(agentDirRaw, homeDir),
     agentDirExplicit: Boolean(agentDirRaw),
+    logLevel,
   };
 }
 

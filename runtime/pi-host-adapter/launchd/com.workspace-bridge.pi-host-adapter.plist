@@ -16,6 +16,11 @@
     PI_CODING_AGENT_DIR   isolated Pi agent dir; default ~/.pi/workspace-bridge.
     WB_PI_ADAPTER_HOST    default 127.0.0.1 (keep loopback; do not broaden).
     WB_PI_ADAPTER_PORT    default 8780.
+    WB_LOG_LEVEL          default INFO (DEBUG/INFO/WARNING/ERROR; invalid fails startup).
+
+  The Docker Bridge and this native adapter are separate processes: set
+  WB_LOG_LEVEL for each deployment environment. Compose config does not
+  automatically configure this LaunchAgent.
 -->
 <plist version="1.0">
 <dict>
@@ -40,6 +45,8 @@
     <string>127.0.0.1</string>
     <key>WB_PI_ADAPTER_PORT</key>
     <string>8780</string>
+    <key>WB_LOG_LEVEL</key>
+    <string>INFO</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

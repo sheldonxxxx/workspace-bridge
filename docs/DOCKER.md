@@ -204,9 +204,11 @@ docker compose logs -f bridge
 docker compose logs --tail=200 bridge
 ```
 
-Both processes emit one-line JSON records with stable event names and bounded
-scalar fields only. Representative SAFE fields (placeholders, not real
-IDs/secrets):
+The bridge and the native Pi adapter emit one-line JSON records with stable
+event names and bounded scalar fields only. The third process, the OpenAI
+tunnel-client sidecar (`mcp-tunnel`), is configured for JSON logs too
+(`LOG_FORMAT: json` in tracked `compose.yaml`). Representative Bridge SAFE fields
+(placeholders, not real IDs/secrets):
 
 ```json
 {"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"runtime_configured":true,"workspace_count":3}
@@ -216,9 +218,50 @@ IDs/secrets):
 ```
 
 `WB_LOG_LEVEL` (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`) controls the
-bridge. An invalid value fails fast at bridge startup (`BridgeError`). Uvicorn access logs
+bridge. An invalid value fails fast at bridge startup (`BridgeError`). The native
+Pi adapter supports the same four levels with the same INFO default via its own
+environment (the LaunchAgent template sets `WB_LOG_LEVEL=INFO`); Compose config does
+not automatically configure the LaunchAgent — set `WB_LOG_LEVEL` for each deployment
+environment. An invalid nonblank adapter value fails adapter startup safely. Bridge `serve`
+controlled startup/config failures emit a sanitized ERROR `process_error` and
+exit nonzero; Pi adapter invalid `WB_LOG_LEVEL` emits a sanitized ERROR
+`adapter_config_error` and exits nonzero; Pi adapter fatal HTTP server/listen
+errors emit a sanitized ERROR `process_error` and exit nonzero; arbitrary
+OS/runtime crashes are not intercepted. Uvicorn access logs
 stay disabled — routine lifecycle is covered by the records above, not by
 request logs.
+
+Three processes, three independent level controls:
+
+| Process | Setting | Valid levels | Default |
+|---|---|---|---|
+| Docker Bridge | `WB_LOG_LEVEL` (Compose) | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` |
+| Native Pi adapter | `WB_LOG_LEVEL` (LaunchAgent) | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` |
+| Tunnel sidecar | `WB_TUNNEL_LOG_LEVEL` → tunnel `LOG_LEVEL` (Compose) | `debug`/`info`/`warn` (tunnel vocabulary; no `ERROR` threshold) | `info` |
+
+The tunnel vocabulary is `debug|info|warn` only — do not configure an `ERROR`
+threshold that tunnel-client does not support. Compose cannot validate enum
+values itself; an invalid `WB_TUNNEL_LOG_LEVEL` is left for tunnel-client to
+reject with its own config error. Raw HTTP tunnel logging (`LOG_HTTP_RAW_UNSAFE`)
+must remain disabled: it may expose sensitive headers/bodies.
+
+Shared level semantics (Bridge and Pi adapter):
+
+| Level | Meaning | Production guidance |
+|---|---|---|
+| `DEBUG` | High-frequency internals, polls/resyncs/probes, normal SDK tool-event tracing. | Temporary troubleshooting only. |
+| `INFO` | Healthy/expected lifecycle transitions (ready, run/session created, dispatch started, permission transitions, successful completion/recovery). | Normal production level. |
+| `WARNING` | Recoverable degradation, policy/input rejection, stream/runtime unavailability after grace, dispatch refusal, orphaning, SDK dispatch stall/journal anomaly. | Alert candidates. |
+| `ERROR` | Unexpected internal/runtime exception or unsafe startup condition. | Alert candidates. |
+
+Retention: Docker bridge AND tunnel-sidecar logs are rotated 10m x3 by Compose
+(`max-size: 10m` / `max-file: 3` on both services in tracked `compose.yaml`,
+the canonical Compose contract). A local deployment-specific `compose-prod.yaml`
+may mirror it — the current local copy has been validated separately — but it is
+ignored and not portable because it contains host-specific paths. The native
+launchd adapter writes plain host files
+via `StandardOutPath`/`StandardErrorPath`; project-managed rotation is NOT currently
+provided — rotation of those files is an explicit operator/next-milestone concern.
 
 Logs never contain prompts, message/final-response text, file contents,
 absolute paths, permission resources/patterns/metadata, tool arguments,

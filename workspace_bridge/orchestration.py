@@ -574,7 +574,8 @@ class AgentOrchestrator:
                 "WHERE run=? AND state='pending'", (self._clock(), self._clock(), run["id"]))
         self._set_state(run["id"], "orphaned", error_code=code, error_message=message, finished=True)
         self.service.event(run["workspace"], "agent_orphaned", code)
-        emit(_ops_log, "INFO", "bridge", "run_state", run_id=run["id"],
+        # Orphaning is recoverable degradation worth operator attention.
+        emit(_ops_log, "WARNING", "bridge", "run_state", run_id=run["id"],
              session_id=run.get("session"), workspace_id=run.get("workspace"),
              state="orphaned", code=str(code)[:80])
 
@@ -1737,9 +1738,9 @@ class AgentOrchestrator:
                     self._set_state(run_id, "failed", error_code="continuation_unavailable",
                                     error_message="Session status unavailable at dispatch; "
                                                   "prompt was not sent", finished=True)
-                    emit(_ops_log, "INFO", "bridge", "dispatch_failed", run_id=run_id,
+                    emit(_ops_log, "WARNING", "bridge", "dispatch_failed", run_id=run_id,
                          code="continuation_unavailable")
-                    emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
+                    emit(_ops_log, "WARNING", "bridge", "run_state", run_id=run_id,
                          state="failed", code="continuation_unavailable")
                     with self.service.lock:
                         row = self.service.db.execute(
@@ -1751,9 +1752,9 @@ class AgentOrchestrator:
                     self._set_state(run_id, "failed", error_code="session_busy",
                                     error_message="Session became busy before dispatch; "
                                                   "prompt was not sent", finished=True)
-                    emit(_ops_log, "INFO", "bridge", "dispatch_failed", run_id=run_id,
+                    emit(_ops_log, "WARNING", "bridge", "dispatch_failed", run_id=run_id,
                          code="session_busy")
-                    emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
+                    emit(_ops_log, "WARNING", "bridge", "run_state", run_id=run_id,
                          state="failed", code="session_busy")
                     with self.service.lock:
                         row = self.service.db.execute(
@@ -1771,9 +1772,9 @@ class AgentOrchestrator:
                  session_reused=bool(run.get("session_reused")))
         except BridgeError as exc:
             self._set_state(run_id, "failed", error_code=exc.code, error_message=str(exc), finished=True)
-            emit(_ops_log, "INFO", "bridge", "dispatch_failed", run_id=run_id,
+            emit(_ops_log, "WARNING", "bridge", "dispatch_failed", run_id=run_id,
                  code=exc.code or "bridge_error")
-            emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
+            emit(_ops_log, "WARNING", "bridge", "run_state", run_id=run_id,
                  state="failed", code=exc.code or "bridge_error")
             run = None
             with self.service.lock:
@@ -1784,9 +1785,9 @@ class AgentOrchestrator:
         except Exception as exc:  # noqa: BLE001
             self._set_state(run_id, "failed", error_code="runtime_error",
                             error_message="Prompt submission failed", finished=True)
-            emit(_ops_log, "INFO", "bridge", "dispatch_failed", run_id=run_id,
+            emit(_ops_log, "ERROR", "bridge", "dispatch_failed", run_id=run_id,
                  code=error_code(exc))
-            emit(_ops_log, "INFO", "bridge", "run_state", run_id=run_id,
+            emit(_ops_log, "ERROR", "bridge", "run_state", run_id=run_id,
                  state="failed", code="runtime_error")
         finally:
             with self._submission_condition:

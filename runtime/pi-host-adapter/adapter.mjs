@@ -887,9 +887,15 @@ export class PiAdapter {
     if (Number.isFinite(record.durationMs)) {
       fields.duration_ms = Math.max(0, Math.floor(record.durationMs));
     }
+    // Routine tool-event tracing stays DEBUG so default INFO launchd logs
+    // are not filled per tool call. Stall/error/missing-start anomalies
+    // stay WARNING. adapter_event_unusable (unusable SDK payload) is also
+    // an anomaly worth operator attention.
     const level = record.stage === "extension_dispatch_stalled"
-      || record.stage === "adapter_event_error" || record.stage === "journal_missing_start"
-      ? "WARNING" : "INFO";
+      || record.stage === "adapter_event_error"
+      || record.stage === "journal_missing_start"
+      || record.stage === "adapter_event_unusable"
+      ? "WARNING" : "DEBUG";
     try { this.onLog(level, "pi-adapter", "sdk_tool_event_trace", fields); } catch { /* no-op */ }
   }
 

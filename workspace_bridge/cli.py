@@ -12,7 +12,7 @@ import uvicorn
 from . import __version__
 from .api import make_admin, make_mcp
 from .notifications import notifier_from_environment
-from .oplog import configure_operational_logging, emit
+from .oplog import configure_operational_logging, emit, error_code
 from .registry import runtime_registry_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
@@ -163,6 +163,25 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _emit_serve_startup_error(exc: BaseException) -> None:
+    """Emit one sanitized structured ERROR for a serve startup failure.
+
+    A plain fallback handler is attached when normal WB_LOG_LEVEL
+    configuration itself failed, so the record is still emitted (as ERROR;
+    a safe INFO fallback for the transport is acceptable). Never logs raw
+    exception text, paths, env values, or credentials. Never raises.
+    """
+    try:
+        if not _ops_log.handlers:
+            fallback = logging.StreamHandler(sys.stderr)
+            fallback.setFormatter(logging.Formatter("%(message)s"))
+            _ops_log.addHandler(fallback)
+        emit(_ops_log, "ERROR", "bridge", "process_error",
+             code=error_code(exc), source="startup", action="serve")
+    except Exception:  # noqa: BLE001 - startup logging must never raise
+        pass
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Local, workspace-scoped MCP planning and review bridge")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
@@ -257,7 +276,13 @@ def main(argv: list[str] | None = None):
         finally:
             os.close(lock_fd)
     except (BridgeError, OSError, ValueError) as exc:
-        print(f"workspace-bridge: {exc}", file=sys.stderr)
+        if args.command == "serve":
+            # Production serve path: one sanitized structured ERROR record
+            # only. The raw exception message (paths, values) is never
+            # printed here; interactive commands below keep human output.
+            _emit_serve_startup_error(exc)
+        else:
+            print(f"workspace-bridge: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
 if __name__ == "__main__":

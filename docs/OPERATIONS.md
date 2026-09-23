@@ -109,6 +109,17 @@ immediate permission resync, question resync and completion self-heal
 pre-continuation history never complete a run, and completion notifies
 exactly once under repeated reads, sweeps and duplicate events.
 
+Operational logging uses shared `DEBUG`/`INFO`/`WARNING`/`ERROR` semantics (INFO default)
+across the Docker Bridge and the native Pi adapter, plus the tunnel sidecar's own
+`debug`/`info`/`warn` vocabulary (`WB_TUNNEL_LOG_LEVEL`, default `info`, JSON format);
+see DOCKER.md for the three-process level matrix, production recommendation (`INFO` normal,
+`DEBUG` temporary troubleshooting, `WARNING`/`ERROR` alert candidates), and retention
+(Bridge and tunnel Docker logs rotate 10m x3 via Compose; native launchd
+`StandardOutPath`/`StandardErrorPath` files have no project-managed rotation).
+Set `WB_LOG_LEVEL` independently for each Bridge/adapter deployment environment and
+`WB_TUNNEL_LOG_LEVEL` for the sidecar. Never enable raw HTTP tunnel logging
+(`LOG_HTTP_RAW_UNSAFE`): it may expose sensitive headers/bodies.
+
 Runtime health is capability-based, not transport-based: `/health` reports
 which surfaces the connected adapter actually serves (permission snapshot
 and reply, execution history, extension inventory; counters and timestamps

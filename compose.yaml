@@ -87,6 +87,14 @@ services:
     # environment:
       # HEALTH_LISTEN_ADDR: 0.0.0.0:8080
       # ALLOW_REMOTE_UI: "true"
+    environment:
+      # Tunnel-client production logging: JSON records at the configured
+      # level. Valid WB_TUNNEL_LOG_LEVEL values are debug/info/warn
+      # (tunnel vocabulary only; there is no ERROR threshold), default info.
+      # Never set LOG_HTTP_RAW_UNSAFE: raw HTTP logging may expose
+      # sensitive headers/bodies. See docs/DOCKER.md.
+      LOG_LEVEL: ${WB_TUNNEL_LOG_LEVEL:-info}
+      LOG_FORMAT: json
     command:
       [
         "--profile-file",
@@ -98,3 +106,8 @@ services:
       bridge:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
