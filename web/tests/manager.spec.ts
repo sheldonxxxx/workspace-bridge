@@ -252,8 +252,7 @@ test("custom Pi profile builder creates, edits and deletes external access rules
       body: "{}" });
   });
   await page.goto("./");
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change profile" }).first().click();
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
   await page.getByRole("button", { name: "Create from selected" }).click();
   await page.getByLabel("Profile ID").fill("reviewed-shared");
   await page.getByLabel("Enable edit and write").check();
@@ -265,24 +264,36 @@ test("custom Pi profile builder creates, edits and deletes external access rules
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: "test-results/profile-editor-mobile.png", fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.getByRole("button", { name: "Create and assign" }).click();
-  await expect.poll(() => assignments.length).toBe(1);
-  expect(assignments[0]).toEqual({ enabled: true, profile_id: "reviewed-shared" });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole("button", { name: "Create profile" }).click();
+  await expect.poll(() => saved.length).toBe(1);
   expect((saved[0] as { config: typeof piReadOnlyConfig }).config.external_access.roots)
     .toEqual([{ path: "/Volumes/shared", mode: "ask" }]);
 
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
   await page.getByRole("button", { name: "Change profile" }).first().click();
-  await page.getByLabel("Profile", { exact: true }).selectOption("reviewed-shared");
+  await page.getByRole("button", { name: /reviewed-shared/ }).click();
+  await page.getByRole("button", { name: "Assign profile" }).click();
+  await expect.poll(() => assignments.length).toBe(1);
+  expect(assignments[0]).toEqual({ enabled: true, profile_id: "reviewed-shared" });
+
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await page.getByRole("button", { name: /reviewed-shared/ }).click();
   await page.getByRole("button", { name: "Edit controls" }).click();
   await page.getByLabel("Shell commands").selectOption("ask");
   await page.getByRole("button", { name: "Save controls" }).click();
   await expect.poll(() => saved.length).toBe(2);
   expect((saved[1] as { expected_revision: string }).expected_revision)
     .toBe("revision-1");
-  await page.getByLabel("Profile", { exact: true }).selectOption("read-only");
-  await page.getByRole("button", { name: "Assign profile" }).click();
+
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
   await page.getByRole("button", { name: "Change profile" }).first().click();
-  await page.getByLabel("Profile", { exact: true }).selectOption("reviewed-shared");
+  await page.getByRole("button", { name: /read-only/ }).click();
+  await page.getByRole("button", { name: "Assign profile" }).click();
+  await expect.poll(() => assignments.length).toBe(2);
+
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await page.getByRole("button", { name: /reviewed-shared/ }).click();
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await page.getByRole("button", { name: "Delete profile" }).click();
   await expect.poll(() => profileRows.some((profile) => profile.id === "reviewed-shared"))
