@@ -15,6 +15,7 @@ from .oplog import configure_operational_logging, emit, error_code
 from .wbrp import adapters_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
+from .diagnostics import failure_report
 import logging
 _ops_log = logging.getLogger("workspace_bridge.ops")
 
@@ -117,6 +118,149 @@ def load_config(state: Path) -> dict:
     return config
 
 
+_DOCTOR_SECTIONS = (
+    ("core", "Core"), ("workspaces", "Workspaces"), ("runtimes", "Runtimes"),
+    ("runnable_routes", "Runnable routes"), ("git_evidence", "Git evidence"),
+    ("external_connection", "External connection"),
+)
+
+
+def _print_doctor_human(report: dict) -> None:
+    overall = report["overall"]
+    print(f"Overall: {overall['status'].upper()} — {overall['summary']}")
+    print("Checks: " + ", ".join(
+        f"{key}={value}" for key, value in overall["counts"].items()))
+    checks = report.get("checks", [])
+    for section, title in _DOCTOR_SECTIONS:
+        print(f"\n{title}:")
+        rows = [check for check in checks if check.get("section") == section]
+        if section == "runnable_routes":
+            rows += [check for check in checks if check.get("section") == "models_profiles"]
+            routes = report.get("runnable_routes", [])
+            if not routes and not rows:
+                print("  No configured workspace/runtime routes.")
+            for route in routes:
+                state = "ready" if route.get("ready") else "blocked"
+                model = route.get("default_model_selector")
+                suffix = f"; default model {model}" if model else ""
+                print(f"  [{state}] {route.get('workspace_name')} / {route.get('runtime')}{suffix}")
+                if route.get("blockers"):
+                    print("    blockers: " + ", ".join(route["blockers"]))
+        if section in {"workspaces", "models_profiles", "runtimes", "core", "git_evidence", "external_connection"}:
+            for check in rows:
+                scope = []
+                if check.get("workspace_id"):
+                    scope.append(check["workspace_id"])
+                if check.get("runtime"):
+                    scope.append(check["runtime"])
+                prefix = f"{' / '.join(scope)}: " if scope else ""
+                print(f"  [{check['status']}] {prefix}{check['summary']}")
+                if check["status"] in {"failed", "action_required"}:
+                    print(f"    code: {check['code']}")
+                    if check.get("remediation"):
+                        instructions = [line.strip() for line in check["remediation"].splitlines()
+                                        if line.strip()]
+                        if len(instructions) > 1:
+                            print("    fix:")
+                            for instruction in instructions:
+                                print(f"      - {instruction}")
+                        elif instructions:
+                            print(f"    fix: {instructions[0]}")
+
+
+def _doctor_state_is_missing(state: Path) -> bool:
+    """Return whether the expected state directory or config file is absent.
+
+    Other metadata errors are treated as unreadable state, so permissions and
+    malformed existing locations do not get mislabeled as uninitialized.
+    """
+    try:
+        state.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+    try:
+        (state / "config.json").lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _doctor(state: Path, *, offline: bool, as_json: bool,
+            container_mode: bool = False, mcp_public_port: int | None = None,
+            admin_public_port: int | None = None) -> int:
+    try:
+        config = load_config(state)
+    except Exception:  # noqa: BLE001 - initialization failures stay safe and canonical
+        state_missing = _doctor_state_is_missing(state)
+        if state_missing:
+            summary = "No Workspace Bridge state was found at the selected state location."
+            remediation = (
+                "Native setup: run `workspace-bridge init --allow-parent <projects-dir>`.\n"
+                "Then rerun `workspace-bridge doctor`.\n"
+                "For Docker, run `docker exec workspace-bridge workspace-bridge --state /state doctor`."
+            )
+        else:
+            summary = "Local configuration could not be read."
+            remediation = (
+                "Check local state/config file permissions and configuration validity, "
+                "then rerun `workspace-bridge doctor`."
+            )
+        report = failure_report(mode="offline" if offline else "live",
+                                summary=summary)
+        report["checks"][0]["remediation"] = remediation[:240]
+        _print_doctor(report, as_json)
+        return 1
+
+    runtime_configuration_error = False
+    try:
+        adapters = adapters_from_environment()
+    except BridgeError:
+        adapters = {}
+        runtime_configuration_error = True
+    try:
+        extra_hosts = admin_allowed_hosts_from_env()
+        invalid_admin_host_config = False
+    except BridgeError:
+        extra_hosts = ()
+        invalid_admin_host_config = True
+    listener = {
+        "mcp_port": mcp_public_port or config.get("mcp_port"),
+        "admin_port": admin_public_port or config.get("admin_port"),
+        "container_mode": container_mode,
+        "extra_admin_host_count": len(extra_hosts),
+        "invalid_admin_host_config": invalid_admin_host_config,
+    }
+    try:
+        service = Service(state, config, adapters=adapters, read_only=True,
+                          run_coordinator_background=False)
+    except Exception:  # noqa: BLE001 - no private initialization detail is printed
+        report = failure_report(mode="offline" if offline else "live",
+                                code="core.state_readable",
+                                summary="Private Bridge state database could not be opened.")
+        _print_doctor(report, as_json)
+        return 1
+    try:
+        report = service.diagnostic_report(
+            offline=offline, listener=listener,
+            runtime_configuration_error=runtime_configuration_error)
+    finally:
+        service.close()
+    _print_doctor(report, as_json)
+    return 1 if report["overall"]["status"] in {"failed", "action_required"} else 0
+
+
+def _print_doctor(report: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_doctor_human(report)
+
+
 async def serve(service: Service, config: dict, *, container_mode: bool = False,
                 mcp_public_port: int | None = None, admin_public_port: int | None = None,
                 extra_admin_hosts: tuple[str, ...] | None = None):
@@ -195,7 +339,12 @@ def main(argv: list[str] | None = None):
     run.add_argument("--mcp-public-port", type=int, help="Exact published loopback port; container mode only")
     run.add_argument("--admin-public-port", type=int, help="Exact published management loopback port; container mode only")
     sub.add_parser("rotate-bridge-token", help="Create/rotate the shared MCP credential while stopped; shown once")
-    sub.add_parser("doctor", help="Validate local config and workspace root identities; no network checks")
+    doctor = sub.add_parser("doctor", help="Report local readiness and runtime diagnostics")
+    doctor.add_argument("--json", action="store_true", help="Emit canonical DiagnosticReport JSON")
+    doctor.add_argument("--offline", action="store_true", help="Skip all runtime/network calls")
+    doctor.add_argument("--container", action="store_true", help=argparse.SUPPRESS)
+    doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
+    doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
     sub.add_parser("show-admin-token", help="Print the local UI token to this terminal; never paste it into ChatGPT")
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -205,6 +354,13 @@ def main(argv: list[str] | None = None):
         if args.container and (any(p is None or not 1024 <= p <= 65535 for p in public_ports)
                                or public_ports[0] == public_ports[1]):
             parser.error("--container requires distinct --mcp-public-port and --admin-public-port in 1024..65535")
+    if args.command == "doctor":
+        public_ports = (args.mcp_public_port, args.admin_public_port)
+        if any(port is not None for port in public_ports) and (
+                not args.container or any(port is None or not 1024 <= port <= 65535
+                                          for port in public_ports)
+                or public_ports[0] == public_ports[1]):
+            parser.error("Container Doctor requires distinct published ports and --container")
     if os.name != "posix":
         parser.error("This version requires macOS or Linux (or WSL2), not native Windows")
     state = args.state.expanduser().resolve()
@@ -217,6 +373,14 @@ def main(argv: list[str] | None = None):
             config = initialize(state, args.allow_parent, args.mcp_port, args.admin_port)
             print(f"Initialized {state}\nLocal management: http://127.0.0.1:{config['admin_port']}/")
             print("Run workspace-bridge serve, then workspace-bridge show-admin-token in another terminal.")
+            return
+        if args.command == "doctor":
+            exit_code = _doctor(state, offline=args.offline, as_json=args.json,
+                                container_mode=args.container,
+                                mcp_public_port=args.mcp_public_port,
+                                admin_public_port=args.admin_public_port)
+            if exit_code:
+                raise SystemExit(exit_code)
             return
         config = load_config(state)
         if args.command == "show-admin-token":
@@ -239,21 +403,6 @@ def main(argv: list[str] | None = None):
                     result = service.manage_bridge("rotate_token")
                     print(result["token"])
                     print("Shared bridge credential shown once. Authorizes every enabled mapping. Keep it out of ChatGPT.", file=sys.stderr)
-                elif args.command == "doctor":
-                    report = []
-                    for ws in service.list_workspaces():
-                        try:
-                            with service.safe_root(ws):
-                                pass
-                            result = "root_identity_ok"
-                        except BridgeError as exc:
-                            result = exc.code
-                        report.append({"workspace": ws["name"], "enabled": bool(ws["enabled"]), "check": result})
-                    print(json.dumps({"config": "ok", "workspaces": report,
-                        "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked",
-                        "runtimes": service.runtime_diagnostics(),
-                        "runtime_policies": service.runtime_policy_summaries(),
-                        "admin_allowed_hosts": list(admin_allowed_hosts_from_env())}, indent=2))
                 else:
                     extra_admin_hosts = admin_allowed_hosts_from_env()
                     print(f"MCP: http://127.0.0.1:{config['mcp_port']}/mcp | Local admin: http://127.0.0.1:{config['admin_port']}/")

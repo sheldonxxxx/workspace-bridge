@@ -49,6 +49,17 @@ docker compose config --quiet
 docker compose up -d --build
 docker compose ps
 docker compose exec bridge workspace-bridge --state /state show-admin-token
+docker exec workspace-bridge workspace-bridge --state /state doctor
+```
+
+Run Doctor inside the Bridge container to inspect the state mounted at `/state`
+with the same runtime adapter environment and container network context as the
+live service. Use `--json` for the canonical report or `--offline` to skip
+runtime/network checks:
+
+```sh
+docker exec workspace-bridge workspace-bridge --state /state doctor --json
+docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
 The helper creates `.env` (0600) and a private state directory (0700), defaulting

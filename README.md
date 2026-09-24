@@ -41,6 +41,52 @@ Every project tool requires an explicit `workspace_id`. One credential authorize
 should not be available. Workspace paths and handoff IDs remain scoped; there is
 no mutable shared active-workspace setting.
 
+## Diagnostics and runnable routes
+
+`workspace-bridge doctor` reports local configuration, workspace prerequisites,
+runtime health, current profile/model freshness, runnable workspace/runtime paths,
+and read-only Git Evidence. Use `workspace-bridge doctor --json` for canonical
+DiagnosticReport JSON or add `--offline` to skip all runtime/network calls. The
+authenticated local-admin `GET /api/diagnostics` endpoint returns the same report;
+`?offline=1` selects offline mode.
+
+Diagnostic statuses are `pass`, `warning`, `action_required`, `failed`, and
+`unknown`. Overall severity is deterministic: failed, action required, unknown,
+warning, then pass. Doctor exits nonzero for failed/action-required reports and
+zero for pass, warning, or unknown-only reports. A runnable route is one exact
+workspace/runtime pair whose mapping, handoff write scope, agent switch, shared
+MCP gateway, runtime grant, current security profile, and current default model
+all satisfy run-start prerequisites. Listener health, gateway enablement, and
+runtime health do not establish that such a route exists. Bridge cannot observe
+tunnel or remote ChatGPT reachability, so external connection remains unknown.
+Git Evidence reports review capability and never blocks an execution route.
+
+The native CLI reads `~/.local/state/workspace-bridge` by default; pass the
+global `--state` option before `doctor` to select another location. Native checks:
+
+```sh
+workspace-bridge doctor
+workspace-bridge doctor --json
+workspace-bridge doctor --offline
+```
+
+For Docker deployments, run Doctor inside the Bridge container so it reads the
+same `/state`, runtime adapter environment, and container network context as the
+live Bridge process:
+
+```sh
+docker exec workspace-bridge workspace-bridge --state /state doctor
+docker exec workspace-bridge workspace-bridge --state /state doctor --json
+docker exec workspace-bridge workspace-bridge --state /state doctor --offline
+```
+
+Offline Doctor uses SQLite read-only, starts no runtime or notification workers,
+does not recover notification deliveries, and does not take the serve process
+lock. Runtime/profile/model freshness is unknown offline; such a route is never
+reported ready. The Manager will consume these server-authoritative routes in
+the next productization milestone; its current readiness presentation remains
+legacy client logic for now.
+
 The manager adds mappings, enables/disables access, edits exclusions, copies
 workspace IDs and handoff prompts, sets each workspace's write permission **and its
 separate agent-execution policy** (default off), shows the three planning documents
@@ -106,6 +152,7 @@ python3 scripts/configure_docker.py --projects-dir "$HOME/Projects" --mcp-port 8
 docker compose config --quiet
 docker compose up -d --build
 docker compose exec bridge workspace-bridge --state /state show-admin-token
+docker exec workspace-bridge workspace-bridge --state /state doctor
 ```
 
 Open `http://127.0.0.1:8766/`, add your actual host project paths, create a bridge

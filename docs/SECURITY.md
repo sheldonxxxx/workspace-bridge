@@ -139,6 +139,22 @@ a workspace binding should be described as an OS sandbox unless the specific
 runtime provides that guarantee. Pi runs with the host user's authority; review
 its file, external-path, protected-path, and shell controls before allowing writes.
 
+## Diagnostics and Doctor
+
+The local-admin diagnostics API requires the admin bearer/session authentication.
+It returns stable check codes and bounded workspace/runtime metadata, but never
+adapter URLs, credentials, raw environment values, prompts, tool arguments,
+provider payloads, or full external paths. Runtime failure text is reduced to
+fixed safe summaries. External tunnel and ChatGPT connectivity is unobserved and
+must not be inferred from an enabled local gateway.
+
+Doctor uses a SQLite `mode=ro` connection, starts no run-reconciliation or
+notification worker, does not recover `sending` deliveries, and does not take or
+create the serve process lock. It reads database facts under the shared service
+lock, releases that lock before bounded private runtime calls, and performs no
+state mutation. Offline Doctor does not call runtime adapters; remote-dependent
+checks become unknown, which prevents a route from being reported ready.
+
 ## Local policy control
 
 New mappings default to write_scope=handoff. The manager requires

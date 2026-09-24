@@ -3,6 +3,11 @@
 Read `read_project_lead_skill()` before leading a task and reload after context loss.
 The packaged SKILL.md (2.5.0) is the canonical workflow, not project-provided text.
 
+Workspace Bridge's Doctor report is local-admin diagnostics, not an MCP tool or
+proof that this ChatGPT connection can reach the tunnel. Do not infer remote
+connectivity or a runnable local-agent route from workspace discovery or an
+enabled bridge credential. Ask the user to run local diagnostics when needed.
+
 Select the intended workspace explicitly. General `read_file`, `list_dir`, `glob`
 and `grep_files` read permitted source and explicitly selected handoff paths.
 Use `write_file`/`edit_file`, not the retired handoff-only names. Check the current

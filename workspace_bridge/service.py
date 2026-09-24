@@ -48,19 +48,47 @@ NEUTRAL_AGENT_TOOLS = frozenset({
 })
 
 
+class _ReadOnlyNotificationStatus:
+    """Configuration-only notification view used by offline Doctor."""
+
+    def __init__(self, channels: list[NotificationChannel] | None = None):
+        self.channels = {getattr(channel, "channel_id", ""): channel
+                         for channel in (channels or [])}
+
+    def status(self) -> dict:
+        return {"configured": bool(self.channels),
+                "channel_count": len(self.channels),
+                "channels": {key: {"name": str(getattr(channel, "name", key))[:60],
+                                   "configured": bool(getattr(channel, "enabled", True)),
+                                   "ready": bool(getattr(channel, "ready", True))}
+                             for key, channel in sorted(self.channels.items())}}
+
+    def close(self) -> None:
+        return None
+
+
 class Service:
     def __init__(self, state: Path, config: dict, *, recover_incomplete: bool = False,
                  notifier: NotificationChannel | None = None,
                  notification_channels: list[NotificationChannel] | None = None,
                  run_coordinator_background: bool = True,
-                 adapters: dict[str, HttpRuntimeAdapter] | None = None):
+                 adapters: dict[str, HttpRuntimeAdapter] | None = None,
+                 read_only: bool = False):
         self.state = state.resolve()
         self.config = config
-        self.parents = [Path(p).resolve(strict=True) for p in config["allowed_parents"]]
+        self.read_only = read_only
+        self.parents = [Path(p).resolve(strict=not read_only)
+                        for p in config["allowed_parents"]]
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(self.state / "bridge.sqlite3", check_same_thread=False)
+        database = self.state / "bridge.sqlite3"
+        if read_only:
+            self.db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True,
+                                      check_same_thread=False)
+        else:
+            self.db = sqlite3.connect(database, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        self.db.executescript("""
+        if not read_only:
+            self.db.executescript("""
           PRAGMA journal_mode=WAL;
           PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS workspaces (
@@ -89,30 +117,46 @@ class Service:
             updated TEXT NOT NULL,
             PRIMARY KEY(workspace, runtime));
         """)
-        with self.db:
-            self.db.execute("INSERT OR IGNORE INTO gateway VALUES(1,'',0,?)", (now(),))
-        if notification_channels is None and notifier is None:
+            with self.db:
+                self.db.execute("INSERT OR IGNORE INTO gateway VALUES(1,'',0,?)", (now(),))
+        if read_only:
+            channels = notification_channels
+            if channels is None:
+                channels = notification_channels_from_environment()
+            self.notification_manager = _ReadOnlyNotificationStatus(channels)
+        elif notification_channels is None and notifier is None:
             self.notification_manager = notification_manager_from_environment(self)
         else:
             channels = notification_channels if notification_channels is not None else [notifier]
             self.notification_manager = NotificationManager(self, channels)
         self.browser = Browser(self)
         self.run_coordinator = RunCoordinator(self, adapters or {},
-                                              background=run_coordinator_background)
+                                              background=run_coordinator_background,
+                                              read_only=read_only)
         # Only the exclusive daemon startup may recover interrupted publications.
         # A concurrent diagnostic process must never invalidate an active handoff.
-        if recover_incomplete:
+        if recover_incomplete and not read_only:
             self.db.execute("UPDATE jobs SET state='failed' WHERE state='publishing'")
-        self.db.commit()
-        os.chmod(self.state / "bridge.sqlite3", 0o600)
-        if recover_incomplete:
+        if not read_only:
+            self.db.commit()
+            os.chmod(self.state / "bridge.sqlite3", 0o600)
+        if recover_incomplete and not read_only:
             self.run_coordinator.start_background()
-        self.notification_manager.start()
+        if not read_only:
+            self.notification_manager.start()
 
     def runtime_diagnostics(self) -> dict:
         """Sanitized diagnostics for configured Runtime Protocol adapters."""
         modern = self.run_coordinator.diagnostics()
         return {"configured": sorted(modern), "runtimes": modern}
+
+    def diagnostic_report(self, *, offline: bool = False,
+                          listener: dict | None = None,
+                          runtime_configuration_error: bool = False) -> dict:
+        """Return the canonical runtime-neutral DiagnosticReport."""
+        from .diagnostics import evaluate
+        return evaluate(self, offline=offline, listener=listener,
+                        runtime_configuration_error=runtime_configuration_error)
 
     # ------------------------------------------------- neutral agent routing
     def _validate_runtime_filter(self, runtime: str | None) -> str | None:

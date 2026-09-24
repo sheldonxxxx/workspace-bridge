@@ -670,6 +670,21 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         if not bearer_ok and not cookie_ok:
             return JSONResponse({"error": "Admin token required"}, 401)
         try:
+            if path == "/api/diagnostics":
+                if request.method != "GET":
+                    return JSONResponse({"error": "Method not allowed"}, 405)
+                offline_value = request.query_params.get("offline", "0")
+                if offline_value not in {"0", "1"}:
+                    return JSONResponse({"error": "offline must be 0 or 1"}, 400)
+                listener = {
+                    "mcp_port": public_mcp_port or service.config.get("mcp_port", 8765),
+                    "admin_port": public_port or port,
+                    "container_mode": container_mode,
+                    "extra_admin_host_count": len(extra_hosts),
+                }
+                return JSONResponse(await run_in_threadpool(
+                    service.diagnostic_report, offline=offline_value == "1",
+                    listener=listener))
             if path == "/api/status":
                 return JSONResponse({"version": __version__, "mode": "local-admin", "allowed_parents": [str(p) for p in service.parents],
                     "mcp_port": public_mcp_port or service.config.get("mcp_port", 8765),
@@ -851,7 +866,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
     app = Starlette(routes=[Route("/", home), Route("/static/dist/{path:path}", built_asset),
         Route("/api/login", login, methods=["POST"]),
         Route("/api/logout", logout, methods=["POST"]),
-        Route("/api/status", api), Route("/api/events", api),
+        Route("/api/status", api), Route("/api/diagnostics", api), Route("/api/events", api),
         Route("/api/runs", api),
         Route("/api/runtimes/{runtime}/models", api),
         Route("/api/runtimes/{runtime}/profiles", api, methods=["GET", "POST"]),

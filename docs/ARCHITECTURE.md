@@ -4,11 +4,38 @@ One `/mcp` endpoint behind one private tunnel and one shared bridge credential
 serves all explicitly enabled mappings. Every project call carries its workspace
 ID. The separate loopback manager cannot be reached on the MCP listener.
 
+## Diagnostics and readiness
+
+`workspace_bridge/diagnostics.py` is the sole server-side evaluator for the
+canonical `DiagnosticReport`, `DiagnosticCheck`, and `RunnableRoute` schema.
+Doctor and authenticated local-admin `GET /api/diagnostics` call the same
+service method. A route is evaluated for one concrete workspace/runtime pair;
+facts from other workspaces or runtimes cannot satisfy its prerequisites.
+
+Listener health, shared MCP gateway configuration/enabled state, runtime adapter
+health, an exact runnable route, and remote tunnel/ChatGPT reachability are
+separate observations. Bridge has no evidence for the final remote connection,
+so that check remains `unknown` with code `external_connection.not_observed`.
+Git Evidence is a read-only review capability and does not gate route readiness.
+The status vocabulary is `pass`, `warning`, `action_required`, `failed`, and
+`unknown`, ranked from lowest to highest severity as pass, warning, unknown,
+action required, and failed. Unknown is never promoted to pass.
+
+Offline diagnostics read local state only and mark runtime, profile, and model
+freshness unknown. Doctor's service mode opens SQLite read-only, performs no
+notification recovery, starts no workers, and does not contend for the serve
+process lock. Runtime calls in live mode use bounded private Runtime Protocol
+requests after copying relevant local policy out from under the database lock.
+The Manager UI will move to these authoritative route objects in the next
+productization milestone; its existing readiness calculation is temporary.
+
 ## Component map
 
 - `api.py`: strict typed tool schemas, tools-only MCP adapter and loopback manager API.
 - `service.py`: shared auth, mappings, safe source access, planning publication,
   handoff reads, per-workspace write and agent policy, and metadata.
+- `diagnostics.py`: the canonical bounded diagnostics evaluator and exact
+  workspace/runtime runnable-route model shared by Doctor and the admin API.
 - `git_evidence.py`: fixed-function, bounded read-only Git status and diff
   collection. It keeps `.git` excluded from normal file access and stores no snapshots.
 - `run_coordinator.py`: runtime-neutral conversation, run, interaction, and

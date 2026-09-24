@@ -81,7 +81,11 @@ def main(argv: list[str] | None = None):
     try:
         if os.getuid() == 0:
             raise BridgeError("Run the container as a non-root user: set WB_UID/WB_GID to your host user")
-        if args not in (['serve'], ['doctor'], ['show-admin-token'], ['rotate-bridge-token']):
+        doctor_args_valid = (bool(args) and args[0] == 'doctor'
+                             and all(flag in {'--json', '--offline'} for flag in args[1:])
+                             and len(args[1:]) == len(set(args[1:])))
+        if args not in (['serve'], ['show-admin-token'], ['rotate-bridge-token']) \
+                and not doctor_args_valid:
             raise BridgeError("Supported container commands: serve, doctor, show-admin-token, rotate-bridge-token")
         parent = project_parent(os.environ.get('WB_PROJECTS_DIR', ''))
         state = Path(os.environ.get('WB_STATE_DIR', '/state'))
@@ -97,6 +101,12 @@ def main(argv: list[str] | None = None):
             bootstrap(state, parent)
             cli_main(['--state', str(state), 'serve', '--container',
                       '--mcp-public-port', str(mcp_port), '--admin-public-port', str(admin_port)])
+        elif doctor_args_valid:
+            # The container already binds listeners to container interfaces;
+            # carry that fact to Doctor while preserving its JSON/offline flags.
+            cli_main(['--state', str(state), 'doctor', '--container',
+                      '--mcp-public-port', str(mcp_port),
+                      '--admin-public-port', str(admin_port), *args[1:]])
         else:
             # Administrative commands never create missing state implicitly.
             cli_main(['--state', str(state), *args])

@@ -66,14 +66,15 @@ class RunCoordinator:
     """One generic coordinator for every WBRP adapter in the registry."""
 
     def __init__(self, service, adapters: dict[str, HttpRuntimeAdapter], *,
-                 background: bool = True):
+                 background: bool = True, read_only: bool = False):
         self.service = service
         self.adapters = dict(adapters)
         self.background = background
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._sweep_failures: set[str] = set()
-        service.db.executescript("""
+        if not read_only:
+            service.db.executescript("""
           CREATE TABLE IF NOT EXISTS runtime_profiles (
             workspace TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             runtime TEXT NOT NULL, profile TEXT NOT NULL,
@@ -111,11 +112,11 @@ class RunCoordinator:
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
         """)
-        columns = {row["name"] for row in service.db.execute("PRAGMA table_info(runtime_runs)")}
-        if "continue_from" not in columns:
-            service.db.execute("ALTER TABLE runtime_runs ADD COLUMN continue_from TEXT")
-        if "parent_run" not in columns:
-            service.db.execute("ALTER TABLE runtime_runs ADD COLUMN parent_run TEXT")
+            columns = {row["name"] for row in service.db.execute("PRAGMA table_info(runtime_runs)")}
+            if "continue_from" not in columns:
+                service.db.execute("ALTER TABLE runtime_runs ADD COLUMN continue_from TEXT")
+            if "parent_run" not in columns:
+                service.db.execute("ALTER TABLE runtime_runs ADD COLUMN parent_run TEXT")
 
     @staticmethod
     def _outcome_event_type(outcome: str | None) -> str | None:

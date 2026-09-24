@@ -319,8 +319,8 @@ def test_dockerfile_dependency_layer_before_source():
     assert 'PIP_NO_CACHE_DIR' not in builder
     assert '--mount=type=cache,target=/root/.cache/pip' in builder
     dep_wheel = builder.index('pip wheel --wheel-dir /wheels -r')
-    toml_copy = builder.index('COPY pyproject.toml')
-    source_copy = builder.index('COPY workspace_bridge/')
+    toml_copy = builder.index('pyproject.toml')
+    source_copy = builder.index('workspace_bridge/ ./workspace_bridge/')
     local_wheel = builder.index('pip wheel --no-deps --no-build-isolation')
     assert toml_copy < dep_wheel < source_copy < local_wheel
     assert 'tomllib' in builder, "Dependencies must be extracted from pyproject with stdlib tomllib"

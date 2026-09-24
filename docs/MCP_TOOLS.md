@@ -2,6 +2,11 @@
 
 One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twenty-seven tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
+Local diagnostics are not an MCP tool. The authenticated local manager exposes
+`GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
+local MCP gateway being enabled does not establish runtime readiness or remote
+ChatGPT/tunnel connectivity; the latter remains unobserved by Bridge.
+
 `workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
 
 ## read_project_lead_skill

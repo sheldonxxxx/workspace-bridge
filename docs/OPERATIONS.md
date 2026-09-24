@@ -39,7 +39,39 @@ may still consume space after upgrading, even though new handoffs create none.
 
 ## Readiness checks
 
-`workspace-bridge doctor` checks local configuration and mapped roots. It does not prove tunnel connectivity, account authorization, model tool behavior or test execution. `scripts/smoke_mcp.py --url http://127.0.0.1:8765/mcp` exercises read-only discovery, workspace discovery, info and directory listing over real local HTTP. It prompts for the shared bridge token or reads WORKSPACE_BRIDGE_TOKEN; the token is never a command-line argument. Run `tunnel-client doctor` for the tunnel itself, then validate discovery and source-write denial and allowed handoff-write behavior in a real ChatGPT conversation with a nonsensitive sample project.
+`workspace-bridge doctor` prints concise Overall, Core, Workspaces, Runtimes,
+Runnable routes, Git evidence, and External connection sections. Use
+`workspace-bridge doctor --json` for the canonical JSON report and
+`workspace-bridge doctor --offline` to guarantee zero runtime/network calls.
+The authenticated local-admin `GET /api/diagnostics` endpoint returns the same
+schema; `GET /api/diagnostics?offline=1` selects offline mode. Both Doctor and
+the API use one server-side evaluator.
+
+Checks use `pass`, `warning`, `action_required`, `failed`, or `unknown`. Overall
+severity is failed, action required, unknown, warning, then pass. Doctor exits
+1 when overall is failed/action-required; it exits 0 for pass, warning, and
+unknown-only reports. Unknown runtime/profile/model freshness is not success.
+A route is ready only when the exact workspace/runtime mapping, accessible root,
+handoff-capable write scope, agent switch, shared MCP gateway, runtime grant,
+current profile revision, and current default model/reasoning setting all pass.
+Git Evidence is review-only and never blocks a route.
+
+Listener health, gateway enabled, runtime healthy, runnable route, and remote
+ChatGPT/tunnel reachability are distinct. Bridge cannot observe the last item;
+external connection always reports `unknown` / `external_connection.not_observed`.
+Offline Doctor opens SQLite read-only, creates no service workers, does not
+recover notification `sending` rows, and runs while `serve` holds the process
+lock. The Manager will consume the authoritative route model in the next
+productization milestone.
+
+Diagnostics do not prove account authorization, model tool behavior, test
+execution, or ChatGPT's handling of a response. `scripts/smoke_mcp.py --url
+http://127.0.0.1:8765/mcp` exercises read-only discovery, workspace discovery,
+info and directory listing over real local HTTP. It prompts for the shared
+bridge token or reads WORKSPACE_BRIDGE_TOKEN; the token is never a command-line
+argument. Run `tunnel-client doctor` for the tunnel itself, then validate
+discovery and source-write denial and allowed handoff-write behavior in a real
+ChatGPT conversation with a nonsensitive sample project.
 
 ## Service persistence
 
@@ -81,11 +113,12 @@ Bridge logs. Set `WB_LOG_LEVEL` independently for Bridge and each adapter, and
 
 The `/health` endpoint is a minimal lock and readiness check; the authenticated
 `/v1/descriptor` reports protocol and adapter capabilities. Unsupported features
-fail closed. `workspace-bridge doctor` reports local adapter configuration and
-model policy without contacting the host. Runtime Protocol run notifications use
-Bridge-owned event and delivery tables; channel failures do not change run state.
-The `read_agent_run` `notifications` object shows bounded event summaries and
-per-channel delivery status.
+fail closed. Live `workspace-bridge doctor` checks configured private adapters
+with bounded Runtime Protocol requests; `doctor --offline` reads local adapter
+configuration and model policy without contacting the host. Runtime Protocol run
+notifications use Bridge-owned event and delivery tables; channel failures do not
+change run state. The `read_agent_run` `notifications` object shows bounded event
+summaries and per-channel delivery status.
 
 ## Pi runtime profile
 
