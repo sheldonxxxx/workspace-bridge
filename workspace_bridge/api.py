@@ -534,6 +534,7 @@ class ManageWorkspace(Input):
 class RuntimeGrant(Input):
     enabled: bool
     profile_id: str | None = Field(default=None, max_length=100)
+    security_source: Literal["profile", "runtime-config"] | None = None
 
 
 class ManageBridge(Input):
@@ -728,9 +729,23 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                 if not service.run_coordinator.configured(runtime_id):
                     return JSONResponse({"error": "Runtime is not configured"}, 404)
                 if leaf == "profiles" and len(parts) == 4 and request.method == "GET":
-                    profiles = await run_in_threadpool(
-                        service.run_coordinator.adapter(runtime_id).profiles)
-                    return JSONResponse({"runtime": runtime_id, "profiles": profiles})
+                    workspace_id = request.query_params.get("workspace_id")
+                    fresh_value = request.query_params.get("fresh", "0")
+                    if fresh_value not in {"0", "1"}:
+                        return JSONResponse({"error": "fresh must be 0 or 1"}, 400)
+                    # Profile discovery is a read-only admin operation. Include
+                    # disabled mappings so the editor can still inspect the
+                    # exact target workspace before its runtime grant is enabled.
+                    ws = (service.workspace(workspace_id, require_enabled=False)
+                          if workspace_id else None)
+                    catalog = await run_in_threadpool(
+                        service.run_coordinator.profile_catalog, runtime_id, ws,
+                        fresh=fresh_value == "1")
+                    return JSONResponse({"runtime": runtime_id,
+                                         "profiles": catalog.get("profiles", []),
+                                         "permissionProfiles": catalog.get(
+                                             "permissionProfiles", []),
+                                         "runtimeConfig": catalog.get("runtimeConfig")})
                 if leaf == "profiles" and len(parts) == 4 and request.method == "POST":
                     raw = await body_json(request)
                     if not isinstance(raw, dict) or set(raw) != {
@@ -783,23 +798,26 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     return JSONResponse(await run_in_threadpool(
                         service.respond_agent_interaction, ws, run_id, parts[4], raw))
                 if len(parts) == 4 and parts[3] == "activities":
-                    with service.lock:
-                        row = service.db.execute(
-                            "SELECT workspace FROM runtime_runs WHERE id=?",
-                            (run_id,)).fetchone()
-                    if row is None:
-                        return JSONResponse({"error": "Run not found"}, 404)
-                    ws = service.workspace(row["workspace"], False)
+                    try:
+                        limit = max(1, min(int(request.query_params.get("limit", "50")), 50))
+                    except ValueError:
+                        limit = 50
+                    before_created = request.query_params.get("before_created")
+                    before_id = request.query_params.get("before_id")
                     return JSONResponse(await run_in_threadpool(
-                        service.list_agent_activities, ws, run_id))
+                        service.admin_list_agent_activities, run_id, limit,
+                        before_created, before_id))
                 if len(parts) == 4 and parts[3] == "executions":
                     try:
                         offset = max(0, int(request.query_params.get("offset", "0")))
                         limit = max(1, min(int(request.query_params.get("limit", "50")), 50))
                     except ValueError:
                         offset, limit = 0, 50
+                    before_created = request.query_params.get("before_created")
+                    before_id = request.query_params.get("before_id")
                     return JSONResponse(await run_in_threadpool(
-                        service.admin_list_agent_executions, run_id, offset, limit))
+                        service.admin_list_agent_executions, run_id, offset, limit,
+                        before_created, before_id))
                 if len(parts) == 5 and parts[3] == "executions":
                     return JSONResponse(await run_in_threadpool(
                         service.admin_read_agent_execution, run_id, parts[4]))
@@ -831,7 +849,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     grant = RuntimeGrant.model_validate(await body_json(request))
                     return JSONResponse(await run_in_threadpool(
                         service.set_workspace_runtime, ws, runtime_id,
-                        grant.enabled, grant.profile_id))
+                        grant.enabled, grant.profile_id, grant.security_source))
                 return JSONResponse({"error": "Method not allowed here"}, 405)
             if path.endswith("/jobs"):
                 with service.lock:

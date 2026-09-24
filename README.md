@@ -303,17 +303,29 @@ on port 8772 by default and starts its own Codex app-server process; it does not
 attach to a Desktop or TUI thread. Keep adapter state outside project roots.
 
 For each workspace, enable the agent switch, grant each intended runtime, select
-an adapter security profile, and save that runtime's enabled model list and
-default in the local manager. Every new runtime grant starts disabled. A security
-profile applies to new conversations; changing it does not widen an existing
-conversation. Open **Profiles** in the manager to create, edit, and delete
+the Codex security source, and save that runtime's enabled model list and
+default in the local manager. Every new runtime grant starts disabled. Pi profile
+changes apply to new conversations. Codex can update named permissions between
+turns when the app-server confirms the change; unsafe or unconfirmed changes start
+a fresh conversation. Open **Profiles** in the manager to create, edit, and delete
 custom profiles using the controls supported by Pi or Codex. Assign a saved
-profile from the workspace's **Change profile** dialog. Pi's external access controls govern
+profile from the workspace's **Change security** dialog. Codex can also follow the
+effective native settings from `config.toml` without creating a Bridge profile.
+Pi's external access controls govern
 file tools outside the workspace; shell commands and any enabled host extensions
 have separate authority. Assign another profile in every
 workspace before deleting one. Native Pi and Codex security mechanisms differ;
 review each profile's claims before enabling write access. All configured runtimes
 use the same run, interaction, activity, and execution APIs and Bridge database schema.
+
+Codex profiles select a native permission-profile ID with an approval policy and
+reviewer. The separate **Use Codex config (config.toml)** source follows the
+current effective native configuration for that workspace. Codex owns filesystem,
+network, domain, and socket rules in its config layers; Bridge shows only a bounded
+summary and does not duplicate those controls. Discovery and thread creation use
+the exact workspace directory. Profile-bound starts send the permissions selector;
+config-bound starts omit security overrides so Codex resolves its own configuration.
+See [Codex adapter security profiles](docs/CODEX_ADAPTER.md).
 
 ## Notifications
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, runtimeName, type Workspace } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,8 +21,15 @@ type AccessMode = "allow" | "ask" | "deny";
 type Profile = {
   id: string;
   revision: string;
+  definitionRevision?: string;
   mutable: boolean;
+  available?: boolean;
   config: Record<string, unknown> | null;
+};
+type NativePermissionProfile = {
+  id: string;
+  description: string;
+  allowed: boolean;
 };
 type PiConfig = {
   version: number;
@@ -38,7 +45,7 @@ type PiConfig = {
   shell_mode: AccessMode;
 };
 type CodexConfig = {
-  sandbox: "read-only" | "workspace-write" | "danger-full-access";
+  permissions: string;
   approvalPolicy: "on-request" | "never";
   approvalsReviewer: "user" | "auto_review";
 };
@@ -100,6 +107,12 @@ export function ProfileManager({
 }) {
   const [runtime, setRuntime] = useState(runtimes[0] || "pi");
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [permissionProfiles, setPermissionProfiles] = useState<
+    NativePermissionProfile[]
+  >([]);
+  const [contextWorkspaceId, setContextWorkspaceId] = useState(
+    workspaces[0]?.id || "",
+  );
   const [selectedId, setSelectedId] = useState("");
   const [mode, setMode] = useState<Mode>("choose");
   const [draftId, setDraftId] = useState("");
@@ -109,6 +122,11 @@ export function ProfileManager({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const effectiveContextWorkspaceId = workspaces.some(
+    (workspace) => workspace.id === contextWorkspaceId,
+  )
+    ? contextWorkspaceId
+    : workspaces[0]?.id || "";
   const selected = profiles.find((profile) => profile.id === selectedId);
   const selectedConfig = selected?.config;
   const available = runtimes.includes(runtime);
@@ -124,6 +142,17 @@ export function ProfileManager({
     if (!available && firstRuntime) setRuntime(firstRuntime);
   }, [available, firstRuntime]);
 
+  const profilesUrl = useCallback(() => {
+    if (runtime === "codex" && effectiveContextWorkspaceId) {
+      const query = new URLSearchParams({
+        workspace_id: effectiveContextWorkspaceId,
+        fresh: "1",
+      });
+      return `/api/runtimes/${runtime}/profiles?${query.toString()}`;
+    }
+    return `/api/runtimes/${runtime}/profiles`;
+  }, [runtime, effectiveContextWorkspaceId]);
+
   useEffect(() => {
     let live = true;
     if (!available) return;
@@ -131,10 +160,14 @@ export function ProfileManager({
     setSelectedId("");
     setMode("choose");
     setError("");
-    api<{ profiles: Profile[] }>(`/api/runtimes/${runtime}/profiles`)
+    api<{
+      profiles: Profile[];
+      permissionProfiles?: NativePermissionProfile[];
+    }>(profilesUrl())
       .then((data) => {
         if (!live) return;
         setProfiles(data.profiles || []);
+        setPermissionProfiles(data.permissionProfiles || []);
         setSelectedId(data.profiles?.[0]?.id || "");
       })
       .catch((failure) => {
@@ -143,13 +176,15 @@ export function ProfileManager({
     return () => {
       live = false;
     };
-  }, [runtime, available]);
+  }, [runtime, available, effectiveContextWorkspaceId, profilesUrl]);
 
   async function reload(selectId: string) {
-    const data = await api<{ profiles: Profile[] }>(
-      `/api/runtimes/${runtime}/profiles`,
-    );
+    const data = await api<{
+      profiles: Profile[];
+      permissionProfiles?: NativePermissionProfile[];
+    }>(profilesUrl());
     setProfiles(data.profiles || []);
+    setPermissionProfiles(data.permissionProfiles || []);
     setSelectedId(selectId);
   }
 
@@ -169,7 +204,10 @@ export function ProfileManager({
         {
           id: draftId,
           config: draft,
-          expected_revision: mode === "edit" ? selected?.revision : null,
+          expected_revision:
+            mode === "edit"
+              ? (selected?.definitionRevision ?? selected?.revision)
+              : null,
         },
       );
       await reload(saved.id);
@@ -227,7 +265,11 @@ export function ProfileManager({
   return (
     <>
       <div className="profiles-page">
-        <div className="profiles-runtime-tabs" role="group" aria-label="Runtime">
+        <div
+          className="profiles-runtime-tabs"
+          role="group"
+          aria-label="Runtime"
+        >
           {runtimes.map((id) => (
             <button
               key={id}
@@ -268,7 +310,10 @@ export function ProfileManager({
                     }}
                   >
                     <strong>{profile.id}</strong>
-                    <span>{profile.mutable ? "Custom" : "Built in"}</span>
+                    <span>
+                      {profile.mutable ? "Custom" : "Built in"}
+                      {profile.available === false ? " · unavailable here" : ""}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -307,7 +352,7 @@ export function ProfileManager({
                         {selectedConfig
                           ? runtime === "pi"
                             ? `Files outside workspace: ${(selectedConfig as unknown as PiConfig).external_access?.default_mode || "deny"}`
-                            : `Sandbox: ${(selectedConfig as unknown as CodexConfig).sandbox || "unknown"}`
+                            : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
                           : "Controls unavailable from the installed adapter"}
                       </span>
                       <span>
@@ -368,6 +413,32 @@ export function ProfileManager({
                         placeholder="reviewed-external-files"
                         maxLength={64}
                       />
+                    </div>
+                  )}
+                  {runtime === "codex" && (
+                    <div className="form-field">
+                      <Label htmlFor="codex-discovery-workspace">
+                        Native profile choices
+                      </Label>
+                      <select
+                        id="codex-discovery-workspace"
+                        className="native-select"
+                        value={effectiveContextWorkspaceId}
+                        onChange={(event) =>
+                          setContextWorkspaceId(event.target.value)
+                        }
+                      >
+                        <option value="">No workspace context</option>
+                        {workspaces.map((workspace) => (
+                          <option key={workspace.id} value={workspace.id}>
+                            {workspace.name}
+                          </option>
+                        ))}
+                      </select>
+                      <small>
+                        Codex resolves named permission profiles per project.
+                        This list checks the selected workspace.
+                      </small>
                     </div>
                   )}
                   {runtime === "pi" ? (
@@ -577,24 +648,82 @@ export function ProfileManager({
                   ) : (
                     <>
                       <section className="profile-section">
-                        <h3>Codex controls</h3>
-                        <SelectField
-                          id="profile-sandbox"
-                          label="Sandbox"
-                          value={codex.sandbox || "read-only"}
-                          options={[
-                            "read-only",
-                            "workspace-write",
-                            "danger-full-access",
-                          ]}
-                          onChange={(value) =>
-                            setDraft((current) => ({
-                              ...current,
-                              sandbox: value,
-                            }))
-                          }
-                          hint="Workspace write confines routine edits to the workspace. Full access removes that boundary."
-                        />
+                        <h3>Codex security profile</h3>
+                        {permissionProfiles.length > 0 && (
+                          <div className="form-field">
+                            <Label htmlFor="profile-native-permission">
+                              Permission profile
+                            </Label>
+                            <select
+                              id="profile-native-permission"
+                              className="native-select"
+                              value={
+                                permissionProfiles.some(
+                                  (profile) => profile.id === codex.permissions,
+                                )
+                                  ? codex.permissions
+                                  : "__custom__"
+                              }
+                              onChange={(event) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  permissions:
+                                    event.target.value === "__custom__"
+                                      ? ""
+                                      : event.target.value,
+                                }))
+                              }
+                            >
+                              {permissionProfiles.map((profile) => (
+                                <option key={profile.id} value={profile.id}>
+                                  {profile.id}
+                                  {profile.description
+                                    ? " — " + profile.description
+                                    : ""}
+                                </option>
+                              ))}
+                              <option value="__custom__">
+                                Enter a named profile ID
+                              </option>
+                            </select>
+                            <small>
+                              Choices come from Codex for{" "}
+                              {workspaces.find(
+                                (workspace) =>
+                                  workspace.id === effectiveContextWorkspaceId,
+                              )?.name || "the selected workspace"}
+                              .
+                            </small>
+                          </div>
+                        )}
+                        {!permissionProfiles.some(
+                          (profile) => profile.id === codex.permissions,
+                        ) && (
+                          <div className="form-field">
+                            <Label htmlFor="profile-permissions">
+                              Permission profile ID
+                            </Label>
+                            <Input
+                              id="profile-permissions"
+                              value={codex.permissions || ""}
+                              onChange={(event) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  permissions: event.target.value,
+                                }))
+                              }
+                              placeholder=":workspace or workspace-net"
+                              maxLength={128}
+                              autoComplete="off"
+                            />
+                            <small>
+                              Codex defines filesystem, network, domain, and
+                              socket rules in its permission profiles and
+                              config.toml. Bridge selects this ID and verifies
+                              it against the target workspace when assigned.
+                            </small>
+                          </div>
+                        )}
                         <SelectField
                           id="profile-approval"
                           label="Approvals"

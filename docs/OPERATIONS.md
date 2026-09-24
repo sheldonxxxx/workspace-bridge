@@ -128,8 +128,19 @@ external paths, protected paths, shell behavior, and session grants through the
 Pi host adapter's trusted permission extension. A profile revision is immutable
 for each conversation; changes take effect in new conversations. Review each
 profile's scope in the local manager before assigning it. Codex uses a separate
-native sandbox and approval policy; the two runtimes' profile claims are not
-equivalent.
+native permission profile with an approval policy and reviewer; the two runtimes'
+profile claims are not equivalent. Codex profile discovery and binding are checked
+with the exact workspace ID and validated directory. Bridge selects the native
+profile ID; Codex owns the effective project/user/managed config layers and the
+filesystem/network policy definitions. See
+[Codex adapter security profiles](CODEX_ADAPTER.md).
+
+Codex workspaces may instead follow the effective native `config.toml` security
+settings. Bridge observes a security-only revision and bounded summary, then
+attempts to update an idle conversation before its next turn. A running turn keeps
+its captured settings. When Codex cannot represent or confirm an update, Bridge
+starts a fresh conversation that resolves the current native configuration. This
+mode is distinct from assigning a Bridge profile and is unsupported for Pi.
 
 ## Writable handoff notes
 

@@ -8,8 +8,8 @@ const workspace = {
   write_scope: "handoff",
   excludes: "[]",
   runtime_grants: {
-    pi: { enabled: true, profile: { id: "read-only" } },
-    codex: { enabled: false, profile: null },
+    pi: { enabled: true, profile: { id: "read-only" }, security_binding: null },
+    codex: { enabled: false, profile: null, security_binding: null },
   },
 };
 const run = {
@@ -27,10 +27,20 @@ const run = {
 const piReadOnlyConfig = {
   version: 3,
   write_tools_enabled: false,
-  tools: { read: "allow", grep: "allow", find: "allow", ls: "allow",
-    edit: "ask", write: "ask" },
+  tools: {
+    read: "allow",
+    grep: "allow",
+    find: "allow",
+    ls: "allow",
+    edit: "ask",
+    write: "ask",
+  },
   protected_patterns: [".git/**", ".env", ".env.*"],
-  protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
+  protected_template_exceptions: [
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+  ],
   allow_session_always: true,
   external_access: { default_mode: "deny", roots: [] },
   shell_mode: "deny",
@@ -118,8 +128,14 @@ async function mockApi(page: Page) {
         },
       },
       "/api/runtimes/pi/profiles": {
-        profiles: [{ id: "read-only", revision: "default-revision", mutable: false,
-          config: piReadOnlyConfig }],
+        profiles: [
+          {
+            id: "read-only",
+            revision: "default-revision",
+            mutable: false,
+            config: piReadOnlyConfig,
+          },
+        ],
       },
     };
     const body =
@@ -215,41 +231,67 @@ test("workspace settings use one save and ID copy sits by the name", async ({
     excludes: ["private/**"],
   });
 });
-test("custom Pi profile builder creates, edits and deletes external access rules", async ({ page }) => {
+test("custom Pi profile builder creates, edits and deletes external access rules", async ({
+  page,
+}) => {
   await mockApi(page);
-  const profileRows: Array<{ id: string; revision: string; mutable: boolean;
-    config: Record<string, unknown> }> = [
-    { id: "read-only", revision: "default-revision", mutable: false,
-      config: piReadOnlyConfig },
+  const profileRows: Array<{
+    id: string;
+    revision: string;
+    mutable: boolean;
+    config: Record<string, unknown>;
+  }> = [
+    {
+      id: "read-only",
+      revision: "default-revision",
+      mutable: false,
+      config: piReadOnlyConfig,
+    },
   ];
   const assignments: unknown[] = [];
   const saved: unknown[] = [];
-  await page.route("**/api/runtimes/pi/profiles", async (route) => {
+  await page.route("**/api/runtimes/pi/profiles*", async (route) => {
     if (route.request().method() === "POST") {
       const body = route.request().postDataJSON();
       saved.push(body);
-      const row = { id: body.id, revision: `revision-${saved.length}`,
-        mutable: true, config: body.config };
+      const row = {
+        id: body.id,
+        revision: `revision-${saved.length}`,
+        mutable: true,
+        config: body.config,
+      };
       const index = profileRows.findIndex((profile) => profile.id === row.id);
       if (index >= 0) profileRows[index] = row;
       else profileRows.push(row);
-      return route.fulfill({ status: 200, contentType: "application/json",
-        body: JSON.stringify(row) });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(row),
+      });
     }
-    await route.fulfill({ status: 200, contentType: "application/json",
-      body: JSON.stringify({ profiles: profileRows }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ profiles: profileRows }),
+    });
   });
   await page.route("**/api/runtimes/pi/profiles/*", async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").pop();
     const index = profileRows.findIndex((profile) => profile.id === id);
     if (index >= 0) profileRows.splice(index, 1);
-    await route.fulfill({ status: 200, contentType: "application/json",
-      body: JSON.stringify({ deleted: id }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ deleted: id }),
+    });
   });
   await page.route("**/api/workspaces/ws-1/runtimes/pi", async (route) => {
     assignments.push(route.request().postDataJSON());
-    await route.fulfill({ status: 200, contentType: "application/json",
-      body: "{}" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "{}",
+    });
   });
   await page.goto("./");
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
@@ -258,24 +300,42 @@ test("custom Pi profile builder creates, edits and deletes external access rules
   await page.getByLabel("Enable edit and write").check();
   await page.getByLabel("Default file access").selectOption("deny");
   await page.getByRole("button", { name: "Add external root" }).click();
-  await page.getByRole("textbox", { name: "External root 1", exact: true }).fill("/Volumes/shared");
+  await page
+    .getByRole("textbox", { name: "External root 1", exact: true })
+    .fill("/Volumes/shared");
   await page.getByLabel("Access for external root 1").selectOption("ask");
-  await page.screenshot({ path: "test-results/profile-editor-desktop.png", fullPage: true });
+  await page.screenshot({
+    path: "test-results/profile-editor-desktop.png",
+    fullPage: true,
+  });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "test-results/profile-editor-mobile.png", fullPage: true });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({
+    path: "test-results/profile-editor-mobile.png",
+    fullPage: true,
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.getByRole("button", { name: "Create profile" }).click();
   await expect.poll(() => saved.length).toBe(1);
-  expect((saved[0] as { config: typeof piReadOnlyConfig }).config.external_access.roots)
-    .toEqual([{ path: "/Volumes/shared", mode: "ask" }]);
+  expect(
+    (saved[0] as { config: typeof piReadOnlyConfig }).config.external_access
+      .roots,
+  ).toEqual([{ path: "/Volumes/shared", mode: "ask" }]);
 
   await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change profile" }).first().click();
+  await page.getByRole("button", { name: "Change security" }).first().click();
   await page.getByRole("button", { name: /reviewed-shared/ }).click();
-  await page.getByRole("button", { name: "Assign profile" }).click();
+  await page.getByRole("button", { name: "Save security source" }).click();
   await expect.poll(() => assignments.length).toBe(1);
-  expect(assignments[0]).toEqual({ enabled: true, profile_id: "reviewed-shared" });
+  expect(assignments[0]).toEqual({
+    enabled: true,
+    profile_id: "reviewed-shared",
+    security_source: "profile",
+  });
 
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
   await page.getByRole("button", { name: /reviewed-shared/ }).click();
@@ -283,22 +343,193 @@ test("custom Pi profile builder creates, edits and deletes external access rules
   await page.getByLabel("Shell commands").selectOption("ask");
   await page.getByRole("button", { name: "Save controls" }).click();
   await expect.poll(() => saved.length).toBe(2);
-  expect((saved[1] as { expected_revision: string }).expected_revision)
-    .toBe("revision-1");
+  expect((saved[1] as { expected_revision: string }).expected_revision).toBe(
+    "revision-1",
+  );
 
   await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change profile" }).first().click();
+  await page.getByRole("button", { name: "Change security" }).first().click();
   await page.getByRole("button", { name: /read-only/ }).click();
-  await page.getByRole("button", { name: "Assign profile" }).click();
+  await page.getByRole("button", { name: "Save security source" }).click();
   await expect.poll(() => assignments.length).toBe(2);
 
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
   await page.getByRole("button", { name: /reviewed-shared/ }).click();
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await page.getByRole("button", { name: "Delete profile" }).click();
-  await expect.poll(() => profileRows.some((profile) => profile.id === "reviewed-shared"))
+  await expect
+    .poll(() => profileRows.some((profile) => profile.id === "reviewed-shared"))
     .toBe(false);
 });
+test("Codex profile editor selects native permission profiles in workspace context", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const codexConfig = {
+    permissions: ":read-only",
+    approvalPolicy: "on-request",
+    approvalsReviewer: "user",
+  };
+  const profileRows = [
+    {
+      id: "read-only",
+      revision: "native-rev",
+      definitionRevision: "definition-rev",
+      available: true,
+      mutable: false,
+      config: codexConfig,
+    },
+  ];
+  const profileQueries: string[] = [];
+  const saved: Array<{ id: string; config: Record<string, unknown> }> = [];
+  await page.route("**/api/runtimes/codex/profiles*", async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      const body = request.postDataJSON();
+      saved.push(body);
+      profileRows.push({
+        id: body.id,
+        revision: "saved-rev",
+        definitionRevision: "saved-definition-rev",
+        available: true,
+        mutable: true,
+        config: body.config,
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(profileRows.at(-1)),
+      });
+    }
+    const url = new URL(request.url());
+    profileQueries.push(url.searchParams.get("workspace_id") || "");
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        profiles: profileRows,
+        permissionProfiles: [
+          { id: ":read-only", description: "Read files", allowed: true },
+          {
+            id: "workspace-net",
+            description: "Project network",
+            allowed: true,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.goto("./");
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await page.getByRole("button", { name: "Codex", exact: true }).click();
+  await expect(page.getByRole("button", { name: "read-only" })).toBeVisible();
+  expect(profileQueries.at(-1)).toBe("ws-1");
+  await page.getByRole("button", { name: "Create from selected" }).click();
+  await page.getByLabel("Profile ID").fill("workspace-network");
+  await expect(page.getByLabel("Permission profile")).toBeVisible();
+  await expect(page.getByLabel("Sandbox")).toHaveCount(0);
+  await page.getByLabel("Permission profile").selectOption("workspace-net");
+  const approvalOptions = page.getByLabel("Approvals").locator("option");
+  await expect(approvalOptions).toHaveCount(2);
+  expect(
+    await approvalOptions.evaluateAll((options) =>
+      options.map((option) => (option as HTMLOptionElement).value),
+    ),
+  ).toEqual(["on-request", "never"]);
+  await page.getByLabel("Approvals").selectOption("on-request");
+  await page
+    .getByRole("button", { name: "Create profile", exact: true })
+    .click();
+  await expect.poll(() => saved.length).toBe(1);
+  expect(saved[0]).toEqual({
+    id: "workspace-network",
+    config: {
+      permissions: "workspace-net",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+    },
+    expected_revision: null,
+  });
+  expect(saved[0].config).not.toHaveProperty("sandbox");
+});
+
+test("Codex workspace can follow current config with a live resolved summary", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const selection: unknown[] = [];
+  const runtimeConfig = {
+    supported: true,
+    available: true,
+    status: "ready",
+    revision: "opaque-security-revision",
+    resolvedSummary: {
+      activePermissionProfile: ":workspace",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      provenance: "implicit/default",
+    },
+  };
+  await page.route("**/api/runtimes/codex/profiles*", async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        profiles: [
+          {
+            id: "read-only",
+            revision: "profile-revision",
+            mutable: false,
+            available: true,
+          },
+        ],
+        permissionProfiles: [],
+        runtimeConfig,
+      }),
+    }),
+  );
+  await page.route("**/api/workspaces/ws-1/runtimes/codex", async (route) => {
+    selection.push(route.request().postDataJSON());
+    workspace.runtime_grants.codex.security_binding = {
+      source: "runtime-config",
+      revision: "old-observation",
+      status: "ready",
+      observed_revision: runtimeConfig.revision,
+      resolved_summary: runtimeConfig.resolvedSummary,
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: "{}",
+    });
+  });
+
+  await page.goto("./");
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
+  await page.getByRole("button", { name: "Change security" }).nth(1).click();
+  const configMode = page.getByRole("radio", {
+    name: /Use Codex config \(config.toml\)/,
+  });
+  await expect(configMode).toBeEnabled();
+  await configMode.check();
+  await expect(page.getByText(":workspace", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("implicit/default", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Save security source" }).click();
+  await expect.poll(() => selection.length).toBe(1);
+  expect(selection[0]).toEqual({
+    enabled: false,
+    security_source: "runtime-config",
+    profile_id: null,
+  });
+  await expect(
+    page.getByText("Use Codex config (config.toml)").first(),
+  ).toBeVisible();
+  await expect(page.getByText(/Following current Codex config/)).toBeVisible();
+});
+
 test("mobile navigation, models, and no overflow", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));

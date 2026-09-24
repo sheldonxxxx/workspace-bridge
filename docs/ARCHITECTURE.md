@@ -93,7 +93,8 @@ therefore differ from a deliberately edited document.
 ## Runtime Protocol v1
 
 `RunCoordinator` is the only Bridge run path. It validates handoffs, workspace
-grants, profile revisions and model policy before creating a runtime conversation.
+grants, security bindings and model policy before creating or reusing a runtime
+conversation.
 It persists Bridge-owned runs, live interactions, and bounded activity snapshots
 in `runtime_runs`, `runtime_conversations`, `runtime_interactions`, and
 `runtime_activities`. Pi and Codex adapters implement the same private `/v1/*`
@@ -102,16 +103,32 @@ inside each native runtime and are exposed through reviewed interaction choices.
 All configured adapters share these run tables and APIs; the Bridge has no direct
 Pi session endpoint.
 
+Security discovery may depend on an exact workspace context. The generic Bridge
+stores either an opaque profile ID/revision or the explicit `runtime-config`
+source; it does not interpret runtime-specific permission definitions. Codex
+resolves native permission-profile IDs for the validated workspace directory
+and includes effective security config and managed constraints in its opaque
+revision fingerprint. Each runtime-config conversation persists the revision
+and bounded summary actually applied to its native thread. Before the next turn,
+Codex refreshes supported changes at an idle boundary and creates a fresh thread
+when the native transition cannot be represented or confirmed.
+
 The manual handoff path remains available independently of runtime adapters.
 Agent execution is a per-workspace local-admin policy, disabled by default and
 independent from `write_scope`; MCP cannot change it. `start_agent_run` accepts a
 prepared handoff only, never a free-form prompt or path. A continuation creates a
-new Bridge run inside the same conversation only after runtime, model, profile
-revision, handoff, and conversation state checks pass. Otherwise it fails closed.
+new Bridge run inside the same conversation only after runtime, model, security
+source, handoff, and conversation state checks pass. Runtime-config revision
+drift is refreshed before the next turn; a workspace source change or unsafe
+native update starts a conversation with the selected security source and
+records the replacement reason.
 
-Runtime conversations are routing context and profile bindings, not OS
+Runtime conversations are routing context and security bindings, not OS
 filesystem sandboxes by themselves. Pi and Codex enforce different native
-security mechanisms; review their profile claims before enabling write access.
+security mechanisms; review their security claims before enabling write access.
+Codex either selects an explicit native permission profile or follows the
+current config.toml state with Codex as authority for project/user/managed
+layering and the filesystem/network rules.
 
 ## Notifications
 

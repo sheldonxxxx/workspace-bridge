@@ -79,12 +79,16 @@ class RunCoordinator:
             workspace TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             runtime TEXT NOT NULL, profile TEXT NOT NULL,
             revision TEXT NOT NULL, updated TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'profile',
             PRIMARY KEY(workspace,runtime));
           CREATE TABLE IF NOT EXISTS runtime_conversations (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
             runtime TEXT NOT NULL, native_id TEXT NOT NULL,
             profile TEXT NOT NULL, revision TEXT NOT NULL,
             instance_id TEXT NOT NULL, created TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'profile', security_snapshot TEXT,
+            permission_revision TEXT NOT NULL DEFAULT '',
+            approval_revision TEXT NOT NULL DEFAULT '', replacement_reason TEXT,
             UNIQUE(runtime,native_id));
           CREATE TABLE IF NOT EXISTS runtime_runs (
             id TEXT PRIMARY KEY, conversation TEXT NOT NULL REFERENCES runtime_conversations(id),
@@ -112,6 +116,28 @@ class RunCoordinator:
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
         """)
+            profile_columns = {row["name"] for row in service.db.execute(
+                "PRAGMA table_info(runtime_profiles)")}
+            if "source" not in profile_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_profiles ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'")
+            conversation_columns = {row["name"] for row in service.db.execute(
+                "PRAGMA table_info(runtime_conversations)")}
+            if "source" not in conversation_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'")
+            if "security_snapshot" not in conversation_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_conversations ADD COLUMN security_snapshot TEXT")
+            if "permission_revision" not in conversation_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_conversations ADD COLUMN permission_revision TEXT NOT NULL DEFAULT ''")
+            if "approval_revision" not in conversation_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_conversations ADD COLUMN approval_revision TEXT NOT NULL DEFAULT ''")
+            if "replacement_reason" not in conversation_columns:
+                service.db.execute(
+                    "ALTER TABLE runtime_conversations ADD COLUMN replacement_reason TEXT")
             columns = {row["name"] for row in service.db.execute("PRAGMA table_info(runtime_runs)")}
             if "continue_from" not in columns:
                 service.db.execute("ALTER TABLE runtime_runs ADD COLUMN continue_from TEXT")
@@ -156,20 +182,68 @@ class RunCoordinator:
                                     "detail": _safe(str(exc), 200)}
         return rows
 
-    def set_profile(self, ws: dict, runtime_id: str, profile_id: str) -> dict:
+    def profile_catalog(self, runtime_id: str, ws: dict | None = None, *,
+                        fresh: bool = False) -> dict:
         adapter = self.adapter(runtime_id)
-        profiles = adapter.profiles()
+        contextual_catalog = getattr(adapter, "profile_catalog", None)
+        if ws is not None and isinstance(adapter, HttpRuntimeAdapter):
+            with self.service.safe_root(ws) as safe:
+                return adapter.profile_catalog(ws["id"], safe.path, fresh=fresh)
+        if ws is not None and callable(contextual_catalog):
+            return contextual_catalog(ws, fresh=fresh)
+        if isinstance(adapter, HttpRuntimeAdapter):
+            return adapter.profile_catalog()
+        rows = adapter.profiles()
+        return {"profiles": rows if isinstance(rows, list) else [],
+                "permissionProfiles": []}
+
+    def profiles(self, runtime_id: str, ws: dict | None = None, *,
+                 fresh: bool = False) -> list[dict]:
+        return self.profile_catalog(runtime_id, ws, fresh=fresh)["profiles"]
+
+    def set_profile(self, ws: dict, runtime_id: str, profile_id: str) -> dict:
+        profiles = self.profiles(runtime_id, ws, fresh=True)
         profile = next((item for item in profiles if item.get("id") == profile_id), None)
-        if profile is None or not isinstance(profile.get("revision"), str):
+        if (profile is None or profile.get("available") is False
+                or not isinstance(profile.get("revision"), str)):
             raise BridgeError("Security profile is unavailable", "profile_unavailable")
         with self.service.lock, self.service.db:
             self.service.db.execute(
-                "INSERT INTO runtime_profiles VALUES(?,?,?,?,?) ON CONFLICT(workspace,runtime) "
+                "INSERT INTO runtime_profiles(workspace,runtime,profile,revision,updated,source) "
+                "VALUES(?,?,?,?,?,'profile') ON CONFLICT(workspace,runtime) "
                 "DO UPDATE SET profile=excluded.profile,revision=excluded.revision,"
-                "updated=excluded.updated",
+                "updated=excluded.updated,source='profile'",
                 (ws["id"], runtime_id, profile_id, profile["revision"], _now()))
         return {"runtime": runtime_id, "profile": profile_id,
                 "revision": profile["revision"]}
+
+    def set_runtime_config(self, ws: dict, runtime_id: str) -> dict:
+        catalog = self.profile_catalog(runtime_id, ws, fresh=True)
+        native = catalog.get("runtimeConfig")
+        if (not isinstance(native, dict) or native.get("supported") is not True
+                or native.get("available") is not True
+                or not isinstance(native.get("revision"), str)
+                or not native["revision"] or len(native["revision"]) > 100):
+            raise BridgeError("Runtime config security is unavailable",
+                              "runtime_config_unavailable")
+        with self.service.lock, self.service.db:
+            self.service.db.execute(
+                "INSERT INTO runtime_profiles(workspace,runtime,profile,revision,updated,source) "
+                "VALUES(?,?, '',?,?, 'runtime-config') ON CONFLICT(workspace,runtime) "
+                "DO UPDATE SET profile='',revision=excluded.revision,"
+                "updated=excluded.updated,source='runtime-config'",
+                (ws["id"], runtime_id, native["revision"], _now()))
+        return {"runtime": runtime_id, "security_binding": {
+            "source": "runtime-config", "revision": native["revision"],
+            "resolved_summary": native.get("resolvedSummary")}}
+
+    def set_security_binding(self, ws: dict, runtime_id: str, source: str,
+                             profile_id: str | None = None) -> dict:
+        if source == "profile" and isinstance(profile_id, str) and profile_id:
+            return self.set_profile(ws, runtime_id, profile_id)
+        if source == "runtime-config" and profile_id is None:
+            return self.set_runtime_config(ws, runtime_id)
+        raise BridgeError("Invalid runtime security binding", "invalid_arguments")
 
     def save_profile(self, runtime_id: str, profile_id: str, config: dict,
                      expected_revision: str | None) -> dict:
@@ -181,16 +255,34 @@ class RunCoordinator:
                     and (not isinstance(expected_revision, str)
                          or len(expected_revision) > 100))):
             raise BridgeError("Invalid security profile", "invalid_arguments")
-        saved = self.adapter(runtime_id).save_profile(
+        adapter = self.adapter(runtime_id)
+        saved = adapter.save_profile(
             profile_id, config, expected_revision)
         if saved.get("id") != profile_id or not isinstance(saved.get("revision"), str):
             raise BridgeError("Runtime returned an invalid security profile",
                               "binding_mismatch")
-        with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "UPDATE runtime_profiles SET revision=?,updated=? "
-                "WHERE runtime=? AND profile=?",
-                (saved["revision"], _now(), runtime_id, profile_id))
+        # A deliberate profile edit refreshes assignments to the new opaque
+        # revision. Native Codex policy changes outside Bridge leave these
+        # stored revisions untouched and therefore become visibly stale.
+        with self.service.lock:
+            assigned = [row["workspace"] for row in self.service.db.execute(
+                "SELECT workspace FROM runtime_profiles WHERE runtime=? AND source='profile' AND profile=? "
+                "ORDER BY workspace", (runtime_id, profile_id))]
+        for workspace_id in assigned[:100]:
+            try:
+                ws = self.service.workspace(workspace_id)
+                current = next((item for item in self.profiles(
+                    runtime_id, ws, fresh=True)
+                    if item.get("id") == profile_id
+                    and item.get("available") is not False), None)
+            except Exception:  # noqa: BLE001 - a failed refresh leaves the old binding stale
+                current = None
+            if current and isinstance(current.get("revision"), str):
+                with self.service.lock, self.service.db:
+                    self.service.db.execute(
+                        "UPDATE runtime_profiles SET revision=?,updated=? "
+                        "WHERE workspace=? AND runtime=? AND profile=?",
+                        (current["revision"], _now(), workspace_id, runtime_id, profile_id))
         self.service.event(None, "save_runtime_profile", "saved")
         return saved
 
@@ -200,7 +292,7 @@ class RunCoordinator:
             raise BridgeError("Invalid security profile ID", "invalid_arguments")
         with self.service.lock:
             assigned = self.service.db.execute(
-                "SELECT 1 FROM runtime_profiles WHERE runtime=? AND profile=? LIMIT 1",
+                "SELECT 1 FROM runtime_profiles WHERE runtime=? AND source='profile' AND profile=? LIMIT 1",
                 (runtime_id, profile_id)).fetchone()
         if assigned:
             raise BridgeError("Assign another profile before deleting this one", "conflict")
@@ -208,20 +300,47 @@ class RunCoordinator:
         self.service.event(None, "delete_runtime_profile", "deleted")
         return result
 
-    def profile(self, ws: dict, runtime_id: str) -> dict:
+    def security_binding(self, ws: dict, runtime_id: str) -> dict:
         with self.service.lock:
             row = self.service.db.execute(
-                "SELECT profile,revision FROM runtime_profiles WHERE workspace=? AND runtime=?",
+                "SELECT profile,revision,source FROM runtime_profiles WHERE workspace=? AND runtime=?",
                 (ws["id"], runtime_id)).fetchone()
         if row is None:
-            raise BridgeError("Workspace runtime security profile is not configured",
+            raise BridgeError("Workspace runtime security binding is not configured",
                               "profile_unconfigured")
-        available = self.adapter(runtime_id).profiles()
+        source = row["source"] if "source" in row.keys() else "profile"
+        if source == "runtime-config":
+            native = self.profile_catalog(runtime_id, ws, fresh=True).get("runtimeConfig")
+            if (not isinstance(native, dict) or native.get("supported") is not True
+                    or native.get("available") is not True):
+                raise BridgeError("Runtime config security is unavailable",
+                                  "runtime_config_unavailable")
+            revision = native.get("revision")
+            if not isinstance(revision, str) or not revision or len(revision) > 100:
+                raise BridgeError("Runtime config security is unavailable",
+                                  "runtime_config_unavailable")
+            return {"source": "runtime-config", "revision": revision,
+                    "resolvedSummary": native.get("resolvedSummary"),
+                    "status": native.get("status", "ready")}
+        if source != "profile":
+            raise BridgeError("Workspace runtime security binding is invalid",
+                              "profile_unconfigured")
+        available = self.profiles(runtime_id, ws, fresh=True)
         if not any(item.get("id") == row["profile"] and
-                   item.get("revision") == row["revision"] for item in available):
+                   item.get("revision") == row["revision"]
+                   and item.get("available") is not False for item in available):
             raise BridgeError("Workspace runtime security profile changed",
                               "profile_changed")
-        return {"id": row["profile"], "revision": row["revision"]}
+        return {"source": "profile", "profile": {
+            "id": row["profile"], "revision": row["revision"]}}
+
+    def profile(self, ws: dict, runtime_id: str) -> dict:
+        """Compatibility view for code that still explicitly needs a profile."""
+        binding = self.security_binding(ws, runtime_id)
+        if binding["source"] != "profile":
+            raise BridgeError("Workspace runtime uses native runtime config security",
+                              "profile_unconfigured")
+        return binding["profile"]
 
     def _model_key(self, runtime_id: str) -> str:
         return f"runtime_model_policy:{runtime_id}"
@@ -395,12 +514,15 @@ class RunCoordinator:
             self._run_row(ws, parent_run_id)
         selector = self._select_model(ws, runtime_id, model)
         reasoning = self._select_reasoning(ws, runtime_id, selector)
-        profile = self.profile(ws, runtime_id)
+        binding = self.security_binding(ws, runtime_id)
         request_hash = digest(json.dumps({"job": job_id, "runtime": runtime_id,
                                           "model": selector,
                                           "parent": parent_run_id or "",
                                           "continue": continue_from_run_id or ""},
                                          sort_keys=True).encode())
+        conversation = None
+        prior_conversation_id = None
+        replacement_reason = None
         if continue_from_run_id:
             source = self._run_row(ws, continue_from_run_id)
             if (source["runtime"] != runtime_id or source["phase"] != "terminal"
@@ -409,33 +531,80 @@ class RunCoordinator:
                 raise BridgeError("Continuation source is unavailable",
                                   "continuation_unavailable")
             conversation = self._conversation(source)
-            if (conversation["profile"] != profile["id"]
-                    or conversation["revision"] != profile["revision"]):
-                raise BridgeError("Security profile changed; start a new conversation",
-                                  "profile_changed")
-            native_conversation = adapter.conversation(conversation["native_id"])
-            if native_conversation.get("status") != "idle":
-                raise BridgeError("Conversation is not idle", "conversation_busy")
-        else:
+            bound_revision = (binding.get("revision")
+                              if binding["source"] == "runtime-config"
+                              else binding["profile"]["revision"])
+            same_binding = conversation.get("source", "profile") == binding["source"]
+            if binding["source"] == "profile":
+                same_binding = (same_binding
+                                and conversation["profile"] == binding["profile"]["id"]
+                                and conversation["revision"] == bound_revision)
+            if same_binding:
+                native_conversation = adapter.conversation(conversation["native_id"])
+                if native_conversation.get("status") != "idle":
+                    raise BridgeError("Conversation is not idle", "conversation_busy")
+            else:
+                prior_conversation_id = conversation["id"]
+                replacement_reason = "workspace-security-binding-changed"
+                conversation = None
+        if conversation is None:
             descriptor = adapter.descriptor()
             native_conversation = adapter.create_conversation({
                 "workspaceId": ws["id"], "directory": str(ws["root"]),
-                "securityProfile": profile,
+                "securityBinding": binding,
+                **({"securityProfile": binding["profile"]}
+                   if binding["source"] == "profile" else {}),
             })
+            native_binding = native_conversation.get("securityBinding")
+            if binding["source"] == "profile" and not isinstance(native_binding, dict):
+                legacy = native_conversation.get("securityProfile")
+                if isinstance(legacy, dict):
+                    native_binding = {"source": "profile", "profile": legacy}
+            binding_matches = (isinstance(native_binding, dict)
+                               and native_binding.get("source") == binding["source"])
+            if binding["source"] == "profile":
+                binding_matches = (binding_matches
+                                   and native_binding.get("profile") == binding["profile"])
+            else:
+                binding_matches = (binding_matches
+                                   and isinstance(native_binding.get("revision"), str)
+                                   and bool(native_binding.get("revision"))
+                                   and isinstance(native_binding.get("resolvedSummary"), dict))
             if (native_conversation.get("workspaceId") != ws["id"]
-                    or (native_conversation.get("securityProfile") or {}) != profile
+                    or not binding_matches
                     or not isinstance(native_conversation.get("id"), str)
                     or not native_conversation["id"]):
                 raise BridgeError("Runtime conversation binding is invalid",
                                   "binding_mismatch")
+            summary = (native_binding.get("resolvedSummary")
+                       if binding["source"] == "runtime-config" else None)
+            bound_revision = (binding["profile"]["revision"]
+                              if binding["source"] == "profile"
+                              else native_binding["revision"])
             conversation = {"id": _id("conv_"), "workspace": ws["id"],
                             "runtime": runtime_id, "native_id": native_conversation["id"],
-                            "profile": profile["id"], "revision": profile["revision"],
-                            "instance_id": descriptor.instance_id, "created": _now()}
+                            "profile": binding.get("profile", {}).get("id", ""),
+                            "revision": bound_revision,
+                            "instance_id": descriptor.instance_id, "created": _now(),
+                            "source": binding["source"],
+                            "security_snapshot": (json.dumps(summary, sort_keys=True)
+                                                  if isinstance(summary, dict) else None),
+                            "permission_revision": (native_binding.get("permissionRevision", "")
+                                                    if isinstance(native_binding, dict) else ""),
+                            "approval_revision": (native_binding.get("approvalRevision", "")
+                                                  if isinstance(native_binding, dict) else ""),
+                            "replacement_reason": replacement_reason}
             with self.service.lock, self.service.db:
                 self.service.db.execute(
-                    "INSERT INTO runtime_conversations VALUES(?,?,?,?,?,?,?,?)",
-                    tuple(conversation.values()))
+                    "INSERT INTO runtime_conversations"
+                    "(id,workspace,runtime,native_id,profile,revision,instance_id,created,source,"
+                    "security_snapshot,permission_revision,approval_revision,replacement_reason) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (conversation["id"], conversation["workspace"], conversation["runtime"],
+                     conversation["native_id"], conversation["profile"], conversation["revision"],
+                     conversation["instance_id"], conversation["created"], conversation["source"],
+                     conversation["security_snapshot"], conversation["permission_revision"],
+                     conversation["approval_revision"], conversation["replacement_reason"]))
         bridge_run_id = _id("run_")
         timestamp = _now()
         with self.service.lock, self.service.db:
@@ -457,9 +626,76 @@ class RunCoordinator:
                 run_payload["reasoning"] = reasoning
             native_run = validate_run_state(adapter.start_run(
                 conversation["native_id"], run_payload))
-            if (native_run.get("conversationId") != conversation["native_id"]
-                    or native_run.get("clientRunId") != bridge_run_id):
+            native_security = native_run.get("securityBinding")
+            runtime_replacement = (native_security.get("replacementReason")
+                                   if isinstance(native_security, dict) else None)
+            replacement_native_id = native_run.get("conversationId")
+            if (native_run.get("clientRunId") != bridge_run_id
+                    or (replacement_native_id != conversation["native_id"]
+                        and (binding["source"] != "runtime-config"
+                             or not isinstance(runtime_replacement, str)
+                             or not runtime_replacement
+                             or not isinstance(native_security.get(
+                                 "replacedConversationId"), str)))):
                 raise BridgeError("Runtime run binding is invalid", "binding_mismatch")
+            if binding["source"] == "runtime-config":
+                if (not isinstance(native_security, dict)
+                        or native_security.get("source") != "runtime-config"
+                        or not isinstance(native_security.get("revision"), str)
+                        or not isinstance(native_security.get("resolvedSummary"), dict)):
+                    raise BridgeError("Runtime run security state is invalid", "binding_mismatch")
+                new_summary = native_security["resolvedSummary"]
+                new_revision = native_security["revision"]
+                new_permission_revision = native_security.get("permissionRevision", "")
+                new_approval_revision = native_security.get("approvalRevision", "")
+                if replacement_native_id != conversation["native_id"]:
+                    if native_security.get("replacedConversationId") != conversation["native_id"]:
+                        raise BridgeError("Runtime conversation replacement is invalid",
+                                          "binding_mismatch")
+                    current_native = adapter.conversation(replacement_native_id)
+                    if (current_native.get("workspaceId") != ws["id"]
+                            or current_native.get("status") not in {"idle", "active", "notLoaded"}):
+                        raise BridgeError("Replacement conversation binding is invalid",
+                                          "binding_mismatch")
+                    prior_conversation_id = conversation["id"]
+                    descriptor = adapter.descriptor()
+                    conversation = {
+                        "id": _id("conv_"), "workspace": ws["id"],
+                        "runtime": runtime_id, "native_id": replacement_native_id,
+                        "profile": "", "revision": new_revision,
+                        "instance_id": descriptor.instance_id, "created": _now(),
+                        "source": "runtime-config",
+                        "security_snapshot": json.dumps(new_summary, sort_keys=True),
+                        "permission_revision": new_permission_revision,
+                        "approval_revision": new_approval_revision,
+                        "replacement_reason": runtime_replacement,
+                    }
+                    replacement_reason = runtime_replacement
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            "INSERT INTO runtime_conversations"
+                            "(id,workspace,runtime,native_id,profile,revision,instance_id,created,source,"
+                            "security_snapshot,permission_revision,approval_revision,replacement_reason) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (conversation["id"], conversation["workspace"], conversation["runtime"],
+                             conversation["native_id"], conversation["profile"], conversation["revision"],
+                             conversation["instance_id"], conversation["created"], conversation["source"],
+                             conversation["security_snapshot"], conversation["permission_revision"],
+                             conversation["approval_revision"], conversation["replacement_reason"]))
+                        self.service.db.execute(
+                            "UPDATE runtime_runs SET conversation=? WHERE id=?",
+                            (conversation["id"], bridge_run_id))
+                else:
+                    conversation["revision"] = new_revision
+                    conversation["security_snapshot"] = json.dumps(new_summary, sort_keys=True)
+                    conversation["permission_revision"] = new_permission_revision
+                    conversation["approval_revision"] = new_approval_revision
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            "UPDATE runtime_conversations SET revision=?,security_snapshot=?,"
+                            "permission_revision=?,approval_revision=? WHERE id=?",
+                            (new_revision, conversation["security_snapshot"],
+                             new_permission_revision, new_approval_revision, conversation["id"]))
         except RuntimeRejected as exc:
             with self.service.lock, self.service.db:
                 self.service.db.execute(
@@ -469,6 +705,19 @@ class RunCoordinator:
                     "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
                     "runtime": runtime_id}, "failed")
             raise
+        if replacement_reason is not None:
+            activity_id = _id("act_")
+            payload = _safe_payload({
+                "reason": replacement_reason,
+                "previous_conversation_id": prior_conversation_id,
+                "conversation_id": conversation["id"],
+            }, 2000)
+            with self.service.lock, self.service.db:
+                self.service.db.execute(
+                    "INSERT INTO runtime_activities(id,run,native_id,kind,status,payload,created,updated) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (activity_id, bridge_run_id, "security-replacement:" + bridge_run_id,
+                     "security_conversation_replaced", "completed", payload, _now(), _now()))
         with self.service.lock, self.service.db:
             self.service.db.execute(
                 "UPDATE runtime_runs SET native_id=?,phase=?,active_state=?,outcome=?,"
@@ -695,16 +944,41 @@ class RunCoordinator:
         return self.read(ws, run_id)
 
     def activities(self, ws: dict, run_id: str, offset: int = 0,
-                   limit: int = 50) -> dict:
+                   limit: int = 50, *, newest_first: bool = False,
+                   before_created: str | None = None,
+                   before_id: str | None = None) -> dict:
         self._run_row(ws, run_id)
+        offset = max(0, int(offset or 0))
+        limit = max(1, min(int(limit or 50), 50))
+        if newest_first and ((before_created is None) != (before_id is None)):
+            raise BridgeError("Invalid timeline cursor", "invalid_arguments")
+        if newest_first and before_created is not None and (
+                not before_created or len(before_created) > 64
+                or not before_id or len(before_id) > 200):
+            raise BridgeError("Invalid timeline cursor", "invalid_arguments")
+        where = "run=?"
+        params: list[Any] = [run_id]
+        if newest_first and before_created is not None and before_id is not None:
+            where += " AND (created<? OR (created=? AND id<?))"
+            params.extend((before_created, before_created, before_id))
+        order = "created DESC,id DESC" if newest_first else "created,id"
         with self.service.lock:
             rows = self.service.db.execute(
-                "SELECT id,kind,status,payload FROM runtime_activities WHERE run=? "
-                "ORDER BY created,id LIMIT ? OFFSET ?", (run_id, limit + 1, offset)).fetchall()
-        return {"run_id": run_id, "activities": [{"id": row["id"],
+                f"SELECT id,kind,status,payload,created FROM runtime_activities "
+                f"WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit + 1, offset)).fetchall()
+        page = rows[:limit]
+        result = {"run_id": run_id, "activities": [{"id": row["id"],
                 "kind": row["kind"], "status": row["status"],
-                "details": json.loads(row["payload"])} for row in rows[:limit]],
-                "next_offset": offset + limit if len(rows) > limit else None}
+                "created": row["created"],
+                "details": json.loads(row["payload"])} for row in page]}
+        if newest_first:
+            last = page[-1] if len(rows) > limit and page else None
+            result["next_cursor"] = ({"created": last["created"], "id": last["id"]}
+                                     if last is not None else None)
+        else:
+            result["next_offset"] = offset + limit if len(rows) > limit else None
+        return result
 
     def activity(self, ws: dict, run_id: str, activity_id: str) -> dict:
         self._run_row(ws, run_id)
@@ -718,24 +992,64 @@ class RunCoordinator:
                 "details": json.loads(row["payload"])}
 
     def executions(self, ws: dict, run_id: str, offset: int = 0,
-                   limit: int = 50) -> dict:
+                   limit: int = 50, *, newest_first: bool = False,
+                   before_created: str | None = None,
+                   before_id: str | None = None,
+                   include_previews: bool = False) -> dict:
         """Project recorded runtime tool activities into the execution view."""
         run = self._run_row(ws, run_id)
         offset = max(0, int(offset or 0))
         limit = max(1, min(int(limit or 50), 50))
+        if newest_first and ((before_created is None) != (before_id is None)):
+            raise BridgeError("Invalid execution cursor", "invalid_arguments")
+        if newest_first and before_created is not None and (
+                not before_created or len(before_created) > 64
+                or not before_id or len(before_id) > 200):
+            raise BridgeError("Invalid execution cursor", "invalid_arguments")
         kinds = tuple(sorted(EXECUTION_ACTIVITY_KINDS))
         placeholders = ",".join("?" for _ in kinds)
+        where = f"run=? AND kind IN ({placeholders})"
+        params: list[Any] = [run_id, *kinds]
+        if newest_first and before_created is not None and before_id is not None:
+            where += " AND (created<? OR (created=? AND id<?))"
+            params.extend((before_created, before_created, before_id))
+        order = "created DESC,id DESC" if newest_first else "created,id"
         with self.service.lock:
             rows = self.service.db.execute(
                 f"SELECT id,kind,status,payload,created,updated FROM runtime_activities "
-                f"WHERE run=? AND kind IN ({placeholders}) ORDER BY created,id LIMIT ? OFFSET ?",
-                (run_id, *kinds, limit + 1, offset)).fetchall()
+                f"WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit + 1, offset)).fetchall()
+            sequence_start = None
+            if newest_first:
+                total = self.service.db.execute(
+                    f"SELECT count(*) FROM runtime_activities WHERE run=? AND kind IN ({placeholders})",
+                    (run_id, *kinds)).fetchone()[0]
+                newer = 0
+                if before_created is not None and before_id is not None:
+                    newer = self.service.db.execute(
+                        f"SELECT count(*) FROM runtime_activities WHERE run=? AND kind IN ({placeholders}) "
+                        "AND (created>? OR (created=? AND id>=?))",
+                        (run_id, *kinds, before_created, before_created, before_id)).fetchone()[0]
+                sequence_start = int(total) - int(newer) - offset
         page = [dict(row) for row in rows[:limit]]
-        return {"workspace_id": ws["id"], "run_id": run_id,
-                "runtime": run["runtime"],
-                "executions": [self._execution_public(row, offset + index + 1)
-                               for index, row in enumerate(page)],
-                "next_offset": offset + limit if len(rows) > limit else None}
+        executions = [
+            self._execution_public(
+                row,
+                sequence_start - index if sequence_start is not None
+                else offset + index + 1,
+                include_preview=include_previews,
+            )
+            for index, row in enumerate(page)
+        ]
+        result = {"workspace_id": ws["id"], "run_id": run_id,
+                  "runtime": run["runtime"], "executions": executions}
+        if newest_first:
+            last = page[-1] if len(rows) > limit and page else None
+            result["next_cursor"] = ({"created": last["created"], "id": last["id"]}
+                                     if last is not None else None)
+        else:
+            result["next_offset"] = offset + limit if len(rows) > limit else None
+        return result
 
     def execution(self, ws: dict, run_id: str, execution_id: str) -> dict:
         self._run_row(ws, run_id)
@@ -755,7 +1069,8 @@ class RunCoordinator:
         return self._execution_public(dict(row), int(sequence), detail=True)
 
     @staticmethod
-    def _execution_public(row: dict, sequence: int, *, detail: bool = False) -> dict:
+    def _execution_public(row: dict, sequence: int, *, detail: bool = False,
+                          include_preview: bool = False) -> dict:
         try:
             payload = json.loads(row.get("payload") or "{}")
         except (TypeError, ValueError):
@@ -789,6 +1104,45 @@ class RunCoordinator:
                       and result_data["exitCode"] != 0),
                   "permission_effect": "", "permission_decision": "",
                   "truncated": bool(payload.get("truncated"))}
+        if include_preview:
+            input_details = input_data.get("details")
+            input_details = input_details if isinstance(input_details, dict) else {}
+            input_details = {
+                key: value for key, value in input_details.items()
+                if not re.search(r"(?:_sha256|_bytes)$|^truncated$", str(key), re.I)
+            }
+            if isinstance(input_details.get("command"), str):
+                input_preview = f"$ {input_details['command']}"
+            elif input_details:
+                input_preview = json.dumps(input_details, ensure_ascii=False)
+            else:
+                input_preview = summary
+            input_preview = _safe(input_preview, 1200)
+
+            output_preview = ""
+            for field in ("output_preview", "outputPreview", "aggregatedOutput",
+                          "stdout", "output", "preview", "message", "status"):
+                candidate = result_data.get(field)
+                if isinstance(candidate, str) and candidate:
+                    output_preview = candidate
+                    break
+            if not output_preview:
+                result_metadata = {
+                    key: value for key, value in result_data.items()
+                    if key not in {"is_error", "truncated", "output_bytes",
+                                   "preview_bytes", "durationMs", "duration_ms"}
+                }
+                if result_metadata:
+                    output_preview = "\n".join(
+                        f"{key.replace('_', ' ').replace('Code', ' code').title()}: "
+                        f"{value}"
+                        for key, value in result_metadata.items()
+                        if isinstance(value, (str, int, float, bool))
+                    )
+            record["input_preview"] = input_preview
+            record["output_preview"] = _safe(output_preview, 900)
+            record["output_truncated"] = bool(result_data.get("truncated")) or (
+                isinstance(output_preview, str) and len(output_preview) > 900)
         if detail:
             record["input_summary"] = {"summary": summary} if summary else {}
             try:

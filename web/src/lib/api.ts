@@ -2,6 +2,19 @@ export type Json = Record<string, unknown>;
 
 export interface RuntimeGrant {
   enabled: boolean;
+  security_binding?: {
+    source: "profile" | "runtime-config";
+    profile?: { id: string; revision?: string };
+    revision?: string;
+    status?: string;
+    observed_revision?: string | null;
+    resolved_summary?: {
+      activePermissionProfile?: string | null;
+      approvalPolicy?: string;
+      approvalsReviewer?: string;
+      provenance?: string;
+    } | null;
+  } | null;
   profile?: { id: string } | null;
 }
 export interface Workspace {
@@ -59,6 +72,7 @@ export interface Run {
   finished?: string;
   duration_seconds?: number;
   conversation_id?: string;
+  updated?: string;
   continue_from_run_id?: string;
   parent_run_id?: string;
   interactions?: Interaction[];

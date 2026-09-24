@@ -25,9 +25,11 @@ class DiagnosticAdapter:
         self.descriptor_error = descriptor_error
         self.features = dict.fromkeys(features if features is not None else CORE_FEATURES, 1)
         self.profile_rows = [{"id": "reviewed", "revision": "rev-1"}]
+        self.runtime_config = None
         self.model_rows: dict[str, list[dict]] = {}
         self.descriptor_calls = 0
         self.profile_calls = 0
+        self.profile_context_calls: list[tuple[str, str, bool]] = []
         self.model_calls: list[str] = []
 
     def descriptor(self):
@@ -40,6 +42,15 @@ class DiagnosticAdapter:
     def profiles(self):
         self.profile_calls += 1
         return self.profile_rows
+
+    def profile_catalog(self, workspace: dict, *, fresh: bool = False):
+        self.profile_calls += 1
+        self.profile_context_calls.append(
+            (str(workspace["id"]), str(workspace["root"]), fresh))
+        value = {"profiles": self.profile_rows}
+        if self.runtime_config is not None:
+            value["runtimeConfig"] = self.runtime_config
+        return value
 
     def models(self, workspace_id: str):
         self.model_calls.append(workspace_id)
@@ -203,6 +214,86 @@ def test_profile_binding_missing_or_stale_blocks_route(diagnostic_env, profile_s
     assert actual["ready"] is False
 
 
+def test_runtime_config_drift_is_valid_and_pending_conversation_is_not_a_blocker(diagnostic_env):
+    env = diagnostic_env
+    workspace = add_workspace(env, "Dynamic")
+    make_ready(env, workspace)
+    service = env["service"]
+    adapter = env["adapters"]["codex"]
+    adapter.runtime_config = {
+        "supported": True, "available": True, "status": "ready",
+        "revision": "native-rev-1",
+        "resolvedSummary": {"activePermissionProfile": ":workspace",
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "provenance": "implicit/default"},
+    }
+    service.run_coordinator.set_runtime_config(
+        service.workspace(workspace["id"], False), "codex")
+    adapter.runtime_config["revision"] = "native-rev-2"
+    with service.lock, service.db:
+        service.db.execute(
+            "INSERT INTO runtime_conversations"
+            "(id,workspace,runtime,native_id,profile,revision,instance_id,created,source) "
+            "VALUES('conv_dynamic',?,'codex','native-dynamic','',?,'instance','now','runtime-config')",
+            (workspace["id"], "native-rev-1"))
+    report = service.diagnostic_report()
+    actual = route(report, workspace["id"])
+    codes = {check["code"]: check for check in report["checks"]
+             if check.get("workspace_id") == workspace["id"]}
+    assert actual["ready"] is True
+    assert "runtime.config_resolvable" not in actual["blockers"]
+    assert "profile.freshness" not in actual["blockers"]
+    assert codes["runtime.config_resolvable"]["status"] == "pass"
+    assert codes["conversation.security_update_pending"]["status"] == "warning"
+
+
+def test_unavailable_runtime_config_blocks_route_but_keeps_binding_valid(diagnostic_env):
+    env = diagnostic_env
+    workspace = add_workspace(env, "Unavailable config")
+    make_ready(env, workspace)
+    service = env["service"]
+    adapter = env["adapters"]["codex"]
+    adapter.runtime_config = {
+        "supported": True, "available": True, "status": "ready",
+        "revision": "native-rev-1",
+        "resolvedSummary": {"activePermissionProfile": ":workspace",
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "provenance": "implicit/default"},
+    }
+    service.run_coordinator.set_runtime_config(
+        service.workspace(workspace["id"], False), "codex")
+    adapter.runtime_config.update(available=False, status="unavailable")
+    report = service.diagnostic_report()
+    actual = route(report, workspace["id"])
+    assert actual["ready"] is False
+    assert "runtime.config_resolvable" in actual["blockers"]
+    assert "profile.freshness" not in actual["blockers"]
+
+
+def test_offline_runtime_config_verification_is_unknown_and_not_ready(diagnostic_env):
+    env = diagnostic_env
+    workspace = add_workspace(env, "Offline config")
+    make_ready(env, workspace)
+    adapter = env["adapters"]["codex"]
+    adapter.runtime_config = {
+        "supported": True, "available": True, "status": "ready",
+        "revision": "native-rev-1",
+        "resolvedSummary": {"activePermissionProfile": ":workspace",
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "provenance": "implicit/default"},
+    }
+    env["service"].run_coordinator.set_runtime_config(
+        env["service"].workspace(workspace["id"], False), "codex")
+    report = env["service"].diagnostic_report(offline=True)
+    actual = route(report, workspace["id"])
+    assert actual["ready"] is False
+    assert "runtime.config_resolvable" in actual["blockers"]
+    check = next(item for item in report["checks"]
+                 if item.get("workspace_id") == workspace["id"]
+                 and item["code"] == "runtime.config_resolvable")
+    assert check["status"] == "unknown"
+
+
 @pytest.mark.parametrize("model_state", ["missing_policy", "unavailable_default", "stale_reasoning"])
 def test_model_policy_default_and_reasoning_freshness(diagnostic_env, model_state):
     env = diagnostic_env
@@ -239,7 +330,7 @@ def test_offline_never_calls_adapters_and_never_claims_remote_route_ready(diagno
                and not adapter.model_calls for adapter in env["adapters"].values())
 
 
-def test_runtime_descriptor_and_profiles_are_probed_once_per_report(diagnostic_env):
+def test_runtime_descriptor_is_shared_but_profiles_are_probed_per_workspace(diagnostic_env):
     env = diagnostic_env
     one = add_workspace(env, "One")
     two = add_workspace(env, "Two")
@@ -250,7 +341,11 @@ def test_runtime_descriptor_and_profiles_are_probed_once_per_report(diagnostic_e
     adapter.model_calls.clear()
     env["service"].diagnostic_report()
     assert adapter.descriptor_calls == 1
-    assert adapter.profile_calls == 1
+    assert adapter.profile_calls == 2
+    assert set(adapter.profile_context_calls) == {
+        (one["id"], one["root"], True),
+        (two["id"], two["root"], True),
+    }
     assert sorted(adapter.model_calls) == sorted([one["id"], two["id"]])
 
 
@@ -429,6 +524,112 @@ def test_doctor_read_only_does_not_requeue_or_start_workers(diagnostic_env, caps
                 diagnostic.db.execute("UPDATE gateway SET enabled=0 WHERE id=1")
     finally:
         diagnostic.close()
+
+
+def test_doctor_reads_legacy_runtime_schema_without_writes(tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    state = tmp_path / "state"
+    config = initialize(state, [str(parent)], 8765, 8766)
+    adapters = {runtime: DiagnosticAdapter(runtime) for runtime in ("codex", "pi")}
+    service = Service(state, config, adapters=adapters,
+                      run_coordinator_background=False)
+    env = {"service": service, "state": state, "parent": parent,
+           "adapters": adapters, "tmp": tmp_path}
+    workspace = add_workspace(env, "Legacy")
+    make_ready(env, workspace)
+    with service.lock, service.db:
+        service.db.execute(
+            "INSERT INTO runtime_conversations"
+            "(id,workspace,runtime,native_id,profile,revision,instance_id,created,source) "
+            "VALUES('legacy-conversation',?,'codex','native-legacy','reviewed',"
+            "'older-revision','instance','now','profile')", (workspace["id"],))
+    service.close()
+
+    database = state / "bridge.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("ALTER TABLE runtime_profiles DROP COLUMN source")
+        for column in ("replacement_reason", "approval_revision", "permission_revision",
+                       "security_snapshot", "source"):
+            connection.execute(
+                f"ALTER TABLE runtime_conversations DROP COLUMN {column}")
+        connection.commit()
+        legacy_profile_columns = [row["name"] for row in connection.execute(
+            "PRAGMA table_info(runtime_profiles)")]
+        legacy_conversation_columns = [row["name"] for row in connection.execute(
+            "PRAGMA table_info(runtime_conversations)")]
+        assert legacy_profile_columns == [
+            "workspace", "runtime", "profile", "revision", "updated"]
+        assert legacy_conversation_columns == [
+            "id", "workspace", "runtime", "native_id", "profile", "revision",
+            "instance_id", "created"]
+    finally:
+        connection.close()
+
+    observer = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    schema_before = list(observer.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+    data_version_before = observer.execute("PRAGMA data_version").fetchone()[0]
+    diagnostic = Service(state, config, adapters=adapters, read_only=True,
+                         run_coordinator_background=False)
+    statements: list[str] = []
+    diagnostic.db.set_trace_callback(statements.append)
+    try:
+        report = diagnostic.diagnostic_report()
+        assert not any(check["code"] == "core.state_readable"
+                       for check in report["checks"])
+        config_readable = next(check for check in report["checks"]
+                               if check["code"] == "core.config_state_readable")
+        assert config_readable["status"] == "pass"
+        actual = route(report, workspace["id"])
+        assert actual["profile"] == {"id": "reviewed", "revision": "rev-1"}
+        binding = next(check for check in report["checks"]
+                       if check.get("workspace_id") == workspace["id"]
+                       and check.get("runtime") == "codex"
+                       and check["code"] == "profile.binding")
+        assert binding["status"] == "pass"
+        assert binding["summary"] == "Workspace security profile binding is stored."
+        freshness = next(check for check in report["checks"]
+                         if check.get("workspace_id") == workspace["id"]
+                         and check.get("runtime") == "codex"
+                         and check["code"] == "profile.freshness")
+        assert freshness["status"] == "pass"
+        assert not any(check["code"] == "conversation.security_update_pending"
+                       for check in report["checks"])
+        assert diagnostic.db.total_changes == 0
+    finally:
+        diagnostic.close()
+
+    schema_after = list(observer.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+    data_version_after = observer.execute("PRAGMA data_version").fetchone()[0]
+    observer.close()
+    assert schema_after == schema_before
+    assert data_version_after == data_version_before
+    forbidden = {"ALTER", "CREATE", "DELETE", "DROP", "INSERT", "REPLACE", "UPDATE"}
+    assert not any(statement.lstrip().split(None, 1)[0].upper() in forbidden
+                   for statement in statements if statement.strip())
+
+
+def test_doctor_keeps_corrupt_state_readability_failure(tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    state = tmp_path / "state"
+    config = initialize(state, [str(parent)], 8765, 8766)
+    (state / "bridge.sqlite3").write_bytes(b"not a SQLite database")
+    diagnostic = Service(state, config, adapters={}, read_only=True,
+                         run_coordinator_background=False)
+    try:
+        report = diagnostic.diagnostic_report(offline=True)
+    finally:
+        diagnostic.close()
+    unreadable = next(check for check in report["checks"]
+                      if check["code"] == "core.state_readable")
+    assert unreadable["status"] == "failed"
 
 
 def test_container_entrypoint_preserves_doctor_flags(tmp_path, monkeypatch):

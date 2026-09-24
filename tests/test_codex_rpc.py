@@ -20,7 +20,24 @@ for raw in sys.stdin:
     if "id" not in request:
         continue
     if request["method"] == "initialize":
-        response = {"id": request["id"], "result": {"serverInfo": {"version": "test"}}}
+        response = {"id": request["id"], "result": {
+            "serverInfo": {"version": "test"},
+            "experimentalApi": request["params"]["capabilities"]["experimentalApi"]}}
+    elif request["method"] == "permissionProfile/list":
+        cursor = request["params"].get("cursor")
+        result = {"data": ([{"id": ":workspace", "allowed": True,
+                             "description": "Workspace profile"}]
+                           if cursor else [{"id": ":read-only", "allowed": True,
+                                            "description": None}]),
+                  "nextCursor": None if cursor else "next-page"}
+        response = {"id": request["id"], "result": result}
+    elif request["method"] == "config/read":
+        response = {"id": request["id"], "result": {
+            "config": {"permissions": {"workspace": {"network": {"enabled": False}}}},
+            "origins": {}, "paramsEcho": request["params"]}}
+    elif request["method"] == "configRequirements/read":
+        response = {"id": request["id"], "result": {
+            "requirements": None, "paramsEcho": request["params"]}}
     else:
         response = {"id": request["id"], "error": {"code": -32000,
             "message": "denied at /Users/private/project api_key=sk-proj-" + "z" * 40}}
@@ -29,6 +46,13 @@ for raw in sys.stdin:
     rpc = CodexRpc(command=(sys.executable, "-u", "-c", child))
     try:
         assert rpc.initialize_result["serverInfo"]["version"] == "test"
+        assert rpc.initialize_result["experimentalApi"] is True
+        profiles = rpc.permission_profiles("/safe/project")
+        assert [item["id"] for item in profiles] == [":read-only", ":workspace"]
+        config = rpc.read_security_config("/safe/project")
+        assert config["config"]["permissions"]
+        assert config["paramsEcho"] == {"cwd": "/safe/project", "includeLayers": False}
+        assert rpc.read_config_requirements() is None
         with pytest.raises(CodexRpcError) as exc:
             rpc.call("thread/start", {"cwd": "/Users/private/project"})
         message = str(exc.value)
@@ -47,5 +71,67 @@ for raw in sys.stdin:
         assert "private-material" not in summary
         assert "[oversized app-server stderr line omitted]" in summary
         assert "[private key material omitted]" in summary
+    finally:
+        rpc.close()
+
+
+def test_permission_profile_list_rejects_malformed_rows_without_echoing_ids():
+    child = r'''import json, sys
+for raw in sys.stdin:
+    request = json.loads(raw)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {"serverInfo": {"version": "test"}}
+    elif request["method"] == "permissionProfile/list":
+        result = {"data": [{"id": "/private/project", "allowed": True}],
+                  "nextCursor": None}
+    else:
+        result = {}
+    print(json.dumps({"id": request["id"], "result": result}), flush=True)
+'''
+    rpc = CodexRpc(command=(sys.executable, "-u", "-c", child))
+    try:
+        with pytest.raises(CodexRpcError) as exc:
+            rpc.permission_profiles("/safe/project")
+        assert "invalid" in str(exc.value)
+        assert "/private/project" not in str(exc.value)
+    finally:
+        rpc.close()
+
+
+def test_thread_settings_update_uses_native_request_and_updated_notification():
+    child = r'''import json, sys
+for raw in sys.stdin:
+    request = json.loads(raw)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {"serverInfo": {"version": "test"}}
+        print(json.dumps({"id": request["id"], "result": result}), flush=True)
+    elif request["method"] == "thread/settings/update":
+        params = request["params"]
+        print(json.dumps({"method": "thread/settings/updated", "params": {
+            "threadId": params["threadId"],
+            "threadSettings": {"activePermissionProfile": {"id": params["permissions"]},
+                "approvalPolicy": "on-request", "approvalsReviewer": "user"}}}), flush=True)
+        print(json.dumps({"id": request["id"], "result": {}}), flush=True)
+'''
+    notifications = []
+    rpc = CodexRpc(command=(sys.executable, "-u", "-c", child),
+                   on_notification=lambda method, params: notifications.append((method, params)))
+    try:
+        assert rpc.update_thread_settings(
+            "thread-one", {"permissions": "profile-one"}) == {}
+        deadline = time.monotonic() + 1
+        while not notifications and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert notifications == [("thread/settings/updated", {
+            "threadId": "thread-one", "threadSettings": {
+                "activePermissionProfile": {"id": "profile-one"},
+                "approvalPolicy": "on-request", "approvalsReviewer": "user"}})]
+        with pytest.raises(CodexRpcError, match="fields are invalid"):
+            rpc.update_thread_settings("thread-one", {
+                "permissions": "profile-one", "sandboxPolicy": {"type": "workspaceWrite"}})
     finally:
         rpc.close()

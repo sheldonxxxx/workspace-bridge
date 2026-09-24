@@ -27,6 +27,8 @@ MAX_WORKSPACES = 100
 MAX_RUNTIMES = 20
 MAX_ROUTES = 400
 MAX_MODEL_PROBES = 80
+MAX_PROFILE_PROBES = 80
+MAX_CONVERSATION_OBSERVATIONS = 2000
 MAX_CHECKS = 5000
 _SEVERITY = {"pass": 0, "warning": 1, "unknown": 2,
              "action_required": 3, "failed": 4}
@@ -183,12 +185,18 @@ class _ReportBuilder:
                                 checks, self.routes[:MAX_ROUTES]).to_dict()
 
 
-def _profile_rows(adapter) -> list[dict] | None:
+def _profile_rows(adapter, service, workspace: dict) -> dict | None:
     try:
         if isinstance(adapter, HttpRuntimeAdapter):
-            return _bounded_adapter(adapter).profiles()
+            with service.safe_root(workspace) as safe:
+                return _bounded_adapter(adapter).profile_catalog(
+                    str(workspace["id"]), safe.path, fresh=True)
+        catalog = getattr(adapter, "profile_catalog", None)
+        if callable(catalog):
+            value = catalog(workspace, fresh=True)
+            return value if isinstance(value, dict) else None
         rows = adapter.profiles()
-        return rows if isinstance(rows, list) else None
+        return {"profiles": rows} if isinstance(rows, list) else None
     except Exception:  # noqa: BLE001 - one runtime must not abort the report
         return None
 
@@ -245,9 +253,30 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                 workspaces = [dict(row) for row in service.db.execute(
                     "SELECT id,name,root,enabled,write_scope,agent_enabled,excludes FROM workspaces "
                     "ORDER BY name,id LIMIT ?", (MAX_WORKSPACES + 1,))]
+                profile_columns = {row["name"] for row in service.db.execute(
+                    "PRAGMA table_info(runtime_profiles)")}
+                conversation_columns = {row["name"] for row in service.db.execute(
+                    "PRAGMA table_info(runtime_conversations)")}
+                has_profile_source = "source" in profile_columns
+                has_conversation_source = "source" in conversation_columns
+                profile_select = "workspace,runtime,profile,revision"
+                if has_profile_source:
+                    profile_select += ",source"
                 profile_rows = [dict(row) for row in service.db.execute(
-                    "SELECT workspace,runtime,profile,revision FROM runtime_profiles "
+                    f"SELECT {profile_select} FROM runtime_profiles "
                     "ORDER BY workspace,runtime LIMIT ?", (MAX_WORKSPACES * MAX_RUNTIMES + 1,))]
+                if not has_profile_source:
+                    for row in profile_rows:
+                        row["source"] = "profile"
+                conversation_select = "workspace,runtime,revision"
+                if has_conversation_source:
+                    conversation_select += ",source"
+                conversation_rows = [dict(row) for row in service.db.execute(
+                    f"SELECT {conversation_select} FROM runtime_conversations "
+                    "ORDER BY created DESC LIMIT ?", (MAX_CONVERSATION_OBSERVATIONS,))]
+                if not has_conversation_source:
+                    for row in conversation_rows:
+                        row["source"] = "profile"
                 grant_rows = [dict(row) for row in service.db.execute(
                     "SELECT workspace,runtime,enabled FROM workspace_runtimes "
                     "ORDER BY workspace,runtime LIMIT ?", (MAX_WORKSPACES * MAX_RUNTIMES + 1,))]
@@ -354,6 +383,11 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     "Runtime checks were limited to the first configured adapters.")
 
     profiles_by_key = {(row["workspace"], row["runtime"]): row for row in profile_rows}
+    conversations_by_key: dict[tuple[str, str], list[dict]] = {}
+    for row in conversation_rows:
+        if row.get("source", "profile") == "runtime-config":
+            conversations_by_key.setdefault(
+                (row["workspace"], row["runtime"]), []).append(row)
     grants_by_key = {(row["workspace"], row["runtime"]): bool(row["enabled"])
                      for row in grant_rows}
     policies: dict[str, dict] = {}
@@ -373,29 +407,25 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         else:
             policies[runtime] = {"enabled": [], "default": None, "reasoning_defaults": {}}
 
-    # Shared Runtime Protocol observations happen once per configured runtime.
+    # Runtime descriptors are shared; security profile discovery is scoped to
+    # the exact workspace/runtime pair below.
     descriptors: dict[str, Descriptor | None] = {}
     descriptor_errors: dict[str, str | None] = {}
-    profiles: dict[str, list[dict] | None] = {}
     if offline:
         for runtime in runtime_ids:
             descriptors[runtime] = None
             descriptor_errors[runtime] = "offline"
-            profiles[runtime] = None
             builder.add("runtime.freshness", "runtimes", "unknown",
                         "Runtime reachability and descriptor freshness were not checked offline.",
                         remediation="Run workspace-bridge doctor for bounded live runtime checks.",
                         runtime=runtime)
-            builder.add("profile.runtime_freshness", "models_profiles", "unknown",
-                        "Runtime profile revisions were not checked offline.", runtime=runtime)
     else:
-        def probe(runtime: str) -> tuple[Descriptor | None, str | None, list[dict] | None]:
+        def probe(runtime: str) -> tuple[Descriptor | None, str | None]:
             adapter = adapters[runtime]
             descriptor, error = _descriptor(adapter, runtime)
-            current_profiles = _profile_rows(adapter) if descriptor else None
-            return descriptor, error, current_profiles
+            return descriptor, error
 
-        runtime_probes: dict[str, tuple[Descriptor | None, str | None, list[dict] | None]] = {}
+        runtime_probes: dict[str, tuple[Descriptor | None, str | None]] = {}
         with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bridge-runtime-diagnostic") as pool:
             futures = {pool.submit(probe, runtime): runtime for runtime in runtime_ids}
             for future in as_completed(futures):
@@ -403,9 +433,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                 try:
                     runtime_probes[runtime] = future.result()
                 except Exception:  # noqa: BLE001 - isolate malformed adapters
-                    runtime_probes[runtime] = (None, "unavailable", None)
+                    runtime_probes[runtime] = (None, "unavailable")
         for runtime in runtime_ids:
-            descriptor, error, runtime_profiles = runtime_probes[runtime]
+            descriptor, error = runtime_probes[runtime]
             descriptors[runtime] = descriptor
             descriptor_errors[runtime] = error
             if error in {"protocol", "features"}:
@@ -443,16 +473,6 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                             if not missing else "Runtime omits a required run capability.",
                             remediation="Update the adapter to expose all required Runtime Protocol v1 capabilities."
                             if missing else None, runtime=runtime)
-            profiles[runtime] = runtime_profiles
-            if descriptor and profiles[runtime] is None:
-                builder.add("profile.runtime_freshness", "models_profiles", "unknown",
-                            "Runtime security profiles could not be checked.", runtime=runtime)
-            elif descriptor:
-                builder.add("profile.runtime_freshness", "models_profiles", "pass",
-                            "Runtime security profiles were observed.", runtime=runtime)
-            else:
-                builder.add("profile.runtime_freshness", "models_profiles", "unknown",
-                            "Runtime profile freshness could not be observed.", runtime=runtime)
 
     if ws_truncated:
         builder.add("diagnostics.workspace_limit", "workspaces", "warning",
@@ -521,6 +541,32 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
 
     routes_omitted = max(0, len(workspaces) * len(runtime_ids) - MAX_ROUTES)
     route_pairs = [(ws, runtime) for ws in workspaces for runtime in runtime_ids][:MAX_ROUTES]
+    profile_probe_candidates = [
+        (ws, runtime) for ws, runtime in route_pairs
+        if (str(ws["id"]), runtime) in profiles_by_key
+        and descriptors.get(runtime) is not None
+        and descriptor_errors.get(runtime) is None
+    ]
+    profile_results: dict[tuple[str, str], dict | None] = {}
+    profile_probe_skipped: set[tuple[str, str]] = set()
+    for ws, runtime in profile_probe_candidates[:MAX_PROFILE_PROBES]:
+        profile_results[(str(ws["id"]), runtime)] = None
+    profile_probe_skipped.update(
+        (str(ws["id"]), runtime)
+        for ws, runtime in profile_probe_candidates[MAX_PROFILE_PROBES:])
+    if not offline and profile_results:
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bridge-profile-diagnostic") as pool:
+            futures = {
+                pool.submit(_profile_rows, adapters[runtime], service, ws):
+                    (str(ws["id"]), runtime)
+                for ws, runtime in profile_probe_candidates[:MAX_PROFILE_PROBES]
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    profile_results[key] = future.result()
+                except Exception:  # noqa: BLE001 - per-workspace probes are isolated
+                    profile_results[key] = None
     model_candidates: list[tuple[dict, str, dict, dict | None]] = []
     for ws, runtime in route_pairs:
         ws_id = str(ws["id"])
@@ -550,26 +596,40 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             blockers.append("workspace.runtime_grant")
         if profile is None:
             builder.add("profile.binding", "models_profiles", "action_required",
-                        "Workspace has no security profile binding for this runtime.",
-                        remediation="Assign a current runtime security profile in the local manager.",
+                        "Workspace has no security binding for this runtime.",
+                        remediation="Choose a Workspace Bridge profile or current Codex config in the local manager.",
                         workspace_id=ws_id, runtime=runtime)
             blockers.append("profile.binding")
         else:
-            profile_id = _bounded_text(profile.get("profile"), 100)
-            profile_revision = _bounded_text(profile.get("revision"), 100)
-            builder.add("profile.binding", "models_profiles", "pass",
-                        "Workspace security profile binding is stored.",
-                        workspace_id=ws_id, runtime=runtime)
+            profile_source = profile.get("source", "profile")
+            if profile_source == "runtime-config":
+                profile_id = None
+                profile_revision = None
+                builder.add("profile.binding", "models_profiles", "pass",
+                            "Workspace follows current Codex config security.",
+                            workspace_id=ws_id, runtime=runtime)
+            else:
+                profile_id = _bounded_text(profile.get("profile"), 100)
+                profile_revision = _bounded_text(profile.get("revision"), 100)
+                builder.add("profile.binding", "models_profiles", "pass",
+                            "Workspace security profile binding is stored.",
+                            workspace_id=ws_id, runtime=runtime)
         if not policy_ok:
             blockers.append("model.policy")
         descriptor = descriptors.get(runtime)
         runtime_error = descriptor_errors.get(runtime)
         if offline:
             if profile is not None:
-                builder.add("profile.freshness", "models_profiles", "unknown",
-                            "Bound security profile revision was not checked offline.",
-                            workspace_id=ws_id, runtime=runtime)
-                blockers.append("profile.freshness")
+                if profile.get("source", "profile") == "runtime-config":
+                    builder.add("runtime.config_resolvable", "models_profiles", "unknown",
+                                "Current Codex security config was not checked offline.",
+                                workspace_id=ws_id, runtime=runtime)
+                    blockers.append("runtime.config_resolvable")
+                else:
+                    builder.add("profile.freshness", "models_profiles", "unknown",
+                                "Bound security profile revision was not checked offline.",
+                                workspace_id=ws_id, runtime=runtime)
+                    blockers.append("profile.freshness")
             if policy_ok:
                 builder.add("model.default_freshness", "models_profiles", "unknown",
                             "Default model availability was not checked offline.",
@@ -579,9 +639,15 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             blockers.append("runtime.required_features" if runtime_error == "features"
                             else "runtime.protocol_compatible")
             if profile is not None:
-                builder.add("profile.freshness", "models_profiles", "unknown",
-                            "Bound security profile revision could not be checked because the runtime descriptor is incompatible.",
-                            workspace_id=ws_id, runtime=runtime)
+                if profile.get("source", "profile") == "runtime-config":
+                    builder.add("runtime.config_resolvable", "models_profiles", "unknown",
+                                "Codex security config could not be checked because the runtime descriptor is incompatible.",
+                                workspace_id=ws_id, runtime=runtime)
+                    blockers.append("runtime.config_resolvable")
+                else:
+                    builder.add("profile.freshness", "models_profiles", "unknown",
+                                "Bound security profile revision could not be checked because the runtime descriptor is incompatible.",
+                                workspace_id=ws_id, runtime=runtime)
             if policy_ok:
                 builder.add("model.default_freshness", "models_profiles", "unknown",
                             "Default model availability could not be checked because the runtime descriptor is incompatible.",
@@ -589,9 +655,15 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         elif runtime_error:
             blockers.append("runtime.reachable")
             if profile is not None:
-                builder.add("profile.freshness", "models_profiles", "unknown",
-                            "Bound security profile revision could not be checked.",
-                            workspace_id=ws_id, runtime=runtime)
+                if profile.get("source", "profile") == "runtime-config":
+                    builder.add("runtime.config_resolvable", "models_profiles", "unknown",
+                                "Codex security config could not be checked.",
+                                workspace_id=ws_id, runtime=runtime)
+                    blockers.append("runtime.config_resolvable")
+                else:
+                    builder.add("profile.freshness", "models_profiles", "unknown",
+                                "Bound security profile revision could not be checked.",
+                                workspace_id=ws_id, runtime=runtime)
             if policy_ok:
                 builder.add("model.default_freshness", "models_profiles", "unknown",
                             "Default model availability could not be checked.",
@@ -605,29 +677,75 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                                 "Default model availability could not be checked because a required runtime capability is missing.",
                                 workspace_id=ws_id, runtime=runtime)
             if profile is not None:
-                available_profiles = profiles.get(runtime)
-                if available_profiles is None:
-                    builder.add("profile.freshness", "models_profiles", "unknown",
-                                "Bound security profile revision could not be checked.",
-                                workspace_id=ws_id, runtime=runtime)
-                    blockers.append("profile.freshness")
+                profile_key = (ws_id, runtime)
+                available_profiles = profile_results.get(profile_key)
+                if profile.get("source", "profile") == "runtime-config":
+                    if profile_key in profile_probe_skipped:
+                        builder.add("runtime.config_resolvable", "models_profiles", "unknown",
+                                    "Codex security discovery was skipped after the per-report workspace/runtime limit.",
+                                    remediation="Reduce the number of bound workspace/runtime pairs or inspect them in smaller groups.",
+                                    workspace_id=ws_id, runtime=runtime)
+                        blockers.append("runtime.config_resolvable")
+                    elif available_profiles is None:
+                        builder.add("runtime.config_resolvable", "models_profiles", "unknown",
+                                    "Current Codex security config could not be checked for this workspace.",
+                                    workspace_id=ws_id, runtime=runtime)
+                        blockers.append("runtime.config_resolvable")
+                    else:
+                        native = available_profiles.get("runtimeConfig")
+                        config_ok = bool(isinstance(native, dict)
+                                         and native.get("supported") is True
+                                         and native.get("available") is True
+                                         and isinstance(native.get("revision"), str))
+                        builder.add("runtime.config_resolvable", "models_profiles",
+                                    "pass" if config_ok else "action_required",
+                                    "Codex config resolves a usable security state." if config_ok else
+                                    "Codex config cannot currently resolve a usable security state.",
+                                    remediation=None if config_ok else "Resolve the native Codex security settings or managed requirements.",
+                                    workspace_id=ws_id, runtime=runtime)
+                        if not config_ok:
+                            blockers.append("runtime.config_resolvable")
+                        elif any(row.get("revision") != native.get("revision")
+                                 for row in conversations_by_key.get(profile_key, [])):
+                            builder.add("conversation.security_update_pending", "models_profiles",
+                                        "warning",
+                                        "A prior conversation will refresh its security settings or be replaced before its next turn.",
+                                        workspace_id=ws_id, runtime=runtime)
                 else:
-                    current = next((item for item in available_profiles
-                                    if item.get("id") == profile.get("profile")), None)
-                    profile_ok = bool(current and current.get("revision") == profile.get("revision"))
-                    builder.add("profile.freshness", "models_profiles",
-                                "pass" if profile_ok else "action_required",
-                                "Bound security profile revision is current." if profile_ok else
-                                "Bound security profile is missing or its revision has changed.",
-                                remediation=None if profile_ok else "Reassign the current security profile revision.",
-                                workspace_id=ws_id, runtime=runtime)
-                    if not profile_ok:
+                    if profile_key in profile_probe_skipped:
+                        builder.add("profile.freshness", "models_profiles", "unknown",
+                                    "Profile discovery was skipped after the per-report workspace/runtime limit.",
+                                    remediation="Reduce the number of bound workspace/runtime pairs or inspect them in smaller groups.",
+                                    workspace_id=ws_id, runtime=runtime)
                         blockers.append("profile.freshness")
+                    elif available_profiles is None:
+                        builder.add("profile.freshness", "models_profiles", "unknown",
+                                    "Bound security profile revision could not be checked for this workspace.",
+                                    workspace_id=ws_id, runtime=runtime)
+                        blockers.append("profile.freshness")
+                    else:
+                        rows = available_profiles.get("profiles", [])
+                        current = next((item for item in rows
+                                        if item.get("id") == profile.get("profile")), None)
+                        profile_ok = bool(current and current.get("available") is not False
+                                           and current.get("revision") == profile.get("revision"))
+                        builder.add("profile.freshness", "models_profiles",
+                                    "pass" if profile_ok else "action_required",
+                                    "Bound security profile revision is current." if profile_ok else
+                                    "Bound security profile is missing, disallowed, or its revision has changed.",
+                                    remediation=None if profile_ok else "Reassign a currently available security profile for this workspace.",
+                                    workspace_id=ws_id, runtime=runtime)
+                        if not profile_ok:
+                            blockers.append("profile.freshness")
             if policy_ok and features_ok:
                 model_candidates.append((ws, runtime, policy, profile))
         route_profile = profiles_by_key.get((ws_id, runtime))
-        profile_id = _bounded_text(route_profile.get("profile"), 100) if route_profile else None
-        profile_revision = _bounded_text(route_profile.get("revision"), 100) if route_profile else None
+        is_native_config = bool(route_profile and
+                                route_profile.get("source") == "runtime-config")
+        profile_id = (_bounded_text(route_profile.get("profile"), 100)
+                      if route_profile and not is_native_config else None)
+        profile_revision = (_bounded_text(route_profile.get("revision"), 100)
+                            if route_profile and not is_native_config else None)
         default_selector = _safe_model(policy.get("default"))
         if policy_ok and default_selector is None:
             blockers.append("model.policy")
@@ -729,6 +847,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
     if len(model_candidates) > MAX_MODEL_PROBES:
         builder.add("diagnostics.model_probe_limit", "models_profiles", "warning",
                     "Workspace-specific model discovery reached its per-report limit.")
+    if profile_probe_skipped:
+        builder.add("diagnostics.profile_probe_limit", "models_profiles", "warning",
+                    "Workspace-specific profile discovery reached its per-report limit.")
     builder.add("external_connection.not_observed", "external_connection", "unknown",
                 "Tunnel and ChatGPT reachability are not observed by Workspace Bridge.",
                 detail="Local MCP gateway status reports only Bridge configuration, not remote client connectivity.")

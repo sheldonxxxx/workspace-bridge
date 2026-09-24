@@ -25,6 +25,16 @@ ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
 ACTIVE_STATES = frozenset({"running", "waiting_interaction"})
 OUTCOMES = frozenset({"succeeded", "failed", "cancelled", "interrupted", "orphaned"})
+SECURITY_PROVENANCE = frozenset({"named-profile", "implicit/default", "legacy-sandbox"})
+SECURITY_APPROVAL_CATEGORIES = frozenset({
+    "untrusted", "on-request", "never", "granular", "default", "other"})
+SECURITY_REVIEWER_CATEGORIES = frozenset({
+    "user", "auto_review", "guardian_subagent", "default", "other"})
+SECURITY_REPLACEMENT_REASONS = frozenset({
+    "unresolved-permission-profile", "permission-profile-unavailable",
+    "legacy-sandbox-transition", "settings-update-already-pending",
+    "settings-update-unconfirmed", "settings-update-mismatch",
+    "settings-update-failed"})
 
 
 def _identifier(value: Any, label: str) -> str:
@@ -49,7 +59,68 @@ def validate_run_state(value: dict) -> dict:
         raise RuntimeUnavailable("Runtime returned an invalid starting run")
     if phase == "terminal" and (active is not None or outcome not in OUTCOMES):
         raise RuntimeUnavailable("Runtime returned an invalid terminal run")
+    if "securityBinding" in value:
+        value = {**value, "securityBinding": _validate_security_binding(
+            value.get("securityBinding"))}
     return value
+
+
+def _validate_security_summary(value: Any) -> dict:
+    if not isinstance(value, dict):
+        raise RuntimeUnavailable("Runtime security summary is invalid")
+    profile_id = value.get("activePermissionProfile")
+    if (profile_id is not None and
+            (not isinstance(profile_id, str) or not profile_id or len(profile_id) > 128
+             or any(ord(char) < 33 or char.isspace() for char in profile_id)
+             or "/" in profile_id or "\\" in profile_id)):
+        raise RuntimeUnavailable("Runtime security summary is invalid")
+    approval = value.get("approvalPolicy")
+    reviewer = value.get("approvalsReviewer")
+    provenance = value.get("provenance")
+    if (approval not in SECURITY_APPROVAL_CATEGORIES
+            or reviewer not in SECURITY_REVIEWER_CATEGORIES
+            or provenance not in SECURITY_PROVENANCE):
+        raise RuntimeUnavailable("Runtime security summary is invalid")
+    return {"activePermissionProfile": profile_id, "approvalPolicy": approval,
+            "approvalsReviewer": reviewer, "provenance": provenance}
+
+
+def _validate_security_binding(value: Any) -> dict:
+    if not isinstance(value, dict):
+        raise RuntimeUnavailable("Runtime security binding is invalid")
+    source = value.get("source")
+    if source == "profile":
+        profile = value.get("profile")
+        if (not isinstance(profile, dict) or not isinstance(profile.get("id"), str)
+                or not profile["id"] or len(profile["id"]) > 100
+                or not isinstance(profile.get("revision"), str)
+                or not profile["revision"] or len(profile["revision"]) > 100):
+            raise RuntimeUnavailable("Runtime security binding is invalid")
+        return {"source": "profile", "profile": {
+            "id": profile["id"], "revision": profile["revision"]}}
+    if source != "runtime-config":
+        raise RuntimeUnavailable("Runtime security binding is invalid")
+    revision = value.get("revision")
+    permission_revision = value.get("permissionRevision", "")
+    approval_revision = value.get("approvalRevision", "")
+    if (not isinstance(revision, str) or not revision or len(revision) > 100
+            or not isinstance(permission_revision, str) or len(permission_revision) > 100
+            or not isinstance(approval_revision, str) or len(approval_revision) > 100):
+        raise RuntimeUnavailable("Runtime security binding is invalid")
+    result = {"source": "runtime-config", "revision": revision,
+              "permissionRevision": permission_revision,
+              "approvalRevision": approval_revision,
+              "resolvedSummary": _validate_security_summary(value.get("resolvedSummary"))}
+    reason = value.get("replacementReason")
+    if reason is not None:
+        if reason not in SECURITY_REPLACEMENT_REASONS:
+            raise RuntimeUnavailable("Runtime conversation replacement reason is invalid")
+        replaced = value.get("replacedConversationId")
+        if not isinstance(replaced, str) or not replaced or len(replaced) > 200:
+            raise RuntimeUnavailable("Runtime conversation replacement is invalid")
+        result["replacementReason"] = reason
+        result["replacedConversationId"] = replaced
+    return result
 
 
 @dataclass(frozen=True)
@@ -201,8 +272,24 @@ class HttpRuntimeAdapter:
                            "default": row.get("default") is True})
         return result
 
-    def profiles(self) -> list[dict]:
-        value = self._request("GET", "/v1/profiles")
+    def profile_catalog(self, workspace_id: str | None = None,
+                        directory: str | None = None, *,
+                        fresh: bool = False) -> dict:
+        if (workspace_id is None) != (directory is None):
+            raise BridgeError("Workspace ID and directory must be supplied together",
+                              "invalid_arguments")
+        if workspace_id is not None and (
+                not isinstance(workspace_id, str) or not workspace_id
+                or len(workspace_id) > 100):
+            raise BridgeError("Invalid workspace ID", "invalid_arguments")
+        if directory is not None and (
+                not isinstance(directory, str) or not directory or len(directory) > 4096):
+            raise BridgeError("Invalid workspace directory", "invalid_arguments")
+        query = None
+        if workspace_id is not None:
+            query = {"workspaceId": workspace_id, "directory": directory,
+                     "fresh": "1" if fresh else None}
+        value = self._request("GET", "/v1/profiles", query=query)
         rows = value.get("profiles")
         if not isinstance(rows, list):
             raise RuntimeUnavailable("Runtime profile list is invalid")
@@ -219,11 +306,55 @@ class HttpRuntimeAdapter:
             if config is not None and (not isinstance(config, dict)
                                        or len(json.dumps(config)) > 32768):
                 continue
-            result.append({"id": row["id"], "revision": row["revision"],
+            item = {"id": row["id"], "revision": row["revision"],
                            "config": config, "mutable": row.get("mutable") is True,
                            "enforcement": [item[:80] for item in enforcement[:20]
-                                           if isinstance(item, str)]})
-        return result
+                                           if isinstance(item, str)]}
+            definition_revision = row.get("definitionRevision")
+            if (isinstance(definition_revision, str)
+                    and 1 <= len(definition_revision) <= 100):
+                item["definitionRevision"] = definition_revision
+            if isinstance(row.get("available"), bool):
+                item["available"] = row["available"]
+            result.append(item)
+        permission_profiles = value.get("permissionProfiles")
+        if not isinstance(permission_profiles, list):
+            permission_profiles = []
+        choices = []
+        for row in permission_profiles[:500]:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                    or not row["id"] or len(row["id"]) > 128
+                    or not isinstance(row.get("allowed"), bool)):
+                continue
+            description = row.get("description")
+            choices.append({"id": row["id"], "allowed": row["allowed"],
+                            "description": (redact(str(description)[:240])[0]
+                                            if isinstance(description, str) else "")})
+        catalog = {"profiles": result, "permissionProfiles": choices}
+        runtime_config = value.get("runtimeConfig")
+        if runtime_config is not None:
+            if (not isinstance(runtime_config, dict)
+                    or not isinstance(runtime_config.get("supported"), bool)
+                    or not isinstance(runtime_config.get("available"), bool)
+                    or runtime_config.get("status") not in {"ready", "unavailable"}
+                    or not isinstance(runtime_config.get("revision"), str)
+                    or not runtime_config["revision"]
+                    or len(runtime_config["revision"]) > 100):
+                raise RuntimeUnavailable("Runtime config security state is invalid")
+            catalog["runtimeConfig"] = {
+                "supported": runtime_config["supported"],
+                "available": runtime_config["available"],
+                "status": runtime_config["status"],
+                "revision": runtime_config["revision"],
+                "resolvedSummary": _validate_security_summary(
+                    runtime_config.get("resolvedSummary")),
+            }
+        return catalog
+
+    def profiles(self, workspace_id: str | None = None,
+                 directory: str | None = None, *, fresh: bool = False) -> list[dict]:
+        return self.profile_catalog(workspace_id, directory,
+                                    fresh=fresh)["profiles"]
 
     def save_profile(self, profile_id: str, config: dict,
                      expected_revision: str | None) -> dict:
@@ -236,10 +367,22 @@ class HttpRuntimeAdapter:
                              _identifier(profile_id, "profile id"))
 
     def create_conversation(self, payload: dict) -> dict:
-        return self._request("POST", "/v1/conversations", body=payload)
+        value = self._request("POST", "/v1/conversations", body=payload)
+        if not isinstance(value, dict):
+            raise RuntimeUnavailable("Runtime conversation binding is invalid")
+        if "securityBinding" in value:
+            value = {**value, "securityBinding": _validate_security_binding(
+                value.get("securityBinding"))}
+        return value
 
     def conversation(self, conversation_id: str) -> dict:
-        return self._request("GET", f"/v1/conversations/{_identifier(conversation_id, 'conversation id')}")
+        value = self._request("GET", f"/v1/conversations/{_identifier(conversation_id, 'conversation id')}")
+        if not isinstance(value, dict):
+            raise RuntimeUnavailable("Runtime conversation binding is invalid")
+        if "securityBinding" in value:
+            value = {**value, "securityBinding": _validate_security_binding(
+                value.get("securityBinding"))}
+        return value
 
     def start_run(self, conversation_id: str, payload: dict) -> dict:
         value = self._request("POST", f"/v1/conversations/{_identifier(conversation_id, 'conversation id')}/runs",

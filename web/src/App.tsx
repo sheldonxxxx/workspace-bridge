@@ -83,7 +83,13 @@ import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
 
 type Section =
-  "overview" | "workspaces" | "profiles" | "handoffs" | "runs" | "runtimes" | "audit";
+  | "overview"
+  | "workspaces"
+  | "profiles"
+  | "handoffs"
+  | "runs"
+  | "runtimes"
+  | "audit";
 type ConfirmState = {
   title: string;
   description: string;
@@ -238,7 +244,12 @@ function RunCard({
         </p>
       </div>
       <div className="run-side">
-        <time dateTime={run.created}>{dateTime(run.created)}</time>
+        <span className="run-updated">
+          <span>Updated</span>
+          <time dateTime={run.updated || run.created}>
+            {dateTime(run.updated || run.created)}
+          </time>
+        </span>
         <Button
           variant={attention ? "default" : "outline"}
           size="sm"
@@ -249,6 +260,230 @@ function RunCard({
         </Button>
       </div>
     </article>
+  );
+}
+
+type ExecutionRecord = {
+  execution_id: string;
+  sequence?: number;
+  tool?: string;
+  state?: string;
+  target_preview?: string;
+  input_preview?: string;
+  output_preview?: string;
+  output_truncated?: boolean;
+  started?: string;
+  duration_ms?: number;
+  is_error?: boolean;
+  truncated?: boolean;
+};
+type RunActivity = {
+  id: string;
+  kind: string;
+  status: string;
+  created?: string;
+  details?: Json;
+};
+type FeedCursor = { created: string; id: string };
+type ActivityPage = {
+  activities: RunActivity[];
+  next_cursor: FeedCursor | null;
+};
+type ExecutionPage = {
+  executions: ExecutionRecord[];
+  next_cursor: FeedCursor | null;
+};
+
+function mergeNewest<T>(
+  fresh: T[],
+  existing: T[],
+  key: (item: T) => string,
+): T[] {
+  const freshKeys = new Set(fresh.map(key));
+  return [...fresh, ...existing.filter((item) => !freshKeys.has(key(item)))];
+}
+
+function appendOlder<T>(
+  existing: T[],
+  older: T[],
+  key: (item: T) => string,
+): T[] {
+  const knownKeys = new Set(existing.map(key));
+  return [...existing, ...older.filter((item) => !knownKeys.has(key(item)))];
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function outputPreviewText(value: unknown, depth = 0): string {
+  if (depth > 5 || value == null) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (depth < 5 && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        const readable = outputPreviewText(parsed, depth + 1);
+        if (readable) return readable;
+      } catch {
+        // Keep ordinary command output unchanged when it is not JSON.
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => outputPreviewText(item, depth + 1))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof value !== "object") return String(value);
+
+  const record = value as Record<string, unknown>;
+  const previewKeys = [
+    "output_preview",
+    "outputPreview",
+    "aggregatedOutput",
+    "stdout",
+    "output",
+    "preview",
+    "message",
+    "text",
+    "status",
+    "content",
+  ];
+  for (const key of previewKeys) {
+    if (record[key] !== undefined && record[key] !== value) {
+      const preview = outputPreviewText(record[key], depth + 1);
+      if (preview) return preview;
+    }
+  }
+
+  const ignoredKeys = new Set([
+    "is_error",
+    "isError",
+    "truncated",
+    "output_bytes",
+    "outputBytes",
+    "preview_bytes",
+    "previewBytes",
+    "durationMs",
+    "duration_ms",
+  ]);
+  return Object.entries(record)
+    .filter(([key, item]) => !ignoredKeys.has(key) && item !== undefined)
+    .map(([key, item]) => {
+      const label = key
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+      const text = outputPreviewText(item, depth + 1);
+      return text ? `${label}: ${text}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function executionInputPreview(
+  execution: ExecutionRecord,
+  activityDetails?: Json,
+): string {
+  const input = objectValue(activityDetails?.input);
+  const details = objectValue(input.details);
+  const filtered = Object.fromEntries(
+    Object.entries(details).filter(
+      ([key, value]) =>
+        !/(?:_sha256|_bytes)$|^truncated$/i.test(key) && value !== undefined,
+    ),
+  );
+  if (typeof filtered.command === "string") {
+    const command = `$ ${filtered.command}`;
+    return command.length > 1200 ? `${command.slice(0, 1200)}\n…` : command;
+  }
+  if (Object.keys(filtered).length) {
+    const summary = JSON.stringify(filtered, null, 2);
+    return summary.length > 1200 ? `${summary.slice(0, 1200)}\n…` : summary;
+  }
+  if (execution.input_preview) return execution.input_preview;
+  return (
+    execution.target_preview ||
+    (typeof input.summary === "string" ? input.summary : "") ||
+    "Input not recorded"
+  );
+}
+
+function executionOutputPreview(
+  activityDetails?: Json,
+  execution?: ExecutionRecord,
+): {
+  text: string;
+  truncated: boolean;
+} {
+  const result = objectValue(activityDetails?.result);
+  const preview =
+    outputPreviewText(result) || outputPreviewText(execution?.output_preview);
+  return {
+    text: preview
+      ? preview.slice(0, 900)
+      : activityDetails
+        ? "No output captured"
+        : "Output preview unavailable",
+    truncated:
+      result.truncated === true ||
+      execution?.output_truncated === true ||
+      preview.length > 900,
+  };
+}
+
+function ExecutionStatus({
+  state,
+  isError,
+}: {
+  state?: string;
+  isError?: boolean;
+}) {
+  const normalized = (state || "recorded").toLowerCase();
+  let tone: "danger" | "success" | "warning" | "neutral" = "neutral";
+  if (isError || ["failed", "error"].includes(normalized)) tone = "danger";
+  else if (["completed", "succeeded", "success"].includes(normalized))
+    tone = "success";
+  else if (
+    [
+      "running",
+      "queued",
+      "starting",
+      "declined",
+      "interrupted",
+      "cancelled",
+      "paused",
+    ].includes(normalized)
+  ) {
+    tone = "warning";
+  }
+  const Icon =
+    tone === "danger"
+      ? X
+      : tone === "success"
+        ? Check
+        : ["running", "queued", "starting"].includes(normalized)
+          ? Activity
+          : ["declined", "interrupted", "cancelled", "paused"].includes(
+                normalized,
+              )
+            ? Pause
+            : CircleHelp;
+  const label = isError
+    ? "Failed"
+    : normalized === "recorded"
+      ? "Recorded"
+      : normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  return (
+    <span className={`execution-status execution-status-${tone}`}>
+      <Icon size={13} strokeWidth={2.5} aria-hidden="true" />
+      {label}
+    </span>
   );
 }
 
@@ -377,17 +612,26 @@ function WorkspaceCard({
             <div>
               <strong>{runtimeName(id)} runtime</strong>
               <p>
-                {grant.profile
-                  ? `Profile: ${grant.profile.id}`
-                  : "Choose a security profile"}
+                {grant.security_binding?.source === "runtime-config"
+                  ? "Use Codex config (config.toml)"
+                  : grant.profile
+                    ? `Profile: ${grant.profile.id}`
+                    : "Choose a security profile"}
               </p>
+              {grant.security_binding?.source === "runtime-config" && (
+                <p className="runtime-security-summary">
+                  {grant.security_binding.status === "ready"
+                    ? `Following current Codex config · ${grant.security_binding.resolved_summary?.activePermissionProfile || "Codex default"} · ${grant.security_binding.resolved_summary?.approvalPolicy || "approval unknown"} · ${grant.security_binding.resolved_summary?.approvalsReviewer || "reviewer unknown"}`
+                    : "Codex security config is currently unavailable"}
+                </p>
+              )}
               <Button
                 variant="link"
                 size="sm"
                 className="inline-action"
                 onClick={() => onProfile(ws, id)}
               >
-                Change profile
+                Change security
               </Button>
             </div>
             <Switch
@@ -496,16 +740,20 @@ function WorkspaceCard({
 }
 
 function thinkingEffortLabel(effort: string) {
-  return ({
-    off: "Off",
-    minimal: "Minimal",
-    low: "Low",
-    medium: "Medium",
-    high: "High",
-    xhigh: "Extra high",
-    max: "Maximum",
-    ultra: "Ultra",
-  } as Record<string, string>)[effort] || effort;
+  return (
+    (
+      {
+        off: "Off",
+        minimal: "Minimal",
+        low: "Low",
+        medium: "Medium",
+        high: "High",
+        xhigh: "Extra high",
+        max: "Maximum",
+        ultra: "Ultra",
+      } as Record<string, string>
+    )[effort] || effort
+  );
 }
 
 function ModelDialog({
@@ -530,9 +778,9 @@ function ModelDialog({
   const [models, setModels] = useState<Model[]>([]);
   const [enabled, setEnabled] = useState<string[]>(policy?.enabled || []);
   const [defaultModel, setDefaultModel] = useState(policy?.default || "");
-  const [reasoningDefaults, setReasoningDefaults] = useState<Record<string, string>>(
-    policy?.reasoning_defaults || {},
-  );
+  const [reasoningDefaults, setReasoningDefaults] = useState<
+    Record<string, string>
+  >(policy?.reasoning_defaults || {});
   const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(false);
   const load = useCallback(
@@ -596,7 +844,8 @@ function ModelDialog({
         <DialogHeader>
           <DialogTitle>{runtimeName(runtime || "")} models</DialogTitle>
           <DialogDescription>
-            Enable models, choose the default model, and set an optional thinking level for each model.
+            Enable models, choose the default model, and set an optional
+            thinking level for each model.
           </DialogDescription>
         </DialogHeader>
         {!eligible.length ? (
@@ -639,66 +888,78 @@ function ModelDialog({
               {loading ? (
                 <Skeleton className="h-20" />
               ) : visible.length ? (
-                  visible.map((m) => {
-                    const options = m.reasoningOptions || [];
-                    const selectedEffort = reasoningDefaults[m.selector] || "";
-                    const nativeDefault = m.defaultReasoningEffort
-                      ? `Use runtime default (${thinkingEffortLabel(m.defaultReasoningEffort)})`
-                      : "Use runtime default";
-                    return (
-                      <div className="model-option" key={m.selector}>
-                        <label className="model-option-main">
-                          <input
-                            type="checkbox"
-                            checked={enabled.includes(m.selector)}
-                            onChange={(e) => {
-                              setEnabled((old) =>
-                                e.target.checked
-                                  ? [...old, m.selector]
-                                  : old.filter((x) => x !== m.selector),
-                              );
-                              if (!e.target.checked && defaultModel === m.selector)
-                                setDefaultModel("");
-                            }}
-                          />
-                          <span>
-                            <strong>
-                              {m.displayName || m.name || m.model || m.selector}
-                            </strong>
-                            <small>{m.selector}</small>
-                          </span>
-                        </label>
-                        {options.length > 0 && (
-                          <select
-                            className="native-select model-thinking-select"
-                            aria-label={`Default thinking level for ${m.displayName || m.selector}`}
-                            value={selectedEffort}
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              setReasoningDefaults((old) => {
-                                const next = { ...old };
-                                if (value) next[m.selector] = value;
-                                else delete next[m.selector];
-                                return next;
-                              });
-                            }}
-                          >
-                            <option value="">{nativeDefault}</option>
-                            {selectedEffort && !options.includes(selectedEffort) && (
+                visible.map((m) => {
+                  const options = m.reasoningOptions || [];
+                  const selectedEffort = reasoningDefaults[m.selector] || "";
+                  const nativeDefault = m.defaultReasoningEffort
+                    ? `Use runtime default (${thinkingEffortLabel(m.defaultReasoningEffort)})`
+                    : "Use runtime default";
+                  return (
+                    <div
+                      className={
+                        runtime === "codex"
+                          ? "model-option model-option-codex"
+                          : "model-option"
+                      }
+                      key={m.selector}
+                    >
+                      <label className="model-option-main">
+                        <input
+                          type="checkbox"
+                          checked={enabled.includes(m.selector)}
+                          onChange={(e) => {
+                            setEnabled((old) =>
+                              e.target.checked
+                                ? [...old, m.selector]
+                                : old.filter((x) => x !== m.selector),
+                            );
+                            if (
+                              !e.target.checked &&
+                              defaultModel === m.selector
+                            )
+                              setDefaultModel("");
+                          }}
+                        />
+                        <span>
+                          <strong>
+                            {m.displayName || m.name || m.model || m.selector}
+                          </strong>
+                          <small>{m.selector}</small>
+                        </span>
+                      </label>
+                      {options.length > 0 && (
+                        <select
+                          className="native-select model-thinking-select"
+                          aria-label={`Default thinking level for ${m.displayName || m.selector}`}
+                          value={selectedEffort}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setReasoningDefaults((old) => {
+                              const next = { ...old };
+                              if (value) next[m.selector] = value;
+                              else delete next[m.selector];
+                              return next;
+                            });
+                          }}
+                        >
+                          <option value="">{nativeDefault}</option>
+                          {selectedEffort &&
+                            !options.includes(selectedEffort) && (
                               <option value={selectedEffort}>
-                                Unavailable ({thinkingEffortLabel(selectedEffort)})
+                                Unavailable (
+                                {thinkingEffortLabel(selectedEffort)})
                               </option>
                             )}
-                            {options.map((effort) => (
-                              <option key={effort} value={effort}>
-                                {thinkingEffortLabel(effort)}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                      </div>
-                    );
-                  })
+                          {options.map((effort) => (
+                            <option key={effort} value={effort}>
+                              {thinkingEffortLabel(effort)}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  );
+                })
               ) : (
                 <p className="muted-note">
                   {models.length ? "No models match." : "No models discovered."}
@@ -877,7 +1138,14 @@ export default function App() {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [auth, autoRefresh, refresh, section, selectedWorkspace, loadWorkspaceDetails]);
+  }, [
+    auth,
+    autoRefresh,
+    refresh,
+    section,
+    selectedWorkspace,
+    loadWorkspaceDetails,
+  ]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoginError("");
@@ -1951,24 +2219,22 @@ function RunInspector({
   onConfirm: (state: ConfirmState) => void;
 }) {
   const [data, setData] = useState<Run | null>(run);
-  const [activity, setActivity] = useState<
-    Array<{ id: string; kind: string; status: string; details?: Json }>
-  >([]);
-  const [executions, setExecutions] = useState<
-    Array<{
-      execution_id: string;
-      sequence?: number;
-      tool?: string;
-      state?: string;
-      target_preview?: string;
-      is_error?: boolean;
-    }>
-  >([]);
+  const [activity, setActivity] = useState<RunActivity[]>([]);
+  const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
+  const [activityCursor, setActivityCursor] = useState<FeedCursor | null>(null);
+  const [executionCursor, setExecutionCursor] = useState<FeedCursor | null>(
+    null,
+  );
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [tab, setTab] = useState<"summary" | "activity" | "executions">(
     "summary",
   );
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const loadOlderRef = useRef<HTMLDivElement | null>(null);
+  const loadingOlderRef = useRef(false);
+  const activityOlderLoadedRef = useRef(false);
+  const executionsOlderLoadedRef = useRef(false);
   const pullStartY = useRef<number | null>(null);
   const pullDistanceRef = useRef(0);
   const pullRefreshingRef = useRef(false);
@@ -1980,24 +2246,105 @@ function RunInspector({
         const details = await api<Run>(`/api/runs/${id}`);
         setData(details);
         const [acts, execs] = await Promise.allSettled([
-          api<{ activities: typeof activity }>(`/api/runs/${id}/activities`),
-          api<{ executions: typeof executions }>(
-            `/api/runs/${id}/executions?offset=0&limit=50`,
-          ),
+          api<ActivityPage>(`/api/runs/${id}/activities?limit=50`),
+          api<ExecutionPage>(`/api/runs/${id}/executions?limit=50`),
         ]);
-        if (acts.status === "fulfilled")
-          setActivity(acts.value.activities || []);
-        if (execs.status === "fulfilled")
-          setExecutions(execs.value.executions || []);
+        if (acts.status === "fulfilled") {
+          setActivity((old) =>
+            mergeNewest(acts.value.activities || [], old, (item) => item.id),
+          );
+          if (!activityOlderLoadedRef.current) {
+            setActivityCursor(acts.value.next_cursor || null);
+          }
+        }
+        if (execs.status === "fulfilled") {
+          setExecutions((old) =>
+            mergeNewest(
+              execs.value.executions || [],
+              old,
+              (item) => item.execution_id,
+            ),
+          );
+          if (!executionsOlderLoadedRef.current) {
+            setExecutionCursor(execs.value.next_cursor || null);
+          }
+        }
       } catch (error) {
         onNotice((error as Error).message);
       }
     },
     [onNotice],
   );
+  const loadOlder = useCallback(
+    async (feed: "activity" | "executions") => {
+      const cursor = feed === "activity" ? activityCursor : executionCursor;
+      if (!run || !cursor || loadingOlderRef.current) return;
+      loadingOlderRef.current = true;
+      setLoadingOlder(true);
+      try {
+        const query = new URLSearchParams({
+          limit: "50",
+          before_created: cursor.created,
+          before_id: cursor.id,
+        });
+        if (feed === "activity") {
+          const page = await api<ActivityPage>(
+            `/api/runs/${run.run_id}/activities?${query}`,
+          );
+          setActivity((old) =>
+            appendOlder(old, page.activities || [], (item) => item.id),
+          );
+          setActivityCursor(page.next_cursor || null);
+          activityOlderLoadedRef.current = true;
+        } else {
+          const page = await api<ExecutionPage>(
+            `/api/runs/${run.run_id}/executions?${query}`,
+          );
+          setExecutions((old) =>
+            appendOlder(
+              old,
+              page.executions || [],
+              (item) => item.execution_id,
+            ),
+          );
+          setExecutionCursor(page.next_cursor || null);
+          executionsOlderLoadedRef.current = true;
+        }
+      } catch (error) {
+        onNotice((error as Error).message);
+      } finally {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      }
+    },
+    [activityCursor, executionCursor, onNotice, run],
+  );
   useEffect(() => {
     if (run) void load(run.run_id);
   }, [run, load]);
+  useEffect(() => {
+    const cursor = tab === "activity" ? activityCursor : executionCursor;
+    const target = loadOlderRef.current;
+    const root = panelRef.current;
+    if (
+      !cursor ||
+      loadingOlder ||
+      (tab !== "activity" && tab !== "executions") ||
+      !target ||
+      !root ||
+      typeof IntersectionObserver === "undefined"
+    ) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadOlder(tab);
+      },
+      { root, rootMargin: "180px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [activityCursor, executionCursor, loadOlder, loadingOlder, tab]);
   const inspectRunId = run?.run_id;
   useEffect(() => {
     if (!inspectRunId) return;
@@ -2101,11 +2448,7 @@ function RunInspector({
   );
   return (
     <Sheet open={Boolean(run)} onOpenChange={(value) => !value && onClose()}>
-      <SheetContent
-        ref={panelRef}
-        side="right"
-        className="run-sheet"
-      >
+      <SheetContent ref={panelRef} side="right" className="run-sheet">
         <div
           className="run-pull-indicator"
           data-visible={pullRefreshing || pullDistance > 0}
@@ -2114,10 +2457,7 @@ function RunInspector({
           aria-atomic="true"
         >
           <span>
-            <RefreshCw
-              size={13}
-              className={pullRefreshing ? "spinning" : ""}
-            />
+            <RefreshCw size={13} className={pullRefreshing ? "spinning" : ""} />
             {pullRefreshing
               ? "Refreshing run…"
               : pullDistance >= 68
@@ -2179,9 +2519,7 @@ function RunInspector({
                 </div>
                 <div>
                   <span>Conversation</span>
-                  <strong>
-                    {current.conversation_id || "—"}
-                  </strong>
+                  <strong>{current.conversation_id || "—"}</strong>
                 </div>
                 <div>
                   <span>Run ID</span>
@@ -2317,66 +2655,197 @@ function RunInspector({
           )}
           {tab === "activity" &&
             (activity.length ? (
-              activity.map((item) => (
-                <div className="activity-item" key={item.id}>
-                  <StateBadge value={item.status} />
-                  <h3>{item.kind}</h3>
-                  <p>
-                    {String(
-                      item.details?.title ||
-                        (item.details?.input as Json | undefined)?.summary ||
-                        item.id,
-                    )}
-                  </p>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      onDetail({
-                        title: `Activity ${item.id}`,
-                        content: item.details,
-                      })
-                    }
-                  >
-                    Details <ArrowRight size={14} />
-                  </Button>
+              <>
+                <div className="execution-list">
+                  {activity.map((item) => {
+                    const details = item.details;
+                    const input = objectValue(details?.input);
+                    const result = objectValue(details?.result);
+                    const title = String(
+                      details?.title ||
+                        input.summary ||
+                        item.kind.replace(/_/g, " "),
+                    );
+                    const activityRecord: ExecutionRecord = {
+                      execution_id: item.id,
+                      tool: title,
+                      state: item.status,
+                      started: item.created,
+                      target_preview:
+                        typeof input.summary === "string"
+                          ? input.summary
+                          : undefined,
+                    };
+                    const failed =
+                      ["failed", "error"].includes(item.status.toLowerCase()) ||
+                      result.is_error === true ||
+                      result.isError === true;
+                    const output = executionOutputPreview(
+                      details,
+                      activityRecord,
+                    );
+                    return (
+                      <article className="execution-card" key={item.id}>
+                        <header className="execution-card-head">
+                          <div className="execution-tool">
+                            <span className="execution-tool-icon">
+                              <Command size={15} aria-hidden="true" />
+                            </span>
+                            <div>
+                              <h3>{title}</h3>
+                              <span>
+                                Activity · {item.kind.replace(/_/g, " ")}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="execution-meta">
+                            <ExecutionStatus
+                              state={item.status}
+                              isError={failed}
+                            />
+                            {item.created ? (
+                              <time dateTime={item.created}>
+                                Started {dateTime(item.created)}
+                              </time>
+                            ) : (
+                              <span>Start time unavailable</span>
+                            )}
+                          </div>
+                        </header>
+                        <div className="execution-terminal">
+                          <section className="execution-preview">
+                            <h4>Input</h4>
+                            <pre>
+                              {executionInputPreview(activityRecord, details)}
+                            </pre>
+                          </section>
+                          <section className="execution-preview">
+                            <h4>Output preview</h4>
+                            <pre>{output.text}</pre>
+                          </section>
+                        </div>
+                        <footer className="execution-card-footer">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              onDetail({
+                                title: `Activity ${item.id}`,
+                                content: details,
+                              })
+                            }
+                          >
+                            Full record <ArrowRight size={14} />
+                          </Button>
+                        </footer>
+                      </article>
+                    );
+                  })}
                 </div>
-              ))
+                {activityCursor && (
+                  <div className="feed-older" ref={loadOlderRef}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={loadingOlder}
+                      onClick={() => void loadOlder("activity")}
+                    >
+                      {loadingOlder
+                        ? "Loading older activities…"
+                        : "Load older activities"}
+                    </Button>
+                  </div>
+                )}
+              </>
             ) : (
               <Empty title="No activities recorded" />
             ))}
           {tab === "executions" &&
             (executions.length ? (
-              executions.map((ex) => (
-                <div className="activity-item" key={ex.execution_id}>
-                  <StateBadge
-                    value={ex.is_error ? "Error" : ex.state || "Recorded"}
-                  />
-                  <h3>
-                    {ex.tool || "Tool"} <small>#{ex.sequence || "?"}</small>
-                  </h3>
-                  <p>{ex.target_preview || "—"}</p>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={async () => {
-                      try {
-                        const detail = await api(
-                          `/api/runs/${run.run_id}/executions/${encodeURIComponent(ex.execution_id)}`,
-                        );
-                        onDetail({
-                          title: `Execution ${ex.execution_id}`,
-                          content: detail,
-                        });
-                      } catch (error) {
-                        onNotice((error as Error).message);
-                      }
-                    }}
-                  >
-                    Details <ArrowRight size={14} />
-                  </Button>
-                </div>
-              ))
+              <div className="execution-list">
+                {executions.map((ex) => {
+                  const recorded = activity.find(
+                    (item) => item.id === ex.execution_id,
+                  );
+                  const details = recorded?.details;
+                  const result = objectValue(details?.result);
+                  const failed = ex.is_error || result.is_error === true;
+                  const output = executionOutputPreview(details, ex);
+                  return (
+                    <article className="execution-card" key={ex.execution_id}>
+                      <header className="execution-card-head">
+                        <div className="execution-tool">
+                          <span className="execution-tool-icon">
+                            <Command size={15} aria-hidden="true" />
+                          </span>
+                          <div>
+                            <h3>{ex.tool || "Tool"}</h3>
+                            <span>Execution #{ex.sequence || "?"}</span>
+                          </div>
+                        </div>
+                        <div className="execution-meta">
+                          <ExecutionStatus state={ex.state} isError={failed} />
+                          {ex.started ? (
+                            <time dateTime={ex.started}>
+                              Started {dateTime(ex.started)}
+                            </time>
+                          ) : (
+                            <span>Start time unavailable</span>
+                          )}
+                        </div>
+                      </header>
+                      <div className="execution-terminal">
+                        <section className="execution-preview">
+                          <h4>Input</h4>
+                          <pre>{executionInputPreview(ex, details)}</pre>
+                        </section>
+                        <section className="execution-preview">
+                          <h4>Output preview</h4>
+                          <pre>{output.text}</pre>
+                        </section>
+                      </div>
+                      <footer className="execution-card-footer">
+                        {typeof ex.duration_ms === "number" && (
+                          <span>{(ex.duration_ms / 1000).toFixed(1)}s</span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            try {
+                              const detail = await api(
+                                `/api/runs/${run.run_id}/executions/${encodeURIComponent(ex.execution_id)}`,
+                              );
+                              onDetail({
+                                title: `Execution ${ex.execution_id}`,
+                                content: detail,
+                              });
+                            } catch (error) {
+                              onNotice((error as Error).message);
+                            }
+                          }}
+                        >
+                          Full record <ArrowRight size={14} />
+                        </Button>
+                      </footer>
+                    </article>
+                  );
+                })}
+                {executionCursor && (
+                  <div className="feed-older" ref={loadOlderRef}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={loadingOlder}
+                      onClick={() => void loadOlder("executions")}
+                    >
+                      {loadingOlder
+                        ? "Loading older executions…"
+                        : "Load older executions"}
+                    </Button>
+                  </div>
+                )}
+              </div>
             ) : (
               <Empty title="No executions recorded" />
             ))}

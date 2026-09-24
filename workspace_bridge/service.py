@@ -193,30 +193,66 @@ class Service:
                 (ws["id"],)).fetchall()
         grants = {row["runtime"]: bool(row["enabled"]) for row in rows}
         with self.lock:
-            profiles = {row["runtime"]: {"id": row["profile"], "revision": row["revision"]}
+            profiles = {row["runtime"]: dict(row)
                         for row in self.db.execute(
-                            "SELECT runtime,profile,revision FROM runtime_profiles WHERE workspace=?",
+                            "SELECT runtime,profile,revision,source FROM runtime_profiles WHERE workspace=?",
                             (ws["id"],))}
         runtime_ids = sorted(self.run_coordinator.adapters)
-        return {"workspace_id": ws["id"], "runtimes": {
-            runtime_id: {"enabled": grants.get(runtime_id, False),
-                         "profile": profiles.get(runtime_id)}
-            for runtime_id in runtime_ids}}
+        runtime_state = {}
+        for runtime_id in runtime_ids:
+            row = profiles.get(runtime_id)
+            binding = None
+            profile = None
+            if row:
+                source = row.get("source") or "profile"
+                if source == "profile":
+                    profile = {"id": row["profile"], "revision": row["revision"]}
+                    binding = {"source": "profile", "profile": profile}
+                elif source == "runtime-config":
+                    observation = None
+                    try:
+                        observation = self.run_coordinator.profile_catalog(
+                            runtime_id, ws, fresh=True).get("runtimeConfig")
+                    except Exception:  # noqa: BLE001 - local manager displays an unavailable state
+                        observation = None
+                    binding = {"source": "runtime-config", "revision": row["revision"],
+                               "status": (observation.get("status")
+                                          if isinstance(observation, dict) else "unknown"),
+                               "observed_revision": (observation.get("revision")
+                                                     if isinstance(observation, dict) else None),
+                               "resolved_summary": (observation.get("resolvedSummary")
+                                                    if isinstance(observation, dict) else None)}
+            runtime_state[runtime_id] = {"enabled": grants.get(runtime_id, False),
+                                         "security_binding": binding,
+                                         "profile": profile}
+        return {"workspace_id": ws["id"], "runtimes": runtime_state}
 
     def set_workspace_runtime(self, ws: dict, runtime: str, enabled: bool,
-                              profile_id: str | None = None) -> dict:
+                              profile_id: str | None = None,
+                              security_source: str | None = None) -> dict:
         """Grant or revoke one configured runtime through the local admin plane."""
         if not isinstance(enabled, bool):
             raise BridgeError("enabled must be a boolean", "invalid_arguments")
         self.run_coordinator.adapter(runtime)
-        if enabled or profile_id is not None:
-            if profile_id is None:
-                with self.lock:
-                    existing = self.db.execute(
-                        "SELECT profile FROM runtime_profiles WHERE workspace=? AND runtime=?",
-                        (ws["id"], runtime)).fetchone()
-                profile_id = existing["profile"] if existing else "read-only"
+        with self.lock:
+            existing = self.db.execute(
+                "SELECT profile,source FROM runtime_profiles WHERE workspace=? AND runtime=?",
+                (ws["id"], runtime)).fetchone()
+        if security_source == "runtime-config":
+            if profile_id is not None:
+                raise BridgeError("Runtime config binding cannot include a profile ID",
+                                  "invalid_arguments")
+            self.run_coordinator.set_runtime_config(ws, runtime)
+        elif security_source == "profile":
+            if not isinstance(profile_id, str) or not profile_id:
+                raise BridgeError("A Bridge profile ID is required", "invalid_arguments")
             self.run_coordinator.set_profile(ws, runtime, profile_id)
+        elif security_source is not None:
+            raise BridgeError("Invalid runtime security source", "invalid_arguments")
+        elif profile_id is not None:
+            self.run_coordinator.set_profile(ws, runtime, profile_id)
+        elif enabled and existing is None:
+            self.run_coordinator.set_profile(ws, runtime, "read-only")
         with self.lock, self.db:
             self.db.execute(
                 "INSERT INTO workspace_runtimes(workspace,runtime,enabled,updated) "
@@ -339,10 +375,25 @@ class Service:
         ws = self._admin_run_workspace(run_id)
         return self.run_coordinator.cancel(ws, run_id)
 
-    def admin_list_agent_executions(self, run_id: str, offset: int = 0, limit: int = 50) -> dict:
+    def admin_list_agent_activities(self, run_id: str, limit: int = 50,
+                                    before_created: str | None = None,
+                                    before_id: str | None = None) -> dict:
+        """Admin activity timeline, newest first with a stable older-page cursor."""
+        ws = self._admin_run_workspace(run_id)
+        return self.run_coordinator.activities(
+            ws, run_id, limit=limit, newest_first=True,
+            before_created=before_created, before_id=before_id)
+
+    def admin_list_agent_executions(self, run_id: str, offset: int = 0,
+                                    limit: int = 50,
+                                    before_created: str | None = None,
+                                    before_id: str | None = None) -> dict:
         """Admin execution timeline (persisted-only, safe DOM/textContent client-side)."""
         ws = self._admin_run_workspace(run_id)
-        return self.list_agent_executions(ws, run_id, offset=offset, limit=limit)
+        return self.run_coordinator.executions(
+            ws, run_id, offset=offset, limit=limit, newest_first=True,
+            before_created=before_created, before_id=before_id,
+            include_previews=True)
 
     def admin_read_agent_execution(self, run_id: str, execution_id: str) -> dict:
         """Admin execution detail (persisted-only, bounded/truncated output)."""

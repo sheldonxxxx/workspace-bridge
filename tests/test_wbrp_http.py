@@ -42,11 +42,21 @@ def test_codex_http_adapter_contract(tmp_path):
         client = HttpRuntimeAdapter("codex", f"http://127.0.0.1:{port}", "secret")
         assert client.descriptor().supports("interactions")
         assert client.models("ws-one")[0]["selector"] == "gpt-test"
-        profile = client.profiles()[0]
+        profile_catalog = client.profile_catalog("ws-one", str(workspace), fresh=True)
+        profile = next(row for row in profile_catalog["profiles"]
+                       if row["id"] == "read-only")
+        assert profile_catalog["runtimeConfig"]["supported"] is True
+        assert profile_catalog["runtimeConfig"]["available"] is True
         custom = client.save_profile("reviewed-workspace", {
-            "sandbox": "workspace-write", "approvalPolicy": "on-request",
+            "permissions": ":workspace", "approvalPolicy": "on-request",
             "approvalsReviewer": "user"}, None)
         assert any(row["id"] == custom["id"] for row in client.profiles())
+        catalog = client.profile_catalog("ws-one", str(workspace), fresh=True)
+        assert any(row["id"] == "workspace-write-reviewed"
+                   and row["available"] is True for row in catalog["profiles"])
+        assert any(row["id"] == ":workspace"
+                   for row in catalog["permissionProfiles"])
+        assert ("permissionProfile/list", {"cwd": str(workspace)}) in native.rpc.calls
         assert client.delete_profile(custom["id"]) == {"deleted": custom["id"]}
         conversation = client.create_conversation({
             "workspaceId": "ws-one", "directory": str(workspace),
@@ -58,6 +68,19 @@ def test_codex_http_adapter_contract(tmp_path):
         assert client.run(run["id"])["conversationId"] == conversation["id"]
         assert client.interactions(run["id"]) == []
         assert client.activities(run["id"]) == []
+        native.rpc.status = "idle"
+        runtime_config = catalog["runtimeConfig"]
+        dynamic = client.create_conversation({
+            "workspaceId": "ws-one", "directory": str(workspace),
+            "securityBinding": {"source": "runtime-config",
+                                "revision": runtime_config["revision"]},
+        })
+        assert dynamic["securityBinding"]["source"] == "runtime-config"
+        dynamic_run = client.start_run(dynamic["id"], {
+            "input": [{"type": "text", "text": "Follow Codex config"}]})
+        assert dynamic_run["securityBinding"]["source"] == "runtime-config"
+        assert dynamic_run["securityBinding"]["resolvedSummary"][
+            "activePermissionProfile"] == ":workspace"
     finally:
         server.should_exit = True
         thread.join(timeout=5)

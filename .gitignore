@@ -21,3 +21,4 @@ tunnel-client.yaml
 
 compose-prod.yaml
 tunnel.env
+/sync_adapters_local.sh

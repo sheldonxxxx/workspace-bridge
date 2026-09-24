@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 import httpx
@@ -43,8 +44,13 @@ class DirectAdapter:
     def models(self, workspace_id):
         return self.native.models()["models"]
 
+    def profile_catalog(self, ws=None, *, fresh=False):
+        if ws is None:
+            return self.native.profiles()
+        return self.native.profiles(ws["id"], str(ws["root"]), fresh=fresh)
+
     def profiles(self):
-        return self.native.profiles()["profiles"]
+        return self.profile_catalog()["profiles"]
 
     def save_profile(self, profile_id, config, expected_revision):
         return self.native.save_profile({"id": profile_id, "config": config,
@@ -85,7 +91,7 @@ def test_custom_profile_assignment_tracks_revision_and_guards_delete(modern_env)
     service, ws_id, _, _, _, _ = modern_env
     coordinator = service.run_coordinator
     ws = service.workspace(ws_id)
-    config = {"sandbox": "workspace-write", "approvalPolicy": "on-request",
+    config = {"permissions": ":workspace", "approvalPolicy": "on-request",
               "approvalsReviewer": "user"}
     saved = coordinator.save_profile("codex", "team-reviewed", config, None)
     service.set_workspace_runtime(ws, "codex", False, saved["id"])
@@ -93,19 +99,117 @@ def test_custom_profile_assignment_tracks_revision_and_guards_delete(modern_env)
     assert grant["enabled"] is False and grant["profile"]["id"] == saved["id"]
     service.set_workspace_runtime(ws, "codex", True, saved["id"])
     changed = coordinator.save_profile("codex", saved["id"],
-        {**config, "sandbox": "read-only"}, saved["revision"])
-    assert coordinator.profile(ws, "codex")["revision"] == changed["revision"]
+        {**config, "permissions": ":read-only"}, saved["revision"])
+    current = next(row for row in coordinator.profiles("codex", ws, fresh=True)
+                   if row["id"] == changed["id"])
+    assert coordinator.profile(ws, "codex")["revision"] == current["revision"]
     with pytest.raises(BridgeError, match="Assign another profile"):
         coordinator.delete_profile("codex", saved["id"])
     service.set_workspace_runtime(ws, "codex", True, "read-only")
     assert coordinator.delete_profile("codex", saved["id"]) == {"deleted": saved["id"]}
 
 
+def test_runtime_config_binding_persists_source_and_tracks_live_observation(modern_env):
+    service, ws_id, _, _, _, rpc = modern_env
+    coordinator = service.run_coordinator
+    ws = service.workspace(ws_id)
+    service.set_workspace_runtime(ws, "codex", True,
+                                  security_source="runtime-config")
+    with service.lock:
+        stored = service.db.execute(
+            "SELECT source,profile,revision FROM runtime_profiles "
+            "WHERE workspace=? AND runtime='codex'", (ws_id,)).fetchone()
+    assert stored["source"] == "runtime-config"
+    assert stored["profile"] == ""
+    first = coordinator.security_binding(ws, "codex")
+    rpc.security_config["config"]["approval_policy"] = "never"
+    second = coordinator.security_binding(ws, "codex")
+    assert first["source"] == second["source"] == "runtime-config"
+    assert first["revision"] != second["revision"]
+    assert second["resolvedSummary"]["approvalPolicy"] == "never"
+    with service.lock:
+        persisted = service.db.execute(
+            "SELECT revision FROM runtime_profiles WHERE workspace=? AND runtime='codex'",
+            (ws_id,)).fetchone()["revision"]
+    assert persisted == stored["revision"]
+
+
+def test_runtime_config_binding_remains_unsupported_for_pi(modern_env):
+    service, ws_id, _, _, _, _ = modern_env
+    ws = service.workspace(ws_id)
+
+    class PiProfileCatalog:
+        def profile_catalog(self, _workspace, *, fresh=False):
+            return {"profiles": [], "permissionProfiles": []}
+
+    service.run_coordinator.adapters["pi"] = PiProfileCatalog()
+    with pytest.raises(BridgeError) as exc:
+        service.set_workspace_runtime(ws, "pi", True,
+                                      security_source="runtime-config")
+    assert exc.value.code == "runtime_config_unavailable"
+    with service.lock:
+        assert service.db.execute(
+            "SELECT 1 FROM runtime_profiles WHERE workspace=? AND runtime='pi'",
+            (ws_id,)).fetchone() is None
+
+
+def test_runtime_config_continuation_refreshes_same_conversation_before_next_turn(modern_env):
+    service, ws_id, _, job, _, rpc = modern_env
+    coordinator = service.run_coordinator
+    ws = service.workspace(ws_id)
+    service.set_workspace_runtime(ws, "codex", True,
+                                  security_source="runtime-config")
+    first = coordinator.start(ws, "codex", job["id"], "runtime-config-first")
+    assert first["phase"] == "active"
+    first_row = coordinator._run_row(ws, first["run_id"])
+    first_conversation = coordinator._conversation(first_row)
+    assert first_conversation["source"] == "runtime-config"
+    native = coordinator.adapters["codex"].native
+    native_turn_id = native.run(first_row["native_id"])["nativeId"]
+    native_thread_id = native.conversation(first_conversation["native_id"])["nativeId"]
+    native._notification("turn/completed", {
+        "threadId": native_thread_id,
+        "turn": {"id": native_turn_id, "status": "completed"}})
+    assert native.run(first_row["native_id"])["phase"] == "terminal"
+    rpc.status = "idle"
+    coordinator.read(ws, first["run_id"])
+    old_revision = first_conversation["revision"]
+    rpc.security_config["config"]["approval_policy"] = "never"
+    second = coordinator.start(
+        ws, "codex", job["id"], "runtime-config-second",
+        continue_from_run_id=first["run_id"])
+    assert second["phase"] == "active"
+    assert second["conversation_id"] == first["conversation_id"]
+    second_row = coordinator._run_row(ws, second["run_id"])
+    second_conversation = coordinator._conversation(second_row)
+    assert second_conversation["revision"] != old_revision
+    assert json.loads(second_conversation["security_snapshot"])["approvalPolicy"] == "never"
+    update = next(params for method, params in rpc.calls
+                  if method == "thread/settings/update")
+    assert update["threadId"] == native_thread_id
+    assert "permissions" not in update
+
+
+def test_diagnostics_marks_binding_stale_after_native_requirements_change(modern_env):
+    service, ws_id, _, _, _, rpc = modern_env
+    rpc.requirements = {
+        "allowedApprovalPolicies": ["on-request", "untrusted"],
+        "allowedApprovalsReviewers": ["user"],
+        "allowedPermissionProfiles": {":workspace": True},
+    }
+    report = service.diagnostic_report()
+    route = next(item for item in report["runnable_routes"]
+                 if item["workspace_id"] == ws_id and item["runtime"] == "codex")
+    assert route["ready"] is False
+    assert "profile.freshness" in route["blockers"]
+    assert "allowedApprovalPolicies" not in json.dumps(report)
+
+
 @pytest.mark.asyncio
 async def test_custom_profile_manager_routes_require_admin(modern_env):
     service, _, _, _, _, _ = modern_env
     app = make_admin(service, service.config["admin_token_hash"])
-    config = {"sandbox": "workspace-write", "approvalPolicy": "on-request",
+    config = {"permissions": ":workspace", "approvalPolicy": "on-request",
               "approvalsReviewer": "user"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
@@ -127,6 +231,48 @@ async def test_custom_profile_manager_routes_require_admin(modern_env):
         assert "pi" not in status.json()
         deleted = await client.delete("/api/runtimes/codex/profiles/custom", headers=headers)
         assert deleted.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_codex_profile_catalog_api_uses_exact_workspace_context(modern_env):
+    service, ws_id, _, _, _, rpc = modern_env
+    first = service.workspace(ws_id)
+    second_root = service.parents[0] / "beta"
+    second_root.mkdir()
+    second_id = service.add_workspace("Beta", str(second_root), [])["workspace"]["id"]
+    first_root = str(Path(first["root"]).resolve())
+    rpc.catalog_by_cwd[first_root] = [*rpc.catalog,
+        {"id": "project-only", "allowed": True, "description": "Project access"}]
+    profile = service.run_coordinator.save_profile("codex", "project-access", {
+        "permissions": "project-only", "approvalPolicy": "on-request",
+        "approvalsReviewer": "user"}, None)
+    app = make_admin(service, service.config["admin_token_hash"])
+    token = (service.state / "admin-token").read_text().strip()
+    headers = {"Authorization": "Bearer " + token}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as client:
+        first_response = await client.get(
+            f"/api/runtimes/codex/profiles?workspace_id={ws_id}&fresh=1", headers=headers)
+        second_response = await client.get(
+            f"/api/runtimes/codex/profiles?workspace_id={second_id}&fresh=1", headers=headers)
+        invalid = await client.get(
+            f"/api/runtimes/codex/profiles?workspace_id={ws_id}&fresh=yes",
+            headers=headers)
+    assert first_response.status_code == second_response.status_code == 200, (
+        first_response.text, second_response.text)
+    assert invalid.status_code == 400
+    first_row = next(row for row in first_response.json()["profiles"]
+                     if row["id"] == profile["id"])
+    second_row = next(row for row in second_response.json()["profiles"]
+                      if row["id"] == profile["id"])
+    assert first_row["available"] is True
+    assert second_row["available"] is False
+    assert any(row["id"] == "project-only"
+               for row in first_response.json()["permissionProfiles"])
+    profile_cwds = [call[1]["cwd"] for call in rpc.calls
+                    if call[0] == "permissionProfile/list"]
+    assert first_root in profile_cwds
+    assert str(second_root.resolve()) in profile_cwds
 
 
 @pytest.fixture
@@ -358,7 +504,7 @@ def test_runtime_grant_defaults_off_for_new_workspace(tmp_path):
         service.manage_workspace(ws_id, "enable")
         service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
         assert service.workspace_runtime_policy(service.workspace(ws_id))["runtimes"]["codex"] == {
-            "enabled": False, "profile": None}
+            "enabled": False, "profile": None, "security_binding": None}
         with pytest.raises(BridgeError) as exc:
             service.require_workspace_runtime(service.workspace(ws_id), "codex")
         assert exc.value.code == "runtime_disabled"

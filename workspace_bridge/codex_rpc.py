@@ -19,6 +19,10 @@ from .security import redact
 _MAX_STDERR_LINE = 4096
 _MAX_STDERR_TAIL = 8192
 _MAX_DIAGNOSTIC = 2048
+_MAX_RPC_LINE = 8 * 1024 * 1024
+_MAX_SECURITY_RESPONSE = 2 * 1024 * 1024
+_MAX_PERMISSION_PROFILES = 500
+_MAX_PERMISSION_PROFILE_PAGES = 5
 _ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9:+])/(?!/)[^\s\"'<>|,;)]*")
 _FILE_URL = re.compile(r"file://\S+")
 _WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>|,;)]*")
@@ -128,6 +132,96 @@ class CodexRpc:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
 
+    @staticmethod
+    def _bounded_security_result(value: dict, method: str) -> dict:
+        try:
+            size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                                  allow_nan=False).encode("utf-8"))
+        except (TypeError, ValueError, UnicodeError):
+            raise CodexRpcError(f"{method} returned invalid data") from None
+        if size > _MAX_SECURITY_RESPONSE:
+            raise CodexRpcError(f"{method} response is too large")
+        return value
+
+    def permission_profiles(self, cwd: str) -> list[dict]:
+        """Read a bounded, validated permission-profile catalog for one cwd."""
+        if not isinstance(cwd, str) or not cwd or len(cwd) > 4096:
+            raise CodexRpcError("permissionProfile/list cwd is invalid")
+        rows: list[dict] = []
+        seen: set[str] = set()
+        cursors: set[str] = set()
+        cursor: str | None = None
+        for _ in range(_MAX_PERMISSION_PROFILE_PAGES):
+            params: dict[str, Any] = {"cwd": cwd, "limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = self._bounded_security_result(
+                self.call("permissionProfile/list", params, timeout=10),
+                "permissionProfile/list")
+            page_rows = page.get("data")
+            if not isinstance(page_rows, list) or len(page_rows) > 100:
+                raise CodexRpcError("permissionProfile/list response is invalid")
+            for row in page_rows:
+                if not isinstance(row, dict):
+                    raise CodexRpcError("permissionProfile/list row is invalid")
+                ident = row.get("id")
+                allowed = row.get("allowed")
+                description = row.get("description")
+                if (not isinstance(ident, str) or not ident or len(ident) > 128
+                        or any(ord(char) < 33 or char.isspace() for char in ident)
+                        or any(ord(char) < 32 for char in ident)
+                        or "/" in ident or "\\" in ident
+                        or not isinstance(allowed, bool)
+                        or (description is not None
+                            and (not isinstance(description, str) or len(description) > 2000))
+                        or ident in seen):
+                    raise CodexRpcError("permissionProfile/list row is invalid")
+                seen.add(ident)
+                rows.append({"id": ident, "allowed": allowed,
+                             "description": sanitize_diagnostic(description, limit=240)
+                             if description else ""})
+                if len(rows) > _MAX_PERMISSION_PROFILES:
+                    raise CodexRpcError("permissionProfile/list exceeds the profile limit")
+            next_cursor = page.get("nextCursor")
+            if next_cursor is None:
+                return rows
+            if (not isinstance(next_cursor, str) or not next_cursor
+                    or len(next_cursor) > 4096 or next_cursor in cursors):
+                raise CodexRpcError("permissionProfile/list cursor is invalid")
+            cursors.add(next_cursor)
+            cursor = next_cursor
+        raise CodexRpcError("permissionProfile/list exceeds the page limit")
+
+    def read_security_config(self, cwd: str) -> dict:
+        """Read effective config for cwd without requesting layer/path detail."""
+        if not isinstance(cwd, str) or not cwd or len(cwd) > 4096:
+            raise CodexRpcError("config/read cwd is invalid")
+        value = self.call("config/read", {"cwd": cwd, "includeLayers": False}, timeout=10)
+        return self._bounded_security_result(value, "config/read")
+
+    def read_config_requirements(self) -> dict | None:
+        """Read the current managed constraints without exposing them to callers."""
+        value = self._bounded_security_result(
+            self.call("configRequirements/read", {}, timeout=10),
+            "configRequirements/read")
+        requirements = value.get("requirements")
+        if requirements is not None and not isinstance(requirements, dict):
+            raise CodexRpcError("configRequirements/read response is invalid")
+        return requirements
+
+    def update_thread_settings(self, thread_id: str, settings: dict, *,
+                               timeout: float = 10) -> dict:
+        """Update only settings that Codex applies to subsequent turns."""
+        if not isinstance(thread_id, str) or not thread_id or len(thread_id) > 200:
+            raise CodexRpcError("thread/settings/update thread id is invalid")
+        allowed = {"permissions", "approvalPolicy", "approvalsReviewer", "sandboxPolicy"}
+        if (not isinstance(settings, dict) or not settings
+                or set(settings) - allowed
+                or ("permissions" in settings and "sandboxPolicy" in settings)):
+            raise CodexRpcError("thread/settings/update fields are invalid")
+        return self.call("thread/settings/update", {"threadId": thread_id, **settings},
+                         timeout=timeout)
+
     def notify(self, method: str, params: dict | None = None) -> None:
         message: dict = {"method": method}
         if params is not None:
@@ -191,8 +285,23 @@ class CodexRpc:
     def _read_loop(self) -> None:
         assert self._process.stdout is not None
         try:
-            for line in self._process.stdout:
-                if len(line) > 8 * 1024 * 1024:
+            while True:
+                line = self._process.stdout.readline(_MAX_RPC_LINE + 1)
+                if not line:
+                    break
+                if len(line) > _MAX_RPC_LINE:
+                    request_id_match = re.match(r"\s*\{\s*\"id\"\s*:\s*(\d+)", line)
+                    while line and not line.endswith(("\n", "\r")):
+                        line = self._process.stdout.readline(_MAX_RPC_LINE + 1)
+                    if request_id_match:
+                        request_id = int(request_id_match.group(1))
+                        with self._pending_lock:
+                            target = self._pending.get(request_id)
+                        if target is not None:
+                            event, box = target
+                            box.append({"id": request_id, "error": {
+                                "code": -32000, "message": "Codex app-server response is too large"}})
+                            event.set()
                     continue
                 try:
                     value = json.loads(line)

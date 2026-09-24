@@ -9,7 +9,7 @@ the same resource contract; Bridge never sends a vendor RPC to an adapter.
 
 | Resource | Meaning |
 | --- | --- |
-| Conversation | Bridge-owned, long-lived native context, bound to one workspace, runtime, and immutable security profile revision. |
+| Conversation | Bridge-owned native context bound to one workspace, runtime, security source, and applied security revision. |
 | Run | One accepted operation in a conversation. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. |
 | Activity | One command, file change, tool call, search, subagent action, or other observable action within a run. |
 | Interaction | One live blocking request with exact adapter-provided response options or form fields. |
@@ -19,7 +19,7 @@ The HTTP adapter surface is token authenticated and private:
 ```text
 GET    /v1/descriptor
 GET    /v1/models?workspaceId=...
-GET    /v1/profiles
+GET    /v1/profiles[?workspaceId=<id>&directory=<absolute-path>&fresh=1]
 POST   /v1/profiles
 DELETE /v1/profiles/{id}
 POST   /v1/conversations
@@ -66,14 +66,40 @@ and is passed back unchanged. Model changes do not alter the conversation's
 security binding.
 
 The local manager can create, edit, and delete named custom security profiles.
-`GET /profiles` returns each profile's native `config`, revision, and `mutable`
-flag so the manager can show only controls that runtime implements. The
-adapter validates the full config on `POST`; edits require the prior revision.
-Built-in profiles are immutable starting points. Custom definitions persist in
-the adapter's private state, and the Bridge updates assigned workspace
-revisions after a successful edit. New conversations use the new revision;
-continuation from an older revision is refused. Deletion requires all
-workspaces to be reassigned and no active native run for that profile.
+GET /profiles returns each profile's opaque config, revision, and mutable flag
+so the manager can show only controls that runtime implements. A runtime may
+need workspace context to discover profiles. In that case Bridge supplies the
+exact workspace ID and a validated directory; the adapter independently
+checks the directory beneath its configured project root. Pi may ignore this
+context. Codex uses it to resolve native permission-profile IDs and effective
+security revisions. For Codex, the response can also include a separate
+`runtimeConfig` observation containing an opaque revision and bounded summary;
+it is not a profile row. Raw native rules and managed config are never exposed.
+
+Workspace bindings identify `source: profile` with a profile ID/revision or
+`source: runtime-config` with no profile ID. The latter follows current Codex
+config for the workspace; revision changes do not invalidate the binding. A
+conversation records its own applied revision and bounded security summary.
+Before a later Codex turn, the adapter verifies the thread is idle, reads the
+current native security state, and applies supported changes through
+`thread/settings/update` before `turn/start`. It confirms
+`thread/settings/updated` and updates the saved conversation snapshot only
+after confirmation. The active turn keeps its captured settings. If the
+change cannot be represented or confirmed safely, the adapter creates a fresh
+native conversation and reports a bounded replacement reason.
+
+Profile-bound conversations remain pinned to their immutable revision. A
+workspace binding-source change requires a conversation created for the new
+source. Built-in profiles are immutable starting points. Custom definitions
+persist in the adapter's private state; edits require the prior definition
+revision. Deletion requires all workspaces to be reassigned and no active
+native run for that profile.
+
+Codex wrapper profiles contain only permissions, approvalPolicy, and
+approvalsReviewer. The adapter sends the native permissions selector and
+omits legacy sandbox from thread start/resume requests; permissions and
+sandbox are mutually exclusive in the Codex protocol. Codex permission
+definitions, filesystem/network rules, and config layering remain Codex-owned.
 
 Model records may also include `reasoningOptions` (supported effort strings)
 and `defaultReasoningEffort` (the native default when the adapter reports one).
