@@ -344,6 +344,28 @@ a {
 .page-title button {
   flex: none;
 }
+.page-title-actions {
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  display: flex;
+}
+.auto-refresh-toggle {
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  color: var(--quiet);
+  font-size: 12px;
+  display: flex;
+}
+.last-updated {
+  color: var(--quiet);
+  white-space: nowrap;
+  font-size: 11px;
+}
+.spinning {
+  animation: run-refresh-spin 0.9s linear infinite;
+}
 .section-kicker {
   color: var(--quiet);
   letter-spacing: 0.02em;
@@ -1607,6 +1629,17 @@ a {
   }
   .page-title {
     align-items: start;
+  }
+  .page-title-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .last-updated {
+    display: none;
+  }
+  .auto-refresh-toggle span {
+    display: none;
   }
   .page-title button {
     padding-inline: 9px;

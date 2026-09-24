@@ -141,6 +141,7 @@ const sections: Array<{
   },
 ];
 const pageSize = 25;
+const autoRefreshMs = 30000;
 function initialSection(): Section {
   const value = location.hash.slice(1);
   return sections.some((s) => s.id === value) ? (value as Section) : "overview";
@@ -765,6 +766,9 @@ export default function App() {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [notice, setNotice] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const refreshingRef = useRef(false);
   const notify = useCallback((text: string) => {
     setNotice(text);
     window.setTimeout(() => setNotice(""), 6500);
@@ -797,26 +801,43 @@ export default function App() {
     setRunsNext(data.next_offset);
     return data;
   }, []);
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const [workspaceData, historyData, currentStatus] = await Promise.all([
-        api<{ workspaces: Workspace[] }>("/api/workspaces"),
-        api<{ events: Event[] }>("/api/events"),
-        api<Status>("/api/status"),
-      ]);
-      setWorkspaces(workspaceData.workspaces || []);
-      setEvents(historyData.events || []);
-      setStatus(currentStatus);
+  const refresh = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (refreshingRef.current) return;
+      refreshingRef.current = true;
+      setRefreshing(true);
       try {
-        await loadRuns();
+        const [workspaceData, historyData, currentStatus] = await Promise.all([
+          api<{ workspaces: Workspace[] }>("/api/workspaces"),
+          api<{ events: Event[] }>("/api/events"),
+          api<Status>("/api/status"),
+        ]);
+        setWorkspaces(workspaceData.workspaces || []);
+        setEvents(historyData.events || []);
+        setStatus(currentStatus);
+        try {
+          await loadRuns();
+        } catch (error) {
+          if (!options?.silent) notify((error as Error).message);
+        }
+        setLastUpdated(Date.now());
       } catch (error) {
-        notify((error as Error).message);
+        if (!options?.silent) throw error;
+      } finally {
+        refreshingRef.current = false;
+        setRefreshing(false);
       }
-    } finally {
-      setRefreshing(false);
-    }
-  }, [loadRuns, notify]);
+    },
+    [loadRuns, notify],
+  );
+  const loadWorkspaceDetails = useCallback(async (workspaceId: string) => {
+    const [a, b] = await Promise.all([
+      api<{ handoffs: Handoff[] }>(`/api/workspaces/${workspaceId}/jobs`),
+      api<{ runs: Run[] }>(`/api/workspaces/${workspaceId}/runs`),
+    ]);
+    setHandoffs(a.handoffs || []);
+    setWorkspaceRuns(b.runs || []);
+  }, []);
   useEffect(() => {
     void (async () => {
       try {
@@ -828,6 +849,35 @@ export default function App() {
       }
     })();
   }, [refresh]);
+  useEffect(() => {
+    if (auth !== "ready" || !autoRefresh) return;
+    const tick = () => {
+      if (document.hidden || refreshingRef.current) return;
+      void (async () => {
+        try {
+          await refresh({ silent: true });
+          if (section === "handoffs" && selectedWorkspace) {
+            try {
+              await loadWorkspaceDetails(selectedWorkspace);
+            } catch {
+              /* keep stale handoffs until next tick */
+            }
+          }
+        } catch {
+          /* keep stale page data until next tick */
+        }
+      })();
+    };
+    const timer = window.setInterval(tick, autoRefreshMs);
+    const onVisible = () => {
+      if (!document.hidden) tick();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [auth, autoRefresh, refresh, section, selectedWorkspace, loadWorkspaceDetails]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoginError("");
@@ -906,12 +956,7 @@ export default function App() {
     setSelectedWorkspace(ws.id);
     navigate("handoffs");
     try {
-      const [a, b] = await Promise.all([
-        api<{ handoffs: Handoff[] }>(`/api/workspaces/${ws.id}/jobs`),
-        api<{ runs: Run[] }>(`/api/workspaces/${ws.id}/runs`),
-      ]);
-      setHandoffs(a.handoffs || []);
-      setWorkspaceRuns(b.runs || []);
+      await loadWorkspaceDetails(ws.id);
     } catch (error) {
       notify((error as Error).message);
     }
@@ -1171,15 +1216,33 @@ export default function App() {
               <h1>{page.title}</h1>
               <p>{page.description}</p>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-            >
-              <RefreshCw size={15} className={refreshing ? "spinning" : ""} />{" "}
-              Refresh
-            </Button>
+            <div className="page-title-actions">
+              <label className="auto-refresh-toggle">
+                <Switch
+                  aria-label="Auto-refresh data every 30 seconds"
+                  checked={autoRefresh}
+                  onCheckedChange={setAutoRefresh}
+                />
+                <span>Auto</span>
+              </label>
+              {lastUpdated && (
+                <span
+                  className="last-updated"
+                  title={new Date(lastUpdated).toLocaleString()}
+                >
+                  Updated {new Date(lastUpdated).toLocaleTimeString()}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refresh()}
+                disabled={refreshing}
+              >
+                <RefreshCw size={15} className={refreshing ? "spinning" : ""} />{" "}
+                Refresh
+              </Button>
+            </div>
           </div>
           {section === "overview" && (
             <div className="overview-page">
@@ -1935,6 +1998,15 @@ function RunInspector({
   useEffect(() => {
     if (run) void load(run.run_id);
   }, [run, load]);
+  const inspectRunId = run?.run_id;
+  useEffect(() => {
+    if (!inspectRunId) return;
+    const timer = window.setInterval(() => {
+      if (document.hidden || pullRefreshingRef.current) return;
+      void load(inspectRunId);
+    }, autoRefreshMs);
+    return () => window.clearInterval(timer);
+  }, [inspectRunId, load]);
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || !run) return;
