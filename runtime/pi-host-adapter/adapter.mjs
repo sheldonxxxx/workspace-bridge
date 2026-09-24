@@ -149,12 +149,18 @@ export function sanitizeMessages(raw, limit = 40) {
 export function sanitizeModels(raw) {
   if (!Array.isArray(raw)) throw new AdapterError("Pi model list was invalid", 502, "runtime_unavailable");
   const result = [];
+  const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   for (const row of raw.slice(0, MAX_MODELS)) {
     if (!row || typeof row !== "object") continue;
     const provider = bounded(row.provider, 120);
     const id = bounded(row.id, 200);
     if (!provider || !id) continue;
-    result.push({ provider, id, name: bounded(row.name, 200) || id });
+    const reasoningOptions = Array.isArray(row.reasoningOptions)
+      ? [...new Set(row.reasoningOptions.filter((level) =>
+        typeof level === "string" && levels.has(level)))].slice(0, 10)
+      : [];
+    result.push({ provider, id, name: bounded(row.name, 200) || id,
+      reasoningOptions });
   }
   return result;
 }
@@ -370,13 +376,6 @@ export class PiAdapter {
     return { policy, revision: computed, roots: resolved.roots, snapshot: resolved.snapshot };
   }
 
-  // Bounded native extension inventory for the isolated profile user npm
-  // packages (3C2). No host paths, agentDir, tokens, settings fields,
-  // file contents, or dependency lists ever leave this boundary.
-  listExtensions() {
-    return readExtensionInventory(this.agentDir);
-  }
-
   async createSession(directory, title = "", options = {}) {
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
@@ -430,6 +429,7 @@ export class PiAdapter {
     try {
       created = await this.createSessionFn({
         cwd,
+        ...(options.resumeFile ? { resumeFile: options.resumeFile } : {}),
         tools,
         excludeTools,
         extensionPaths,
@@ -443,6 +443,10 @@ export class PiAdapter {
     }
     const session = created && created.session ? created.session : null;
     const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : "";
+    if (options.expectedSessionId && sessionId !== options.expectedSessionId) {
+      try { session?.dispose?.(); } catch { /* best effort */ }
+      throw new AdapterError("Recovered Pi session identity changed", 502, "binding_mismatch");
+    }
     if (!session || !sessionId || this.sessions.has(sessionId)) {
       try {
         if (session && typeof session.dispose === "function") session.dispose();
@@ -452,6 +456,7 @@ export class PiAdapter {
     const fingerprint = enforcementFingerprint();
     const entry = {
       session,
+      sessionFile: created?.sessionManager?.getSessionFile?.() || "",
       cwd,
       title: bounded(title, TITLE_LIMIT),
       createdAt: Date.now(),
@@ -541,7 +546,7 @@ export class PiAdapter {
     return { isStreaming, messageCount, pendingMessageCount };
   }
 
-  async promptAsync(directory, sessionId, text, model = null) {
+  async promptAsync(directory, sessionId, text, model = null, thinkingLevel = null) {
     const entry = this._boundEntry(sessionId, directory);
     if (!entry) throw new AdapterError("Session not found", 404, "not_found");
     const message = bounded(text, 60000);
@@ -549,6 +554,15 @@ export class PiAdapter {
     const wanted = normalizeModelRef(model);
     try {
       if (wanted) await this._switchModel(entry.session, wanted);
+      if (thinkingLevel !== null && thinkingLevel !== undefined) {
+        const supported = entry.session.getAvailableThinkingLevels?.();
+        if (typeof thinkingLevel !== "string" || !Array.isArray(supported)
+            || !supported.includes(thinkingLevel)) {
+          throw new AdapterError("Unsupported thinking level for this model", 400,
+            "unsupported_reasoning");
+        }
+        entry.session.setThinkingLevel(thinkingLevel);
+      }
       await this._promptAccepted(entry.session, message);
     } catch (error) {
       throw this._asAdapterError(error);

@@ -37,7 +37,7 @@ function writablePolicy(overrides = {}) {
     version: 3,
     write_tools_enabled: true,
     tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
+    protected_patterns: [".git/**", ".env", ".env.*"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
     external_access: { default_mode: "deny", roots: [] },
@@ -72,7 +72,7 @@ test("canonical JSON matches the Bridge Python canonicalization", () => {
   assert.equal(canonicalJson(safeDefaultPolicy()),
     '{"allow_session_always":true,'
     + '"external_access":{"default_mode":"deny","roots":[]},'
-    + '"protected_patterns":[".git/**",".env",".env.*",".workspace-handoff/**"],'
+    + '"protected_patterns":[".git/**",".env",".env.*"],'
     + '"protected_template_exceptions":[".env.example",".env.sample",".env.template"],'
     + '"shell_mode":"deny",'
     + '"tools":{"edit":"ask","find":"allow","grep":"allow","ls":"allow","read":"allow","write":"ask"},'

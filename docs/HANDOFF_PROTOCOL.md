@@ -3,11 +3,13 @@
 ## Responsibilities
 
 ChatGPT owns understanding, technical decisions, scoped instructions, acceptance
-criteria and code review. The Pi agent implements and runs checks locally. The user
-manually carries instructions to the agent and pastes its response back into ChatGPT,
-or — when the local administrator enabled agent execution — ChatGPT starts one
-bounded run for the prepared handoff and reads the final result itself. Run state is
-tracked independently of handoff publication state.
+criteria and code review. The local agent implements and runs checks. After
+publishing or dispatching a handoff, ChatGPT reports the handoff path and next step
+directly to the user; it does not need to watch implementation. For manual dispatch,
+the user carries instructions to the agent and can paste its response back into
+ChatGPT for audit. When local agent execution is enabled, ChatGPT starts one bounded
+Runtime Protocol run and reads its result itself. Run state is tracked independently
+of handoff publication state.
 
 ## Publish
 
@@ -71,18 +73,18 @@ state is not a completion signal.
 ## Optional automated run
 
 When a workspace has agent execution enabled, `start_agent_run` requires a
-prepared handoff in the same workspace and accepts no free-form prompt or path. A run
-is bound to one Pi session under the canonical mapped workspace root and stores
-its exact model selector (the configured default when `model` is omitted, or an
-explicit admin-enabled selector per the project-lead skill model-choice rule;
-MCP cannot change the policy), lifecycle state, timestamps and notification status.
-`starting`, `running`, `waiting_permission` and `waiting_question` are active;
-`completed`, `blocked`, `failed`, `cancelled` and `orphaned` are terminal.
-`waiting_permission`/`waiting_question` are resumable and never imply failure.
+prepared handoff in the same workspace and accepts no free-form prompt or path. A
+run is bound to one Runtime Protocol conversation and stores its exact model
+selector (the configured default when `model` is omitted, or an explicit
+admin-enabled selector per the project-lead skill model-choice rule; MCP cannot
+change policy), lifecycle state, timestamps, and notification status. A run may be
+`starting`, `active`, or `terminal`; `waiting_interaction` is an active state, not
+an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
+`interrupted`, and `orphaned`.
 
-`once`/`always`/`reject` answer only a still-pending request bound to that exact
-workspace/run/session and resume the SAME session. `always` passes Pi’s own
-proposed pattern through unchanged and fails closed when it cannot be reviewed. The
-manager can stop an active session; abort is recorded as `cancelled` only after a
-positive result, otherwise the run stays explicit. A corrective iteration is a new
-handoff and a new run (`parent_run_id` is traceability only). See `MCP_TOOLS.md`.
+`respond_agent_interaction` resolves only a live request with its exact
+adapter-provided choice or validated form answers. The manager can request
+cancellation of a run bound to that conversation. A corrective iteration creates
+a new Bridge run and can reuse a completed conversation only after profile, model,
+workspace, handoff, and state checks pass. See `MCP_TOOLS.md` and
+`RUNTIME_PROTOCOL.md`.

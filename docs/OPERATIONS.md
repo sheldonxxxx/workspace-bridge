@@ -45,7 +45,7 @@ may still consume space after upgrading, even though new handoffs create none.
 
 Native startup remains foreground-only; no launchd/systemd or reverse proxy is installed.
 v0.8 adds Dockerfile/Compose with restart policy, health check, non-root UID/GID,
-private persistent state, explicit project binds and the native Pi host adapter
+private persistent state, explicit project binds, and private host runtime adapters
 (no Compose service, no published port). See DOCKER.md. Native listeners
 remain loopback-only by default; only explicit container startup binds 0.0.0.0 inside the
 container, with both Docker-published host ports restricted to 127.0.0.1.
@@ -53,125 +53,50 @@ Setting `WB_ADMIN_ALLOWED_HOSTS` widens only the admin listener to 0.0.0.0 with
 those `Host` values allowed (MCP unaffected); invalid values fail closed.
 The tunnel client stays on the host; no Docker socket is mounted into the bridge.
 
-The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. Pi execution is available only through the bounded, opt-in agent tools and the separate host runtime; the server never exposes a shell or arbitrary command tool.
+The optional `scripts/run_tunnel.py` helper only launches the official client when manually invoked. It is not imported or callable by the MCP server. Runtime execution is available only through bounded, opt-in Runtime Protocol tools and separate host adapters; the server never exposes a shell or arbitrary command tool.
 
-## Pi agent runs and restart recovery (v0.8)
+## Runtime Protocol runs and restart recovery
 
-Agent execution is enabled per workspace in the local manager (Agent execution,
-default off, independent from write scope). The manager shows runtime health/version,
-the Discord configured/not-configured state, the global model policy (enabled models
-plus the mandatory default, saved atomically in a "Manage models" modal; MCP cannot change it),
-linked runs
-(status, handoff/job, bridge run id, Pi session id, exact model, timestamps,
-notification status), a global Bridge-owned agent sessions table across all
-workspaces (newest first, bounded pagination, View/Stop on owned records only),
-a bounded escaped session transcript, and any pending
-permission/question requests with the exact Pi-proposed `always` scope. It can
-stop an active session and answer `once`/`always`/`reject`. None of these admin routes
-exist on the MCP listener.
+Agent execution is disabled per workspace until a local administrator enables the
+workspace, grants a configured runtime, assigns a security profile, and saves that
+runtime's model policy. Run and conversation views are local-admin-only; MCP
+cannot change grants, profiles, or model policy. The manager shows the owning
+runtime, Bridge run and conversation IDs, handoff, model, state, timestamps, and
+notification delivery. Run details show current interactions and bounded activity
+and execution records. Only live, adapter-provided choices can be submitted.
 
-On restart, the bridge reconciles: a persisted pending request stays `waiting` and is
-answerable; a run whose session still exists is kept running; a session that is gone
-becomes `orphaned`; and a final assistant message is only accepted as `completed` when
-the runtime positively shows a completed, non-error response. An interrupted worker is
-never assumed to have finished, and a transient adapter-unavailable result at startup
-(e.g. the bridge starts before the native Pi adapter is reachable) leaves the run
-active and retries until the runtime is reachable rather than orphaning it. Pending requests are
-re-verified against the recorded session so a positively missing session becomes an
-explicit orphan instead of an indefinitely answerable wait.
+On startup and during active runs, Bridge reconciles its durable records with the
+Runtime Protocol adapter snapshots. It rebinds only operations the adapter
+positively identifies as owned. It never replays a prompt or approval. If the
+adapter cannot confirm an operation, Bridge records an interrupted or orphaned
+outcome and marks any pending interactions stale. Transient adapter failures are
+reported as availability errors and do not cause a prompt retry.
 
-The installed Pi backend exposes no event stream, so a dedicated
-reconciliation loop owns authoritative state convergence while runs are
-active, sharing one run enumeration per sweep across checks but never
-merging their failure semantics:
+Pi and Codex adapters are private host processes using the same Runtime Protocol
+v1 contract. They bind to loopback, require `WB_RUNTIME_TOKEN`, and are configured
+in Bridge with `WB_RUNTIME_ADAPTERS`. Their native process logs are separate from
+Bridge logs. Set `WB_LOG_LEVEL` independently for Bridge and each adapter, and
+`WB_TUNNEL_LOG_LEVEL` for the tunnel sidecar. Never enable raw HTTP tunnel logging
+(`LOG_HTTP_RAW_UNSAFE`): it may expose sensitive headers or bodies.
 
-- Permissions: exact-session pending snapshot every ~4s for
-  `starting`/`running` runs, capability-gated to adapters that advertise
-  the permission surface. A successful empty snapshot is not a failure;
-  a persisted request is never resolved merely because it disappeared
-  from a snapshot.
-- Completion: durable bounded session messages after the run floor every
-  ~7s (`starting`/`running` only, prompt acceptance proven, no pending
-  request). The latest in-scope completed non-error assistant message is
-  the only completion evidence; session status/idle never gate or prove it.
-- Questions: snapshot resync applies only to backends advertising question
-detection; the installed Pi backend does not, so question resync stays
-silent there. No TUI scraping, internal state reads, private endpoints,
-text inference, or ownership guessing exist.
+The `/health` endpoint is a minimal lock and readiness check; the authenticated
+`/v1/descriptor` reports protocol and adapter capabilities. Unsupported features
+fail closed. `workspace-bridge doctor` reports local adapter configuration and
+model policy without contacting the host. Runtime Protocol run notifications use
+Bridge-owned event and delivery tables; channel failures do not change run state.
+The `read_agent_run` `notifications` object shows bounded event summaries and
+per-channel delivery status.
 
-Each sweep covers at most 50 distinct sessions, issues no work when no
-relevant active run exists, and stops polling terminal runs immediately.
-Expected worst-case detection latency is ~4s (poll tick) + 4s/7s cadence
-plus one bounded adapter round trip. `read_agent_run` keeps an
-immediate permission resync, question resync and completion self-heal
-(`reason=read_reconcile`); sweeps complete with
-`reason=background_reconcile`. Waiting permission/question runs and
-pre-continuation history never complete a run, and completion notifies
-exactly once under repeated reads, sweeps and duplicate events.
+## Pi runtime profile
 
-Operational logging uses shared `DEBUG`/`INFO`/`WARNING`/`ERROR` semantics (INFO default)
-across the Docker Bridge and the native Pi adapter, plus the tunnel sidecar's own
-`debug`/`info`/`warn` vocabulary (`WB_TUNNEL_LOG_LEVEL`, default `info`, JSON format);
-see DOCKER.md for the three-process level matrix, production recommendation (`INFO` normal,
-`DEBUG` temporary troubleshooting, `WARNING`/`ERROR` alert candidates), and retention
-(Bridge and tunnel Docker logs rotate 10m x3 via Compose; native launchd
-`StandardOutPath`/`StandardErrorPath` files have no project-managed rotation).
-Set `WB_LOG_LEVEL` independently for each Bridge/adapter deployment environment and
-`WB_TUNNEL_LOG_LEVEL` for the sidecar. Never enable raw HTTP tunnel logging
-(`LOG_HTTP_RAW_UNSAFE`): it may expose sensitive headers/bodies.
-
-Runtime health is capability-based, not transport-based: `/health` reports
-which surfaces the connected adapter actually serves (permission snapshot
-and reply, execution history, extension inventory; counters and timestamps
-only, never contents). Unsupported surfaces fail closed as
-`runtime_unsupported` without any network call. This diagnostic never blocks
-runs because polling is authoritative; degraded /
-recovered transitions log once at WARNING / INFO (DEBUG aggregate counts
-only). If the adapter is still starting, background loops back off safely
-(DEBUG inside the first 30s, throttled WARNINGs after) and recover
-automatically.
-
-The private adapter is **locked until `WB_RUNTIME_TOKEN` is set**: with an empty token
-every operational endpoint returns 401 and the bridge fails closed. `/health` reports
-`locked`/`token_configured` without revealing the token. Agent execution therefore
-stays unavailable until both the per-workspace policy and the token are deliberately
-configured. Discord notifications (if `WB_DISCORD_WEBHOOK_URL` is set) are sent on
-waiting/completed/blocked/failed/cancelled with safe metadata only; delivery failures
-are bounded and never change run state. The persisted `notification` record carries
-only `status`/`attempts`/`code` plus an optional short non-secret `detail` parsed
-from Discord JSON error bodies (HTML/proxy pages are never stored). Post-deploy live
-smoke (user-triggered only, never in automated tests): with a webhook configured,
-start a real run and let it reach a notified state (for example completion), then
-read the run's `notification` field in the manager or via `read_agent_run`;
-`sent` confirms delivery and `failed` with `http_403` points at webhook/egress
-filtering, not the bridge payload. `workspace-bridge doctor` reports runtime
-configuration and the model policy status without contacting the host server.
-
-## Pi file permissions (3B1)
-
-Pi runs natively with your macOS user authority: the permission layer is
-pre-tool policy/approval, not a sandbox. By default Pi sessions are
-read-only (`read,grep,find,ls`; no trusted extension loaded). The local
-manager ("Manage permissions" on the Pi runtime card) can enable writable
-tools (`edit`/`write`) with per-tool Allow/Ask/Deny, workspace-relative
-protected glob patterns (hard deny, never approvable) with template
-exceptions, and an "Always allow exact target" session toggle.
-
-Safe defaults are read-only; restoring them is an explicit save, never a
-hidden mutation. Every change is validated strictly (invalid input never
-partially applies), logged as an activity event without policy contents,
-and applies to NEW Pi sessions only: each session carries an immutable
-policy snapshot plus revision, and continuation across a policy change is
-refused fail-closed (start a fresh session). An `ask` suspends the exact
-tool invocation and resumes it on `once`/`always`/`reject` through the
-existing neutral permission flow; `always` is exact-resource and
-session-local, never persisted. The adapter (`adapter_version >= 0.2.0`,
-`capabilities` in `/health`) re-validates the snapshot, confines every
-path canonically to the mapped workspace (symlink escapes denied), and
-self-protects the permission implementation from edit/write. No bash, no
-project/global extension discovery, no raw args/paths in pending records.
-Do not restart live services from an implementation job; the project lead
-deploys after audit.
+Pi runs natively with the host user's authority, so its security profile is
+pre-tool policy rather than an OS sandbox. Profiles control supported file tools,
+external paths, protected paths, shell behavior, and session grants through the
+Pi host adapter's trusted permission extension. A profile revision is immutable
+for each conversation; changes take effect in new conversations. Review each
+profile's scope in the local manager before assigning it. Codex uses a separate
+native sandbox and approval policy; the two runtimes' profile claims are not
+equivalent.
 
 ## Writable handoff notes
 

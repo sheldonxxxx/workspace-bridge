@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "2.2.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "2.5.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -91,7 +91,7 @@ def test_skill_defaults_silent_dispatch_to_pi():
     content = read_project_lead_skill()["content"]
     assert "a silent user \u2192 Pi" in content
     for tool in ("list_agent_models", "start_agent_run", "read_agent_run",
-                 "respond_agent_permission", "list_agent_executions"):
+                 "respond_agent_interaction", "list_agent_executions"):
         assert tool in content, tool
     assert "silent/default runtime is Pi" in INSTRUCTIONS or \
         "silent user choice means runtime pi" in INSTRUCTIONS

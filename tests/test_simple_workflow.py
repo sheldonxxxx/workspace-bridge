@@ -16,10 +16,13 @@ EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
             'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',
-            'read_agent_run', 'read_agent_request', 'respond_agent_permission',
-            'cancel_agent_run', 'list_agent_executions', 'read_agent_execution'}
+            'read_agent_run',
+            'cancel_agent_run', 'list_agent_executions', 'read_agent_execution',
+            'read_agent_interaction', 'respond_agent_interaction',
+            'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff'}
 MUTATING = {'prepare_handoff', 'write_file', 'edit_file',
-            'start_agent_run', 'respond_agent_permission', 'cancel_agent_run'}
+            'start_agent_run', 'cancel_agent_run',
+            'respond_agent_interaction'}
 
 
 def publish(env, payload):
@@ -161,12 +164,12 @@ async def test_manager_only_offers_planning_documents(env, payload):
     token = (env['state']/'admin-token').read_text().strip()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_admin(env['service'],env['config']['admin_token_hash'])),
                                 base_url='http://127.0.0.1:8766', headers={'Authorization':'Bearer '+token}) as c:
-        js = (await c.get('/static/app.js')).text
+        js = (__import__('pathlib').Path(__file__).resolve().parents[1] / 'web' / 'src' / 'App.tsx').read_text()
         html = (await c.get('/')).text
         assert 'Agent result' not in js and 'Reported tests' not in js
         assert 'saved baseline' not in html
-        assert '"Context", "CONTEXT.md"' in js
-        assert 'j.state === "prepared"' in js
+        assert '"CONTEXT.md"' in js
+        assert 'h.state === "prepared"' in js
         for doc in ['TASK.md','CONTEXT.md','ACCEPTANCE.md']:
             r = await c.get('/api/workspaces/'+env['id']+'/document',params={'job_id':job['id'],'document':doc})
             assert r.status_code == 200

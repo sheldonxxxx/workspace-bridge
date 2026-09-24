@@ -66,7 +66,7 @@ test("in-process lifecycle over the fake SDK transport", async () => {
   assert.equal(assistant.completed, 1758398400001);
 
   const models = await adapter.listModels(cwd);
-  assert.deepEqual(models, [{ provider: "fake-provider", id: "fake-model", name: "Fake Model" }]);
+  assert.deepEqual(models, [{ provider: "fake-provider", id: "fake-model", name: "Fake Model", reasoningOptions: [] }]);
 
   assert.equal(await adapter.abortSession(cwd, session.id), true);
   assert.equal(sdkSession.abortCalls, 1);

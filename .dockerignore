@@ -7,6 +7,10 @@
 !LICENSE
 !workspace_bridge/
 !workspace_bridge/**
+!web/
+!web/**
+web/node_modules/
+web/dist/
 workspace_bridge/**/__pycache__/
 workspace_bridge/**/*.pyc
 workspace_bridge/**/.env*

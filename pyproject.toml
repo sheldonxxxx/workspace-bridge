@@ -15,12 +15,13 @@ test = ["pytest>=8,<10", "httpx>=0.28,<1", "pytest-asyncio>=1,<2", "PyYAML>=6,<7
 
 [project.scripts]
 workspace-bridge = "workspace_bridge.cli:main"
+workspace-bridge-codex-adapter = "workspace_bridge.codex_host_adapter:main"
 
 [tool.setuptools.packages.find]
 include = ["workspace_bridge*"]
 
 [tool.setuptools.package-data]
-workspace_bridge = ["static/*", "skills/*/SKILL.md"]
+workspace_bridge = ["static/dist/*", "static/dist/assets/*", "skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

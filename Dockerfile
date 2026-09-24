@@ -1,6 +1,13 @@
 # syntax=docker/dockerfile:1
 # Override with a reviewed digest for reproducible deployments.
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm
+FROM node:24-bookworm-slim AS web-builder
+WORKDIR /source/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
@@ -15,13 +22,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python -m pip install "setuptools>=77"
 COPY README.md LICENSE ./
 COPY workspace_bridge/ ./workspace_bridge/
+COPY --from=web-builder /source/workspace_bridge/static/dist/ ./workspace_bridge/static/dist/
 RUN python -m pip wheel --no-deps --no-build-isolation --wheel-dir /wheels .
 
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 WB_STATE_DIR=/state HOME=/tmp
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels workspace-bridge==0.8.4 \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir --no-index --find-links=/wheels workspace-bridge==0.8.4 \
     && rm -rf /wheels \
     && groupadd --gid 10001 bridge \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp bridge \

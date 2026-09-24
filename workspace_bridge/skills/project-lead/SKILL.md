@@ -1,7 +1,7 @@
 ---
 name: project-lead
-description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, resumable permission decisions, execution-evidence audit, and current-source review; use general file tools within administrator-controlled write and agent policies.
-version: 2.2.0
+description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, runtime interaction review, activity evidence, and current-source audit; use general file tools within administrator-controlled write and agent policies.
+version: 2.5.0
 ---
 
 # Project lead
@@ -70,82 +70,53 @@ that runtime's default; an explicit ENABLED request → may use it; a category
 ("free/cheap") → may match a clearly satisfying enabled model, stating the
 selector; a self-initiated non-default → ask first; never silently switch after
 failure or quota; never use a disabled model. Reuse the session when
-a small corrective follow-up shares workspace, runtime, model, task and
-permission scope: prefer `start_agent_run(... continue_from_run_id=<completed run>)`,
-a new Bridge run inheriting session context including session-scoped approvals.
-A runtime change always requires a fresh session. Use a fresh session when the
-model changes, the prior run did not complete, the permission scope changes,
-clean context is requested, or validation fails; a requested continuation never
-silently becomes a fresh session.
+a small corrective follow-up shares workspace, runtime, model, task and security
+profile: prefer `start_agent_run(... continue_from_run_id=<succeeded run>)`,
+which creates a new Bridge run in the same conversation. A runtime change always
+requires a fresh conversation. Use a fresh conversation when the model or security
+profile changes, the prior run did not succeed, clean context is requested, or
+validation fails; a requested continuation never silently becomes a fresh run.
 
 Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks. Never weaken tests or invent
 success. It replies with a summary, affected paths, actual check commands/outcomes,
 failures or unrun checks, and risks/blockers. No special report files or JSON schema.
 
-## Permission loop
-`external_directory` and similar actions may be an `ask`, not a denial. A run in
-`waiting_permission` is a resumable, non-terminal wait; it does not end the session.
-Read the pending request with `read_agent_run`/`read_agent_request`: kind,
-action/tool, requested resource, metadata, and the exact proposed approval
-pattern. When the user asks you to decide, call
-`respond_agent_permission` with `once`, `always`, or `reject`.
-- `once` approves only this request; `always` approves the runtime's exact proposed
-  pattern and must never be broadened; `reject` refuses. A policy denial is not
-  remotely approvable. Runtimes without permission support fail closed.
-  Pi permissions are web-admin configured (writable-tool switch,
-  allow/ask/deny per file tool, protected patterns, session-always
-  toggle, external scope: default outside-workspace mode plus absolute
-  host root overrides, safe default deny; shell execution Deny/Ask/Allow
-  over the Pi built-in bash tool only, no powershell, no command rules,
-  default deny). Each Pi session carries an immutable policy snapshot
-  plus revision, so a change applies to NEW sessions only and
-  continuation across a change is refused. The trusted extension loads in
-  every managed session, so read/search/list policy holds even in
-  read-only mode; the switches only expose edit/write/bash. A file ask
-  suspends the exact call; `always` is exact-resource (canonical absolute
-  target outside the workspace) and session-local. A shell ask shows the
-  exact bounded command + verified timeout; once approves the exact call,
-  always stays session-local and exact-command scoped, reject blocks it.
-  Shell Allow runs with native macOS-user authority and can bypass
-  structured file scope. Pi has no sandbox claim: it runs natively with
-  the user's macOS authority. There are no fixed project-specific denies;
-  enforcement is identified by fingerprint, not by blocking normal edits.
-- Review `always` against the handoff and the user's intent. Surface ambiguous,
-  overly broad or sensitive scopes instead of guessing; if no scope is available,
-  `always` fails closed.
-A successful approval resumes the SAME session; permissions are not an OS sandbox.
-Session reuse inherits session-scoped approvals: continue only with unchanged
-permission scope, else start fresh.
+## Report after handoff
+Once an agent has received the handoff—or a manual handoff is ready for the user
+to dispatch—report directly to the user and return control. For manual dispatch,
+include the actual `copy_prompt` and absolute handoff path. For an automated run,
+include its run ID and initial status. Do not wait for, poll, or watch the agent's
+implementation. Resume when the user asks to continue or review, or provides the
+agent's response; then follow the interaction and audit instructions below.
+
+## Runtime Protocol v1 interaction and activity loop
+
+When `read_agent_run` returns `phase`, `waiting_interaction` means the run is
+active. Inspect pending choices with `read_agent_interaction`; submit an exact
+choice ID or form answer through `respond_agent_interaction` only with user
+authorization. A profile change requires a fresh conversation. Use
+`list_agent_executions` and `read_agent_execution` for the bounded execution
+view. Use `list_agent_activities` and `read_agent_activity` for the full activity
+timeline, then independently inspect current source and tests.
 
 ## Audit using normal tools
 Treat the run result and any manual reply as claims and inspection guides, not proof.
-Read the original plan with `read_handoff`, then the final result with
-`read_agent_run`. Inspect current implementation, callers, configuration and tests
-with general tools. Check every acceptance criterion and plausible regressions beyond
-the claimed file list.
+Read the plan with `read_handoff` and the result with `read_agent_run`. Inspect
+current implementation, callers, configuration and tests with general tools; check
+acceptance criteria and plausible regressions.
 
-### Execution-evidence review (completed Pi coding runs, skill 2.2.0)
-Bridge proves what Pi invoked/reported, not that a test result is
-semantically correct. For completed Pi runs:
-- inspect `execution_audit` in `read_agent_run` first (status, counts
-  total/failed/shell/mutating, incomplete/gap indicator, enforcement
-  fingerprint, active extension snapshot: extension revision plus the
-  id/name/version/fingerprint rows of every enabled package);
-- list executions with `list_agent_executions`;
-- read every failed execution and every material bash/edit/write detail
-  with `read_agent_execution` before accepting the agent's claims;
-- material extension-tool executions are part of execution-evidence
-  review: their bounded generic input selectors and ~8 KiB result
-  previews are audit evidence, labeled potentially sensitive in detail
-  views; list views never carry result bodies;
-- extension packages are trusted native code, not constrained by
-  structured file/shell policy: an enabled extension tool executing
-  without a permission ask is expected, not a policy bypass;
-- still inspect current source/tests independently with general tools.
-If audit is incomplete, say so explicitly (status + reason) and treat
-claims as unaudited for the missing span. If audit is not_recorded
-(historical/legacy), say so and rely on source inspection alone.
+Treat `read_agent_run.notifications` and any channel message as delivery evidence
+only. They do not establish the run outcome. The summary is runtime-neutral and
+may show partial or failed channel delivery while the run itself succeeded.
+
+Review activities and `git_status`; use targeted `git_diff` with the status hash,
+then read current source/tests. Dirty edits may predate runs; Git proves no authorship.
+
+Execution records are projections of Runtime Protocol activity snapshots.
+Review them as bounded evidence about the adapter's reported actions, then inspect
+current source and tests independently. They do not prove test correctness or
+complete history when the adapter did not report an activity.
 
 Explain findings with severity, file/line evidence and required corrections. Separate
 observed code from agent-reported tests. Live reads are not a baseline. Do not infer

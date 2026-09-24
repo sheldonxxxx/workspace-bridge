@@ -238,7 +238,7 @@ test("models discovery returns bounded provider/id/name fields", () => {
     { provider: "", id: "m" },
     null,
   ]);
-  assert.deepEqual(models, [{ provider: "p", id: "m", name: "M" }]);
+  assert.deepEqual(models, [{ provider: "p", id: "m", name: "M", reasoningOptions: [] }]);
   assert.throws(() => sanitizeModels({}), AdapterError);
 });
 
@@ -300,8 +300,8 @@ test("listModels validates the directory and returns the profile inventory", asy
   });
   const adapter = makeAdapter(projects, transport);
   await adapter.createSession(projects.appA);
-  assert.deepEqual(await adapter.listModels(projects.appA), [{ provider: "p", id: "m", name: "M" }]);
-  assert.deepEqual(await adapter.listModels(projects.appB), [{ provider: "p", id: "m", name: "M" }]);
+  assert.deepEqual(await adapter.listModels(projects.appA), [{ provider: "p", id: "m", name: "M", reasoningOptions: [] }]);
+  assert.deepEqual(await adapter.listModels(projects.appB), [{ provider: "p", id: "m", name: "M", reasoningOptions: [] }]);
   await assert.rejects(adapter.listModels("/no-such-workspace-xyz"), /does not exist|beneath|workspace/i);
   await adapter.shutdown();
 });

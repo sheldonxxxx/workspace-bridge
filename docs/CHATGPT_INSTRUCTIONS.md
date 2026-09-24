@@ -1,7 +1,7 @@
 # Operating instructions — v0.8.4
 
 Read `read_project_lead_skill()` before leading a task and reload after context loss.
-The packaged SKILL.md (2.2.0) is the canonical workflow, not project-provided text.
+The packaged SKILL.md (2.5.0) is the canonical workflow, not project-provided text.
 
 Select the intended workspace explicitly. General `read_file`, `list_dir`, `glob`
 and `grep_files` read permitted source and explicitly selected handoff paths.
@@ -30,19 +30,20 @@ category; a self-initiated change needs prior user approval; never silently
 switch after failure). Never invent or broaden a selector, never pass a
 free-form prompt/path, and treat `agent_execution=disabled` or
 `model_policy_unconfigured` as fail
-closed. A corrective iteration reuses the session when a safe continuation
+closed. After dispatch, report the handoff path/copy prompt and, for an
+automated run, its run ID and initial status directly to the user. Do not poll or
+watch implementation; resume when the user asks to continue/review or shares the
+agent reply. A corrective iteration reuses the session when a safe continuation
 path exists and task/model/scope match; otherwise it is a new handoff and run.
 
-When a run reaches `waiting_permission`, read the pending request with
-`read_agent_run`/`read_agent_request` and check its action and runtime-proposed
-scope against the handoff and the user's intent. When the user asks you to act, call
-`respond_agent_permission` with `once`, `always` or `reject`; a successful
-`once`/`always` resumes the SAME session. Treat `always` as the broader choice: show
-the exact proposed pattern first and surface ambiguous, overly broad or sensitive
-scopes instead of guessing. `always` fails closed when no scope is reviewable. An
-explicit runtime `deny` is not approvable. After completion, read the final result
-with `read_agent_run` and audit current code. The agent's test report is never
-independent proof; this server does not run tests.
+When a run reaches `waiting_interaction`, inspect the exact pending request with
+`read_agent_run`/`read_agent_interaction` and compare its choices or fields against
+the handoff and user's intent. Submit its exact adapter-provided choice or validated
+form answers with `respond_agent_interaction` only when the user has authorized
+that response. A successful response resumes the same conversation. Treat grants
+as security-sensitive and show their exact scope before acting. After completion,
+read the final result with `read_agent_run` and audit current code. The agent's test
+report is never independent proof; this server does not run tests.
 
 No callbacks, required report files, snapshots, review IDs, stored verdicts or
 independent test execution are available.

@@ -1,6 +1,6 @@
 # MCP tool reference — v0.8.4
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twenty-one tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twenty-seven tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 `workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
 
@@ -171,22 +171,75 @@ have legacy states. Neither tool requires or ingests agent report files.
 The former `review_changes`, `read_change` and `record_audit` are removed. Cached
 calls fail as unknown tools. Tool discovery is authoritative for exact schemas.
 
-## Agent run tools (runtime-neutral)
+## Read-only Git evidence
+
+```text
+git_status(workspace_id, offset=0, limit=50, expected_status_sha256=null)
+git_diff(workspace_id, mode=head|worktree|staged, path=null, offset=0,
+         max_bytes=3000, expected_status_sha256=null)
+```
+
+These tools inspect only a repository with a real `.git` directory directly under
+the mapped workspace. A non-Git workspace returns `available=false`; `.git` files,
+linked worktrees, bare repositories, symlinked or unsafe metadata fail closed.
+`git_status` returns the branch, HEAD, local upstream counts when available,
+policy-allowed changed paths, conflict stages, pagination, and a filtered
+`status_sha256`. Excluded or sensitive paths contribute only to `hidden_count`.
+The opaque hash is process-local; fetch fresh status after a Bridge restart.
+
+`git_diff` compares HEAD to the worktree (`head`), index to worktree (`worktree`),
+or HEAD to index (`staged`). It accepts only a fixed mode and an optional exact
+changed path; untracked paths have status entries but no patch. It has no arbitrary
+Git command, ref, or option surface. External diff/textconv and pagers are disabled,
+submodules are not traversed, patch secrets are redacted, and output is byte-paginated.
+Pass the latest status hash to either tool to reject stale review evidence. A status
+or diff is live observation only: it creates no snapshot and establishes no
+authorship. Dirty-tree changes may predate the current run. Continue with targeted
+current-source reads and runtime activity evidence.
+
+## Agent run tools (Runtime Protocol v1)
 
 ```text
 list_agent_models(workspace_id, runtime, query="", limit=25)
 start_agent_run(workspace_id, runtime, job_id, request_id, model=null, parent_run_id=null, continue_from_run_id=null)
 list_agent_runs(workspace_id, runtime=null, offset=0, limit=20)
 read_agent_run(workspace_id, run_id)
-read_agent_request(workspace_id, run_id, request_id)
-respond_agent_permission(workspace_id, run_id, request_id, decision)
 cancel_agent_run(workspace_id, run_id)
 list_agent_executions(workspace_id, run_id, offset=0, limit=50)
 read_agent_execution(workspace_id, run_id, execution_id)
+read_agent_interaction(workspace_id, run_id, interaction_id)
+respond_agent_interaction(workspace_id, run_id, interaction_id, response)
+list_agent_activities(workspace_id, run_id, offset=0, limit=50)
+read_agent_activity(workspace_id, run_id, activity_id)
 ```
 
+`start_agent_run` accepts only a prepared handoff in the selected workspace. It
+does not accept a free-form prompt or path. The runtime must be configured, agent
+execution enabled for the workspace, and the exact model enabled by local admin
+policy. An exact retry with the same request ID returns the existing run; reusing
+that ID for a different request is rejected. A continuation creates a new Bridge
+run in a completed run's conversation and fails closed if the runtime, model,
+handoff, profile revision, or conversation state does not match.
+
+`read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
+sanitized error, notification delivery summary, and pending `interactions`.
+Use `read_agent_interaction` to inspect the exact live request and supported
+choices. Submit the adapter's opaque choice ID unchanged with
+`respond_agent_interaction` only when the user has authorized that response; the
+Bridge rechecks that the interaction remains live before forwarding it. Form
+interactions accept only validated answers. A stale interaction fails closed.
+Activities and executions are bounded adapter evidence and do not independently
+verify the agent's final claim.
+
+`read_agent_run` also returns `notifications`: up to 20
+recent semantic event summaries, per-channel delivery status/attempts and an
+overall `sent`, `partial`, `failed`, `pending`, `disabled` or `none` state.
+Run listings stay compact. `/api/status` reports configured channel ids and
+readiness without endpoints or credentials. Notification status is delivery
+evidence only and never establishes run success.
+
 `list_agent_models` reads one runtime's model list for an explicit `runtime`
-(`pi` or another configured runtime; unknown runtimes fail
+(for example `pi` or `codex`; unknown runtimes fail
 `unknown_runtime`) and returns exact canonical selectors annotated with their
 runtime-global policy status (`enabled`, `policy_default`), plus runtime,
 discovery scope and policy scope. A `query` filters or ranks candidates; it
@@ -198,38 +251,29 @@ against the admin-enabled allowlist plus default: omitting `model` uses the
 selected runtime's configured default, while an explicit `model` is allowed only
 when its exact selector is enabled and currently available
 (`model_not_enabled`/`model_unavailable` otherwise; MCP cannot change the
-policy). It is idempotent per `request_id` within the selected runtime only and
-never replays another runtime's run. It accepts no free-form prompt or path and
-returns promptly with `run_id`, `session_id` and the exact model. For a small
-corrective follow-up with unchanged task, workspace, runtime, model and
-permission scope, `continue_from_run_id` reuses a completed run's session of the
-SAME runtime as a NEW Bridge run for the new handoff (implies `parent_run_id`;
-exposes `session_reused=true`). Continuation fails closed without silently
-starting a fresh session and never sends into a busy session. Reusing a session
-inherits its context, including session-scoped `always` approvals, so
-continuation requires an unchanged intended permission scope; a runtime change
-always requires a fresh session. Each run owns only messages after its durable
-boundary; results and transcripts are iteration-scoped and older runs never show
-a later continuation's messages. A silent runtime choice means Pi; an explicit
-user runtime request always wins and is never silently switched after failure or
-quota.
+policy). The local administrator may save an optional thinking or reasoning
+default for each model; runs use that effort when configured and otherwise
+retain the runtime's own default. MCP cannot override it. It is idempotent per
+`request_id` and
+never replays a run from a different runtime. It accepts no free-form prompt or
+path and returns `run_id`, `conversation_id`, and the exact model. For a small
+corrective follow-up with unchanged task, workspace, runtime, model, and profile,
+`continue_from_run_id` reuses a completed run's conversation as a new Bridge run
+(implies `parent_run_id`). Continuation fails closed without silently starting a
+fresh conversation and never sends into a busy conversation. Each run owns only
+the activities and results recorded for that iteration. The caller must select
+the runtime explicitly; Bridge does not silently switch runtimes after failure.
 
 `list_agent_runs` lists this workspace's runs across runtimes (newest first) with
-state, runtime, model, session id and timestamps; pass `runtime` to filter to one
-known runtime. `read_agent_run` exposes persisted run state, bounded final
-result, sanitized error and any pending requests. `read_agent_request` shows the
-pending request kind, action/tool, resource, sanitized metadata, and the
-runtime's exact proposed `always` scope plus `always_allowed`.
-`respond_agent_permission` accepts `once`, `always` or `reject` only for a
-still-pending request bound to that exact workspace/run/session; a successful
-`once`/`always` resumes the same session. `always` passes through the
-runtime-proposed pattern unchanged and fails closed when no scope is reviewable
-or the runtime has no permission support. `cancel_agent_run` aborts only the
-recorded session and records `cancelled` only after positive confirmation; an
-ambiguous abort leaves the run explicit and unchanged. `list_agent_executions` /
+phase, active state, outcome, runtime, model, conversation id, and timestamps;
+pass `runtime` to filter to one configured runtime. `cancel_agent_run` requests
+cancellation of only the bound conversation and records the result from the
+adapter snapshot. `list_agent_executions` /
 `read_agent_execution` expose persisted tool-execution evidence (bounded
 summaries and sanitized input/result previews; no output bodies, reasoning, or
-secrets).
+secrets). They project command, file-change, tool-call, search, and subagent
+activities; these are adapter snapshots rather than an independent completeness
+audit.
 
 The run's `runtime` field identifies the owning backend.
 

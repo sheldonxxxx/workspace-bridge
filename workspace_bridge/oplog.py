@@ -3,17 +3,11 @@
 One-line JSON records for Docker json-file logs. No logging dependency beyond
 the standard library.
 
-Shared level semantics (Python Bridge and native Pi adapter):
-- DEBUG: high-frequency/repeated internals, polls/resyncs/probes, normal SDK
-  tool-event tracing. Temporary troubleshooting only.
-- INFO: healthy/expected lifecycle transitions (service ready, run/session
-  created, dispatch started, permission state transitions, successful
-  completion/recovery). Normal production level.
-- WARNING: recoverable degradation, policy/input rejection worth operator
-  attention, event-stream/runtime unavailability after grace, dispatch
-  refusal, orphaning, SDK dispatch stall/journal anomaly. Alert candidates.
-- ERROR: unexpected internal/runtime exception or unsafe startup condition
-  requiring operator action. Alert candidates.
+Shared level semantics (Python Bridge and native adapters):
+- DEBUG: high-frequency troubleshooting details.
+- INFO: service readiness and expected lifecycle transitions.
+- WARNING: recoverable degradation or input rejection needing attention.
+- ERROR: unexpected exceptions or unsafe startup conditions.
 Supported levels are DEBUG/INFO/WARNING/ERROR with INFO default.
 
 Security boundary: only explicit allowlisted scalar fields are ever emitted.
@@ -41,38 +35,14 @@ COMPONENT = "bridge"
 
 # Stable event names emitted by the bridge process.
 EVENTS = frozenset({
-    "bridge_ready",
-    "run_created",
-    "dispatch_started",
-    "dispatch_failed",
-    "boundary_reject",
-    "request_error",
-    "run_state",
-    "permission_asked",
-    "permission_replied",
-    "permission_resync",
-    "question_resync",
-    "completion_probe",
-    "completion_reconcile",
-    "event_stream_health",
-    "event_pump_error",
-    "event_rejected",
-    "reconcile_start",
-    "reconcile_result",
-    "startup_reconcile",
-    "process_error",
+    "bridge_ready", "boundary_reject", "request_error", "process_error",
 })
 
 # Bounded scalar fields only. IDs/state names/counts/durations/sanitized
 # codes and boolean health flags are acceptable; everything else is dropped.
 ALLOWED_FIELDS = frozenset({
-    "run_id", "session_id", "job_id", "workspace_id", "request_id",
-    "state", "reason", "code", "status", "action", "source", "decision",
-    "generation",
-    "matched", "count", "examined", "duration_ms", "transitions",
-    "consecutive_failures", "version", "adapter_version", "runtime_configured",
-    "server_configured", "locked", "workspace_count", "enabled_count",
-    "model", "session_reused", "message_count", "pending_count",
+    "workspace_id", "reason", "code", "action", "source", "version",
+    "runtime_configured", "workspace_count", "enabled_count",
 })
 
 _MAX_STR = 200

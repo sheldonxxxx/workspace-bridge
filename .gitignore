@@ -6,6 +6,8 @@ node_modules/
 *.egg-info/
 build/
 dist/
+!workspace_bridge/static/dist/
+!workspace_bridge/static/dist/**
 .env*
 *.sqlite3*
 admin-token
@@ -18,3 +20,4 @@ compose.override.yaml
 tunnel-client.yaml
 
 compose-prod.yaml
+tunnel.env

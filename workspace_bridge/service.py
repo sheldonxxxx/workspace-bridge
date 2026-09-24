@@ -11,10 +11,12 @@ from .browse import Browser
 from .media import (ImageReadResult, DEFAULT_DIMENSION, SUPPORTED_SUFFIXES,
                     image_capabilities, read_image, selected_read_limit, sniff_image)
 from .embedded_skill import SKILL_TOOL, read_project_lead_skill, skill_hint
-from .notifications import Notifier
-from .orchestration import AgentOrchestrator, REQUEST_COLUMNS
-from .registry import RuntimeRegistry
-from .runtime import PI_RUNTIME_ID, AgentRuntime
+from .notifications import (NotificationChannel, NotificationManager,
+                            notification_channels_from_environment,
+                            notification_manager_from_environment)
+from .run_coordinator import RunCoordinator
+from .wbrp import HttpRuntimeAdapter
+from .git_evidence import GitEvidence
 from .security import (BridgeError, SafeRoot, HANDOFF, MAX_FILE,
                        MAX_OUTPUT, MAX_WRITE, WRITE_SCOPES, allowed, handoff_allowed, file_text, digest, redact, require_write_path)
 
@@ -35,63 +37,23 @@ def within(child: Path, parent: Path) -> bool:
     return child == parent or parent in child.parents
 
 
-def _bounded_extension_snapshot(raw) -> list[dict]:
-    """Bounded active-extension rows for persisted run views (no paths)."""
-    try:
-        parsed = json.loads(raw) if isinstance(raw, str) else []
-    except ValueError:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    rows = []
-    for row in parsed[:64]:
-        if not isinstance(row, dict) or not row.get("id"):
-            continue
-        rows.append({
-            "id": str(row.get("id"))[:218],
-            "name": str(row.get("name") or "")[:214],
-            "version": str(row.get("version") or "")[:80],
-            "fingerprint": str(row.get("fingerprint") or "")[:64],
-        })
-    return rows
-
-
 HANDOFF_DOCUMENTS = ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md")
 JOB_COLUMNS = "id,workspace,request_id,request_hash,title,state,created,documents"
 NEUTRAL_AGENT_TOOLS = frozenset({
     "list_agent_models", "start_agent_run", "list_agent_runs",
-    "read_agent_run", "read_agent_request", "respond_agent_permission",
-    "cancel_agent_run", "list_agent_executions", "read_agent_execution",
+    "read_agent_run", "cancel_agent_run",
+    "list_agent_executions", "read_agent_execution",
+    "read_agent_interaction", "respond_agent_interaction",
+    "list_agent_activities", "read_agent_activity",
 })
 
 
 class Service:
     def __init__(self, state: Path, config: dict, *, recover_incomplete: bool = False,
-                 runtime: AgentRuntime | None = None, notifier: Notifier | None = None,
-                 orchestrator_background: bool = True,
-                 registry: RuntimeRegistry | None = None,
-                 runtimes: dict[str, AgentRuntime] | None = None):
-        # Optional multi-runtime construction path (3A2): a package-owned
-        # registry maps stable runtime ids to configured backends. The
-        # legacy runtime= path stays backward compatible: it builds
-        # a single-entry registry internally and service.orchestrator keeps
-        # pointing at the Pi compatibility orchestrator.
-        if registry is not None and runtimes is not None:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Pass registry or runtimes, not both", "invalid_arguments")
-        if registry is not None and runtime is not None:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Pass registry or runtime, not both", "invalid_arguments")
-        if registry is None and runtimes is not None:
-            registry = RuntimeRegistry(dict(runtimes))
-        if registry is None and runtime is not None:
-            try:
-                legacy_id = runtime.runtime_id
-            except NotImplementedError:
-                legacy_id = PI_RUNTIME_ID
-            if not legacy_id:
-                legacy_id = PI_RUNTIME_ID
-            registry = RuntimeRegistry({legacy_id: runtime})
+                 notifier: NotificationChannel | None = None,
+                 notification_channels: list[NotificationChannel] | None = None,
+                 run_coordinator_background: bool = True,
+                 adapters: dict[str, HttpRuntimeAdapter] | None = None):
         self.state = state.resolve()
         self.config = config
         self.parents = [Path(p).resolve(strict=True) for p in config["allowed_parents"]]
@@ -120,87 +82,23 @@ class Service:
             action TEXT NOT NULL, outcome TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS agent_runs (
-            id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
-            runtime TEXT NOT NULL DEFAULT 'pi',
-            job TEXT NOT NULL REFERENCES jobs(id), request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
-            parent_run TEXT, session TEXT, model TEXT, state TEXT NOT NULL,
-            error_code TEXT, error_message TEXT, result TEXT NOT NULL DEFAULT '{}',
-            notification TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL, started TEXT,
-            updated TEXT NOT NULL, finished TEXT, permission_revision TEXT NOT NULL DEFAULT '',
-            message_floor_ms INTEGER NOT NULL DEFAULT 0,
-            session_reused INTEGER NOT NULL DEFAULT 0 CHECK(session_reused IN (0,1)),
-            transcript TEXT NOT NULL DEFAULT '[]',
-            execution_floor INTEGER NOT NULL DEFAULT 0,
-            execution_cursor INTEGER NOT NULL DEFAULT 0,
-            execution_audit_status TEXT NOT NULL DEFAULT 'not_recorded',
-            execution_audit_error TEXT NOT NULL DEFAULT '',
-            enforcement_fingerprint TEXT NOT NULL DEFAULT '',
-            adapter_version TEXT NOT NULL DEFAULT '',
-            pi_version TEXT NOT NULL DEFAULT '',
-            extension_revision TEXT NOT NULL DEFAULT '',
-            extension_snapshot TEXT NOT NULL DEFAULT '[]',
-            UNIQUE(workspace, request_id));
-          CREATE TABLE IF NOT EXISTS agent_requests (
-            id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id),
-            workspace TEXT NOT NULL, session TEXT NOT NULL,
-            runtime_request TEXT NOT NULL,
-            kind TEXT NOT NULL, action TEXT, resource TEXT, pattern TEXT NOT NULL DEFAULT '[]',
-            metadata TEXT NOT NULL DEFAULT '{}', explanation TEXT, redacted INTEGER NOT NULL DEFAULT 0,
-            state TEXT NOT NULL, decision TEXT, created TEXT NOT NULL, updated TEXT,
-            resolved TEXT, generation TEXT NOT NULL DEFAULT 'v1' CHECK(generation IN ('v1','v2')),
-            UNIQUE(run, runtime_request));
-          CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_session_active
-            ON agent_runs(runtime, session)
-            WHERE state IN ('starting','running','waiting_permission','waiting_question')
-              AND session IS NOT NULL AND session <> '';
-          CREATE TABLE IF NOT EXISTS agent_executions (
-            id TEXT PRIMARY KEY, run TEXT NOT NULL REFERENCES agent_runs(id),
-            workspace TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'pi',
-            session TEXT NOT NULL, tool_call_id TEXT NOT NULL,
-            seq INTEGER NOT NULL, tool TEXT NOT NULL, state TEXT NOT NULL,
-            started TEXT, ended TEXT, duration_ms INTEGER,
-            input_summary TEXT NOT NULL DEFAULT '{}',
-            result_summary TEXT NOT NULL DEFAULT '{}',
-            is_error INTEGER NOT NULL DEFAULT 0,
-            permission_effect TEXT NOT NULL DEFAULT '',
-            permission_decision TEXT NOT NULL DEFAULT '',
-            truncated INTEGER NOT NULL DEFAULT 0,
-            created TEXT NOT NULL, updated TEXT NOT NULL,
-            UNIQUE(run, tool_call_id));
-          CREATE INDEX IF NOT EXISTS ix_agent_executions_run_seq
-            ON agent_executions(run, seq);
+          CREATE TABLE IF NOT EXISTS workspace_runtimes (
+            workspace TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            runtime TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+            updated TEXT NOT NULL,
+            PRIMARY KEY(workspace, runtime));
         """)
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO gateway VALUES(1,'',0,?)", (now(),))
+        if notification_channels is None and notifier is None:
+            self.notification_manager = notification_manager_from_environment(self)
+        else:
+            channels = notification_channels if notification_channels is not None else [notifier]
+            self.notification_manager = NotificationManager(self, channels)
         self.browser = Browser(self)
-        if registry is None:
-            self.runtime_registry = RuntimeRegistry()
-        else:
-            self.runtime_registry = registry
-        # One orchestrator owns exactly one runtime. service.orchestrator
-        # stays the Pi compatibility path: the Pi orchestrator
-        # when configured, otherwise a runtime=None orchestrator so agent
-        # tools fail runtime_unavailable rather than route elsewhere.
-        self.orchestrators: dict[str, AgentOrchestrator] = {}
-        for runtime_id, configured in self.runtime_registry.items():
-            self.orchestrators[runtime_id] = AgentOrchestrator(
-                self, configured, notifier, background=orchestrator_background, clock=now)
-        if PI_RUNTIME_ID in self.orchestrators:
-            self.orchestrator = self.orchestrators[PI_RUNTIME_ID]
-        elif runtime is not None:
-            # Legacy single-runtime path: reuse the
-            # registry-built orchestrator so the runtime starts/stops once.
-            try:
-                _legacy_id = runtime.runtime_id
-            except NotImplementedError:
-                _legacy_id = ""
-            self.orchestrator = self.orchestrators.get(
-                _legacy_id, AgentOrchestrator(self, runtime, notifier,
-                                              background=orchestrator_background, clock=now))
-        else:
-            self.orchestrator = AgentOrchestrator(self, None, notifier,
-                                                  background=orchestrator_background, clock=now)
+        self.run_coordinator = RunCoordinator(self, adapters or {},
+                                              background=run_coordinator_background)
         # Only the exclusive daemon startup may recover interrupted publications.
         # A concurrent diagnostic process must never invalidate an active handoff.
         if recover_incomplete:
@@ -208,263 +106,143 @@ class Service:
         self.db.commit()
         os.chmod(self.state / "bridge.sqlite3", 0o600)
         if recover_incomplete:
-            # Never assume an interrupted worker finished; reconcile positively or orphan.
-            # Every configured runtime orchestrator reconciles/starts exactly once.
-            seen: set[int] = set()
-            for orchestrator in list(self.orchestrators.values()) + [self.orchestrator]:
-                if id(orchestrator) in seen:
-                    continue
-                seen.add(id(orchestrator))
-                if orchestrator.runtime is None:
-                    continue
-                orchestrator.reconcile_startup()
-                orchestrator.start()
-
-    def orchestrator_for_runtime(self, runtime_id: str) -> AgentOrchestrator:
-        """Return the orchestrator owning exactly this runtime id.
-
-        Routes only by the package registry; unknown or unconfigured ids
-        fail closed without touching any backend.
-        """
-        try:
-            return self.orchestrators[runtime_id]
-        except KeyError:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError(f"Runtime {runtime_id!r} is not configured",
-                               "unknown_runtime") from None
-
-    def orchestrator_for_run(self, run_id: str, workspace: str | None = None) -> AgentOrchestrator:
-        """Route one persisted run to its owning orchestrator.
-
-        Reads only the persisted ``agent_runs.runtime`` identity (missing
-        values fail closed as unknown); unknown runs and unconfigured
-        runtimes fail closed without attempting a backend call.
-        """
-        with self.lock:
-            if workspace is not None:
-                row = self.db.execute("SELECT runtime FROM agent_runs WHERE id=? AND workspace=?",
-                                      (run_id, workspace)).fetchone()
-            else:
-                row = self.db.execute("SELECT runtime FROM agent_runs WHERE id=?",
-                                      (run_id,)).fetchone()
-        if not row:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Run not found", "not_found")
-        persisted = row["runtime"] or ""
-        if not persisted:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Run has no persisted runtime", "unknown_runtime")
-        return self.orchestrator_for_runtime(persisted)
+            self.run_coordinator.start_background()
+        self.notification_manager.start()
 
     def runtime_diagnostics(self) -> dict:
-        """Additive sanitized diagnostics for configured runtimes.
-
-        Bounded ids plus per-runtime health/capabilities; never paths,
-        tokens, or raw backend payloads.
-        """
-        return self.runtime_registry.status()
+        """Sanitized diagnostics for configured Runtime Protocol adapters."""
+        modern = self.run_coordinator.diagnostics()
+        return {"configured": sorted(modern), "runtimes": modern}
 
     # ------------------------------------------------- neutral agent routing
     def _validate_runtime_filter(self, runtime: str | None) -> str | None:
         """Validate an optional cross-runtime list filter.
 
-        Accepts known configured ids and runtimes persisted on historical
-        rows; anything else fails ``unknown_runtime`` without backend calls.
+        Accept only configured Runtime Protocol adapters; unknown ids fail
+        before any backend call.
         """
         if runtime is None:
             return None
-        if self.runtime_registry.optional(runtime) is not None:
-            return runtime
-        with self.lock:
-            found = self.db.execute("SELECT 1 FROM agent_runs WHERE runtime=? LIMIT 1",
-                                    (runtime,)).fetchone()
-        if found is None:
+        if not self.run_coordinator.configured(runtime):
             from .security import BridgeError as _BridgeError
             raise _BridgeError(f"Runtime {runtime!r} is not configured", "unknown_runtime")
         return runtime
 
     def list_agent_models(self, ws: dict, runtime: str, query: str = "", limit: int = 25) -> dict:
         """Neutral model discovery: explicitly select a runtime first."""
-        return self.orchestrator_for_runtime(runtime).list_models(ws, query, limit)
+        return self.run_coordinator.models(ws, runtime, query, limit)
 
     def start_agent_run(self, ws: dict, runtime: str, job_id: str, request_id: str,
                         model: str | None = None, parent_run_id: str | None = None,
                         continue_from_run_id: str | None = None) -> dict:
         """Neutral run start: explicitly select a runtime first."""
-        return self.orchestrator_for_runtime(runtime).start_run(
-            ws, job_id, request_id, model=model, parent_run_id=parent_run_id,
-            continue_from_run_id=continue_from_run_id)
+        self.require_workspace_runtime(ws, runtime)
+        return self.run_coordinator.start(
+            ws, runtime, job_id, request_id, model, parent_run_id,
+            continue_from_run_id)
+
+    def workspace_runtime_policy(self, ws: dict) -> dict:
+        """Local administrator's explicit execution grants for one workspace."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT runtime, enabled FROM workspace_runtimes WHERE workspace=?",
+                (ws["id"],)).fetchall()
+        grants = {row["runtime"]: bool(row["enabled"]) for row in rows}
+        with self.lock:
+            profiles = {row["runtime"]: {"id": row["profile"], "revision": row["revision"]}
+                        for row in self.db.execute(
+                            "SELECT runtime,profile,revision FROM runtime_profiles WHERE workspace=?",
+                            (ws["id"],))}
+        runtime_ids = sorted(self.run_coordinator.adapters)
+        return {"workspace_id": ws["id"], "runtimes": {
+            runtime_id: {"enabled": grants.get(runtime_id, False),
+                         "profile": profiles.get(runtime_id)}
+            for runtime_id in runtime_ids}}
+
+    def set_workspace_runtime(self, ws: dict, runtime: str, enabled: bool,
+                              profile_id: str | None = None) -> dict:
+        """Grant or revoke one configured runtime through the local admin plane."""
+        if not isinstance(enabled, bool):
+            raise BridgeError("enabled must be a boolean", "invalid_arguments")
+        self.run_coordinator.adapter(runtime)
+        if enabled or profile_id is not None:
+            if profile_id is None:
+                with self.lock:
+                    existing = self.db.execute(
+                        "SELECT profile FROM runtime_profiles WHERE workspace=? AND runtime=?",
+                        (ws["id"], runtime)).fetchone()
+                profile_id = existing["profile"] if existing else "read-only"
+            self.run_coordinator.set_profile(ws, runtime, profile_id)
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO workspace_runtimes(workspace,runtime,enabled,updated) "
+                "VALUES(?,?,?,?) ON CONFLICT(workspace,runtime) DO UPDATE SET "
+                "enabled=excluded.enabled, updated=excluded.updated",
+                (ws["id"], runtime, int(enabled), now()))
+        self.event(ws["id"], "set_workspace_runtime", "enabled" if enabled else "disabled")
+        return self.workspace_runtime_policy(ws)
+
+    def require_workspace_runtime(self, ws: dict, runtime: str) -> None:
+        """A workspace-wide agent switch never authorizes a newly installed runtime."""
+        self.run_coordinator.adapter(runtime)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT enabled FROM workspace_runtimes WHERE workspace=? AND runtime=?",
+                (ws["id"], runtime)).fetchone()
+        if row is None or row["enabled"] != 1:
+            raise BridgeError(
+                f"Runtime {runtime!r} is not enabled for this workspace",
+                "runtime_disabled")
 
     def list_agent_runs(self, ws: dict, offset: int = 0, limit: int = 20,
                         runtime: str | None = None) -> dict:
-        """Intentional cross-runtime view over persisted runs for one workspace.
-
-        Newest first, bounded, no backend calls. Optional runtime filter is
-        validated against known configured/persisted ids. Summaries carry no
-        transcript/result bodies.
-        """
-        from .orchestration import RUN_COLUMNS, neutral_run_summary
+        """List persisted Runtime Protocol runs for one workspace."""
         selected = self._validate_runtime_filter(runtime)
         limit = max(1, min(int(limit), 40))
         offset = max(0, int(offset))
-        with self.lock:
-            if selected is None:
-                rows = self.db.execute(
-                    f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE workspace=? "
-                    "ORDER BY created DESC LIMIT ? OFFSET ?",
-                    (ws["id"], limit + 1, offset)).fetchall()
-            else:
-                rows = self.db.execute(
-                    f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE workspace=? AND runtime=? "
-                    "ORDER BY created DESC LIMIT ? OFFSET ?",
-                    (ws["id"], selected, limit + 1, offset)).fetchall()
-            page = [dict(r) for r in rows[:limit]]
-            pending_counts: dict[str, int] = {}
-            if page:
-                placeholders = ",".join("?" for _ in page)
-                for prow in self.db.execute(
-                        f"SELECT run, count(*) AS n FROM agent_requests WHERE run IN "
-                        f"({placeholders}) AND state='pending' GROUP BY run",
-                        [r["id"] for r in page]).fetchall():
-                    pending_counts[prow["run"]] = int(prow["n"])
-        summaries = []
-        for run in page:
-            view = neutral_run_summary(run)
-            view["pending_request_count"] = pending_counts.get(run["id"], 0)
-            summaries.append(view)
-        result: dict = {"workspace_id": ws["id"], "runs": summaries,
-                        "next_offset": offset + limit if len(rows) > limit else None}
-        if selected is not None:
-            result["runtime"] = selected
-        return result
+        return self.run_coordinator.list(ws, offset, limit, selected)
 
     def read_agent_run(self, ws: dict, run_id: str) -> dict:
-        """Neutral run read routed solely by the persisted run runtime.
-
-        When the persisted runtime is temporarily unconfigured, the
-        historical row stays readable from persisted state only (no
-        backend calls, no live reconciliation); operations needing the
-        backend still fail explicitly.
-        """
-        try:
-            return self.orchestrator_for_run(run_id, ws["id"]).read_run(ws, run_id)
-        except BridgeError as exc:
-            if exc.code != "unknown_runtime":
-                raise
-            return self.persisted_run_view(ws, run_id)
+        """Read a Runtime Protocol run and reconcile its durable snapshot."""
+        return self.run_coordinator.read(ws, run_id)
 
     # ------------------------------- persisted execution audit (3C1)
     def list_agent_executions(self, ws: dict, run_id: str,
                               offset: int = 0, limit: int = 50) -> dict:
-        """Persisted-only execution list for ChatGPT audit (no backend calls).
-
-        The run owns runtime/session; completed-record reads require no
-        backend call. List returns bounded summaries only (no output body
-        or raw source content).
-        """
-        from .pi_executions import summary_record
-        run = self._persisted_run_row(ws, run_id)
-        offset = max(0, int(offset or 0))
-        limit = max(1, min(int(limit or 50), 50))
-        with self.lock:
-            rows = self.db.execute(
-                "SELECT tool_call_id, seq, tool, state, started, ended, duration_ms,"
-                "input_summary, result_summary, is_error, permission_effect,"
-                "permission_decision, truncated FROM agent_executions "
-                "WHERE workspace=? AND run=? ORDER BY seq LIMIT ? OFFSET ?",
-                (ws["id"], run_id, limit + 1, offset)).fetchall()
-        page = [dict(r) for r in rows[:limit]]
-        summaries = []
-        for row in page:
-            summaries.append(summary_record({
-                "tool_call_id": row["tool_call_id"], "seq": row["seq"],
-                "tool": row["tool"], "state": row["state"],
-                "started": row["started"], "ended": row["ended"],
-                "duration_ms": row["duration_ms"],
-                "input_summary": row["input_summary"],
-                "result_summary": row["result_summary"],
-                "is_error": row["is_error"],
-                "permission_effect": row["permission_effect"],
-                "permission_decision": row["permission_decision"],
-                "truncated": row["truncated"],
-            }))
-        return {"workspace_id": ws["id"], "run_id": run_id,
-                "runtime": run.get("runtime") or "pi",
-                "executions": summaries,
-                "next_offset": offset + limit if len(rows) > limit else None}
+        """Project persisted tool activities into the execution list."""
+        return self.run_coordinator.executions(ws, run_id, offset=offset, limit=limit)
 
     def read_agent_execution(self, ws: dict, run_id: str, execution_id: str) -> dict:
-        """Persisted-only execution detail (no backend calls).
-
-        Returns bounded sanitized input/result evidence including bash
-        output preview when present, but never reasoning, environment,
-        runtime tokens, or fullOutputPath.
-        """
-        from .pi_executions import detail_record
-        run = self._persisted_run_row(ws, run_id)
-        if not isinstance(execution_id, str) or not execution_id:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Execution not found in this workspace", "not_found")
-        with self.lock:
-            row = self.db.execute(
-                "SELECT tool_call_id, seq, tool, state, started, ended, duration_ms,"
-                "input_summary, result_summary, is_error, permission_effect,"
-                "permission_decision, truncated FROM agent_executions "
-                "WHERE workspace=? AND run=? AND tool_call_id=?",
-                (ws["id"], run_id, execution_id[:200])).fetchone()
-        if not row:
-            from .security import BridgeError as _BridgeError
-            raise _BridgeError("Execution not found in this workspace", "not_found")
-        detail = detail_record({
-            "tool_call_id": row["tool_call_id"], "seq": row["seq"],
-            "tool": row["tool"], "state": row["state"],
-            "started": row["started"], "ended": row["ended"],
-            "duration_ms": row["duration_ms"],
-            "input_summary": row["input_summary"],
-            "result_summary": row["result_summary"],
-            "is_error": row["is_error"],
-            "permission_effect": row["permission_effect"],
-            "permission_decision": row["permission_decision"],
-            "truncated": row["truncated"],
-        })
-        detail["workspace_id"] = ws["id"]
-        detail["run_id"] = run_id
-        detail["runtime"] = run.get("runtime") or "pi"
-        return detail
+        """Read bounded execution evidence from the persisted activity log."""
+        return self.run_coordinator.execution(ws, run_id, execution_id)
 
     def list_all_agent_runs(self, offset: int = 0, limit: int = 25,
                             runtime: str | None = None) -> dict:
-        """Neutral global overview across workspaces and runtimes.
-
-        Newest first, bounded, persisted rows only; no backend calls and no
-        transcript/result bodies. Optional runtime filter is validated like
-        ``list_agent_runs``.
-        """
-        from .orchestration import RUN_COLUMNS, neutral_run_summary
+        """Global Runtime Protocol run overview for local administration."""
         selected = self._validate_runtime_filter(runtime)
         limit = max(1, min(int(limit), 50))
         offset = max(0, int(offset))
         with self.lock:
-            if selected is None:
-                rows = self.db.execute(
-                    f"SELECT {RUN_COLUMNS} FROM agent_runs "
-                    "ORDER BY created DESC LIMIT ? OFFSET ?",
-                    (limit + 1, offset)).fetchall()
-            else:
-                rows = self.db.execute(
-                    f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE runtime=? "
-                    "ORDER BY created DESC LIMIT ? OFFSET ?",
-                    (selected, limit + 1, offset)).fetchall()
+            sql = "SELECT * FROM runtime_runs"
+            params: list = []
+            if selected is not None:
+                sql += " WHERE runtime=?"
+                params.append(selected)
+            sql += " ORDER BY created DESC LIMIT ? OFFSET ?"
+            params.extend([limit + 1, offset])
+            rows = self.db.execute(sql, params).fetchall()
             enriched = []
             for row in rows[:limit]:
                 run = dict(row)
-                view = neutral_run_summary(run)
+                view = self.run_coordinator._public(run)
+                view["notifications"] = {
+                    "overall": self.notification_manager.summary(run["id"])["overall"]}
                 try:
                     view["workspace_name"] = self.workspace(run["workspace"], False)["name"]
                 except BridgeError:
                     view["workspace_name"] = ""
                 job = self.db.execute("SELECT title FROM jobs WHERE id=?",
-                                      (run["job"],)).fetchone()
+                                      (run["handoff"],)).fetchone()
                 view["handoff_title"] = job["title"] if job else ""
                 enriched.append(view)
         result: dict = {"scope": "global", "runs": enriched,
@@ -474,252 +252,67 @@ class Service:
         return result
 
     def runtime_policy_summaries(self) -> dict:
-        """Runtime-global model policy status per configured runtime (additive)."""
-        return {runtime_id: orch.model_policy_status()
-                for runtime_id, orch in self.orchestrators.items()}
+        """Runtime-global model policy status for configured adapters."""
+        return {runtime_id: self.run_coordinator.model_policy(runtime_id)
+                for runtime_id in self.run_coordinator.adapters}
 
-    # ----------------------------------------- Pi permission policy (3B1)
-    def get_pi_permission_policy(self) -> tuple[dict, str, bool]:
-        """Current Pi permission policy snapshot (Bridge is source of truth)."""
-        from .pi_permissions import get_policy as _get_policy
-        return _get_policy(self)
+    def read_agent_interaction(self, ws: dict, run_id: str,
+                               interaction_id: str) -> dict:
+        return self.run_coordinator.interaction(ws, run_id, interaction_id)
 
-    def pi_permission_status(self) -> dict:
-        """Bounded admin status summary for the Pi permission policy."""
-        from .pi_permissions import status_summary as _summary
-        return _summary(self)
+    def respond_agent_interaction(self, ws: dict, run_id: str,
+                                  interaction_id: str, response: dict) -> dict:
+        return self.run_coordinator.resolve(ws, run_id, interaction_id, response)
 
-    def pi_permission_view(self) -> dict:
-        """Full admin GET view for the Pi permission policy."""
-        from .pi_permissions import full_view as _view
-        return _view(self)
+    def list_agent_activities(self, ws: dict, run_id: str,
+                              offset: int = 0, limit: int = 50) -> dict:
+        return self.run_coordinator.activities(ws, run_id, offset, limit)
 
-    def set_pi_permission_policy(self, raw) -> dict:
-        """Validate strictly and persist; local-admin only (no MCP path)."""
-        from .pi_permissions import set_policy as _set_policy
-        from .pi_permissions import status_summary as _summary
-        policy, _ = _set_policy(self, raw)
-        return {**_summary(self), "policy": policy}
-
-    # ----------------------------------------- Pi extension policy (3C2)
-    def get_pi_extension_policy(self) -> tuple[dict, str, bool]:
-        """Current Pi extension policy snapshot (Bridge is source of truth)."""
-        from .pi_extensions import get_policy as _get_policy
-        return _get_policy(self)
-
-    def pi_extension_status(self) -> dict:
-        """Bounded admin status summary: counts + revision prefix only.
-
-        Degrades gracefully when Pi is unconfigured: installed_count is
-        None with ready=False instead of failing the whole status read.
-        """
-        try:
-            return self.orchestrator_for_runtime("pi").pi_extension_status()
-        except Exception:  # noqa: BLE001 - status degrades, never fails the read
-            from .pi_extensions import status_summary as _summary
-            return _summary(self, None, inventory_available=False)
-
-    def pi_extension_view(self) -> dict:
-        """Full admin GET view: effective policy plus bounded live inventory."""
-        return self.orchestrator_for_runtime("pi").pi_extension_view()
-
-    def set_pi_extension_policy(self, raw) -> dict:
-        """Validate against the live inventory and persist; local-admin only."""
-        return self.orchestrator_for_runtime("pi").set_pi_extension_policy(raw)
-
-    def read_agent_request(self, ws: dict, run_id: str, request_id: str) -> dict:
-        """Neutral request read routed solely by the persisted run runtime.
-
-        Same unconfigured-runtime persisted fallback as read_agent_run.
-        """
-        try:
-            return self.orchestrator_for_run(run_id, ws["id"]).read_request(ws, run_id, request_id)
-        except BridgeError as exc:
-            if exc.code != "unknown_runtime":
-                raise
-            return self.persisted_request_view(ws, run_id, request_id)
-
-    def respond_agent_permission(self, ws: dict, run_id: str, request_id: str,
-                                 decision: str) -> dict:
-        """Neutral permission response routed solely by the persisted run runtime."""
-        return self.orchestrator_for_run(run_id, ws["id"]).respond_permission(
-            ws, run_id, request_id, decision)
+    def read_agent_activity(self, ws: dict, run_id: str,
+                            activity_id: str) -> dict:
+        return self.run_coordinator.activity(ws, run_id, activity_id)
 
     def cancel_agent_run(self, ws: dict, run_id: str) -> dict:
-        """Neutral cancel routed solely by the persisted run runtime."""
-        return self.orchestrator_for_run(run_id, ws["id"]).cancel_run(ws, run_id)
+        """Cancel a Runtime Protocol run owned by this workspace."""
+        return self.run_coordinator.cancel(ws, run_id)
 
-    def _persisted_run_row(self, ws: dict, run_id: str) -> dict:
-        from .orchestration import RUN_COLUMNS
+    def _admin_run_workspace(self, run_id: str) -> dict:
         with self.lock:
             row = self.db.execute(
-                f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE id=? AND workspace=?",
-                (run_id, ws["id"])).fetchone()
-        if not row:
-            raise BridgeError("Run not found in this workspace", "not_found")
-        return dict(row)
-
-    def persisted_run_view(self, ws: dict, run_id: str, *, include_transcript: bool = False,
-                           limit: int = 40) -> dict:
-        """Bounded persisted-only view for a run whose runtime is unavailable.
-
-        Pure database reads: neutral summary, persisted error/result,
-        persisted request metadata/counts, and (only when already stored)
-        a terminal transcript snapshot. No backend calls, no mutations, no
-        live transcript fetch.
-        """
-        from .orchestration import (TERMINAL_RUN_STATES, _label_for_runtime,
-                                    neutral_request_public, neutral_run_summary)
-        run = self._persisted_run_row(ws, run_id)
-        label = _label_for_runtime(run.get("runtime"))
-        with self.lock:
-            pending = self.db.execute(
-                "SELECT count(*) FROM agent_requests WHERE run=? AND state='pending'",
-                (run["id"],)).fetchone()[0]
-            requests = [dict(r) for r in self.db.execute(
-                f"SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE run=? ORDER BY created",
-                (run["id"],)).fetchall()]
-        view = neutral_run_summary(run)
-        from .pi_executions import audit_counts as _audit_counts
-        try:
-            with self.lock:
-                _exec_rows = [dict(r) for r in self.db.execute(
-                    "SELECT tool, is_error FROM agent_executions WHERE run=?",
-                    (run["id"],)).fetchall()]
-        except Exception:  # noqa: BLE001
-            _exec_rows = []
-        _counts = _audit_counts([{"tool": r.get("tool"), "is_error": bool(r.get("is_error"))}
-                                for r in _exec_rows])
-        _audit_status = run.get("execution_audit_status") or "not_recorded"
-        if _audit_status not in ("pending", "complete", "incomplete", "not_recorded"):
-            _audit_status = "not_recorded"
-        if (run.get("runtime") or "") != "pi":
-            _audit_status = "not_recorded"
-        view.update({
-            "pending_request_count": int(pending), "idempotent_replay": False,
-            "permission_sync": None, "question_sync": None,
-            "agent_evidence": "unverified",
-            "execution_audit": {
-                "status": _audit_status, "counts": _counts,
-                "incomplete_reason": str(run.get("execution_audit_error") or "")[:200]
-                if _audit_status == "incomplete" else "",
-                "enforcement_fingerprint": str(run.get("enforcement_fingerprint") or "")[:64],
-                "adapter_version": str(run.get("adapter_version") or "")[:40],
-                "pi_version": str(run.get("pi_version") or "")[:80],
-                "permission_revision": str(run.get("permission_revision") or "")[:64],
-                "extension_revision": str(run.get("extension_revision") or "")[:64],
-                "extensions": _bounded_extension_snapshot(run.get("extension_snapshot")),
-            },
-            "error": ({"code": run["error_code"], "message": run["error_message"]}
-                      if run["error_code"] or run["error_message"] else None),
-        })
-        try:
-            result = json.loads(run["result"] or "{}")
-        except ValueError:
-            result = {}
-        if not isinstance(result, dict):
-            result = {}
-        view["result"] = {"summary": result.get("summary", ""),
-                          "reason": result.get("reason", ""),
-                          "has_final_response": bool(result.get("has_final_response")),
-                          "message_count": result.get("message_count", 0)}
-        view["pending_requests"] = [neutral_request_public(r, label)
-                                    for r in requests if r["state"] == "pending"]
-        view["requests"] = [neutral_request_public(r, label) for r in requests]
-        view["runtime_available"] = False
-        view["note"] = (f"Runtime {run.get('runtime')!r} is not configured: persisted history only, "
-                        "live reconciliation is unavailable.")
-        if include_transcript:
-            try:
-                persisted = json.loads(run.get("transcript") or "[]")
-            except ValueError:
-                persisted = []
-            if run["state"] in TERMINAL_RUN_STATES and persisted:
-                view["transcript"] = list(persisted)[:max(1, min(int(limit), 100))]
-            else:
-                view["transcript"] = [{"error": "transcript unavailable"}]
-        return view
-
-    def persisted_request_view(self, ws: dict, run_id: str, request_id: str) -> dict:
-        """Bounded persisted-only view for one request of an unavailable runtime."""
-        from .orchestration import PERMISSIONS, _label_for_runtime, neutral_request_public
-        run = self._persisted_run_row(ws, run_id)
-        with self.lock:
-            row = self.db.execute(
-                f"SELECT {REQUEST_COLUMNS} FROM agent_requests "
-                "WHERE workspace=? AND run=? AND runtime_request=?",
-                (ws["id"], run_id, request_id)).fetchone()
-        if not row:
-            raise BridgeError(f"Pending {_label_for_runtime(run.get('runtime'))} request "
-                              "not found for this run", "not_found")
-        view = neutral_request_public(dict(row), _label_for_runtime(run.get("runtime")))
-        view["run_state"] = run["state"]
-        view["decisions"] = list(PERMISSIONS)
-        view["always_allowed"] = bool(json.loads(row["pattern"] or "[]"))
-        view["runtime_available"] = False
-        return view
-
-    def _admin_run_workspace(self, run_id: str) -> tuple[dict, dict]:
-        """Resolve a run row plus its workspace for admin routes (any runtime)."""
-        from .orchestration import RUN_COLUMNS
-        with self.lock:
-            row = self.db.execute(
-                f"SELECT {RUN_COLUMNS} FROM agent_runs WHERE id=?", (run_id,)).fetchone()
-            if not row:
+                "SELECT workspace FROM runtime_runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
                 raise BridgeError("Run not found", "not_found")
-            ws = self.workspace(row["workspace"], False)
-        return dict(row), ws
+            return self.workspace(row["workspace"], False)
 
     def admin_read_agent_run(self, run_id: str, *, include_transcript: bool = False,
                              limit: int = 40) -> dict:
-        """Neutral admin run read routed by persisted run runtime."""
-        run, ws = self._admin_run_workspace(run_id)
-        try:
-            orch = self.orchestrator_for_run(run["id"], ws["id"])
-        except BridgeError as exc:
-            if exc.code != "unknown_runtime":
-                raise
-            return self.persisted_run_view(ws, run_id,
-                                           include_transcript=include_transcript,
-                                           limit=limit)
-        return orch.read_run(ws, run_id, include_transcript=include_transcript, limit=limit)
+        """Read one Runtime Protocol run through the local admin plane."""
+        ws = self._admin_run_workspace(run_id)
+        return self.run_coordinator.read(ws, run_id)
 
     def admin_stop_agent_run(self, run_id: str) -> dict:
-        """Neutral admin cancel routed by persisted run runtime."""
-        run, ws = self._admin_run_workspace(run_id)
-        return self.orchestrator_for_run(run["id"], ws["id"]).cancel_run(ws, run_id)
-
-    def admin_respond_agent(self, run_id: str, request_id: str, decision: str) -> dict:
-        """Neutral admin permission reply routed by persisted run runtime."""
-        run, ws = self._admin_run_workspace(run_id)
-        return self.orchestrator_for_run(run["id"], ws["id"]).respond_permission(
-            ws, run_id, request_id, decision)
+        """Cancel one Runtime Protocol run through the local admin plane."""
+        ws = self._admin_run_workspace(run_id)
+        return self.run_coordinator.cancel(ws, run_id)
 
     def admin_list_agent_executions(self, run_id: str, offset: int = 0, limit: int = 50) -> dict:
         """Admin execution timeline (persisted-only, safe DOM/textContent client-side)."""
-        run, ws = self._admin_run_workspace(run_id)
+        ws = self._admin_run_workspace(run_id)
         return self.list_agent_executions(ws, run_id, offset=offset, limit=limit)
 
     def admin_read_agent_execution(self, run_id: str, execution_id: str) -> dict:
         """Admin execution detail (persisted-only, bounded/truncated output)."""
-        run, ws = self._admin_run_workspace(run_id)
+        ws = self._admin_run_workspace(run_id)
         return self.read_agent_execution(ws, run_id, execution_id)
 
     def close(self):
-        # Stop every orchestrator exactly once, then close registry runtimes
-        # safely before closing the database.
-        seen: set[int] = set()
-        for orchestrator in list(self.orchestrators.values()) + [self.orchestrator]:
-            if orchestrator is None or id(orchestrator) in seen:
-                continue
-            seen.add(id(orchestrator))
-            try:
-                orchestrator.stop()
-            except Exception:  # noqa: BLE001 - shutdown must always close the database
-                pass
         try:
-            self.runtime_registry.close()
+            self.notification_manager.close()
         except Exception:  # noqa: BLE001 - shutdown must always close the database
+            pass
+        try:
+            self.run_coordinator.close()
+        except Exception:
             pass
         self.db.close()
     def setting(self, key: str) -> str | None:
@@ -811,8 +404,23 @@ class Service:
         if not path.is_dir() or path.is_symlink():
             raise BridgeError("Workspace root unavailable", "unavailable")
         return SafeRoot(ws["root"], None, json.loads(ws["excludes"]))
+
+    def git_status(self, ws: dict, *, offset: int = 0, limit: int = 50,
+                   expected_status_sha256: str | None = None) -> dict:
+        with self.safe_root(ws) as safe:
+            return GitEvidence.status(safe, ws, offset=offset, limit=limit,
+                                      expected_status_sha256=expected_status_sha256)
+
+    def git_diff(self, ws: dict, *, mode: str, path: str | None = None,
+                 offset: int = 0, max_bytes: int = 3000,
+                 expected_status_sha256: str | None = None) -> dict:
+        with self.safe_root(ws) as safe:
+            return GitEvidence.diff(safe, ws, mode=mode, path=path, offset=offset,
+                                    max_bytes=max_bytes,
+                                    expected_status_sha256=expected_status_sha256)
     def public_workspace(self, row: dict) -> dict:
-        return {k: v for k, v in row.items() if k != "token_hash"}
+        return {**{k: v for k, v in row.items() if k != "token_hash"},
+                "runtime_grants": self.workspace_runtime_policy(row)["runtimes"]}
     def list_workspaces(self) -> list[dict]:
         with self.lock:
             return [self.public_workspace(dict(r)) for r in self.db.execute("SELECT * FROM workspaces ORDER BY name")]
@@ -854,8 +462,8 @@ class Service:
                          write_scope: str | None = None, agent_enabled: bool | None = None) -> dict:
         with self.lock:
             ws = self.workspace(ident, False)
-            if write_scope is not None and operation != "set_write_scope":
-                raise BridgeError("write_scope requires set_write_scope", "invalid_arguments")
+            if write_scope is not None and operation not in ("set_write_scope", "set_settings"):
+                raise BridgeError("write_scope requires set_write_scope or set_settings", "invalid_arguments")
             if agent_enabled is not None and operation != "set_agent_enabled":
                 raise BridgeError("agent_enabled requires set_agent_enabled", "invalid_arguments")
             result = {}
@@ -870,6 +478,13 @@ class Service:
                     if write_scope not in WRITE_SCOPES:
                         raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
                     self.db.execute("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident))
+                elif operation == "set_settings":
+                    if write_scope not in WRITE_SCOPES:
+                        raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
+                    if excludes is None or len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
+                        raise BridgeError("Invalid exclusions")
+                    self.db.execute("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
+                                    (write_scope, encoded(excludes).decode(), ident))
                 elif operation == "set_agent_enabled":
                     if not isinstance(agent_enabled, bool):
                         raise BridgeError("agent_enabled must be a boolean", "invalid_arguments")
@@ -1092,6 +707,38 @@ class Service:
                 "sha256": digest(raw), "matches_published": digest(raw) == expected if expected else None,
                 "redacted": redacted, "trust": "untrusted_handoff_content"}
     def call(self, ws_id: str | None, token: str, name: str, args: dict) -> dict | ImageReadResult:
+        try:
+            return self._call_impl(ws_id, token, name, args)
+        finally:
+            # A cheap signal is safe here; only the outbox worker performs
+            # channel I/O after acquiring durable pending work.
+            self.notification_manager.wake()
+
+    def _call_impl(self, ws_id: str | None, token: str, name: str, args: dict) -> dict | ImageReadResult:
+        # Remote snapshot reads can wait for an adapter timeout. Keep those
+        # calls outside the shared database lock so one slow host cannot
+        # freeze local admin and browsing requests.
+        remote_reads = {
+            "list_agent_models": self.list_agent_models,
+            "list_agent_runs": self.list_agent_runs,
+            "read_agent_run": self.read_agent_run,
+            "read_agent_interaction": self.read_agent_interaction,
+            "list_agent_activities": self.list_agent_activities,
+            "read_agent_activity": self.read_agent_activity,
+        }
+        if name in remote_reads and self.run_coordinator.adapters:
+            with self.lock:
+                self.authenticate_bridge(token)
+                ws = self.workspace(ws_id)
+            try:
+                result = remote_reads[name](ws, **args)
+            except BridgeError as exc:
+                with self.lock:
+                    self.event(ws_id, name, exc.code)
+                raise
+            with self.lock:
+                self.event(ws_id, name)
+            return {"workspace_id": ws_id, **result}
         # Re-authenticate inside the serialized operation, not only before queued work.
         with self.lock:
             self.authenticate_bridge(token)
@@ -1115,11 +762,15 @@ class Service:
                 "start_agent_run": self.start_agent_run,
                 "list_agent_runs": self.list_agent_runs,
                 "read_agent_run": self.read_agent_run,
-                "read_agent_request": self.read_agent_request,
-                "respond_agent_permission": self.respond_agent_permission,
                 "cancel_agent_run": self.cancel_agent_run,
                 "list_agent_executions": self.list_agent_executions,
                 "read_agent_execution": self.read_agent_execution,
+                "read_agent_interaction": self.read_agent_interaction,
+                "respond_agent_interaction": self.respond_agent_interaction,
+                "list_agent_activities": self.list_agent_activities,
+                "read_agent_activity": self.read_agent_activity,
+                "git_status": self.git_status,
+                "git_diff": self.git_diff,
             }
             if name not in methods and name != "prepare_handoff":
                 raise BridgeError("Unknown tool", "unknown_tool")

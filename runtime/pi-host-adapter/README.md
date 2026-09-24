@@ -1,128 +1,53 @@
-# Pi host adapter (native macOS only)
+# Pi Runtime Protocol adapter (native macOS)
 
-A native macOS host adapter that owns in-process Pi AgentSession instances
-(Pi 0.87.0 SDK) for Workspace Bridge. It is intentionally **not** a Compose
-service and never runs in Docker.
+A private macOS host adapter that owns Pi AgentSession instances for Workspace
+Bridge. It is not a Compose service and never runs in Docker. The Bridge and Pi
+host communicate only through Runtime Protocol v1; the old direct session,
+permission, execution, model, and extension HTTP API has been removed.
 
 ## Topology
 
-```
-Docker Workspace Bridge (HttpPiRuntime)
-  -> http://host.docker.internal:8780 (X-Runtime-Token)
-    -> native pi-host-adapter (this component, normal macOS user)
+```text
+Docker Workspace Bridge
+  -> http://host.docker.internal:8780 (X-Runtime-Token, Runtime Protocol v1)
+    -> native Pi host adapter (this component, normal macOS user)
       -> in-process AgentSession (@earendil-works/pi-coding-agent 0.87.0)
         -> macOS Xcode/CoreML/MLX/Metal toolchain
 ```
 
-The Bridge runtime selection is Pi-only: Pi is the configured backend.
-This adapter serves the Mac execution plane.
+The adapter owns its Pi conversations, runs, profiles, interaction requests,
+and activity snapshots. It never adopts a Pi TUI session. It does not run a
+`pi --mode rpc` subprocess. Workspace Bridge owns run authorization and durable
+cross-runtime records; Pi owns native session files, model syntax, and enforcement.
 
-There is no subprocess transport: managed sessions never spawn
-`pi --mode rpc`, there is no JSONL framing, and no frame-size ceiling can
-kill a session. Oversized tool payloads are summarized to bounded audit
-evidence while the session stays usable.
+## Profiles and host authority
 
-## Read-only boundary loadout
+The built-in `read-only` profile allows read tools only. The
+`workspace-write-reviewed` profile enables edit/write tools and asks before shell
+commands. Custom Pi profiles are managed through the local Bridge manager and
+apply to new conversations; an existing conversation keeps its immutable profile
+revision. The trusted permission extension validates each supported file and shell
+action against that profile.
 
-Every managed session is created with an explicit SDK loadout:
+Pi runs with the macOS user's authority. These controls are pre-tool policy, not an
+OS sandbox. Review external paths, protected paths, writable tools, and shell mode
+before enabling a profile. Third-party extensions with host authority are not
+exposed for management by the Bridge adapter.
 
-- `tools: ["read", "grep", "find", "ls"]` (plus `edit`, `write` when the
-  session is writable; plus `bash` unless shell mode is `deny`) is Pi's
-  strict allowlist across built-in, extension, and custom tools.
-- Project trust is disabled (`projectTrusted: false`, the SDK equivalent
-  of `--no-approve`), so trusted project-local resources cannot widen
-  what the session may do.
-- Extension/skills/prompt/theme/context-file discovery is disabled (the
-  SDK equivalent of `--no-extensions` plus skill/prompt/context
-  suppression). Extensions otherwise execute arbitrary TypeScript with
-  the macOS user's full permissions, so they stay off for this
-  read-only posture even though the tool allowlist alone would constrain
-  tool names.
+## Runtime Protocol surface
 
-## Managed extension set (3C2, adapter 0.4.0)
+The token-authenticated HTTP API is limited to `/v1/*` resources: descriptor,
+models, profiles, conversations, runs, interactions, and activities. `/health`
+remains a bounded unauthenticated readiness check. The adapter advertises the
+protocol and implemented features through `GET /v1/descriptor`. Every other
+operational route requires `X-Runtime-Token: <WB_RUNTIME_TOKEN>`; an empty token
+locks the adapter fail-closed.
 
-The isolated Bridge profile (`PI_CODING_AGENT_DIR`) may hold user-scope npm
-packages installed with the Pi CLI:
-
-```sh
-PI_CODING_AGENT_DIR="$HOME/.pi/workspace-bridge" pi install npm:pi-web-access
-```
-
-The web manager lists installed packages that provide extension resources
-and lets the local admin enable/disable each package for NEW Bridge
-sessions (default: none enabled; newly installed code is never
-auto-enabled). Token-authenticated `GET /extensions` exposes the bounded
-native inventory (no host paths); `GET /health` advertises the
-`extension_inventory` capability.
-
-Managed sessions keep auto-discovery off and load the package-owned
-trusted permission extension as an inline factory (with the session's
-immutable policy snapshot closed over), plus each enabled package root
-via explicit `additionalExtensionPaths`. A manifest entry that resolves
-to a directory follows Pi's verified explicit-loader rule (empirically
-confirmed with marker fixtures, no provider): the directory loads
-`<dir>/index.ts`, else `<dir>/index.js`, else `<dir>/package.json`
-`main` limited to same-directory files; subpath mains, `index.mjs`, and
-main-less/index-less directories load nothing. This is why e.g.
-`pi.extensions: ["./dist"]` with `dist/index.js`
-(a real installed package shape) is accepted and inventoried as
-`dist/index.js`. Because the SDK `tools` allowlist covers extension
-tools too, sessions with enabled packages drop the allowlist and hide
-built-ins with `excludeTools` instead (edit/write unless writable; bash
-when shell is denied; powershell defensively), then activate the
-intended built-ins explicitly alongside registered extension tools, so
-extension tools stay available. Session creation fails clearly when an
-enabled package disappeared or its manifest is invalid; enabled packages
-are never silently skipped.
-
-Trust semantics: enabled extension packages execute native code with the
-macOS user's authority; Bridge file/shell policy is NOT a sandbox for
-extension internals or extension tools. Extension-tool executions are
-audited with bounded generic evidence (args hash/size/keys + redacted
-safe selectors; ~8 KiB redacted result preview) and never ask for Bridge
-permission. Redaction is conservative best-effort, not perfect secret
-detection; detail views stay labeled potentially sensitive.
-
-## Tool availability notes (Pi 0.87.0 SDK, verified locally)
-
-The SDK enumerates registered tools directly (`getAllTools()`), so a
-provider-free check proves a specific extension tool is registered: the
-adapter test suite creates a real AgentSession with a fixture package
-root under the managed boundary (auto-discovery off, explicit root,
-denylist exposure) and asserts the fixture tool is registered. No LLM
-prompt is sent.
-
-Post-deploy smoke requirement (after restart, before trusting the
-extension set): exercise one REAL tool from each enabled extension
-package in a scratch session and confirm its execution appears in the
-Bridge execution audit with the expected extension snapshot.
-
-Provider-free real-profile check (read-only; modifies nothing
-installed): `WB_REAL_PROFILE_CHECK=1 npm test` additionally validates
-the real isolated-profile inventory (e.g. installed `pi-web-access`
-resolves supported with contained relative markers) and creates a real
-AgentSession against the real package root with a throwaway agentDir,
-asserting the session starts with no extension load error.
-
-## Session protocol notes (Pi 0.87.0 SDK, verified locally)
-
-- `promptAsync` returns `{accepted: true}` as soon as the prompt is
-  **accepted** (via the SDK preflight hook); the agent keeps working
-  asynchronously (poll `GET /sessions/:id` / `status`). The adapter never
-  waits for run completion before responding.
-- `GET /sessions/:id` returns authoritative `sessionId`, `sessionFile`,
-  `isStreaming`, `messageCount`, and `pendingMessageCount` read
-  in-process from the owned session.
-- `GET /models` returns `{models: [...]}` with provider/id/name style
-  entries from the isolated profile inventory (empty when no provider is
-  authenticated).
-- Prompt-async `model` selection and `setModel` take an exact
-  `provider/id` selector and fail closed for unknown or ambiguous models.
-- `abort` succeeds even when idle, resolves owned suspended permission
-  selects as rejected first, and never disposes the session.
-- Sessions are persistent (SessionManager files under the isolated
-  profile session area) and dispose cleanly on shutdown; a disposed
-  session fails closed instead of being silently replaced.
+A conversation is bound to a canonical project directory, model, and security
+profile revision. A run starts only in an idle owned conversation. Run snapshots
+report active state, terminal outcome, current interactions, and bounded activity
+records. On adapter restart, an in-progress run is marked `interrupted`; Bridge
+never replays the prompt or adopts an unrelated Pi session.
 
 ## Temporary SDK event diagnostics
 
@@ -173,8 +98,8 @@ Optional environment:
 | `WB_PI_PROJECTS_DIR` (`WB_PROJECTS_DIR` fallback) | required | Canonicalized; must exist. Every session dir must realpath beneath it. |
 | `WB_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`; same semantics as the Docker Bridge. Invalid nonblank value fails adapter startup safely. Set independently from the Bridge (Compose does not configure the LaunchAgent). |
 
-`GET /health` is readable without a token and exposes booleans/version/status
-plus the `agentsession-sdk` transport marker. Every other endpoint requires
+`GET /health` is readable without a token and exposes bounded readiness,
+protocol, and version fields. Every other endpoint requires
 `X-Runtime-Token: <WB_RUNTIME_TOKEN>`; an empty token locks the adapter
 fail-closed.
 
@@ -183,11 +108,11 @@ fail-closed.
 ```sh
 curl -s http://127.0.0.1:8780/health
 curl -s -H "X-Runtime-Token: $WB_RUNTIME_TOKEN" \
-  "http://127.0.0.1:8780/models?directory=$HOME/Projects/my-app"
+  http://127.0.0.1:8780/v1/descriptor
 curl -s -H "X-Runtime-Token: $WB_RUNTIME_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"directory\":\"$HOME/Projects/my-app\",\"title\":\"review\"}" \
-  http://127.0.0.1:8780/sessions
+  http://127.0.0.1:8780/v1/models
+curl -s -H "X-Runtime-Token: $WB_RUNTIME_TOKEN" \
+  http://127.0.0.1:8780/v1/profiles
 ```
 
 Docker-to-host connectivity (from inside the Bridge container):
@@ -246,8 +171,8 @@ npm test
 Node test runner with an in-process fake SDK transport; no network,
 provider, or model calls. A provider-free real-SDK smoke runs in the
 normal suite: it creates/disposes a real AgentSession in an isolated
-temporary profile (verifying session persistence, model discovery, the
-0.87.0 dependency pin, and suppressed auto-discovery) without sending
+temporary profile (verifying conversation persistence, model discovery,
+the 0.87.0 dependency pin, and suppressed project auto-discovery) without sending
 an LLM prompt. An optional real-profile check
 (`WB_REAL_PROFILE_CHECK=1 npm test`) additionally validates the real
-isolated-profile inventory and loads the real package root in-process.
+isolated-profile package path and loads its package root in-process.

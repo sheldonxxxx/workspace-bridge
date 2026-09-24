@@ -1,10 +1,10 @@
 # Docker Compose — v0.8.4
 
 Runs **Workspace Bridge** with an internal tunnel sidecar on the shared Compose
-network. The Pi agent runs natively on the host and is reached through a
-private client-only Pi host adapter URL. The image is built locally from
-this source; no public Workspace Bridge image has been published. The Pi agent
-itself is **not** part of this stack: it runs natively on the host and is managed by you.
+network. Runtime adapters run natively on the host and are reached through
+private Runtime Protocol URLs. The image is built locally from this source; no
+public Workspace Bridge image has been published. Agents are not part of this
+stack; they run natively on the host and are managed by you.
 
 ## Requirements and scope
 
@@ -24,7 +24,7 @@ with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 **Validation boundary:** `docker compose config` validated, the bridge
 (`workspace-bridge:0.8.4`) image built, and a disposable bridge container smoke
 passed here: the bridge served MCP (401 unauthenticated) and the loopback
-manager, settings/health resolved, and a new workspace defaulted to
+manager and status resolved, and a new workspace defaulted to
 disabled/handoff/agent-disabled. The full Compose stack with the tunnel sidecar
 and a live host Pi agent was **not** run in this environment.
 `scripts/test_docker.py` performs the real Compose build/start/health
@@ -60,8 +60,8 @@ deliberately; rerunning the helper is not required.
 Open **http://127.0.0.1:8766/** and enter the admin token locally. Register each
 actual host project path, create one bridge token, then enable only intended
 mappings. The project parent is mounted at the **same absolute path inside the
-container**, so copied handoff paths also work in the host Pi agent. Register a project
-child, not the parent itself. Do not use `/state` or invented `/workspace` aliases.
+container**, so host runtime adapters use the same workspace paths. Register a
+project child, not the parent itself. Do not use `/state` or invented `/workspace` aliases.
 
 The first startup initializes **only fresh** Docker state. It refuses incomplete
 nonempty state, mismatched parents/internal ports or unsafe ownership instead of
@@ -163,35 +163,31 @@ tunnel using the existing setup guide. They are not image build arguments or
 Compose environment variables. The container's admin token is available with the
 explicit `exec ... show-admin-token` command, never printed in startup logs.
 
-## Pi runtime (optional)
+## Runtime adapters (optional)
 
-Agent execution is off until you enable it per workspace. The private Pi host
-adapter stays **locked** until `WB_RUNTIME_TOKEN` is set: with an empty token every
-operational endpoint returns 401 and the bridge fails closed. `/health` remains
-readable and reports `locked: true` without revealing any secret. To connect the
-host Pi agent:
+Agent execution is disabled until you enable it per workspace and grant a runtime.
+Host adapters stay **locked** until `WB_RUNTIME_TOKEN` is set: with an empty token,
+operational endpoints return 401 and runs fail closed. `/health` remains readable
+without revealing secrets. Pi and Codex adapters run natively on the host, bind to
+loopback, and have no Compose service or published port.
 
-1. Start the Pi host adapter natively on the host. On macOS, the
-   [LaunchAgent setup](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd)
-   starts it after user login and restarts it if it exits. Keep it bound to
-   loopback.
-2. In `.env` set `WB_PI_RUNTIME_URL` plus a random `WB_RUNTIME_TOKEN` shared
-   between the bridge and the adapter. The token is **required** to unlock agent
-   operations; an empty value never means allow.
-   - Docker Desktop or OrbStack: `WB_PI_RUNTIME_URL=http://host.docker.internal:<port>`.
-   - Linux Docker Engine: set an explicit reachable host URL. Do **not** assume
-     `localhost` inside a container means the host.
-3. `docker compose up -d` (recreates the bridge). The manager's **Pi runtime**
-   panel shows health/version and the locked state; `docker compose logs bridge`
-   shows adapter reachability without printing credentials.
+1. Start the chosen host adapter. For Pi, use the
+   [LaunchAgent setup](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd).
+   The Codex adapter starts and owns its dedicated app-server process.
+2. In `.env`, set `WB_RUNTIME_ADAPTERS` to a JSON map of runtime IDs to private
+   adapter URLs, and set a random `WB_RUNTIME_TOKEN` shared by Bridge and the
+   adapters. For example:
+   `WB_RUNTIME_ADAPTERS={"pi":"http://host.docker.internal:8780","codex":"http://host.docker.internal:8772"}`.
+   Docker Desktop and OrbStack use `host.docker.internal`; Linux Docker Engine
+   needs an explicit reachable host URL. Do not assume `localhost` inside a
+   container means the host.
+3. Run `docker compose up -d`. The manager's **Runtimes** page shows configured
+   adapter health, and `docker compose logs bridge` reports reachability without
+   printing credentials.
 
-A transient adapter-unavailable result during startup reconciliation never orphans
-an active run. Reconciliation retries until the runtime is reachable and only
-orphans a run after a positive missing-session result.
-
-The Pi adapter runs natively on the host with **no published port** and no Compose
-service. The bridge never receives provider credentials. Never put the Pi agent
-in this Compose file.
+After restart, Bridge reconciles runs against Runtime Protocol adapter snapshots.
+It does not replay prompts or adopt unowned Pi TUI or Codex Desktop/TUI sessions.
+Provider credentials stay on the host and never enter the Bridge container.
 
 ## Operational container logs
 
@@ -204,7 +200,7 @@ docker compose logs -f bridge
 docker compose logs --tail=200 bridge
 ```
 
-The bridge and the native Pi adapter emit one-line JSON records with stable
+The bridge and the native runtime adapters emit one-line JSON records with stable
 event names and bounded scalar fields only. The third process, the OpenAI
 tunnel-client sidecar (`mcp-tunnel`), is configured for JSON logs too
 (`LOG_FORMAT: json` in tracked `compose.yaml`). Representative Bridge SAFE fields
@@ -212,20 +208,19 @@ tunnel-client sidecar (`mcp-tunnel`), is configured for JSON logs too
 
 ```json
 {"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"runtime_configured":true,"workspace_count":3}
-{"component":"bridge","event":"run_created","level":"INFO","job_id":"job_…","model":"provider/model","run_id":"run_…","session_id":"ses_…","workspace_id":"ws_…"}
-{"component":"bridge","event":"permission_asked","level":"INFO","action":"external_directory","request_id":"per_…","run_id":"run_…","source":"event","session_id":"ses_…"}
-{"component":"bridge","event":"run_state","level":"INFO","run_id":"run_…","state":"completed","reason":"read_reconcile"}
+{"component":"bridge","event":"boundary_reject","level":"WARNING","reason":"untrusted-origin"}
+{"component":"bridge","event":"request_error","level":"ERROR","code":"RuntimeError","source":"mcp","action":"read_file","workspace_id":"ws_…"}
 ```
 
 `WB_LOG_LEVEL` (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`) controls the
 bridge. An invalid value fails fast at bridge startup (`BridgeError`). The native
-Pi adapter supports the same four levels with the same INFO default via its own
-environment (the LaunchAgent template sets `WB_LOG_LEVEL=INFO`); Compose config does
-not automatically configure the LaunchAgent — set `WB_LOG_LEVEL` for each deployment
+native adapters support the same four levels with the same INFO default via their
+own environments (the Pi LaunchAgent template sets `WB_LOG_LEVEL=INFO`); Compose
+does not configure host adapters — set `WB_LOG_LEVEL` for each deployment
 environment. An invalid nonblank adapter value fails adapter startup safely. Bridge `serve`
 controlled startup/config failures emit a sanitized ERROR `process_error` and
-exit nonzero; Pi adapter invalid `WB_LOG_LEVEL` emits a sanitized ERROR
-`adapter_config_error` and exits nonzero; Pi adapter fatal HTTP server/listen
+exit nonzero; adapter invalid `WB_LOG_LEVEL` emits a sanitized ERROR
+`adapter_config_error` and exits nonzero; adapter fatal HTTP server/listen
 errors emit a sanitized ERROR `process_error` and exit nonzero; arbitrary
 OS/runtime crashes are not intercepted. Uvicorn access logs
 stay disabled — routine lifecycle is covered by the records above, not by
@@ -236,7 +231,7 @@ Three processes, three independent level controls:
 | Process | Setting | Valid levels | Default |
 |---|---|---|---|
 | Docker Bridge | `WB_LOG_LEVEL` (Compose) | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` |
-| Native Pi adapter | `WB_LOG_LEVEL` (LaunchAgent) | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` |
+| Native host adapters | `WB_LOG_LEVEL` (each process) | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` |
 | Tunnel sidecar | `WB_TUNNEL_LOG_LEVEL` → tunnel `LOG_LEVEL` (Compose) | `debug`/`info`/`warn` (tunnel vocabulary; no `ERROR` threshold) | `info` |
 
 The tunnel vocabulary is `debug|info|warn` only — do not configure an `ERROR`
@@ -245,13 +240,13 @@ values itself; an invalid `WB_TUNNEL_LOG_LEVEL` is left for tunnel-client to
 reject with its own config error. Raw HTTP tunnel logging (`LOG_HTTP_RAW_UNSAFE`)
 must remain disabled: it may expose sensitive headers/bodies.
 
-Shared level semantics (Bridge and Pi adapter):
+Shared level semantics (Bridge and host adapters):
 
 | Level | Meaning | Production guidance |
 |---|---|---|
-| `DEBUG` | High-frequency internals, polls/resyncs/probes, normal SDK tool-event tracing. | Temporary troubleshooting only. |
-| `INFO` | Healthy/expected lifecycle transitions (ready, run/session created, dispatch started, permission transitions, successful completion/recovery). | Normal production level. |
-| `WARNING` | Recoverable degradation, policy/input rejection, stream/runtime unavailability after grace, dispatch refusal, orphaning, SDK dispatch stall/journal anomaly. | Alert candidates. |
+| `DEBUG` | High-frequency details for a current operation or adapter. | Temporary troubleshooting only. |
+| `INFO` | Service readiness and expected lifecycle transitions. | Normal production level. |
+| `WARNING` | Recoverable degradation or input rejection needing attention. | Alert candidates. |
 | `ERROR` | Unexpected internal/runtime exception or unsafe startup condition. | Alert candidates. |
 
 Retention: Docker bridge AND tunnel-sidecar logs are rotated 10m x3 by Compose
@@ -279,18 +274,23 @@ decisions, and the startup `reconcile_start` /
 
 ## Image layering
 
-The bridge image builds third-party Python wheels in a dependency-only layer
+The bridge image builds the React manager in a Node build stage and copies its
+compiled assets into the Python wheel. It builds third-party Python wheels in a dependency-only layer
 (dependencies extracted from `pyproject.toml` with stdlib `tomllib`) before any
-Workspace Bridge source is copied, so source/static/test edits reuse the cached
+Workspace Bridge source is copied, so source/UI/test edits reuse the cached
 dependency layer. The builder uses a BuildKit pip cache mount; the runtime stage
-still installs offline (`--no-index`) from prebuilt wheels with no cache. The image
-stays minimal: explicit `COPY` allowlists, non-root runtime, read-only rootfs, and
-health checks.
+still installs offline (`--no-index`) from prebuilt wheels with no cache. The
+runtime stage also installs Debian's `git` package without recommended packages
+for Bridge's read-only Git Evidence tools (`git_status` and `git_diff`). Agent
+runtimes and their Git installations remain separate and host-side. The image
+uses explicit `COPY` allowlists, a non-root runtime, a read-only root filesystem,
+and health checks.
 
-Discord notifications are optional: set `WB_DISCORD_WEBHOOK_URL` in `.env` (kept out
-of the repo and never returned by any API). Waiting and completion states are
-notified with safe metadata only. `docker compose config` interpolates these values;
-review `.env` permissions (0600) as you would other secrets.
+Notifications are optional: set `WB_DISCORD_WEBHOOK_URL` in `.env` to configure the
+current Discord channel adapter (kept out of the repo and never returned by any API).
+The Bridge persists semantic events and per-channel delivery status; payloads contain
+safe metadata only. `docker compose config` interpolates these values; review `.env`
+permissions (0600) as you would other secrets.
 
 ## What is protected — and what is not
 
@@ -396,8 +396,9 @@ published ports, health, two workspaces, native PNG content, actual host handoff
 paths, protected writes, stale hashes, hostile Origin rejection and retained
 credentials/mappings after recreation. It tears down only its own temporary Compose
 project. It requires Docker and fails rather than claiming success when absent.
-The CI workflow runs the same script. Neither checks actual ChatGPT pixel recognition,
-Pi execution or tunnel authentication; those remain separate live checks.
+The CI workflow runs the same script. It does not check actual ChatGPT pixel
+recognition, host adapter execution, or tunnel authentication; those remain
+separate live checks.
 
 ## Primary references
 

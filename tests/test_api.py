@@ -21,7 +21,7 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) and len(TOOLS) == 21
+        assert len(tools) == len(TOOLS) == 25
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces", "read_project_lead_skill"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)
@@ -70,6 +70,17 @@ async def test_admin_auth_policy_and_mapping(env):
     app = make_admin(env["service"], env["config"]["admin_token_hash"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.get("/"); assert r.status_code == 200 and "frame-ancestors 'none'" in r.headers["content-security-policy"]
+        csp = r.headers["content-security-policy"]
+        assert "script-src 'self'" in csp
+        assert "style-src-elem 'self' 'unsafe-inline'" in csp
+        assert "style-src-attr 'unsafe-inline'" in csp
+        assert '<div id="root"></div>' in r.text
+        assert '/static/dist/assets/' in r.text
+        asset_path = r.text.split('src="/static/dist/')[1].split('"')[0]
+        assert (await c.get('/static/dist/' + asset_path)).status_code == 200
+        assert (await c.get('/static/dist/assets/not-present.js')).status_code == 404
+        assert (await c.get('/legacy')).status_code == 404
+        assert (await c.get('/static/app.js')).status_code == 404
         assert (await c.get("/api/workspaces")).status_code == 401
         token = (env["state"] / "admin-token").read_text().strip()
         c.headers["Authorization"] = "Bearer " + token

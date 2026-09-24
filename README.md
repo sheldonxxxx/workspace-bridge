@@ -5,20 +5,21 @@
 ChatGPT reads your project, resolves the technical approach, and writes a handoff.
 By default you paste its instructions and path into the local agent manually. When a local
 administrator enables agent execution for a workspace, ChatGPT can instead start one
-bounded agent session (Pi by default, or another configured runtime on explicit request)
+bounded agent run on an explicitly configured runtime
 for that prepared handoff through Workspace Bridge and read
-the final result back itself. Permission requests are resumable: `waiting_permission`
-is a non-terminal state that ChatGPT can answer with `once`, `always` or `reject`,
-resuming the **same** session. When the run finishes, Workspace Bridge records a
-terminal state and (if configured) sends a Discord notification. ChatGPT then audits
+the final result back itself. Runtime questions and choices are resumable through
+the Runtime Protocol interaction flow. When the run finishes, Workspace Bridge records a
+terminal state and publishes a durable notification event to each configured channel.
+Discord is the current channel adapter. ChatGPT then audits
 current source with the normal browsing tools and gives findings in the conversation.
 
 There are no source snapshots, automatic changed-file lists, frozen diffs, review
-IDs, server-verified audit verdicts, or required result files. Source is read-only by
+IDs, server-verified audit verdicts, or required result files. Read-only Git status
+and bounded diffs are available as live review evidence. Source is read-only by
 default; a local administrator can explicitly enable text writes per workspace and
 separately enable agent execution (default off). The bridge never runs shell commands,
 never exposes an arbitrary command tool, and never starts or hosts an agent server:
-a private client-only adapter connects to the Pi agent you run natively on the host.
+private host adapters connect to the locally managed runtimes.
 
 ## Connection and management
 
@@ -43,22 +44,27 @@ no mutable shared active-workspace setting.
 The manager adds mappings, enables/disables access, edits exclusions, copies
 workspace IDs and handoff prompts, sets each workspace's write permission **and its
 separate agent-execution policy** (default off), shows the three planning documents
-and access events, lists linked agent runs with their session IDs, model, state
-and notification status, shows a bounded escaped session transcript with any pending
-permission/question requests, lets the admin approve `once`/`always`/`reject` or stop
-an active session, enforces a global model policy (enabled models plus one
-mandatory default that MCP cannot override), shows a global Bridge-owned
-agent sessions table, creates/rotates the shared
+and access events, lists linked agent runs with their conversation IDs, model, state
+and notification status, shows live Runtime Protocol interactions and recorded
+activities, lets the admin answer supported choices or stop an active run, enforces
+per-runtime model policies, creates/rotates the shared
 credential, pauses MCP access, and generates a single tunnel profile.
 
-## Twenty-one tools
+The local manager uses React, TypeScript, Vite, Tailwind CSS, and owned
+shadcn/ui components. Starlette serves the API and the compiled UI from the
+same loopback listener. Frontend source lives in `web/`; run `npm ci` and
+`npm run build` there after UI changes. The compiled assets are included in
+the Python package, so installing or running the server does not require Node.
+
+## Twenty-five tools
 
 | Purpose | Tools |
 |---|---|
 | Project-lead guidance | `read_project_lead_skill` |
 | Workspace selection | `list_workspaces`, `workspace_info` |
 | General inspection and audit | `list_dir`, `glob`, `grep_files`, `read_file` |
-| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_agent_models`, `start_agent_run`, `list_agent_runs`, `read_agent_run`, `read_agent_request`, `respond_agent_permission`, `cancel_agent_run`, `list_agent_executions`, `read_agent_execution` |
+| Read-only Git evidence | `git_status`, `git_diff` |
+| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_agent_models`, `start_agent_run`, `list_agent_runs`, `read_agent_run`, `cancel_agent_run`, `list_agent_executions`, `read_agent_execution`, `read_agent_interaction`, `respond_agent_interaction`, `list_agent_activities`, `read_agent_activity` |
 | Policy-controlled writing | `write_file`, `edit_file` |
 
 The embedded skill tells ChatGPT to own decisions, give the less-capable implementer
@@ -68,6 +74,9 @@ server-enforced. The API is general; permissions are enforced by the server.
 `read_file` reads allowed source, handoff documents, and raster images. `write_file` and `edit_file`
 use the same workspace-relative paths, with a separately configured write scope.
 `read_handoff` remains an optional convenience, not a restriction on general reads.
+Git evidence accepts no arbitrary commands or refs and never mutates the repository;
+excluded changes contribute counts only. A dirty tree may contain edits from before
+the current agent run, and Git status/diffs do not establish authorship.
 See [tool reference](docs/MCP_TOOLS.md) and [file access](docs/FILE_ACCESS.md).
 
 | Local write permission | API value | Effect |
@@ -179,8 +188,8 @@ plan, runs checks locally, and returns a summary in its own conversation. No
 > current source, callers and tests using Workspace Bridge. Check the acceptance
 > criteria, identify regressions, and give findings or a corrective handoff.
 
-ChatGPT uses `read_handoff` for task context and the same general browsing tools
-for code inspection. Findings stay in chat, with optional ordinary notes saved under
+ChatGPT uses `read_handoff` for task context, runtime activities, read-only Git
+status/diffs, and the same general browsing tools for code inspection. Findings stay in chat, with optional ordinary notes saved under
 `.workspace-handoff/`. A follow-up change gets another small handoff. `prepared` means published, not completed or approved.
 
 These are live reads, not a historical diff: ChatGPT cannot automatically prove
@@ -233,66 +242,50 @@ or handoff path in every write mode. The user still pastes the agent's reply int
 ChatGPT for general-tool review; workspace permission alone does not authorize
 ChatGPT to take over implementation. See [file access guide](docs/FILE_ACCESS.md).
 
-## Pi agent execution (opt-in)
+## Runtime Protocol v1 adapters (opt-in)
 
-Agent execution is a separate, explicit, fail-closed policy. New
-workspaces default to **disabled**; `workspace_info.agent_execution` reports it, and
-only the loopback manager can change it. Enabling a workspace for MCP or granting
-workspace-wide writes does **not** enable agent execution. Once enabled, any holder
-of the shared bridge credential can start bounded runs for prepared handoffs in that
-workspace (and only that workspace).
+Bridge can coordinate Pi and Codex through the same private [Runtime Protocol
+v1](docs/RUNTIME_PROTOCOL.md). Set `WB_RUNTIME_ADAPTERS` to a JSON object that
+maps each runtime ID to its private host URL, for example
+`{"pi":"http://host.docker.internal:8780","codex":"http://host.docker.internal:8772"}`.
+The existing Pi host adapter serves `/v1/*` on its current port. To start the
+dedicated Codex host adapter, install this checkout in a host Python environment
+and run `workspace-bridge-codex-adapter` with `WB_CODEX_ADAPTER_STATE`,
+`WB_CODEX_PROJECTS_ROOT`, and `WB_RUNTIME_TOKEN` set. It binds to host loopback
+on port 8772 by default and starts its own Codex app-server process; it does not
+attach to a Desktop or TUI thread. Keep adapter state outside project roots.
 
-The Pi agent runs **natively on the host** and is managed by you. It must not
-be started or packaged inside Docker/Compose. Workspace Bridge ships a private,
-client-only Pi host adapter; the adapter connects to your existing agent
-and has no host-published port. Set `WB_PI_RUNTIME_URL` (Docker Desktop or
-OrbStack: `http://host.docker.internal:<port>`; Linux Engine: an explicit
-reachable host URL) plus a shared `WB_RUNTIME_TOKEN`. The token is **required to
-unlock** the adapter: with an empty token every adapter operational endpoint is
-denied (401) and agent operations fail closed. Provider credentials and the agent
-URL never enter the bridge container, MCP, the manager, events or logs.
+For each workspace, enable the agent switch, grant each intended runtime, select
+an adapter security profile, and save that runtime's enabled model list and
+default in the local manager. Every new runtime grant starts disabled. A security
+profile applies to new conversations; changing it does not widen an existing
+conversation. Open **Profiles** in the manager to create, edit, and delete
+custom profiles using the controls supported by Pi or Codex. Assign a saved
+profile from the workspace's **Change profile** dialog. Pi's external access controls govern
+file tools outside the workspace; shell commands and any enabled host extensions
+have separate authority. Assign another profile in every
+workspace before deleting one. Native Pi and Codex security mechanisms differ;
+review each profile's claims before enabling write access. All configured runtimes
+use the same run, interaction, activity, and execution APIs and Bridge database schema.
 
-The loop is handoff-bound: `prepare_handoff` → optionally
-`list_agent_models(runtime, query=...)` →
-`start_agent_run(runtime, job_id, request_id)` with an explicit runtime (a silent
-runtime choice means Pi). `start_agent_run` accepts **no arbitrary prompt or
-filesystem path** and resolves the model against that runtime's policy: omitting
-`model` uses the configured default, while an explicit `model` is allowed only
-when its exact selector is admin-enabled and currently available
-(`model_not_enabled`/`model_unavailable` otherwise),
-new runs fail closed with `model_policy_unconfigured` until the local
-administrator saves a model policy, and the exact selector is persisted per run.
-Requests are idempotent per `request_id`. The
-bridge records run state independently of handoff publication state. On completion
-ChatGPT reads the bounded final result with `read_agent_run`; the agent's report is
-**unverified evidence**, not independent proof.
+## Notifications
 
-Permission handling preserves Pi's normal configuration. When Pi asks
-(for example `external_directory`), the run moves to the non-terminal
-`waiting_permission` state, the request is persisted, and a Discord attention
-notification is sent. `read_agent_request` exposes the exact pending scope; when
-the user asks, ChatGPT calls `respond_agent_permission` with `once`, `always` or
-`reject`, which resumes the **same** session. `always` passes through Pi's own
-proposed pattern unchanged and fails closed when no reviewable scope exists. Pi
-permissions are **not an OS sandbox**: the native agent has the host user's
-authority. Stronger OS/container isolation is optional hardening, not a Phase-2
-requirement. An explicit Pi `deny` is a policy rejection and is not remotely
-approvable.
+The Bridge records canonical lifecycle events and per-channel delivery state in a
+durable SQLite outbox. Runtime coordinators publish semantic events; a persistent
+daemon worker performs channel delivery after startup and wake signals, outside
+request and run-state paths. The current adapter is Discord, configured locally with
+`WB_DISCORD_WEBHOOK_URL`; future channels can register an adapter without changing
+run orchestration. Pending rows for removed channels are disabled so they cannot
+block configured channels.
 
-Missed-ask recovery is best-effort: `read_agent_run` resyncs the official
-pending-permission listing before reporting, but an upstream listing failure
-leaves the run active with `pending_request_count=0` and a visible
-non-terminal `permission_sync: degraded` diagnostic instead of a silent zero.
-A later successful listing recovers the exact session ask and clears the
-diagnostic. Runtime health is exposed through runtime status; only
-capability-advertised surfaces are used, and anything unadvertised fails
-closed. Live revalidation with a real external-directory ask is
-still required after upgrades.
-
-If `WB_DISCORD_WEBHOOK_URL` is set locally, waiting and completion states produce
-notifications with safe metadata only (workspace name, handoff title, run id, request
-kind/action, timestamp). No external paths, command bodies, source snippets, prompt
-text or secrets are sent, and notification failures never change run state.
+Events contain bounded workspace and handoff labels, Bridge run/runtime identifiers,
+timestamps, and optional request kind/action metadata. They never contain prompts,
+results, source, commands, external paths, webhook URLs, tokens, or raw provider
+payloads. Delivery failures are bounded, isolated per channel, and never change run
+state. A crash after remote acceptance but before the sent result is persisted can
+cause one duplicate after restart; delivery is at least once across that window.
+`read_agent_run` exposes a safe multi-channel delivery summary; `/api/status` reports
+configured channel ids and readiness without endpoints or credentials.
 
 ## Boundaries
 
@@ -301,11 +294,11 @@ bounded reads, heuristic secret redaction, separate local-admin credentials, and
 shared-token revocation remain. Repository ignore files are not access policy.
 This is not an OS sandbox, complete secret detection, or per-chat authorization.
 Source read by ChatGPT leaves your computer through the connection. No general shell
-or Git execution tool was added. Pi execution occurs only through the bounded
-agent tools and a client-only adapter to the host runtime, only after a local
-administrator enables agent execution for the workspace. Source writes stay disabled
-unless the local administrator explicitly selects workspace-wide permission. Pi
-permissions are not an OS sandbox; the host agent runs with your user's authority.
+or Git execution tool was added. Runtime execution occurs only through bounded
+Runtime Protocol tools and private host adapters, after a local administrator enables
+agent execution for the workspace. Source writes stay disabled unless the local
+administrator explicitly selects workspace-wide permission. Runtime profiles are
+not necessarily OS sandboxes; review each adapter's enforcement claims.
 
 See [security](docs/SECURITY.md), [operations](docs/OPERATIONS.md),
 [architecture](docs/ARCHITECTURE.md) and [validation](VALIDATION.md).

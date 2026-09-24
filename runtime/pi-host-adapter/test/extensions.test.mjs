@@ -1,7 +1,7 @@
 // 3C2 extension inventory/policy/loadout/audit: fixture agentDir +
 // managed npm package fixtures, identity parsing, object/string settings
 // forms, bounds, manifest/conventional extensions, missing/symlink/
-// malformed cases, no path leaks, GET /extensions auth + capability,
+// malformed cases, no path leaks, and the absence of a public inventory route,
 // explicit extension-root loading with auto-discovery off against
 // installed Pi 0.87.0, excludeTools loadout, permission pass-through, and
 // generic audit bounds.
@@ -904,7 +904,7 @@ test("generic extension audit bounds input/result without secrets", () => {
 });
 
 // ------------------------------------------------------------ server
-test("GET /extensions requires auth and returns bounded rows", async () => {
+test("third-party extension inventory is not exposed through the runtime API", async () => {
   const agentDir = makeAgentDir(["npm:alpha"]);
   writePackage(agentDir, "alpha", { manifest: ["./ext.js"] });
   const fake = {
@@ -918,17 +918,10 @@ test("GET /extensions requires auth and returns bounded rows", async () => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
-    const denied = await fetch(`${base}/extensions`);
-    assert.equal(denied.status, 401);
     const res = await fetch(`${base}/extensions`, { headers: { "X-Runtime-Token": "tok" } });
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.scope, "global");
-    assert.equal(body.packages.length, 1);
-    assert.equal(body.packages[0].id, "npm:alpha");
-    assert.ok(!JSON.stringify(body).includes(agentDir));
+    assert.equal(res.status, 404);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.capabilities.extension_inventory, true);
+    assert.equal(health.capabilities, undefined);
     assert.ok(!JSON.stringify(health).includes("alpha"));
   } finally {
     await new Promise((resolve) => server.close(resolve));

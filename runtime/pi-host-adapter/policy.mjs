@@ -89,7 +89,7 @@ export function safeDefaultPolicy() {
       edit: "ask",
       write: "ask",
     },
-    protected_patterns: [".git/**", ".env", ".env.*", ".workspace-handoff/**"],
+    protected_patterns: [".git/**", ".env", ".env.*"],
     protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
     allow_session_always: true,
     external_access: {

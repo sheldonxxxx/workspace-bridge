@@ -1,21 +1,6 @@
-// Narrow token-authenticated HTTP surface for the Pi host adapter (3C1).
-//
-// Endpoints:
-//   GET  /health (readable without a token; booleans/version/status only)
-//   GET  /models?directory=<workspace>
-//   POST /sessions {directory, title}
-//   GET  /sessions/:id?directory=...
-//   GET  /sessions/:id/status?directory=...
-//   POST /sessions/:id/prompt-async {directory, text, model?}
-//   GET  /sessions/:id/messages?directory=...&limit=...
-//   POST /sessions/:id/abort {directory}
-//   GET  /sessions/:id/permissions?directory=...
-//   POST /sessions/:id/permissions/:permissionId/respond {directory, response}
-//   GET  /sessions/:id/executions?directory=...&after=<seq>&limit=<n>
-//
-// There is no arbitrary command, shell, spawn, or question endpoint;
-// Bridge polls messages/status/permissions plus the execution journal.
-// Execution evidence never lands in ops logs or general status.
+// Narrow token-authenticated Runtime Protocol v1 surface for the Pi host.
+// Health is a bounded unauthenticated diagnostic; all /v1 routes require the
+// shared runtime token. No arbitrary command, shell, spawn, or question route.
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 
@@ -23,6 +8,7 @@ import { AdapterError } from "./adapter.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { sanitizedErrorCode } from "./logging.mjs";
 import { PathError } from "./paths.mjs";
+import { PiRuntimeProtocol } from "./wbrp.mjs";
 
 const DEFAULT_BODY_LIMIT = 256 * 1024;
 
@@ -83,6 +69,7 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
                                         bodyLimit = DEFAULT_BODY_LIMIT, onLog = null }) {
   const locked = !token;
   const configuredToken = typeof token === "string" ? token : "";
+  let protocol = null;
 
   function log(level, event, fields) {
     try {
@@ -100,11 +87,8 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
   }
 
   function healthPayload() {
-    // Bounded booleans/version/status only; never roots, full paths, or
-    // raw policy. The capabilities block advertises the 3C1 permission +
-    // execution-history surface so Bridge can refuse to treat old adapters
-    // as managed. Enforcement fingerprint identifies the Pi enforcement
-    // build without blocking normal project edits (no full paths).
+    // Bounded readiness/version only; never roots, full paths, or raw policy.
+    // Runtime Protocol capabilities are reported by /v1/descriptor.
     const ok = !locked && piUsable;
     let fingerprint = "";
     try {
@@ -117,21 +101,13 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
       status: locked ? "locked" : (piUsable ? "ok" : "degraded"),
       locked,
       token_configured: !locked,
-      pi_configured: true,
       pi_usable: piUsable,
       ...(piVersion ? { pi_version: piVersion } : {}),
       projects_configured: Boolean(adapter && adapter.projectsRoot),
       adapter_version: adapterVersion,
       instance,
-      sessions: adapter ? adapter.sessionCount : 0,
-      // Managed sessions run in-process on the Pi AgentSession SDK, not
-      // as pi --mode rpc subprocesses. The transport marker plus
-      // pi_version diagnose deployment without exposing paths.
-      transport: "agentsession-sdk",
-      capabilities: {
-        pending_snapshot: true, permission_response: true,
-        execution_history: true, extension_inventory: true,
-      },
+      runtime: "pi",
+      protocol: 1,
       ...(fingerprint ? { enforcement_fingerprint: fingerprint } : {}),
     };
   }
@@ -153,114 +129,56 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
         return send(res, 503, { error: "Pi projects parent is not configured", code: "not_configured" });
       }
 
-      if (url.pathname === "/models" && req.method === "GET") {
-        const directory = url.searchParams.get("directory") || "";
-        const models = await adapter.listModels(directory);
-        return send(res, 200, { models, scope: "global" });
+      if (segments[0] === "v1") {
+        if (!protocol) protocol = new PiRuntimeProtocol(adapter);
+        let result;
+        const key = (index) => decodeURIComponent(segments[index] || "");
+        if (url.pathname === "/v1/descriptor" && req.method === "GET") {
+          result = protocol.descriptor();
+        } else if (url.pathname === "/v1/models" && req.method === "GET") {
+          result = await protocol.models();
+        } else if (url.pathname === "/v1/profiles" && req.method === "GET") {
+          result = protocol.profileList();
+        } else if (url.pathname === "/v1/profiles" && req.method === "POST") {
+          result = protocol.saveProfile(await readBody(req, bodyLimit));
+        } else if (segments.length === 3 && segments[1] === "profiles"
+            && req.method === "DELETE") {
+          result = protocol.deleteProfile(key(2));
+        } else if (url.pathname === "/v1/conversations" && req.method === "POST") {
+          result = await protocol.createConversation(await readBody(req, bodyLimit));
+        } else if (segments.length === 3 && segments[1] === "conversations"
+            && req.method === "GET") {
+          result = await protocol.conversation(key(2));
+        } else if (segments.length === 4 && segments[1] === "conversations"
+            && segments[3] === "runs" && req.method === "POST") {
+          result = await protocol.startRun(key(2), await readBody(req, bodyLimit));
+        } else if (segments.length === 5 && segments[1] === "conversations"
+            && segments[3] === "runs" && req.method === "GET") {
+          result = await protocol.findRun(key(2), key(4));
+        } else if (segments.length === 3 && segments[1] === "runs"
+            && req.method === "GET") {
+          result = await protocol.run(key(2));
+        } else if (segments.length === 4 && segments[1] === "runs"
+            && segments[3] === "cancel" && req.method === "POST") {
+          result = await protocol.cancel(key(2));
+        } else if (segments.length === 4 && segments[1] === "runs"
+            && segments[3] === "interactions" && req.method === "GET") {
+          result = await protocol.interactions(key(2));
+        } else if (segments.length === 4 && segments[1] === "runs"
+            && segments[3] === "activities" && req.method === "GET") {
+          result = await protocol.activityList(key(2));
+        } else if (segments.length === 4 && segments[1] === "interactions"
+            && segments[3] === "resolve" && req.method === "POST") {
+          result = await protocol.resolve(key(2), await readBody(req, bodyLimit));
+        } else if (segments.length === 3 && segments[1] === "activities"
+            && req.method === "GET") {
+          result = protocol.activity(key(2));
+        } else {
+          return send(res, 404, { error: "Unknown route", code: "not_found" });
+        }
+        return send(res, 200, result);
       }
 
-      // 3C2 bounded native extension inventory (token-authenticated,
-      // global: no workspace path). Bounded rows only; never host
-      // paths, agentDir, tokens, settings fields, file contents, or
-      // dependency lists.
-      if (url.pathname === "/extensions" && req.method === "GET") {
-        const inventory = adapter.listExtensions();
-        return send(res, 200, { packages: inventory.packages, scope: "global" });
-      }
-
-      if (segments[0] === "sessions") {
-        const sessionId = segments[1] ? decodeURIComponent(segments[1]) : "";
-        if (req.method === "POST" && segments.length === 1) {
-          const body = await readBody(req, bodyLimit);
-          const directory = String(body.directory || "");
-          // Bounded session options: exactly the Bridge-owned permission
-          // policy snapshot fields cross this boundary; arbitrary body
-          // fields are never forwarded.
-          const options = {};
-          if (body.permission_policy !== undefined) {
-            options.permission_policy = body.permission_policy;
-          }
-          if (body.policy_revision !== undefined) {
-            options.policy_revision = body.policy_revision;
-          }
-          // 3C2 extension policy snapshot fields; arbitrary body fields
-          // are never forwarded.
-          if (body.extension_policy !== undefined) {
-            options.extension_policy = body.extension_policy;
-          }
-          if (body.extension_revision !== undefined) {
-            options.extension_revision = body.extension_revision;
-          }
-          const session = await adapter.createSession(
-            directory, String(body.title || "Workspace Bridge run"), options);
-          // Correlate Bridge and adapter records: safe created session_id
-          // only, never directory/title/model/prompt bodies.
-          log("INFO", "session_create", { status: "ok",
-            ...(session && session.id ? { session_id: String(session.id).slice(0, 200) } : {}),
-          });
-          return send(res, 200, { session });
-        }
-        if (!sessionId) return send(res, 404, { error: "Unknown route", code: "not_found" });
-        if (req.method === "GET" && segments.length === 2) {
-          const directory = url.searchParams.get("directory") || "";
-          const result = await adapter.getSession(directory, sessionId);
-          if (!result) return send(res, 404, { error: "Session not found", code: "not_found" });
-          return send(res, 200, result);
-        }
-        if (req.method === "GET" && segments[2] === "status" && segments.length === 3) {
-          const directory = url.searchParams.get("directory") || "";
-          const status = await adapter.sessionStatus(directory, sessionId);
-          return send(res, 200, { status });
-        }
-        if (req.method === "GET" && segments[2] === "messages" && segments.length === 3) {
-          const directory = url.searchParams.get("directory") || "";
-          const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "40"), 100));
-          const messages = await adapter.messages(directory, sessionId, limit);
-          return send(res, 200, { messages });
-        }
-        if (req.method === "POST" && segments[2] === "prompt-async" && segments.length === 3) {
-          const body = await readBody(req, bodyLimit);
-          const directory = String(body.directory || "");
-          const result = await adapter.promptAsync(
-            directory, sessionId, String(body.text || ""),
-            body.model === undefined ? null : body.model,
-          );
-          return send(res, 200, result);
-        }
-        if (req.method === "POST" && segments[2] === "abort" && segments.length === 3) {
-          const body = await readBody(req, bodyLimit);
-          const ok = await adapter.abortSession(String(body.directory || ""), sessionId);
-          return send(res, 200, { ok });
-        }
-        // 3C1 exact-session permission surface (authenticated only).
-        // Pending records carry bounded targets; bash carries the exact
-        // bounded command + verified timeout detail.
-        if (req.method === "GET" && segments[2] === "permissions" && segments.length === 3) {
-          const directory = url.searchParams.get("directory") || "";
-          const permissions = await adapter.listPermissions(directory, sessionId);
-          return send(res, 200, { permissions, source: "v1" });
-        }
-        if (req.method === "POST" && segments[2] === "permissions"
-            && segments[4] === "respond" && segments.length === 5) {
-          const permissionId = decodeURIComponent(segments[3] || "");
-          const body = await readBody(req, bodyLimit);
-          const result = await adapter.respondPermission(
-            String(body.directory || ""), sessionId, permissionId,
-            String(body.response || ""));
-          return send(res, 200, result);
-        }
-        // 3C1 exact-session execution journal (authenticated only).
-        // Bounded normalized updates plus next/head/oldest evidence.
-        // Evicted history reports audit_gap/cursor_too_old, never silent
-        // completeness. Never lands in ops logs or general status.
-        if (req.method === "GET" && segments[2] === "executions" && segments.length === 3) {
-          const directory = url.searchParams.get("directory") || "";
-          const after = Math.max(0, Number(url.searchParams.get("after") || "0") || 0);
-          const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "50") || 50, 100));
-          const result = await adapter.readExecutions(directory, sessionId, { after, limit });
-          return send(res, 200, result);
-        }
-      }
       return send(res, 404, { error: "Unknown route", code: "not_found" });
     } catch (error) {
       if (error instanceof AdapterError || error instanceof PathError) {

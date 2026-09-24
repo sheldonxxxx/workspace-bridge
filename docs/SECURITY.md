@@ -2,7 +2,7 @@
 
 ## Intended threat model
 
-Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no arbitrary command execution and handoff-only writes by default. Only local administrators may explicitly enable bounded source-text writes and, separately, opt-in Pi agent execution. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job/session confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
+Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no arbitrary command execution and handoff-only writes by default. Only local administrators may explicitly enable bounded source-text writes and, separately, opt-in Runtime Protocol agent execution. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job/conversation confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
 
 Not covered: a hostile local user/process with the service user's permissions; root/admin compromise; malicious browser extensions; compromised Python dependencies or tunnel-client; vulnerabilities in the host OS; comprehensive secret detection; prevention of every prompt-injection attempt; or ensuring that the local coding agent obeys a handoff. A prompt cannot substitute for the local agent's sandbox.
 
@@ -15,11 +15,14 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
 - Explicit project-parent allowlist; canonical configured-root boundary; overlapping mappings rejected even if disabled; current allowed-parent validation; default-disabled registration. The same configured path stays usable across reboot/remount even when device/inode identity changes; each request still re-validates the current root and enforces containment.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
-- Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, subprocess, test or Git invocation is exposed as an MCP tool.
-- Agent execution is a separate per-workspace policy (`agent_enabled`, default FALSE). It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_agent_run` is handoff-bound, accepts no free-form prompt or path, resolves the model against the selected runtime's admin-enabled allowlist plus default (`model_not_enabled`/`model_unavailable` for disallowed selectors, `model_policy_unconfigured` until a policy is saved), and fails closed when disabled. There is no arbitrary command endpoint and the private Pi host adapter is not host-published.
-- Model policy (`model_policy`: enabled selectors plus one mandatory default) and the global Bridge-owned agent sessions table (`/api/sessions`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change the default, bypass it, or act on arbitrary agent session IDs.
+- Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, or arbitrary command surface is exposed as an MCP tool. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, hooks, network transports, terminal prompting, or repository mutation.
+- Agent execution requires both the workspace agent switch and an explicit grant for the selected runtime, each defaulting to OFF. It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_agent_run` is handoff-bound, accepts no free-form prompt or path, resolves an opaque model selector against that runtime's admin-enabled allowlist plus default, and fails closed without a policy. There is no arbitrary command endpoint. Runtime adapters are private host processes.
+- Runtime Protocol v1 binds each conversation to one workspace, native runtime and immutable security profile revision. Pi enforces its trusted permission extension in an isolated profile; Codex enforces its native sandbox and approval policy in a dedicated app-server process. These mechanisms make different claims. The Codex read-only profile denies native approval escalation automatically. Interactions require a live exact request, not merely a persisted ID.
+- Local administrators can create, edit, assign, and delete custom runtime security profiles. Pi profiles expose the validated file-tool, external path, protected path, shell, and session-grant controls; Codex profiles expose native sandbox, approval policy, and reviewer choices. The adapter owns and validates each definition. An edit changes its revision and requires a new conversation; an assigned profile cannot be deleted. Pi shell Allow and Codex full access can run with broad host authority, so the manager labels those choices explicitly.
+- Per-runtime model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass policy, or act on arbitrary runtime conversations.
 - All writes reject secret-like/binary/control content and administrator exclusions. Staging uses private files and complete-content publication, not in-place truncation. Rechecks catch ordinary target/parent changes; they are not a sandbox or a portable atomic compare-and-swap against hostile external writers. Parent folders may remain after a later write failure; read back after an ambiguous I/O failure.
 - Built-in sensitive-name and build-directory exclusions. Additional administrator globs are conservative and case-insensitive. Repository ignore files cannot grant access or relax policy.
+- Git evidence requires a direct real `.git` directory and rejects linked worktrees, bare repositories, symlinked/hardlinked metadata, shared object stores and external config includes. Changed paths are filtered through workspace exclusions before any patch command; denied paths are represented by aggregate counts only. Patch text uses the normal secret redactor. Status hashes bind pagination/diffs to the filtered current state, but do not attribute edits to an agent or user.
 - Request type/size bounds, bounded reads/search, output budget, concurrency gate and quotas. File changes during reads and stale context hashes fail rather than silently succeeding.
 - Generated planning document hashes expose local modification when a handoff is read. No runtime test execution, automatic approval gate, stored verdict, or claim of independent verification is provided.
 - No third-party scripts, escaped text rendering, a restrictive CSP, no browser persistent token storage, and no contents/keys in operational events. The UI intentionally does not render project Markdown as HTML.
@@ -39,6 +42,18 @@ Globs filter a safe inventory and cannot resolve arbitrary files. Search cursors
 ## Redaction is not a DLP guarantee
 
 The heuristic recognizes several common token/password/private-key patterns. It can miss unusual secrets and falsely redact legitimate code. Deny policies and choosing appropriate projects are the primary safeguards. Do not put credentials into plans or reports. Redacted source is incomplete evidence; report that limitation during review.
+
+## Lifecycle notifications
+
+The Bridge persists only canonical event identity, bounded workspace/handoff labels,
+runtime and run ids, timestamps, and allowlisted request kind/action metadata. It
+does not persist prompts, results, source, commands, external paths, arbitrary
+provider payloads, webhook endpoints, or tokens in notification tables. The
+`WB_DISCORD_WEBHOOK_URL` value is read from local process configuration and held
+only by the Discord adapter. Discord payloads suppress mentions and contain the same
+metadata-only event envelope. Channel result codes/details are bounded and
+redacted; raw HTTP bodies are discarded. Delivery failures cannot change run state,
+and status/read APIs expose channel ids and delivery summaries without secrets.
 
 Source returned through the tunnel reaches ChatGPT. The tunnel removes a public inbound endpoint; it does not make model processing local or mean code never leaves the machine. Check organizational AI rules and your account's data controls.
 
@@ -107,31 +122,22 @@ Do not use this as arbitrary storage; configure OS quotas for stricter limits.
 Normal notes and user-pasted returns remain untrusted data, not proof that tests
 ran or that an independent audit occurred.
 
-## Pi agent execution — v0.8 and later
+## Runtime Protocol agent execution
 
-The Pi agent is started and managed by you, natively on the host. Workspace
-Bridge never starts, supervises, packages or host-publishes a Pi agent. A
-private, token-authenticated, client-only Pi host adapter talks to the host
-agent; the bridge container reaches only that adapter URL and never receives provider
-credentials. There is no host-published adapter port and no Docker
-socket. The adapter **fails closed without `WB_RUNTIME_TOKEN`**: an empty token locks
-every operational endpoint (401), so a sibling Compose-network process cannot list
-models, create sessions, submit prompts, reply to permissions or abort without the
-shared token. `/health` exposes only booleans and never the token. Every run is bound
-to the exact canonical mapped workspace; the recorded Pi session cannot be
-read, answered or aborted through a different workspace, and an absent or mismatched
-observed session directory fails closed rather than substituting the requested path.
+Agent adapters are private host processes configured through
+`WB_RUNTIME_ADAPTERS` and protected by `WB_RUNTIME_TOKEN`. They bind to host
+loopback, have no published container port, and do not receive provider
+credentials from Bridge. Without the token, operational requests fail closed;
+`/health` exposes only readiness and lock state.
 
-Pi's own permission configuration is preserved; the bridge does not inject
-blanket auto-approval. An `ask` becomes a persisted non-terminal `waiting_permission`
-request with bounded, redacted review metadata and Pi's exact proposed `always`
-pattern. `once`/`always`/`reject` resume the same session; `always` passes the
-Pi scope through unchanged and fails closed when no reviewable scope exists. An
-explicit Pi `deny` is a policy rejection and is not remotely approvable. These
-permissions are **not an OS sandbox**: the native agent runs with the host user's
-authority. Containers, a dedicated OS identity or other isolation are optional
-hardening, not a Phase-2 guarantee. Never enable agent execution for a workspace you
-would not let that host user modify.
+Each conversation is bound to one enabled workspace, runtime, and immutable
+security profile revision. Bridge rechecks the workspace grant, prepared handoff,
+profile binding, and model policy before a run. Responses are limited to live,
+adapter-provided interactions and are revalidated by the adapter. Pi and Codex
+profiles use different native security mechanisms. Neither a runtime profile nor
+a workspace binding should be described as an OS sandbox unless the specific
+runtime provides that guarantee. Pi runs with the host user's authority; review
+its file, external-path, protected-path, and shell controls before allowing writes.
 
 ## Local policy control
 
@@ -175,9 +181,10 @@ is included. Both bridge ports are explicitly host-loopback only; the native Pi
 host adapter has **no** Compose service and publishes **no** port. Use a current
 Docker Engine (28+ avoids the documented old localhost-publication L2 exposure).
 Never attach untrusted services to its Compose network or add a public reverse proxy.
-The bridge reaches the host Pi agent through `WB_PI_RUNTIME_URL`
-(`host.docker.internal` on Docker Desktop/OrbStack) or an explicit reachable host
-URL (Linux Engine); provider credentials stay on the host only and are never logged or returned.
+The bridge reaches private host adapters through the `WB_RUNTIME_ADAPTERS` URL map
+(`host.docker.internal` on Docker Desktop/OrbStack) or explicit reachable host
+URLs (Linux Engine). Provider credentials stay on the host only and are never
+logged or returned.
 
 The project-parent bind is writable so handoffs and later authorized source writes
 can reach the host. All mounted files, including disabled mappings, are visible to

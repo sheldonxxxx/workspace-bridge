@@ -1,7 +1,7 @@
 // Deterministic enforcement fingerprint (milestone 3C1).
 //
 // Computes a SHA-256 fingerprint at process startup over the
-// package-owned enforcement modules (adapter/rpc/policy/trusted
+// package-owned enforcement modules (adapter/SDK/policy/trusted
 // extension/config/server). A changed fingerprint is audit evidence,
 // not an automatic refusal. No full package paths are exposed: only
 // the hex digest plus module basenames.
@@ -12,13 +12,14 @@ import { fileURLToPath } from "node:url";
 
 export const FINGERPRINT_MODULES = [
   "adapter.mjs",
-  "rpc.mjs",
+  "sdk-transport.mjs",
   "policy.mjs",
   "trusted-permission-extension.mjs",
   "config.mjs",
   "server.mjs",
   "executions.mjs",
   "extensions.mjs",
+  "wbrp.mjs",
 ];
 
 function packageDir() {

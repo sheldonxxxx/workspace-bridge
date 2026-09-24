@@ -11,9 +11,8 @@ import sys
 import uvicorn
 from . import __version__
 from .api import make_admin, make_mcp
-from .notifications import notifier_from_environment
 from .oplog import configure_operational_logging, emit, error_code
-from .registry import runtime_registry_from_environment
+from .wbrp import adapters_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
 import logging
@@ -141,7 +140,7 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
     except Exception:  # noqa: BLE001 - counts are best-effort only
         total = enabled = 0
     emit(_ops_log, "INFO", "bridge", "bridge_ready", version=__version__,
-         runtime_configured=service.orchestrator.configured,
+         runtime_configured=bool(service.run_coordinator.adapters),
          workspace_count=total, enabled_count=enabled)
     configs = [
         uvicorn.Config(make_mcp(service, config["mcp_port"], public_port=mcp_public_port,
@@ -233,12 +232,8 @@ def main(argv: list[str] | None = None):
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise BridgeError("A bridge process already owns this state directory; rotate online in the local manager") from None
-            # The serve path builds the full multi-runtime registry from
-            # environment (Pi) so every configured
-            # backend gets its own orchestrator.
             service = Service(state, config, recover_incomplete=args.command == "serve",
-                              registry=runtime_registry_from_environment(),
-                              notifier=notifier_from_environment())
+                              adapters=adapters_from_environment())
             try:
                 if args.command == "rotate-bridge-token":
                     result = service.manage_bridge("rotate_token")
@@ -256,9 +251,8 @@ def main(argv: list[str] | None = None):
                         report.append({"workspace": ws["name"], "enabled": bool(ws["enabled"]), "check": result})
                     print(json.dumps({"config": "ok", "workspaces": report,
                         "bridge": service.bridge_status(), "tunnel": "not_checked", "chatgpt": "not_checked",
-                        "pi": service.orchestrator.runtime_status(),
-                        "model_policy": service.orchestrator.model_policy_status(),
                         "runtimes": service.runtime_diagnostics(),
+                        "runtime_policies": service.runtime_policy_summaries(),
                         "admin_allowed_hosts": list(admin_allowed_hosts_from_env())}, indent=2))
                 else:
                     extra_admin_hosts = admin_allowed_hosts_from_env()

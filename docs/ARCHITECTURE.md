@@ -8,14 +8,20 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
 
 - `api.py`: strict typed tool schemas, tools-only MCP adapter and loopback manager API.
 - `service.py`: shared auth, mappings, safe source access, planning publication,
-  handoff reads, per-workspace write and agent policy, and metadata. No source snapshot or diff engine.
-- `orchestration.py`: the only long-running agent lifecycle owner: handoff-bound
-  session creation, run/request persistence, event handling, permission decisions,
-  cancellation and restart reconciliation.
-- `runtime.py`: narrow, bounded client boundary to the private Pi host adapter;
-  request and metadata sanitization; no arbitrary command surface.
-- `notifications.py`: bounded Discord notifications from local runtime configuration,
-  safe metadata only.
+  handoff reads, per-workspace write and agent policy, and metadata.
+- `git_evidence.py`: fixed-function, bounded read-only Git status and diff
+  collection. It keeps `.git` excluded from normal file access and stores no snapshots.
+- `run_coordinator.py`: runtime-neutral conversation, run, interaction, and
+  activity persistence and reconciliation for Runtime Protocol v1 adapters.
+- `wbrp.py`: validated, bounded private HTTP client for every v1 adapter.
+- `codex_host_adapter.py` / `codex_rpc.py`: dedicated Codex app-server v2 host
+  adapter with native thread ownership and reviewed interactions.
+- `runtime/pi-host-adapter/wbrp.mjs`: Pi's v1 facade over its isolated SDK
+  session owner and trusted permission extension.
+- `runtime.py`: shared runtime errors and identity validation.
+- `notifications.py`: Bridge-owned semantic notification events, durable per-channel
+  outbox state, and named channel adapters; Discord is configured from local
+  environment and contains its own formatting, retries, and HTTP behavior.
 - `security.py`: pinned roots, descriptor-relative no-follow traversal, exclusions,
   bounded reads, fixed planning publication and hash-checked policy-scoped text writes.
 - `media.py` / `image_worker.py`: typed native image results and fixed, timed
@@ -24,68 +30,82 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
   signed continuation cursors and file/listing hashes.
 - `embedded_skill.py` and `skills/project-lead/SKILL.md`: fixed package-owned
   project-lead guidance, retrieved on demand.
-- `static/`: local manager with workspace controls, plan/context/acceptance viewing,
-  run/session views, permission approvals, shared-token controls and copyable manual handoffs.
-- `runtime/pi-host-adapter/`: private Node client-only adapter around the
-  natively hosted Pi agent; it connects to the externally managed host agent and
-  never creates one.
+- `web/` and `static/dist/`: local manager source and compiled assets, with
+  workspace controls, Runtime Protocol run views, profiles, shared-token controls,
+  and copyable manual handoffs.
+- `runtime/pi-host-adapter/`: private Node Runtime Protocol v1 adapter around the
+  natively hosted Pi agent; it never starts or packages Pi itself.
 
 ## Read and write boundaries
 
-Authenticate shared credential → validate explicit enabled workspace → open pinned
-root → apply bridge-owned policy → return bounded untrusted source plus pagination.
-A serialized service lock protects internal operations, not external file writers.
-This is live observation, not an atomic filesystem snapshot. Hashes detect stale
-reads/listings; they do not recreate source history. Ignore files do not grant access.
+Authenticate the shared credential → validate the explicit enabled workspace →
+open the pinned root → apply Bridge-owned policy → return bounded, untrusted
+source with pagination. A serialized service lock protects internal operations,
+not external file writers. Hashes detect stale reads/listings; they do not recreate
+source history. Ignore files do not grant access.
 
-`prepare_handoff` publishes three exclusively created planning
-documents under a server-generated job folder. Optional context hashes read only
-specifically named files before publication. No whole-tree capture occurs. Plans
-and published hashes are retained; source text is not copied into job baselines.
-`write_file` and `edit_file` use general paths with local policy: `none`,
-`handoff` (default), or `workspace`. The current mapping policy is loaded under the
-serialized operation lock, not taken from an MCP argument. `none` also denies
-`prepare_handoff`. Only the separate manager API can set policy. Existing files need a matching SHA-256. SafeRoot stages complete bytes in a
-private same-directory temporary file, rechecks the target/parent, then publishes
-with no-clobber linking for creation or atomic replacement for an update. This is
-not an OS-atomic compare-and-swap against arbitrary external writers. The service
-lock serializes this process's tool calls, not other local programs. Notes are plain
-files; no status engine or audit subsystem is introduced. New mappings default to
-handoff-only writes.
+`prepare_handoff` publishes three exclusively created planning documents under a
+server-generated job folder. Optional context hashes read only specifically named
+files before publication. No whole-tree capture occurs. `write_file` and
+`edit_file` use general paths with local policy: `none`, `handoff` (default), or
+`workspace`. The current mapping policy is loaded under the serialized operation
+lock, not taken from an MCP argument. `none` also denies `prepare_handoff`. Only
+the separate manager API can set policy. Existing files need a matching SHA-256.
+SafeRoot stages complete bytes in a private same-directory temporary file,
+rechecks the target/parent, then publishes with no-clobber linking for creation or
+atomic replacement for an update. This is not an OS-atomic compare-and-swap
+against arbitrary external writers. The service lock serializes this process's
+tool calls, not other local programs. Notes are plain files; no source snapshots
+or persisted audit subsystem is introduced. New mappings default to handoff-only
+writes.
 
 Normal file tools allow explicit handoff reads and scans; default source-root
 scans still exclude it. Published job hashes and metadata remain original and may
 therefore differ from a deliberately edited document.
 
-Pi remains an external actor owned by the host user. The manual path still
-travels through the user. The optional automated path uses a private client-only
-Pi host adapter: a fresh start creates one native Pi session per prepared handoff
-under the exact mapped workspace directory, submits a server-generated prompt,
-and reconciles runtime state through status/message polling (Pi exposes no
-event stream). An explicit safe continuation instead creates a new
-Bridge run and handoff iteration that reuses a completed run's Pi session,
-keeping the same model. Only one active Bridge run owns a
-session at a time, and continuation fails closed when binding, model, status or
-scope validation fails.
-The bridge never starts, supervises or packages a Pi agent, and holds no
-provider credentials. Runs have their own lifecycle (`starting`, `running`,
-`waiting_permission`, `waiting_question`, `completed`, `blocked`, `failed`,
-`cancelled`, `orphaned`) isolated from `jobs.state`. `waiting_permission` and
-`waiting_question` are non-terminal and resumable; `always` approvals pass through
-Pi's own proposed scope unchanged.
+## Runtime Protocol v1
 
-## Agent execution boundary
+`RunCoordinator` is the only Bridge run path. It validates handoffs, workspace
+grants, profile revisions and model policy before creating a runtime conversation.
+It persists Bridge-owned runs, live interactions, and bounded activity snapshots
+in `runtime_runs`, `runtime_conversations`, `runtime_interactions`, and
+`runtime_activities`. Pi and Codex adapters implement the same private `/v1/*`
+contract. Adapter-specific permission, approval, and filesystem controls remain
+inside each native runtime and are exposed through reviewed interaction choices.
+All configured adapters share these run tables and APIs; the Bridge has no direct
+Pi session endpoint.
 
-Handoffs remain the mandatory execution unit: `start_agent_run` requires a
-prepared job in the same workspace and accepts no free-form prompt or path. Agent
-execution is a per-workspace local-admin policy (`agent_enabled`, default FALSE,
-independent from `write_scope`); MCP cannot change it. The runtime session directory
-is routing context plus an explicit binding check, not a hard filesystem sandbox —
-Pi permissions are not an OS sandbox and the native agent has the host user's
-authority. Pending requests are persisted with bounded, redacted review metadata and
-the Pi-proposed pattern; the bridge never broadens it. On startup, interrupted
-work is reconciled positively with the runtime or explicitly orphaned, and persisted
-pending waits stay answerable.
+The manual handoff path remains available independently of runtime adapters.
+Agent execution is a per-workspace local-admin policy, disabled by default and
+independent from `write_scope`; MCP cannot change it. `start_agent_run` accepts a
+prepared handoff only, never a free-form prompt or path. A continuation creates a
+new Bridge run inside the same conversation only after runtime, model, profile
+revision, handoff, and conversation state checks pass. Otherwise it fails closed.
+
+Runtime conversations are routing context and profile bindings, not OS
+filesystem sandboxes by themselves. Pi and Codex enforce different native
+security mechanisms; review their profile claims before enabling write access.
+
+## Notifications
+
+Run state transitions and newly persisted attention interactions create canonical
+notification events in the same SQLite transaction as their run/interaction snapshot.
+Each configured channel gets its own durable delivery row. A persistent daemon
+worker drains rows after startup and on wake signals; request, reconciliation, and
+read paths only persist intent and signal it. Channel calls run outside the service
+database lock. Rows for channels no longer configured are marked disabled so they
+cannot block other channels. Adapter retries are bounded and terminal for each
+delivery. A crash after remote acceptance but before the sent result is persisted can
+cause one duplicate after restart, so delivery is at least once across that failure
+window. Notification delivery is evidence about message delivery; it never decides
+or changes run outcome.
+
+Adapters receive only bounded Bridge metadata. Discord formatting, mentions policy,
+webhook access, error diagnostics, and bounded network retries stay in the Discord
+adapter. Adding a channel means implementing `NotificationChannel` and registering
+its local configuration; the run coordinator uses canonical event types.
+No webhook endpoint or token is stored in notification tables or returned by local
+status/read APIs.
 
 ## Image read path
 
@@ -106,17 +126,20 @@ The worker neither receives workspace paths nor produces persistent preview file
 
 ## State and compatibility
 
-Fresh databases contain mappings, gateway auth, jobs and content-free operation
-events. Job publication uses `publishing`, `prepared` and `failed`; these states
-say nothing about implementation completion. New mappings have a `write_scope`
-of `handoff` and agent execution disabled until configured locally.
+Fresh databases contain mappings, gateway auth, jobs, content-free operation
+events, and Runtime Protocol conversation/run/interaction/activity tables. Job
+publication uses `publishing`, `prepared`, and `failed`; these states say nothing
+about implementation completion. New
+mappings have a `write_scope` of `handoff` and agent execution disabled until
+configured locally.
 
 ## Intentional omissions
 
-No general shell execution, Git operation, automatic source-write enablement, snapshot
-audit, arbitrary binary reader, public OAuth, per-chat ACL, or background scheduling.
-Agent execution exists only through the bounded, opt-in Pi agent tools described
-above; there is no arbitrary command endpoint and no host-published adapter port.
+No general shell execution, Git mutation, automatic source-write enablement,
+snapshot audit, arbitrary binary reader, public OAuth, per-chat ACL, or background scheduling.
+Read-only Git evidence is a bounded live view and does not establish authorship.
+Agent execution exists only through bounded, opt-in Runtime Protocol tools; there
+is no arbitrary command endpoint and host adapters have no published container port.
 Skill following and review quality are model behavior, not enforced guarantees. The
 protocol adapter supports mixed text/image results; the tunnel profile is unchanged.
 No external conformance certification is claimed.
@@ -131,22 +154,17 @@ policy override, or MCP tool is added. The manager reports the published MCP por
 for host tunnel profiles. Native startup still binds 127.0.0.1.
 
 Compose uses a separate private state bind and a dedicated project-parent bind at
-the same absolute host path, preserving copyable Pi agent paths. State and the
+the same absolute host path, preserving consistent workspace paths for host
+adapters. State and the
 parent must not overlap. Write scope remains none/handoff/workspace; read-only
 rootfs does not make the writable project bind read-only. The host tunnel remains
-separate, and the package-owned skill is version 2.2.0.
+separate, and the package-owned skill is version 2.5.0.
 
-## Pi runtime — v0.8 and later
+## Runtime adapters
 
-The Pi agent runs natively on the host and is managed by you; Compose adds no
-agent sidecar. The private Node Pi host adapter (`runtime/pi-host-adapter`)
-exposes health, model list, session create/get, prompt-async, bounded message
-read, permission snapshot/reply, abort, execution history, and extension
-inventory over a token-authenticated loopback HTTP surface with no published
-port. The bridge reaches it at `WB_PI_RUNTIME_URL` with a shared
-`WB_RUNTIME_TOKEN`; the host Pi agent stays outside Compose. Docker Desktop and
-OrbStack use `host.docker.internal`; Linux Engine needs an explicit reachable
-host URL. See [Docker](DOCKER.md).
-
-The Pi runtime uses a fresh database with native request identities in
-`agent_requests.runtime_request` and run identities in `agent_runs.runtime`.
+`WB_RUNTIME_ADAPTERS` maps runtime IDs to private host adapter URLs, and
+`WB_RUNTIME_TOKEN` authenticates every adapter request. The Pi adapter implements
+Runtime Protocol v1 over its isolated native SDK owner. The Codex adapter owns a
+dedicated app-server process and native thread state. Both bind to host loopback
+and have no Compose service or published port. See
+[Runtime Protocol](RUNTIME_PROTOCOL.md) and [Docker](DOCKER.md).

@@ -32,6 +32,19 @@ def free_port() -> int:
         sock.bind(('127.0.0.1',0));return sock.getsockname()[1]
 
 
+def initialize_git_fixture(root: Path):
+    env={**os.environ,'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':os.devnull,
+         'GIT_TERMINAL_PROMPT':'0','LC_ALL':'C'}
+    def git(*args):
+        subprocess.run(['git',*args],cwd=root,env=env,check=True,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+    git('init','-q','--initial-branch=main')
+    git('config','user.name','Workspace Bridge Docker Smoke')
+    git('config','user.email','bridge-docker-smoke@example.invalid')
+    git('add','README.md','pixel.png','evidence.txt')
+    git('commit','-qm','fixture baseline')
+
+
 def http(port: int, path: str, data=None, headers=None):
     request=Request(f'http://127.0.0.1:{port}{path}',
                     data=None if data is None else json.dumps(data).encode(),
@@ -93,12 +106,22 @@ def verify_service(mcp: int, admin: int, parent: Path, admin_token: str):
     manage('/api/workspaces/'+ids[0],{'operation':'set_write_scope','write_scope':'none'})
     assert call('write_file',{'workspace_id':ids[0],'path':'.workspace-handoff/no.md','content':'no'})['isError']
     assert value('read_file',{'workspace_id':ids[0],'path':'README.md'})['lines']
+    evidence_file=parent/'alpha'/'evidence.txt'
+    evidence_file.write_text('runtime Git Evidence smoke change\n')
+    git_status=value('git_status',{'workspace_id':ids[0]})
+    assert git_status['available'] is True
+    assert any(item['path']=='evidence.txt' and item['unstaged'] for item in git_status['entries'])
+    git_diff=value('git_diff',{'workspace_id':ids[0],'mode':'worktree','path':'evidence.txt',
+                               'max_bytes':256,'expected_status_sha256':git_status['status_sha256']})
+    assert git_diff['available'] and git_diff['mode']=='worktree'
+    assert len(git_diff['patch'].encode('utf-8'))<=256
+    assert '+runtime Git Evidence smoke change' in git_diff['patch']
     return ids,token
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--no-build',action='store_true',help='Use an already locally built v0.8.3 image')
+    parser.add_argument('--no-build',action='store_true',help='Use an already locally built v0.8.4 image')
     args=parser.parse_args()
     if os.name!='posix' or os.getuid()==0 or not shutil.which('docker'):
         raise SystemExit('Requires a non-root POSIX host user, Docker CLI/engine and Compose v2. Runtime was NOT tested.')
@@ -110,11 +133,16 @@ def main():
         for name in ('alpha','beta'):
             root=parent/name;root.mkdir();(root/'README.md').write_text('# '+name+'\n')
             (root/'pixel.png').write_bytes(png)
+            if name=='alpha':(root/'evidence.txt').write_text('fixture baseline\n')
+        initialize_git_fixture(parent/'alpha')
         mp,ap=free_port(),free_port()
         while ap==mp:ap=free_port()
         env_file=temp/'compose.env';configure(parent,temp/'state',env_file,mp,ap)
-        command=['docker','compose','--project-name','wb-smoke-'+secrets.token_hex(5),
-                 '--env-file',str(env_file),'-f',str(ROOT/'compose.yaml')]
+        project_name='wb-smoke-'+secrets.token_hex(5)
+        override=temp/'compose.override.yaml'
+        override.write_text('services:\n  bridge:\n    container_name: workspace-bridge-'+project_name.removeprefix('wb-smoke-')+'\n')
+        command=['docker','compose','--project-name',project_name,
+                 '--env-file',str(env_file),'-f',str(ROOT/'compose.yaml'),'-f',str(override)]
         env={k:v for k,v in os.environ.items() if not k.startswith('WB_') and k!='COMPOSE_FILE'}
         def compose(*parts, capture=False, timeout=180):
             return subprocess.run([*command,*parts],cwd=ROOT,env=env,check=True,timeout=timeout,
@@ -122,7 +150,7 @@ def main():
         try:
             compose('config','--quiet')
             build=[] if args.no_build else ['--build']
-            compose('up','-d',*build,'--wait','--wait-timeout','180',timeout=900)
+            compose('up','-d','bridge',*build,'--wait','--wait-timeout','180',timeout=900)
             admin_token=compose('exec','-T','bridge','workspace-bridge','--state','/state','show-admin-token',capture=True).stdout.strip()
             ids,token=verify_service(mp,ap,parent,admin_token)
             cid=compose('ps','-q','bridge',capture=True).stdout.strip()
@@ -132,7 +160,10 @@ def main():
             bindings=inspection['HostConfig']['PortBindings']
             assert all(row['HostIp']=='127.0.0.1' for rows in bindings.values() for row in rows)
             assert inspection['State']['Health']['Status']=='healthy'
-            compose('up','-d','--force-recreate','--wait','--wait-timeout','180')
+            git_check="import os,shutil,subprocess; p=shutil.which('git'); assert p and os.access(p,os.X_OK); r=subprocess.run([p,'--version'],check=True,text=True,capture_output=True); print(r.stdout.strip())"
+            git_version=compose('exec','-T','bridge','python','-c',git_check,capture=True).stdout.strip()
+            assert git_version.startswith('git version '),git_version
+            compose('up','-d','--force-recreate','--wait','--wait-timeout','180','bridge')
             new_admin=compose('exec','-T','bridge','workspace-bridge','--state','/state','show-admin-token',capture=True).stdout.strip()
             assert new_admin==admin_token
             status,body=http(mp,'/mcp',{'jsonrpc':'2.0','id':2,'method':'tools/call',
@@ -141,8 +172,9 @@ def main():
             assert status==200 and {x['workspace_id'] for x in data['workspaces']}==set(ids)
             assert next(x for x in data['workspaces'] if x['workspace_id']==ids[0])['write_scope']=='none'
             assert (parent/'alpha'/'.workspace-handoff/notes/compose-check.md').read_text()=='two\n'
-            print('PASS: real Compose build/start/health, non-root runtime, loopback port publishing, two workspaces, native PNG, '
-                  'handoff host paths/writes, default source denial, stale hashes, hostile Origin, separation and recreate persistence.')
+            print('PASS: real Compose build/start/health, executable Git and git --version, read-only Git Evidence status/bounded diff, '
+                  'non-root runtime, loopback port publishing, two workspaces, native PNG, handoff host paths/writes, '
+                  'default source denial, stale hashes, hostile Origin, separation and recreate persistence.')
             print('No real tunnel, ChatGPT recognition or Pi agent execution was tested.')
         finally:
             compose('down','--remove-orphans')

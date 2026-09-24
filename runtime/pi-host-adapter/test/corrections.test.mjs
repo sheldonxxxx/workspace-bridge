@@ -12,7 +12,6 @@ import { parseOpaqueMarker } from "../adapter.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "../policy.mjs";
 import { OPTION_ALWAYS, OPTION_ONCE, OPTION_REJECT } from "../trusted-permission-extension.mjs";
-import { createPiAdapterServer } from "../server.mjs";
 import { askPermission, createFakeTransport, trackSelect } from "./fake-sdk.mjs";
 
 const TOKEN = "shared-private-token";
@@ -51,91 +50,6 @@ function makeAdapter(projects, transport) {
   });
 }
 
-function post(base, urlPath, body, headers = {}) {
-  return fetch(base + urlPath, {
-    method: "POST", headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(body || {}),
-  });
-}
-
-// ------------------------------------------------------- 1. HTTP transport
-test("server POST /sessions forwards exactly policy + revision", async () => {
-  const projects = makeProjects();
-  const seen = [];
-  const fake = {
-    projectsRoot: projects.root,
-    sessionCount: 0,
-    createSession: async (directory, title, options) => {
-      seen.push({ directory, title, options });
-      return { id: "ses_1", directory, title };
-    },
-  };
-  const server = createPiAdapterServer({
-    adapter: fake, token: TOKEN, adapterVersion: "0.2.0", instance: "inst-1",
-    piUsable: true, piVersion: "0.87.0",
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const policy = writablePolicy();
-    const revision = policyRevision(policy);
-    const res = await post(base, "/sessions", {
-      directory: projects.app, title: "t",
-      permission_policy: policy, policy_revision: revision,
-      injected: "must-not-forward",
-    }, AUTH);
-    assert.equal(res.status, 200);
-    assert.equal(seen.length, 1);
-    assert.deepEqual(seen[0].options, { permission_policy: policy, policy_revision: revision });
-    // Legacy create without policy passes empty options (read-only default).
-    await post(base, "/sessions", { directory: projects.app, title: "t2" }, AUTH);
-    assert.deepEqual(seen[1].options, {});
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-test("writable policy over HTTP yields an editing loadout; read-only loads the trusted extension", async () => {
-  const projects = makeProjects();
-  const transport = createFakeTransport();
-  const adapter = makeAdapter(projects, transport);
-  const server = createPiAdapterServer({
-    adapter, token: TOKEN, adapterVersion: "0.2.0", instance: "inst-1",
-    piUsable: true, piVersion: "0.87.0",
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const policy = writablePolicy();
-    const created = await post(base, "/sessions", {
-      directory: projects.app, title: "w",
-      permission_policy: policy, policy_revision: policyRevision(policy),
-    }, AUTH);
-    assert.equal(created.status, 200);
-    assert.deepEqual(transport.created[0].tools, ["read", "grep", "find", "ls", "edit", "write"]);
-    assert.deepEqual(transport.created[0].policy, policy);
-    assert.ok(transport.created[0].uiContext);
-    const readOnly = safeDefaultPolicy();
-    const created2 = await post(base, "/sessions", {
-      directory: projects.app, title: "r",
-      permission_policy: readOnly, policy_revision: policyRevision(readOnly),
-    }, AUTH);
-    assert.equal(created2.status, 200);
-    // Read-only v2 sessions enforce read policy through the trusted
-    // extension too: read-family allowlist plus a bound UI context.
-    assert.deepEqual(transport.created[1].tools, ["read", "grep", "find", "ls"]);
-    assert.ok(transport.created[1].uiContext);
-    // Mismatched revision fails closed at the HTTP boundary.
-    const bad = await post(base, "/sessions", {
-      directory: projects.app, title: "x",
-      permission_policy: policy, policy_revision: "f".repeat(64),
-    }, AUTH);
-    assert.equal(bad.status, 409);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-    await adapter.shutdown();
-  }
-});
 
 // ------------------------------------------------------- 4. opaque marker
 test("opaque marker grammar accepts only prefix + bare toolCallId", () => {

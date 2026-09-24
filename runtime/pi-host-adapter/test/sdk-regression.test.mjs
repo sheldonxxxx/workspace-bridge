@@ -142,8 +142,8 @@ test("model discovery lists the profile inventory and setModel validates exactly
   const { session, entry } = await writableSession(adapter, projects, transport);
   const listed = await adapter.listModels(projects.app);
   assert.deepEqual(listed, [
-    { provider: "acme", id: "a-1", name: "Acme One" },
-    { provider: "opencode-go", id: "big-model", name: "Big Model" },
+    { provider: "acme", id: "a-1", name: "Acme One", reasoningOptions: [] },
+    { provider: "opencode-go", id: "big-model", name: "Big Model", reasoningOptions: [] },
   ]);
   // Exact provider/id selector switches the session model, including
   // opencode-go/* provider identities.

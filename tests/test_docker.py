@@ -265,7 +265,7 @@ def test_compose_security_and_same_host_path():
     # The bridge only reaches the native Pi host adapter URL plus the shared
     # runtime token; provider credentials stay on the host and never enter
     # the bridge container.
-    assert 'WB_PI_RUNTIME_URL' in svc['environment']
+    assert 'WB_RUNTIME_ADAPTERS' in svc['environment']
     assert 'WB_RUNTIME_TOKEN' in svc['environment']
     assert set(cfg['services']) == {'bridge', 'mcp-tunnel'}
     # Tunnel sidecar: internal-only client, no published ports, no project/state mounts.
@@ -315,7 +315,7 @@ def test_dockerfile_dependency_layer_before_source():
     assert 'COPY . ' not in text
     assert 'pip wheel' in text and '--no-index' in text
     assert 'ENTRYPOINT ["python", "-m", "workspace_bridge.docker_entrypoint"]' in text
-    builder = text.split('FROM ${PYTHON_IMAGE} AS runtime')[0]
+    builder = text.split('FROM ${PYTHON_IMAGE} AS builder')[1].split('FROM ${PYTHON_IMAGE} AS runtime')[0]
     assert 'PIP_NO_CACHE_DIR' not in builder
     assert '--mount=type=cache,target=/root/.cache/pip' in builder
     dep_wheel = builder.index('pip wheel --wheel-dir /wheels -r')
@@ -325,8 +325,12 @@ def test_dockerfile_dependency_layer_before_source():
     assert toml_copy < dep_wheel < source_copy < local_wheel
     assert 'tomllib' in builder, "Dependencies must be extracted from pyproject with stdlib tomllib"
     # A source/static/test-only change touches none of the dependency-layer inputs.
-    assert builder.count('COPY') == 3
+    assert builder.count('COPY') == 4  # source wheel also receives the built web assets
     runtime = text.split('FROM ${PYTHON_IMAGE} AS runtime')[1]
+    assert 'apt-get update' in runtime
+    assert 'apt-get install -y --no-install-recommends git' in runtime
+    assert 'rm -rf /var/lib/apt/lists/*' in runtime
+    assert runtime.index('apt-get update') < runtime.index('apt-get install') < runtime.index('rm -rf /var/lib/apt/lists/*')
     assert '--no-cache-dir --no-index --find-links=/wheels' in runtime
     assert 'USER 10001:10001' in runtime
     ignore = (ROOT/'.dockerignore').read_text()
@@ -414,7 +418,7 @@ def test_health_unavailable(monkeypatch):
 def test_no_skill_or_remote_schema_expansion():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==21 and SKILL_VERSION=='2.2.0'
+    assert len(TOOLS)==25 and SKILL_VERSION=='2.5.0'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
 
 
@@ -624,5 +628,4 @@ async def test_boundary_reject_is_structured_without_host_origin_path(env, caplo
         assert rejects[0]["reason"] == "untrusted-host"
         assert set(rejects[0]) <= {"timestamp", "level", "component", "event",
                                     "reason", "code", "source", "action",
-                                    "workspace_id", "request_id", "run_id", "session_id",
-                                    "status"}
+                                    "workspace_id"}

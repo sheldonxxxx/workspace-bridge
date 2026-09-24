@@ -37,6 +37,7 @@
 //   explicitly with setActiveToolsByName alongside every registered
 //   extension tool.
 import path from "node:path";
+import fs from "node:fs";
 
 import {
   DefaultResourceLoader,
@@ -54,6 +55,7 @@ import { createTrustedPermissionExtension } from "./trusted-permission-extension
 // running against an unverified API surface.
 export const SDK_VERSION = "0.87.0";
 const SDK_EVENT_STALL_WARN_MS = 10_000;
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 // Built-in tool names known to the Pi SDK (createAllToolDefinitions).
 // Everything else registered on a session is an extension/custom tool.
@@ -96,7 +98,7 @@ export async function createIsolatedServices({ cwd, agentDir }) {
 // skipped.
 export async function createSdkSession({
   cwd, agentDir, tools = null, excludeTools = null, extensionPaths = [],
-  policy, uiContext, onEvent = null, onDiagnostic = null,
+  policy, uiContext, onEvent = null, onDiagnostic = null, resumeFile = null,
 }) {
   const { settingsManager, modelRuntime } = await createIsolatedServices({ cwd, agentDir });
   const extra = Array.isArray(extensionPaths)
@@ -125,7 +127,15 @@ export async function createSdkSession({
     const detail = errors.map((e) => `${e.path}: ${e.error}`).join("; ").slice(0, 400);
     throw new Error(`Pi extension loading failed: ${detail}`);
   }
-  const sessionManager = SessionManager.create(cwd, sessionDirFor(agentDir, cwd));
+  const sessionDir = sessionDirFor(agentDir, cwd);
+  if (resumeFile && (path.dirname(path.resolve(resumeFile)) !== sessionDir
+      || !fs.lstatSync(resumeFile, { throwIfNoEntry: true })?.isFile()
+      || fs.realpathSync(resumeFile) !== path.resolve(resumeFile))) {
+    throw new Error("Pi session recovery path is invalid");
+  }
+  const sessionManager = resumeFile
+    ? SessionManager.open(resumeFile, sessionDir, cwd)
+    : SessionManager.create(cwd, sessionDir);
   const options = {
     cwd,
     agentDir,
@@ -264,9 +274,17 @@ export async function listSdkModels({ agentDir }) {
     });
   }
   const runtime = await pending;
-  return runtime.getAvailableSnapshot().map((m) => ({
-    provider: String(m.provider ?? ""),
-    id: String(m.id ?? ""),
-    name: String(m.name ?? m.id ?? ""),
-  }));
+  return runtime.getAvailableSnapshot().map((m) => {
+    const levelMap = m.thinkingLevelMap || {};
+    const reasoningOptions = m.reasoning
+      ? THINKING_LEVELS.filter((level) => levelMap[level] !== null
+        && (level !== "xhigh" && level !== "max" || levelMap[level] !== undefined))
+      : ["off"];
+    return {
+      provider: String(m.provider ?? ""),
+      id: String(m.id ?? ""),
+      name: String(m.name ?? m.id ?? ""),
+      reasoningOptions,
+    };
+  });
 }

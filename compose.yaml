@@ -35,14 +35,9 @@ services:
       # Client boundary to the native Pi host adapter; the bridge never
       # reaches the host Pi agent directly and never starts one.
       # WB_RUNTIME_TOKEN must be set for agent operations; empty locks the adapter.
-      # No Pi Compose service exists: the adapter runs natively on the Mac
-      # and the bridge only holds this URL plus the shared runtime token
-      # (provider credentials stay on the Mac).
-      # The adapter must stay bound narrowly; verified on this host under
-      # OrbStack 29.4.0: the container host.docker.internal gateway reached
-      # the native 127.0.0.1-bound adapter. Docker Desktop behavior may
-      # differ and must be smoke-tested; never broaden to 0.0.0.0/LAN.
-      WB_PI_RUNTIME_URL: ${WB_PI_RUNTIME_URL:-}
+      # Runtime Protocol adapters run outside Compose. Provider credentials
+      # stay on those hosts; the Bridge receives private URLs and a shared token.
+      WB_RUNTIME_ADAPTERS: ${WB_RUNTIME_ADAPTERS:-{}}
       WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
       WB_DISCORD_WEBHOOK_URL: ${WB_DISCORD_WEBHOOK_URL:-}
       # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.

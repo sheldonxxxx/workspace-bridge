@@ -28,7 +28,7 @@ def read(e, path):
 
 
 def test_generic_tools_replace_handoff_names_without_aliases(env):
-    assert len(TOOLS) == 21
+    assert len(TOOLS) == 25
     assert {'read_file','write_file','edit_file'} <= TOOLS.keys()
     for name in ['write_handoff_file','edit_handoff_file','review_changes','read_change','record_audit']:
         assert name not in TOOLS
@@ -194,6 +194,19 @@ async def test_only_admin_listener_and_admin_credential_can_set_policy(env):
         assert r.status_code==400
     assert 'set_write_scope' not in TOOLS and 'manage_workspace' not in TOOLS
     with pytest.raises(BridgeError):call(env,'set_write_scope',write_scope='workspace')
+
+
+def test_workspace_settings_save_is_atomic(env):
+    service = env['service']
+    ident = env['id']
+    updated = service.manage_workspace(ident, 'set_settings', excludes=['private/**'], write_scope='none')['workspace']
+    assert updated['write_scope'] == 'none'
+    assert updated['excludes'] == '["private/**"]'
+    with pytest.raises(BridgeError):
+        service.manage_workspace(ident, 'set_settings', excludes=['x' * 121], write_scope='workspace')
+    persisted = service.workspace(ident, False)
+    assert persisted['write_scope'] == 'none'
+    assert persisted['excludes'] == '["private/**"]'
 
 
 @pytest.mark.parametrize('version',[LEGACY[-1],MODERN])
