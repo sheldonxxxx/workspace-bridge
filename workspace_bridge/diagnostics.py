@@ -22,7 +22,7 @@ from .wbrp import CORE_FEATURES, Descriptor, HttpRuntimeAdapter
 STATUSES = frozenset({"pass", "warning", "action_required", "failed", "unknown"})
 STATUS_ORDER = ("pass", "warning", "unknown", "action_required", "failed")
 SECTIONS = frozenset({"core", "workspaces", "runtimes", "runnable_routes",
-                      "models_profiles", "git_evidence", "external_connection"})
+                       "models_profiles", "git_evidence"})
 MAX_WORKSPACES = 100
 MAX_RUNTIMES = 20
 MAX_ROUTES = 400
@@ -177,7 +177,7 @@ class _ReportBuilder:
         summaries = {
             "pass": "All observed local and runtime checks passed.",
             "warning": "Diagnostics completed with warnings.",
-            "unknown": "Some runtime freshness or external connectivity was not observed.",
+            "unknown": "Some runtime freshness was not observed.",
             "action_required": "Configuration or runnable-route prerequisites need administrator action.",
             "failed": "One or more required diagnostic checks failed.",
         }
@@ -291,8 +291,6 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         builder.add("core.state_readable", "core", "failed",
                     "Private Bridge state could not be read.",
                     remediation="Check the local state database and its file permissions.")
-        builder.add("external_connection.not_observed", "external_connection", "unknown",
-                    "Tunnel and ChatGPT reachability are not observed by Workspace Bridge.")
         return builder.report(mode)
 
     ws_truncated = len(workspaces) > MAX_WORKSPACES
@@ -850,7 +848,4 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
     if profile_probe_skipped:
         builder.add("diagnostics.profile_probe_limit", "models_profiles", "warning",
                     "Workspace-specific profile discovery reached its per-report limit.")
-    builder.add("external_connection.not_observed", "external_connection", "unknown",
-                "Tunnel and ChatGPT reachability are not observed by Workspace Bridge.",
-                detail="Local MCP gateway status reports only Bridge configuration, not remote client connectivity.")
     return builder.report(mode)

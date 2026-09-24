@@ -121,7 +121,6 @@ def load_config(state: Path) -> dict:
 _DOCTOR_SECTIONS = (
     ("core", "Core"), ("workspaces", "Workspaces"), ("runtimes", "Runtimes"),
     ("runnable_routes", "Runnable routes"), ("git_evidence", "Git evidence"),
-    ("external_connection", "External connection"),
 )
 
 
@@ -146,7 +145,7 @@ def _print_doctor_human(report: dict) -> None:
                 print(f"  [{state}] {route.get('workspace_name')} / {route.get('runtime')}{suffix}")
                 if route.get("blockers"):
                     print("    blockers: " + ", ".join(route["blockers"]))
-        if section in {"workspaces", "models_profiles", "runtimes", "core", "git_evidence", "external_connection"}:
+        if section in {"workspaces", "models_profiles", "runtimes", "core", "git_evidence"}:
             for check in rows:
                 scope = []
                 if check.get("workspace_id"):

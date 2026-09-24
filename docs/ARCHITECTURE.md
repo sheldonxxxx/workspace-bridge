@@ -13,21 +13,27 @@ service method. A route is evaluated for one concrete workspace/runtime pair;
 facts from other workspaces or runtimes cannot satisfy its prerequisites.
 
 Listener health, shared MCP gateway configuration/enabled state, runtime adapter
-health, an exact runnable route, and remote tunnel/ChatGPT reachability are
-separate observations. Bridge has no evidence for the final remote connection,
-so that check remains `unknown` with code `external_connection.not_observed`.
+health, and an exact runnable route are separate observations.
 Git Evidence is a read-only review capability and does not gate route readiness.
 The status vocabulary is `pass`, `warning`, `action_required`, `failed`, and
 `unknown`, ranked from lowest to highest severity as pass, warning, unknown,
 action required, and failed. Unknown is never promoted to pass.
+
+The authenticated Manager consumes `/api/diagnostics`; only
+`runnable_routes[].ready` for the exact workspace/runtime pair represents route
+readiness. `overall.status`, adapter health, Bridge gateway configuration and
+enablement, and run interactions remain
+separate concepts. A diagnostics fetch failure makes route readiness unavailable
+in the UI and disables handoff starts without discarding other Manager data.
 
 Offline diagnostics read local state only and mark runtime, profile, and model
 freshness unknown. Doctor's service mode opens SQLite read-only, performs no
 notification recovery, starts no workers, and does not contend for the serve
 process lock. Runtime calls in live mode use bounded private Runtime Protocol
 requests after copying relevant local policy out from under the database lock.
-The Manager UI will move to these authoritative route objects in the next
-productization milestone; its existing readiness calculation is temporary.
+The Manager uses these authoritative route objects for overview, workspace
+cards, and the Handoff route selector. Missing or truncated routes remain
+unevaluated; the client does not reconstruct prerequisites.
 
 ## Component map
 
@@ -122,6 +128,13 @@ source, handoff, and conversation state checks pass. Runtime-config revision
 drift is refreshed before the next turn; a workspace source change or unsafe
 native update starts a conversation with the selected security source and
 records the replacement reason.
+
+The authenticated local Manager's `POST
+/api/workspaces/{workspace}/jobs/{job_id}/runs` wrapper accepts only an explicit
+runtime and idempotency request ID; the prepared job ID comes from the path. It
+delegates directly to `service.start_agent_run`, preserving the existing
+workspace grant, handoff ownership, model policy, security binding, and adapter
+checks. It accepts no arbitrary prompt or model override.
 
 Runtime conversations are routing context and security bindings, not OS
 filesystem sandboxes by themselves. Pi and Codex enforce different native

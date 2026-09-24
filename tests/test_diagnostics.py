@@ -129,9 +129,7 @@ def test_fully_configured_exact_route_is_ready_and_safe(diagnostic_env):
     assert actual["blockers"] == []
     assert actual["profile"] == {"id": "reviewed", "revision": "rev-1"}
     assert actual["default_model_selector"] == "model-one"
-    assert report["overall"]["status"] == "unknown"  # external reachability is never guessed
-    assert next(item for item in report["checks"]
-                if item["code"] == "external_connection.not_observed")["status"] == "unknown"
+    assert report["overall"]["status"] == "pass"
     assert str(env["parent"]) not in json.dumps(report)
 
 
@@ -410,7 +408,7 @@ def test_doctor_human_and_json_use_report_and_exit_codes(diagnostic_env, capsys,
     assert cli_main(["--state", str(env["state"]), "doctor", "--offline"]) is None
     human = capsys.readouterr().out
     for heading in ("Overall:", "Core:", "Workspaces:", "Runtimes:",
-                    "Runnable routes:", "Git evidence:", "External connection:"):
+                    "Runnable routes:", "Git evidence:"):
         assert heading in human
 
 

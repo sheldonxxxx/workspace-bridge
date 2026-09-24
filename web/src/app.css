@@ -456,79 +456,188 @@ a {
   overflow-wrap: anywhere;
   font-size: 11px;
 }
-.mission-banner {
-  color: #effaf8;
-  background: #194b5d;
-  border-radius: 10px;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 21px;
-  min-height: 156px;
-  padding: 28px 31px;
-  display: grid;
-  position: relative;
-  overflow: hidden;
-}
-.mission-banner:after {
-  content: "";
-  pointer-events: none;
-  border: 1px solid #effaf824;
-  border-radius: 50%;
-  width: 170px;
-  height: 170px;
-  position: absolute;
-  right: 20%;
-  box-shadow:
-    0 0 0 42px #effaf809,
-    0 0 0 85px #effaf806;
-}
-.mission-icon {
-  background: #ffffff13;
-  border: 1px solid #a5d9d744;
-  border-radius: 12px;
-  align-self: start;
-  place-items: center;
-  width: 46px;
-  height: 46px;
-  display: grid;
-}
-.mission-icon svg {
-  width: 22px;
-}
-.mission-banner .section-kicker {
-  color: #b2d9d9;
-}
-.mission-banner h2 {
-  letter-spacing: -0.045em;
-  margin: 6px 0;
-  font-size: clamp(22px, 2vw, 29px);
-}
-.mission-banner p {
-  color: #c9e3e4;
-  max-width: 580px;
-  font-size: 13px;
-}
-.mission-banner button {
-  z-index: 1;
-  color: #153e47;
-  background: #d5f3eb;
-  position: relative;
-}
-.mission-banner button:hover {
-  background: #fff;
-}
-.mission-ready {
-  background: #175b58;
-}
-.mission-attention {
-  background: #704a2e;
-}
 .overview-columns {
   grid-template-columns: minmax(0, 1.03fr) minmax(0, 0.97fr);
   align-items: start;
   gap: 18px;
   margin-top: 18px;
   display: grid;
+}
+.diagnostic-health-summary,
+.diagnostic-unavailable {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  padding: 16px 25px 0;
+  font-size: 12px;
+}
+.diagnostic-unavailable strong {
+  color: var(--ink);
+}
+.diagnostic-unavailable p {
+  margin-top: 7px;
+}
+.diagnostic-counts {
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 14px 25px 5px;
+  display: flex;
+}
+.diagnostic-counts span {
+  color: var(--quiet);
+  background: var(--muted);
+  border-radius: 5px;
+  gap: 5px;
+  padding: 5px 7px;
+  font-size: 10px;
+  display: inline-flex;
+}
+.diagnostic-counts strong {
+  color: var(--ink);
+}
+.diagnostic-observation-list {
+  border-top: 1px solid var(--line);
+  margin-top: 13px;
+  padding: 10px 25px 13px;
+}
+.diagnostic-observation-list p {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  margin: 5px 0;
+  font-size: 11px;
+}
+.diagnostic-warnings {
+  border-top: 1px solid var(--line);
+  padding: 13px 25px 16px;
+  font-size: 11px;
+}
+.diagnostic-warnings > strong {
+  display: block;
+  margin-bottom: 6px;
+}
+.diagnostic-warnings > div {
+  align-items: start;
+  border-top: 1px solid var(--line);
+  gap: 8px;
+  padding: 7px 0;
+  display: flex;
+}
+.diagnostic-warnings > div span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.diagnostic-warnings .inline-action {
+  flex: none;
+  margin: 0;
+}
+.diagnostic-route-list {
+  max-height: 480px;
+  overflow: auto;
+}
+.diagnostic-route {
+  min-width: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.diagnostic-route:last-child {
+  border-bottom: 0;
+}
+.diagnostic-route-head {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  display: flex;
+}
+.diagnostic-route-head > div {
+  min-width: 0;
+  gap: 9px;
+  display: flex;
+  align-items: baseline;
+}
+.diagnostic-route-head strong,
+.diagnostic-route-head span {
+  overflow-wrap: anywhere;
+}
+.diagnostic-route-head > div > span {
+  color: var(--quiet);
+  font-size: 11px;
+}
+.diagnostic-route-facts {
+  color: var(--quiet);
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 8px;
+  font-size: 10px;
+  display: flex;
+}
+.diagnostic-route-message,
+.diagnostic-blocker p {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  margin-top: 9px;
+  font-size: 11px;
+}
+.diagnostic-blocker small {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+  font-size: 10px;
+  display: block;
+}
+.diagnostic-blocker .inline-action {
+  margin-top: 2px;
+}
+.diagnostic-generated {
+  color: var(--quiet);
+  border-top: 1px solid var(--line);
+  padding: 10px 24px;
+  font-size: 10px;
+}
+.diagnostic-route-compact {
+  padding: 14px 20px;
+}
+.runtime-route-readiness {
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  display: flex;
+}
+.runtime-route-readiness > span:first-child {
+  color: var(--quiet);
+  font-size: 10px;
+}
+.runtime-route-blocker {
+  margin-top: 7px;
+}
+.runtime-route-blocker p,
+.runtime-route-blocker small {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+.runtime-route-blocker small {
+  margin-top: 4px;
+  display: block;
+}
+.handoff-route-panel {
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(190px, 0.38fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+  padding: 16px 24px;
+  display: grid;
+}
+.handoff-route-picker {
+  min-width: 0;
+  gap: 8px;
+  display: grid;
+}
+.handoff-route-panel .diagnostic-route {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 12px;
+}
+.handoff-route-panel .diagnostic-unavailable {
+  padding: 8px 0;
 }
 .setup-list {
   display: grid;
@@ -1842,21 +1951,29 @@ a {
   .main-content {
     padding: 26px 16px 70px;
   }
+  .handoff-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .handoff-toolbar .native-select {
+    width: 100%;
+  }
+  .handoff-route-panel {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+  .diagnostic-route {
+    padding-inline: 17px;
+  }
+  .diagnostic-health-summary,
+  .diagnostic-unavailable,
+  .diagnostic-counts,
+  .diagnostic-observation-list,
+  .diagnostic-warnings {
+    padding-inline: 17px;
+  }
   .page-title {
     margin-bottom: 23px;
-  }
-  .mission-banner {
-    grid-template-columns: 39px minmax(0, 1fr);
-    gap: 15px;
-    padding: 22px;
-  }
-  .mission-icon {
-    width: 38px;
-    height: 38px;
-  }
-  .mission-banner button {
-    grid-column: 2;
-    justify-self: start;
   }
   .login-main {
     grid-template-columns: 1fr;
@@ -1924,20 +2041,6 @@ a {
   .page-title h1 {
     font-size: 29px;
   }
-  .mission-banner {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-  .mission-icon {
-    display: none;
-  }
-  .mission-banner button {
-    grid-column: 1;
-    margin-top: 8px;
-  }
-  .mission-banner h2 {
-    font-size: 25px;
-  }
   .section-heading {
     padding: 20px;
   }
@@ -1946,6 +2049,14 @@ a {
   }
   .section-heading p {
     font-size: 11px;
+  }
+  .diagnostic-route-head {
+    align-items: flex-start;
+  }
+  .diagnostic-route-head > div {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
   }
   .setup-item {
     padding: 16px 19px;

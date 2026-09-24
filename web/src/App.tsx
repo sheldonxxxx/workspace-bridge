@@ -69,12 +69,15 @@ import {
   displayState,
   jsonText,
   runtimeName,
+  type DiagnosticCheck,
+  type DiagnosticReport,
   type Event,
   type Handoff,
   type Json,
   type Model,
   type ModelPolicy,
   type Run,
+  type RunnableRoute,
   type Status,
   type Workspace,
 } from "@/lib/api";
@@ -167,13 +170,140 @@ function StateBadge({ value }: { value: string }) {
     ? "success"
     : /waiting|review|pending|paused/.test(lower)
       ? "warning"
-      : /failed|error|unavailable|locked/.test(lower)
+      : /failed|error|unavailable|locked|blocked/.test(lower)
         ? "danger"
         : "neutral";
   return (
     <Badge variant="outline" className={`state-badge tone-${tone}`}>
       {value}
     </Badge>
+  );
+}
+function routeChecks(
+  report: DiagnosticReport | null,
+  route: RunnableRoute,
+): Array<{ code: string; check?: DiagnosticCheck }> {
+  return route.blockers.map((code) => ({
+    code,
+    check: report?.checks.find(
+      (check) =>
+        check.code === code &&
+        (!check.workspace_id || check.workspace_id === route.workspace_id) &&
+        (!check.runtime || check.runtime === route.runtime),
+    ),
+  }));
+}
+function diagnosticDestination(
+  check?: DiagnosticCheck,
+  code?: string,
+): Section {
+  const value = code || check?.code || "";
+  if (check?.section === "workspaces" || value.startsWith("workspace."))
+    return "workspaces";
+  if (value.startsWith("profile.")) return "profiles";
+  return "runtimes";
+}
+function securitySource(ws: Workspace | undefined, runtime: string): string {
+  const grant = ws?.runtime_grants?.[runtime];
+  if (grant?.security_binding?.source === "runtime-config")
+    return "Codex config";
+  const profileId = grant?.security_binding?.profile?.id || grant?.profile?.id;
+  return profileId ? `Profile ${profileId}` : "Security source not reported";
+}
+function isDiagnosticReport(value: unknown): value is DiagnosticReport {
+  if (!value || typeof value !== "object") return false;
+  const report = value as Partial<DiagnosticReport>;
+  return Boolean(
+    typeof report.generated_at === "string" &&
+    typeof report.mode === "string" &&
+    Array.isArray(report.checks) &&
+    Array.isArray(report.runnable_routes) &&
+    report.overall &&
+    typeof report.overall.status === "string" &&
+    typeof report.overall.summary === "string" &&
+    report.overall.counts &&
+    report.runnable_routes.every(
+      (route) =>
+        typeof route.workspace_id === "string" &&
+        typeof route.runtime === "string" &&
+        typeof route.ready === "boolean",
+    ),
+  );
+}
+function RouteSummary({
+  route,
+  report,
+  unavailable,
+  security,
+  onNavigate,
+  compact = false,
+}: {
+  route: RunnableRoute;
+  report: DiagnosticReport | null;
+  unavailable: boolean;
+  security: string;
+  onNavigate: (section: Section) => void;
+  compact?: boolean;
+}) {
+  const blockers = routeChecks(report, route);
+  const visibleBlockers = compact ? blockers.slice(0, 1) : blockers;
+  return (
+    <article
+      className={`diagnostic-route ${compact ? "diagnostic-route-compact" : ""}`}
+    >
+      <div className="diagnostic-route-head">
+        <div>
+          <strong>{route.workspace_name}</strong>
+          <span>{runtimeName(route.runtime)}</span>
+        </div>
+        <StateBadge
+          value={
+            unavailable
+              ? "Diagnostics unavailable"
+              : route.ready
+                ? "Ready"
+                : "Blocked"
+          }
+        />
+      </div>
+      <p className="diagnostic-route-facts">
+        <span>
+          Default model: {route.default_model_selector || "Not reported"}
+        </span>
+        <span>Security: {security}</span>
+        <span>Blockers: {route.blockers.length}</span>
+      </p>
+      {unavailable ? (
+        <p className="diagnostic-route-message">
+          The last route snapshot is stale. Refresh diagnostics before starting.
+        </p>
+      ) : !route.ready ? (
+        <div className="diagnostic-blockers">
+          {visibleBlockers.length ? (
+            visibleBlockers.map(({ code, check }) => (
+              <div className="diagnostic-blocker" key={`${route.id}:${code}`}>
+                <p>{check?.summary || `Blocked by ${code}.`}</p>
+                {check?.remediation && <small>{check.remediation}</small>}
+                {(!compact || check?.remediation) && (
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="inline-action"
+                    onClick={() =>
+                      onNavigate(diagnosticDestination(check, code))
+                    }
+                  >
+                    {check?.remediation ? "Resolve" : "Open"}
+                  </Button>
+                )}
+              </div>
+            ))
+          ) : (
+            <p className="diagnostic-route-message">{route.summary}</p>
+          )}
+        </div>
+      ) : null}
+    </article>
   );
 }
 function Empty({
@@ -489,17 +619,23 @@ function ExecutionStatus({
 
 function WorkspaceCard({
   ws,
+  diagnostics,
+  diagnosticsUnavailable,
   onManage,
   onProfile,
   onHandoffs,
+  onNavigate,
   onConfirm,
   onNotice,
   onDetail,
 }: {
   ws: Workspace;
+  diagnostics: DiagnosticReport | null;
+  diagnosticsUnavailable: boolean;
   onManage: (ws: Workspace, operation: string, extra?: Json) => Promise<void>;
   onProfile: (ws: Workspace, runtimeId: string) => void;
   onHandoffs: (ws: Workspace) => void;
+  onNavigate: (section: Section) => void;
   onConfirm: (state: ConfirmState) => void;
   onNotice: (value: string) => void;
   onDetail: (detail: TextDetail) => void;
@@ -607,58 +743,93 @@ function WorkspaceCard({
             }
           />
         </div>
-        {Object.entries(ws.runtime_grants || {}).map(([id, grant]) => (
-          <div className="access-cell runtime-access" key={id}>
-            <div>
-              <strong>{runtimeName(id)} runtime</strong>
-              <p>
-                {grant.security_binding?.source === "runtime-config"
-                  ? "Use Codex config (config.toml)"
-                  : grant.profile
-                    ? `Profile: ${grant.profile.id}`
-                    : "Choose a security profile"}
-              </p>
-              {grant.security_binding?.source === "runtime-config" && (
-                <p className="runtime-security-summary">
-                  {grant.security_binding.status === "ready"
-                    ? `Following current Codex config · ${grant.security_binding.resolved_summary?.activePermissionProfile || "Codex default"} · ${grant.security_binding.resolved_summary?.approvalPolicy || "approval unknown"} · ${grant.security_binding.resolved_summary?.approvalsReviewer || "reviewer unknown"}`
-                    : "Codex security config is currently unavailable"}
-                </p>
-              )}
-              <Button
-                variant="link"
-                size="sm"
-                className="inline-action"
-                onClick={() => onProfile(ws, id)}
-              >
-                Change security
-              </Button>
-            </div>
-            <Switch
-              aria-label={`${runtimeName(id)} runtime for ${ws.name}`}
-              checked={grant.enabled}
-              onCheckedChange={(enabled) =>
-                change(
-                  enabled
-                    ? `Allow ${runtimeName(id)} here?`
-                    : `Revoke ${runtimeName(id)} here?`,
-                  enabled
-                    ? "The workspace agent switch and model policy must also be enabled."
-                    : "Active runs are not stopped automatically.",
-                  () =>
-                    api(`/api/workspaces/${ws.id}/runtimes/${id}`, "POST", {
-                      enabled,
-                    }).then(() =>
-                      onNotice(
-                        `${runtimeName(id)} ${enabled ? "allowed" : "revoked"} for ${ws.name}.`,
+        {Object.entries(ws.runtime_grants || {}).map(([id, grant]) => {
+          const route = diagnostics?.runnable_routes.find(
+            (item) => item.workspace_id === ws.id && item.runtime === id,
+          );
+          const blockers = route ? routeChecks(diagnostics, route) : [];
+          const status = diagnosticsUnavailable
+            ? "Diagnostics unavailable"
+            : route
+              ? route.ready
+                ? "Ready"
+                : "Blocked"
+              : "Not evaluated";
+          return (
+            <div className="access-cell runtime-access" key={id}>
+              <div>
+                <strong>{runtimeName(id)} runtime</strong>
+                <p>Security source: {securitySource(ws, id)}</p>
+                <p>Runtime grant: {grant.enabled ? "Enabled" : "Disabled"}</p>
+                {grant.security_binding?.source === "runtime-config" && (
+                  <p className="runtime-security-summary">
+                    {grant.security_binding.status === "ready"
+                      ? `Following current Codex config · ${grant.security_binding.resolved_summary?.activePermissionProfile || "Codex default"} · ${grant.security_binding.resolved_summary?.approvalPolicy || "approval unknown"} · ${grant.security_binding.resolved_summary?.approvalsReviewer || "reviewer unknown"}`
+                      : "Codex security config is currently unavailable"}
+                  </p>
+                )}
+                <div className="runtime-route-readiness">
+                  <span>Route readiness</span>
+                  <StateBadge value={status} />
+                </div>
+                {!diagnosticsUnavailable && route && !route.ready && (
+                  <div className="runtime-route-blocker">
+                    <p>{blockers[0]?.check?.summary || route.summary}</p>
+                    {blockers[0]?.check?.remediation && (
+                      <small>{blockers[0].check.remediation}</small>
+                    )}
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="inline-action"
+                      onClick={() =>
+                        onNavigate(
+                          diagnosticDestination(
+                            blockers[0]?.check,
+                            blockers[0]?.code,
+                          ),
+                        )
+                      }
+                    >
+                      View blockers
+                    </Button>
+                  </div>
+                )}
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="inline-action"
+                  onClick={() => onProfile(ws, id)}
+                >
+                  Change security
+                </Button>
+              </div>
+              <Switch
+                aria-label={`${runtimeName(id)} runtime for ${ws.name}`}
+                checked={grant.enabled}
+                onCheckedChange={(enabled) =>
+                  change(
+                    enabled
+                      ? `Allow ${runtimeName(id)} here?`
+                      : `Revoke ${runtimeName(id)} here?`,
+                    enabled
+                      ? "The workspace agent switch and model policy must also be enabled."
+                      : "Active runs are not stopped automatically.",
+                    () =>
+                      api(`/api/workspaces/${ws.id}/runtimes/${id}`, "POST", {
+                        enabled,
+                      }).then(() =>
+                        onNotice(
+                          `${runtimeName(id)} ${enabled ? "allowed" : "revoked"} for ${ws.name}.`,
+                        ),
                       ),
-                    ),
-                  !enabled,
-                )
-              }
-            />
-          </div>
-        ))}
+                    !enabled,
+                  )
+                }
+              />
+            </div>
+          );
+        })}
       </div>
       <div className="workspace-footer">
         <span>
@@ -1006,6 +1177,8 @@ export default function App() {
   const [section, setSection] = useState<Section>(initialSection);
   const [mobileNav, setMobileNav] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -1013,6 +1186,9 @@ export default function App() {
   const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(
     null,
   );
+  const [selectedRouteRuntime, setSelectedRouteRuntime] = useState<
+    string | null
+  >(null);
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
   const [workspaceRuns, setWorkspaceRuns] = useState<Run[]>([]);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
@@ -1029,7 +1205,9 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [startingHandoff, setStartingHandoff] = useState<string | null>(null);
   const refreshingRef = useRef(false);
+  const startRequestIds = useRef(new Map<string, string>());
   const notify = useCallback((text: string) => {
     setNotice(text);
     window.setTimeout(() => setNotice(""), 6500);
@@ -1068,10 +1246,28 @@ export default function App() {
       refreshingRef.current = true;
       setRefreshing(true);
       try {
+        const diagnosticsResult = api<unknown>("/api/diagnostics").then(
+          (value) => {
+            if (isDiagnosticReport(value)) {
+              setDiagnostics(value);
+              setDiagnosticsError(null);
+            } else {
+              setDiagnosticsError("Diagnostics returned an invalid report.");
+            }
+          },
+          (error: unknown) => {
+            setDiagnosticsError(
+              error instanceof Error
+                ? error.message
+                : "Diagnostics could not be refreshed.",
+            );
+          },
+        );
         const [workspaceData, historyData, currentStatus] = await Promise.all([
           api<{ workspaces: Workspace[] }>("/api/workspaces"),
           api<{ events: Event[] }>("/api/events"),
           api<Status>("/api/status"),
+          diagnosticsResult,
         ]);
         setWorkspaces(workspaceData.workspaces || []);
         setEvents(historyData.events || []);
@@ -1181,6 +1377,8 @@ export default function App() {
     }
     setAuth("login");
     setStatus(null);
+    setDiagnostics(null);
+    setDiagnosticsError(null);
     setWorkspaces([]);
     setEvents([]);
     setRuns([]);
@@ -1222,11 +1420,71 @@ export default function App() {
   }
   async function openHandoffs(ws: Workspace) {
     setSelectedWorkspace(ws.id);
+    setSelectedRouteRuntime(null);
     navigate("handoffs");
     try {
       await loadWorkspaceDetails(ws.id);
     } catch (error) {
       notify((error as Error).message);
+    }
+  }
+  async function startPreparedHandoff(handoff: Handoff, route: RunnableRoute) {
+    if (startingHandoff) return;
+    const key = `${selectedWorkspace}:${handoff.id}:${route.runtime}`;
+    let requestId = startRequestIds.current.get(key);
+    if (!requestId) {
+      requestId = crypto.randomUUID();
+      startRequestIds.current.set(key, requestId);
+    }
+    setStartingHandoff(key);
+    try {
+      const response = await fetch(
+        `/api/workspaces/${selectedWorkspace}/jobs/${handoff.id}/runs`,
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runtime: route.runtime,
+            request_id: requestId,
+          }),
+        },
+      );
+      const result = (await response.json().catch(() => ({}))) as Run & {
+        error?: string;
+      };
+      if (!response.ok) {
+        if (response.status >= 400 && response.status < 500)
+          startRequestIds.current.delete(key);
+        notify(
+          result.error ||
+            (response.status >= 500
+              ? "The start outcome is uncertain. Retry to reuse the same request ID."
+              : `Could not start the prepared handoff (HTTP ${response.status}).`),
+        );
+        return;
+      }
+      if (!result.run_id) {
+        notify(
+          "The start outcome is uncertain. Retry to reuse the same request ID.",
+        );
+        return;
+      }
+      startRequestIds.current.delete(key);
+      notify(
+        `Started ${runtimeName(route.runtime)} run${result.model ? ` with ${result.model}` : ""}.`,
+      );
+      await Promise.allSettled([
+        refresh({ silent: true }),
+        loadWorkspaceDetails(selectedWorkspace || ""),
+      ]);
+      navigate("runs");
+    } catch {
+      notify(
+        "The start outcome is uncertain. Retry to reuse the same request ID.",
+      );
+    } finally {
+      setStartingHandoff(null);
     }
   }
   function openProfile(ws: Workspace, runtime: string) {
@@ -1281,47 +1539,58 @@ export default function App() {
   );
   const adapters = status?.runtimes?.runtimes || {};
   const policies = useMemo(() => status?.runtime_policies || {}, [status]);
-  const activeRuns = runs.filter((r) => r.phase === "active" || r.active);
   const attentionRuns = runs.filter(
     (r) => r.active_state === "waiting_interaction",
   );
-  const setup = useMemo(
-    () => [
-      {
-        title: "Add a workspace",
-        done: workspaces.some((w) => w.enabled),
-        target: "workspaces" as Section,
-        text: "Choose a project and enable bridge access.",
-      },
-      {
-        title: "Connect the bridge",
-        done: Boolean(status?.bridge.enabled),
-        target: "runtimes" as Section,
-        text: "Create a credential for the shared connection.",
-      },
-      {
-        title: "Grant agent access",
-        done: workspaces.some(
-          (w) =>
-            w.enabled &&
-            w.agent_enabled &&
-            Object.values(w.runtime_grants || {}).some(
-              (g) => g.enabled && g.profile,
-            ),
-        ),
-        target: "workspaces" as Section,
-        text: "Allow runs and choose a security profile.",
-      },
-      {
-        title: "Choose a model",
-        done: Object.values(policies).some((p) => p.configured),
-        target: "runtimes" as Section,
-        text: "Enable a model and set its default.",
-      },
-    ],
-    [workspaces, status, policies],
+  const diagnosticsUnavailable = !diagnostics || Boolean(diagnosticsError);
+  const readyRoutes = useMemo(
+    () =>
+      diagnosticsUnavailable
+        ? []
+        : (diagnostics?.runnable_routes || []).filter((route) => route.ready),
+    [diagnostics, diagnosticsUnavailable],
   );
-  const ready = setup.every((s) => s.done);
+  const selectedRoutes = (diagnostics?.runnable_routes || []).filter(
+    (route) => route.workspace_id === selectedWorkspace,
+  );
+  const effectiveSelectedRouteRuntime = selectedRoutes.some(
+    (route) => route.runtime === selectedRouteRuntime,
+  )
+    ? selectedRouteRuntime
+    : (selectedRoutes.find((route) => route.ready) || selectedRoutes[0])
+        ?.runtime || null;
+  const selectedRoute = selectedRoutes.find(
+    (route) => route.runtime === effectiveSelectedRouteRuntime,
+  );
+  const setup = useMemo(() => {
+    const passed = (code: string) =>
+      !diagnosticsUnavailable &&
+      Boolean(
+        diagnostics?.checks.some(
+          (check) => check.code === code && check.status === "pass",
+        ),
+      );
+    return [
+      {
+        title: "Enable a workspace",
+        done: passed("workspace.enabled"),
+        target: "workspaces" as Section,
+        text: "Choose a project mapping and enable Bridge access.",
+      },
+      {
+        title: "Enable the Bridge gateway",
+        done: passed("core.gateway_enabled"),
+        target: "runtimes" as Section,
+        text: "Configure and enable the shared MCP gateway.",
+      },
+      {
+        title: "Prepare a runnable route",
+        done: readyRoutes.length > 0,
+        target: "workspaces" as Section,
+        text: "Review exact workspace and runtime route readiness.",
+      },
+    ];
+  }, [diagnostics, diagnosticsUnavailable, readyRoutes]);
   const page = sections.find((s) => s.id === section)!;
   if (auth === "checking")
     return (
@@ -1457,7 +1726,11 @@ export default function App() {
           <div className="topbar-right">
             <span className="topbar-health">
               <span className="live-dot" />
-              {status?.bridge.enabled ? "Bridge online" : "Bridge setup needed"}
+              {!status?.bridge.configured
+                ? "Bridge gateway not configured"
+                : status.bridge.enabled
+                  ? "Bridge gateway enabled"
+                  : "Bridge gateway paused"}
             </span>
             <Button
               variant="ghost"
@@ -1514,61 +1787,118 @@ export default function App() {
           </div>
           {section === "overview" && (
             <div className="overview-page">
-              <div
-                className={`mission-banner ${attentionRuns.length ? "mission-attention" : ready ? "mission-ready" : ""}`}
-              >
-                <div className="mission-icon">
-                  {attentionRuns.length ? (
-                    <CircleHelp />
-                  ) : ready ? (
-                    <Check />
-                  ) : (
-                    <Workflow />
-                  )}
-                </div>
-                <div>
-                  <span className="section-kicker">Current position</span>
-                  <h2>
-                    {attentionRuns.length
-                      ? `${attentionRuns.length} run${attentionRuns.length === 1 ? " needs" : "s need"} review`
-                      : activeRuns.length
-                        ? `${activeRuns.length} run${activeRuns.length === 1 ? "" : "s"} in progress`
-                        : ready
-                          ? "Ready for the next handoff"
-                          : "Bring a workspace online"}
-                  </h2>
-                  <p>
-                    {attentionRuns.length
-                      ? "An agent is waiting for a decision. Open the run to continue."
-                      : ready
-                        ? "Workspace access, the bridge, runtime grants, and models are configured."
-                        : "Follow the access path below to get this Bridge ready."}
-                  </p>
-                </div>
-                <Button
-                  onClick={() =>
-                    navigate(
-                      attentionRuns.length
-                        ? "runs"
-                        : ready
-                          ? "handoffs"
-                          : setup.find((s) => !s.done)?.target || "workspaces",
+              <section className="surface-panel diagnostic-health">
+                <SectionHeading
+                  title="System health"
+                  description="Diagnostic health and observations; this does not determine route readiness."
+                  action={
+                    diagnostics && (
+                      <StateBadge
+                        value={
+                          diagnosticsUnavailable
+                            ? "Stale / unavailable"
+                            : `Health ${diagnostics.overall.status}`
+                        }
+                      />
                     )
                   }
-                >
-                  {attentionRuns.length
-                    ? "Review runs"
-                    : ready
-                      ? "Open handoffs"
-                      : "Continue setup"}
-                  <ArrowRight size={15} />
-                </Button>
-              </div>
+                />
+                {diagnosticsUnavailable ? (
+                  <div className="diagnostic-unavailable" role="status">
+                    <strong>
+                      Current system observations are unavailable.
+                    </strong>
+                    {diagnostics?.generated_at && (
+                      <p>
+                        Last successful diagnostics:{" "}
+                        {dateTime(diagnostics.generated_at)}. This snapshot is
+                        stale and cannot authorize a start.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <p className="diagnostic-health-summary">
+                      {diagnostics?.overall.summary}
+                    </p>
+                    <div
+                      className="diagnostic-counts"
+                      aria-label="Diagnostic check counts"
+                    >
+                      {(
+                        [
+                          "pass",
+                          "warning",
+                          "unknown",
+                          "action_required",
+                          "failed",
+                        ] as const
+                      ).map((state) => (
+                        <span key={state}>
+                          <strong>
+                            {diagnostics?.overall.counts[state] || 0}
+                          </strong>
+                          {state.replaceAll("_", " ")}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <div className="diagnostic-observation-list">
+                  <p>
+                    Bridge gateway:{" "}
+                    {status?.bridge.configured
+                      ? "configured"
+                      : "not configured"}{" "}
+                    · {status?.bridge.enabled ? "enabled" : "disabled"}
+                  </p>
+                  {Object.entries(adapters).map(([runtime, info]) => (
+                    <p key={runtime}>
+                      {runtimeName(runtime)} adapter:{" "}
+                      {info.configured && info.healthy
+                        ? "healthy"
+                        : "unavailable"}
+                    </p>
+                  ))}
+                </div>
+                {!diagnosticsUnavailable &&
+                  (diagnostics?.checks || []).some(
+                    (check) => check.status === "warning",
+                  ) && (
+                    <div className="diagnostic-warnings">
+                      <strong>Warnings</strong>
+                      {(diagnostics?.checks || [])
+                        .filter((check) => check.status === "warning")
+                        .slice(0, 5)
+                        .map((check) => (
+                          <div key={check.id}>
+                            <span>{check.summary}</span>
+                            <Button
+                              variant="link"
+                              size="sm"
+                              className="inline-action"
+                              onClick={() =>
+                                navigate(
+                                  diagnosticDestination(check, check.code),
+                                )
+                              }
+                            >
+                              Open
+                            </Button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+              </section>
               <div className="overview-columns">
                 <section className="surface-panel">
                   <SectionHeading
                     title="Access path"
-                    description={`${setup.filter((s) => s.done).length} of 4 steps ready`}
+                    description={
+                      diagnosticsUnavailable
+                        ? "Completion is unavailable until diagnostics refresh."
+                        : `${setup.filter((s) => s.done).length} of ${setup.length} checks confirmed`
+                    }
                   />
                   <div className="setup-list">
                     {setup.map((step, index) => (
@@ -1579,7 +1909,13 @@ export default function App() {
                         key={step.title}
                       >
                         <span className="setup-number">
-                          {step.done ? <Check size={15} /> : index + 1}
+                          {diagnosticsUnavailable ? (
+                            "—"
+                          ) : step.done ? (
+                            <Check size={15} />
+                          ) : (
+                            index + 1
+                          )}
                         </span>
                         <span>
                           <strong>{step.title}</strong>
@@ -1649,9 +1985,12 @@ export default function App() {
                     <WorkspaceCard
                       key={`${ws.id}:${ws.excludes}:${ws.write_scope}`}
                       ws={ws}
+                      diagnostics={diagnostics}
+                      diagnosticsUnavailable={diagnosticsUnavailable}
                       onManage={manage}
                       onProfile={(w, runtime) => void openProfile(w, runtime)}
                       onHandoffs={(w) => void openHandoffs(w)}
+                      onNavigate={navigate}
                       onConfirm={ask}
                       onNotice={notify}
                       onDetail={setTextDetail}
@@ -1715,6 +2054,56 @@ export default function App() {
                       title="Prepared handoffs"
                       description={`In ${selected.name}`}
                     />
+                    <div className="handoff-route-panel">
+                      <div className="handoff-route-picker">
+                        <Label htmlFor="handoff-route">Runtime / Route</Label>
+                        <select
+                          id="handoff-route"
+                          className="native-select"
+                          value={effectiveSelectedRouteRuntime || ""}
+                          onChange={(event) =>
+                            setSelectedRouteRuntime(event.target.value || null)
+                          }
+                          disabled={!selectedRoutes.length}
+                        >
+                          {!selectedRoutes.length && (
+                            <option value="">
+                              {diagnosticsUnavailable
+                                ? "Diagnostics unavailable"
+                                : "No canonical route reported"}
+                            </option>
+                          )}
+                          {selectedRoutes.map((route) => (
+                            <option key={route.id} value={route.runtime}>
+                              {runtimeName(route.runtime)} —{" "}
+                              {diagnosticsUnavailable
+                                ? "Diagnostics unavailable"
+                                : route.ready
+                                  ? "Ready"
+                                  : "Blocked"}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      {selectedRoute ? (
+                        <RouteSummary
+                          route={selectedRoute}
+                          report={diagnostics}
+                          unavailable={diagnosticsUnavailable}
+                          security={securitySource(
+                            selected,
+                            selectedRoute.runtime,
+                          )}
+                          onNavigate={navigate}
+                        />
+                      ) : (
+                        <p className="diagnostic-unavailable">
+                          {diagnosticsUnavailable
+                            ? "Route readiness is unavailable. Start is disabled until diagnostics refresh."
+                            : "No diagnostic route is available for this workspace."}
+                        </p>
+                      )}
+                    </div>
                     {handoffs.length ? (
                       handoffs.map((h) => (
                         <div className="handoff-row" key={h.id}>
@@ -1728,6 +2117,27 @@ export default function App() {
                             <p className="path-text">{h.path}</p>
                           </div>
                           <div className="row-actions">
+                            {h.state === "prepared" && (
+                              <Button
+                                size="sm"
+                                disabled={
+                                  !selectedRoute ||
+                                  diagnosticsUnavailable ||
+                                  selectedRoute.ready !== true ||
+                                  Boolean(startingHandoff)
+                                }
+                                onClick={() =>
+                                  selectedRoute &&
+                                  void startPreparedHandoff(h, selectedRoute)
+                                }
+                              >
+                                <Play size={14} />
+                                {startingHandoff ===
+                                `${selectedWorkspace}:${h.id}:${selectedRoute?.runtime}`
+                                  ? "Starting…"
+                                  : "Start run"}
+                              </Button>
+                            )}
                             <Button
                               variant="outline"
                               size="sm"
@@ -1760,12 +2170,17 @@ export default function App() {
                                 key={doc}
                                 onClick={async () => {
                                   try {
-                                    const data = await api(
+                                    const data = await api<{
+                                      content?: unknown;
+                                    }>(
                                       `/api/workspaces/${selected.id}/document?${new URLSearchParams({ job_id: h.id, document: doc })}`,
                                     );
                                     setTextDetail({
                                       title: `${h.title} — ${doc}`,
-                                      content: data,
+                                      content:
+                                        typeof data?.content === "string"
+                                          ? data.content
+                                          : (data?.content ?? data),
                                     });
                                   } catch (error) {
                                     notify((error as Error).message);
@@ -1861,12 +2276,12 @@ export default function App() {
                           <StateBadge
                             value={
                               !info.configured
-                                ? "Not configured"
+                                ? "Adapter not configured"
                                 : info.locked
-                                  ? "Locked"
+                                  ? "Adapter locked"
                                   : healthy
-                                    ? "Healthy"
-                                    : "Unavailable"
+                                    ? "Adapter healthy"
+                                    : "Adapter unavailable"
                             }
                           />
                         </div>
@@ -1881,6 +2296,7 @@ export default function App() {
                         <div className="adapter-policy">
                           {policy?.configured ? (
                             <>
+                              <span>Model policy configured</span>
                               <span>
                                 {policy.enabled_count ??
                                   policy.enabled?.length ??
@@ -1906,7 +2322,7 @@ export default function App() {
                   );
                 })}
                 {!Object.keys(adapters).length && (
-                  <Empty title="No adapters connected">
+                  <Empty title="No adapters configured">
                     Configure a runtime adapter to run prepared handoffs.
                   </Empty>
                 )}
@@ -1923,13 +2339,17 @@ export default function App() {
                   <StateBadge
                     value={
                       !status?.bridge.configured
-                        ? "Not configured"
+                        ? "Gateway not configured"
                         : status.bridge.enabled
-                          ? "Enabled"
-                          : "Paused"
+                          ? "Gateway enabled"
+                          : "Gateway disabled"
                     }
                   />
                 </div>
+                <p className="external-connection-note">
+                  External ChatGPT and tunnel connection: not observed by this
+                  service.
+                </p>
                 <div className="connection-endpoint">
                   MCP endpoint{" "}
                   <code>http://127.0.0.1:{status?.mcp_port}/mcp</code>

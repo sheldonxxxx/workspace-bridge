@@ -24,6 +24,75 @@ const run = {
   created: "2026-09-24T10:00:00Z",
   conversation_id: "conv-1",
 };
+const diagnosticsReport = {
+  generated_at: "2026-09-25T08:00:00Z",
+  mode: "live",
+  overall: {
+    status: "unknown",
+    summary: "Some runtime freshness was not observed.",
+    counts: { pass: 8, warning: 1, unknown: 1, action_required: 0, failed: 0 },
+  },
+  checks: [
+    {
+      id: "conversation.security_update_pending:ws-1:pi",
+      code: "conversation.security_update_pending",
+      section: "models_profiles",
+      status: "warning",
+      summary:
+        "A prior conversation will refresh its security settings before its next turn.",
+      workspace_id: "ws-1",
+      runtime: "pi",
+    },
+  ],
+  runnable_routes: [
+    {
+      id: "ws-1:pi",
+      workspace_id: "ws-1",
+      workspace_name: "Alpine archive",
+      runtime: "pi",
+      ready: true,
+      status: "ready",
+      summary: "This exact workspace/runtime path is ready to start.",
+      blockers: [],
+      profile: { id: "read-only", revision: "default-revision" },
+      default_model_selector: "muse-spark",
+    },
+  ],
+};
+function runnableRoute(
+  workspaceId: string,
+  workspaceName: string,
+  runtime: string,
+  ready: boolean,
+  blockers: string[] = [],
+) {
+  return {
+    id: `${workspaceId}:${runtime}`,
+    workspace_id: workspaceId,
+    workspace_name: workspaceName,
+    runtime,
+    ready,
+    status: ready ? "ready" : "blocked",
+    summary: ready
+      ? "This exact workspace/runtime path is ready to start."
+      : `Runnable path has ${blockers.length} blocker(s).`,
+    blockers,
+    profile: runtime === "pi" ? { id: "read-only" } : null,
+    default_model_selector: runtime === "pi" ? "muse-spark" : "gpt-test",
+  };
+}
+function reportWith(
+  routes: unknown[],
+  checks: unknown[] = [],
+  status = "unknown",
+) {
+  return {
+    ...diagnosticsReport,
+    overall: { ...diagnosticsReport.overall, status },
+    checks: [...diagnosticsReport.checks, ...checks],
+    runnable_routes: routes,
+  };
+}
 const piReadOnlyConfig = {
   version: 3,
   write_tools_enabled: false,
@@ -45,7 +114,10 @@ const piReadOnlyConfig = {
   external_access: { default_mode: "deny", roots: [] },
   shell_mode: "deny",
 };
-async function mockApi(page: Page) {
+async function mockApi(
+  page: Page,
+  options: { diagnostics?: unknown; workspaces?: unknown; runs?: unknown } = {},
+) {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const data: Record<string, unknown> = {
@@ -75,7 +147,8 @@ async function mockApi(page: Page) {
           },
         },
       },
-      "/api/workspaces": { workspaces: [workspace] },
+      "/api/diagnostics": options.diagnostics ?? diagnosticsReport,
+      "/api/workspaces": options.workspaces ?? { workspaces: [workspace] },
       "/api/events": {
         events: [
           {
@@ -86,7 +159,7 @@ async function mockApi(page: Page) {
           },
         ],
       },
-      "/api/runs": { runs: [run], next_offset: null },
+      "/api/runs": options.runs ?? { runs: [run], next_offset: null },
       "/api/workspaces/ws-1/jobs": {
         handoffs: [
           {
@@ -155,7 +228,7 @@ test("desktop operations and request review", async ({ page }) => {
   await mockApi(page);
   await page.goto("./");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.getByText("1 run needs review")).toBeVisible();
+  await expect(page.getByText("System health").first()).toBeVisible();
   await page.screenshot({
     path: "test-results/desktop-overview.png",
     fullPage: true,
@@ -185,6 +258,340 @@ test("desktop operations and request review", async ({ page }) => {
     fullPage: true,
   });
   expect(errors).toEqual([]);
+});
+test("canonical Ready route stays startable while overall health is unknown", async ({
+  page,
+}) => {
+  await mockApi(page);
+  let request: Record<string, unknown> | undefined;
+  await page.route("**/api/workspaces/ws-1/jobs/job-1/runs", async (route) => {
+    request = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...run,
+        run_id: "run-started",
+        phase: "active",
+        active_state: "running",
+        model: "muse-spark",
+      }),
+    });
+  });
+  await page.goto("./");
+  await expect(page.getByText("Health unknown")).toBeVisible();
+  await expect(
+    page.getByText(
+      "A prior conversation will refresh its security settings before its next turn.",
+    ),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await expect(page.getByText("Default model: muse-spark")).toBeVisible();
+  const start = page.getByRole("button", { name: "Start run" });
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
+  expect(request).toMatchObject({ runtime: "pi" });
+  expect(Object.keys(request || {}).sort()).toEqual(["request_id", "runtime"]);
+  expect(request?.request_id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+});
+test("globally complete setup facts cannot override a blocked exact route", async ({
+  page,
+}) => {
+  const report = reportWith(
+    [
+      runnableRoute("ws-1", "Alpine archive", "pi", false, [
+        "model.default_freshness",
+      ]),
+    ],
+    [
+      {
+        id: "model.default_freshness:ws-1:pi",
+        code: "model.default_freshness",
+        section: "models_profiles",
+        status: "action_required",
+        summary: "Configured default model is unavailable for this workspace.",
+        remediation:
+          "Choose a currently discovered model as the runtime default.",
+        workspace_id: "ws-1",
+        runtime: "pi",
+      },
+    ],
+  );
+  await mockApi(page, {
+    diagnostics: report,
+    runs: { runs: [], next_offset: null },
+  });
+  await page.goto("./");
+  await expect(page.getByText("System health").first()).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Workspaces", exact: true })
+    .click();
+  await expect(
+    page.locator(".runtime-access").getByText("Blocked"),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await expect(
+    page.getByText(
+      "Choose a currently discovered model as the runtime default.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+});
+test("workspace and runtime route status never cross-combines", async ({
+  page,
+}) => {
+  const beta = {
+    ...workspace,
+    id: "ws-2",
+    name: "Beta archive",
+    root: "/Projects/beta-archive",
+    runtime_grants: {
+      pi: {
+        enabled: false,
+        profile: { id: "read-only" },
+        security_binding: null,
+      },
+      codex: { enabled: true, profile: null, security_binding: null },
+    },
+  };
+  const report = reportWith([
+    runnableRoute("ws-1", "Alpine archive", "pi", true),
+    runnableRoute("ws-1", "Alpine archive", "codex", false, [
+      "runtime.reachable",
+    ]),
+    runnableRoute("ws-2", "Beta archive", "pi", false, ["profile.freshness"]),
+    runnableRoute("ws-2", "Beta archive", "codex", true),
+  ]);
+  await mockApi(page, {
+    diagnostics: report,
+    workspaces: { workspaces: [workspace, beta] },
+    runs: { runs: [], next_offset: null },
+  });
+  await page.goto("./");
+  await expect(page.getByText("System health").first()).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Workspaces", exact: true })
+    .click();
+  const cards = page.locator(".workspace-entry");
+  await expect(
+    cards.nth(0).locator(".runtime-access").nth(0).getByText("Ready"),
+  ).toBeVisible();
+  await expect(
+    cards.nth(0).locator(".runtime-access").nth(1).getByText("Blocked"),
+  ).toBeVisible();
+  await expect(
+    cards.nth(1).locator(".runtime-access").nth(0).getByText("Blocked"),
+  ).toBeVisible();
+  await expect(
+    cards.nth(1).locator(".runtime-access").nth(1).getByText("Ready"),
+  ).toBeVisible();
+});
+test("blocked route shows scoped remediation and opens its Manager section", async ({
+  page,
+}) => {
+  const report = reportWith(
+    [
+      runnableRoute("ws-1", "Alpine archive", "pi", false, [
+        "workspace.agent_enabled",
+      ]),
+    ],
+    [
+      {
+        id: "workspace.agent_enabled:ws-1",
+        code: "workspace.agent_enabled",
+        section: "workspaces",
+        status: "action_required",
+        summary: "Agent runs are disabled for this workspace.",
+        remediation:
+          "Enable agent runs for this workspace in the local manager.",
+        workspace_id: "ws-1",
+      },
+      {
+        id: "workspace.agent_enabled:ws-other",
+        code: "workspace.agent_enabled",
+        section: "workspaces",
+        status: "action_required",
+        summary: "Wrong workspace must never appear here.",
+        remediation: "This is unrelated.",
+        workspace_id: "ws-other",
+      },
+    ],
+  );
+  await mockApi(page, { diagnostics: report });
+  await page.goto("./");
+  await expect(
+    page.getByText("Agent runs are disabled for this workspace."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Wrong workspace must never appear here."),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Resolve", exact: true })
+    .first()
+    .click();
+  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible();
+});
+test("diagnostics failure marks routes unavailable and leaves other pages usable", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await expect(page.getByText("Default model: muse-spark")).toBeVisible();
+  await page.route("**/api/diagnostics", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "probe unavailable" }),
+    });
+  });
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(
+    page.getByText("Current system observations are unavailable."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("stale and cannot authorize a start."),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Workspaces", exact: true })
+    .click();
+  await expect(page.getByText("Alpine archive").first()).toBeVisible();
+});
+test("Codex config binding remains separate from exact route readiness", async ({
+  page,
+}) => {
+  const codexWorkspace = {
+    ...workspace,
+    runtime_grants: {
+      ...workspace.runtime_grants,
+      codex: {
+        enabled: true,
+        profile: null,
+        security_binding: {
+          source: "runtime-config",
+          status: "ready",
+          resolved_summary: {
+            activePermissionProfile: "workspace-write",
+            approvalPolicy: "on-request",
+            approvalsReviewer: "user",
+          },
+        },
+      },
+    },
+  };
+  const report = reportWith([
+    runnableRoute("ws-1", "Alpine archive", "pi", true),
+    runnableRoute("ws-1", "Alpine archive", "codex", false, [
+      "runtime.required_features",
+    ]),
+  ]);
+  await mockApi(page, {
+    diagnostics: report,
+    workspaces: { workspaces: [codexWorkspace] },
+  });
+  await page.goto("./");
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Workspaces", exact: true })
+    .click();
+  const codex = page
+    .locator(".runtime-access")
+    .filter({ hasText: "Codex config" });
+  await expect(
+    codex.getByText("Security source: Codex config", { exact: true }),
+  ).toBeVisible();
+  await expect(codex.getByText("Blocked")).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await page.getByLabel("Runtime / Route").selectOption("codex");
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+});
+test("ambiguous handoff start retry reuses its request ID", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const requests: Array<Record<string, unknown>> = [];
+  await page.route("**/api/workspaces/ws-1/jobs/job-1/runs", async (route) => {
+    requests.push(route.request().postDataJSON());
+    if (requests.length === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary response failure" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...run,
+        run_id: "run-retried",
+        model: "muse-spark",
+      }),
+    });
+  });
+  await page.goto("./");
+  await page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await page.getByRole("button", { name: "Start run" }).click();
+  await expect(page.getByText("temporary response failure")).toBeVisible();
+  await page.getByRole("button", { name: "Start run" }).click();
+  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toEqual(requests[1]);
+  expect(Object.keys(requests[0]).sort()).toEqual(["request_id", "runtime"]);
+});
+test("overview and handoffs fit a mobile viewport without horizontal overflow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page);
+  await page.goto("./");
+  const noHorizontalOverflow = async () =>
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  await noHorizontalOverflow();
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await page
+    .getByRole("navigation", { name: "Mobile navigation" })
+    .getByRole("button", { name: "Handoffs" })
+    .click();
+  await expect(
+    page.getByRole("navigation", { name: "Mobile navigation" }),
+  ).toBeHidden();
+  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
+  await noHorizontalOverflow();
+  await page.screenshot({
+    path: "test-results/mobile-handoffs.png",
+    fullPage: true,
+  });
 });
 test("workspace settings use one save and ID copy sits by the name", async ({
   page,

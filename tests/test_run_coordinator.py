@@ -206,6 +206,46 @@ def test_diagnostics_marks_binding_stale_after_native_requirements_change(modern
 
 
 @pytest.mark.asyncio
+async def test_admin_prepared_handoff_start_is_strict_and_idempotent(modern_env):
+    service, ws_id, _, job, _, _ = modern_env
+    app = make_admin(service, service.config["admin_token_hash"])
+    token = (service.state / "admin-token").read_text().strip()
+    headers = {"Authorization": f"Bearer {token}"}
+    path = f"/api/workspaces/{ws_id}/jobs/{job['id']}/runs"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as client:
+        assert (await client.post(path, json={
+            "runtime": "codex", "request_id": "manager-start-1"
+        })).status_code == 401
+
+        extra = await client.post(path, headers=headers, json={
+            "runtime": "codex", "request_id": "manager-start-1",
+            "prompt": "run arbitrary instructions", "model": "gpt-test",
+            "path": "/tmp/unrelated",
+        })
+        assert extra.status_code == 400
+
+        malformed_path = await client.post(
+            f"/api/workspaces/{ws_id}/jobs/not-a-job/runs", headers=headers,
+            json={"runtime": "codex", "request_id": "manager-start-1"})
+        assert malformed_path.status_code == 400
+
+        body = {"runtime": "codex", "request_id": "manager-start-1"}
+        first = await client.post(path, headers=headers, json=body)
+        assert first.status_code == 200, first.text
+        repeated = await client.post(path, headers=headers, json=body)
+        assert repeated.status_code == 200, repeated.text
+        assert first.json()["run_id"] == repeated.json()["run_id"]
+        assert repeated.json()["idempotent"] is True
+        with service.lock:
+            count = service.db.execute(
+                "SELECT count(*) FROM runtime_runs WHERE workspace=? AND request_id=?",
+                (ws_id, body["request_id"]),
+            ).fetchone()[0]
+        assert count == 1
+
+
+@pytest.mark.asyncio
 async def test_custom_profile_manager_routes_require_admin(modern_env):
     service, _, _, _, _, _ = modern_env
     app = make_admin(service, service.config["admin_token_hash"])

@@ -134,6 +134,16 @@ class AgentStartRun(Input):
     continue_from_run_id: RunID | None = Field(default=None, description="Optional completed run to continue: creates a new Bridge run for this handoff in the same conversation. Must belong to the same runtime. Implies parent_run_id; a differing explicit parent is rejected. Omitted model inherits the source run's exact model; an explicit model must equal it. Fails closed without silent fresh-conversation fallback.")
 
 
+class PreparedHandoffRun(Input):
+    """Small local-admin wrapper for starting a path-owned prepared handoff."""
+    runtime: RuntimeID
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+class PreparedHandoffPath(Input):
+    job_id: JobID
+
+
 class AgentRunList(Page):
     runtime: RuntimeID | None = Field(default=None, description="Optional filter to one configured Runtime Protocol adapter. Omit to list this workspace's runs across configured adapters.")
 
@@ -839,6 +849,17 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     rows = [dict(r) for r in service.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
                 return JSONResponse({"events": rows})
             ws_id = request.path_params["workspace"]
+            if "job_id" in request.path_params:
+                if request.method != "POST":
+                    return JSONResponse({"error": "Method not allowed"}, 405)
+                path_model = PreparedHandoffPath.model_validate(
+                    {"job_id": request.path_params["job_id"]})
+                model = PreparedHandoffRun.model_validate(await body_json(request))
+                with service.lock:
+                    ws = service.workspace(ws_id, False)
+                return JSONResponse(await run_in_threadpool(
+                    service.start_agent_run, ws, model.runtime,
+                    path_model.job_id, model.request_id))
             if path.endswith("/runtimes") or "/runtimes/" in path:
                 with service.lock:
                     ws = service.workspace(ws_id, False)
@@ -898,6 +919,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/runs/{run_id}/executions/{execution_id}", api),
         Route("/api/bridge", api, methods=["GET", "POST"]),
         Route("/api/workspaces", api, methods=["GET", "POST"]),
+        Route("/api/workspaces/{workspace}/jobs/{job_id}/runs", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}/jobs", api),
         Route("/api/workspaces/{workspace}/runs", api),
         Route("/api/workspaces/{workspace}/document", api),

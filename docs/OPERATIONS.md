@@ -40,7 +40,7 @@ may still consume space after upgrading, even though new handoffs create none.
 ## Readiness checks
 
 `workspace-bridge doctor` prints concise Overall, Core, Workspaces, Runtimes,
-Runnable routes, Git evidence, and External connection sections. Use
+Runnable routes, and Git evidence sections. Use
 `workspace-bridge doctor --json` for the canonical JSON report and
 `workspace-bridge doctor --offline` to guarantee zero runtime/network calls.
 The authenticated local-admin `GET /api/diagnostics` endpoint returns the same
@@ -56,13 +56,17 @@ handoff-capable write scope, agent switch, shared MCP gateway, runtime grant,
 current profile revision, and current default model/reasoning setting all pass.
 Git Evidence is review-only and never blocks a route.
 
-Listener health, gateway enabled, runtime healthy, runnable route, and remote
-ChatGPT/tunnel reachability are distinct. Bridge cannot observe the last item;
-external connection always reports `unknown` / `external_connection.not_observed`.
+Listener health, gateway enabled, runtime healthy, and runnable route are distinct.
+The Manager reads this canonical report and treats only
+`runnable_routes[].ready` for an exact workspace/runtime pair as route readiness;
+overall health does not gate that pair. If diagnostics are unavailable, the
+Manager disables starts and marks route readiness unavailable while retaining
+other page data. The Handoff `Start run` action is an authenticated local-admin
+wrapper for an existing prepared handoff and delegates to
+`service.start_agent_run`; it accepts no free-form prompt or model override.
 Offline Doctor opens SQLite read-only, creates no service workers, does not
 recover notification `sending` rows, and runs while `serve` holds the process
-lock. The Manager will consume the authoritative route model in the next
-productization milestone.
+lock.
 
 Diagnostics do not prove account authorization, model tool behavior, test
 execution, or ChatGPT's handling of a response. `scripts/smoke_mcp.py --url

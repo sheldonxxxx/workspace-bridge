@@ -82,9 +82,16 @@ async def test_admin_auth_policy_and_mapping(env):
         assert (await c.get('/legacy')).status_code == 404
         assert (await c.get('/static/app.js')).status_code == 404
         assert (await c.get("/api/workspaces")).status_code == 401
+        assert (await c.get("/api/diagnostics")).status_code == 401
         token = (env["state"] / "admin-token").read_text().strip()
         c.headers["Authorization"] = "Bearer " + token
         assert (await c.get("/api/workspaces")).status_code == 200
+        diagnostics = await c.get("/api/diagnostics")
+        assert diagnostics.status_code == 200
+        assert set(diagnostics.json()) == {
+            "generated_at", "mode", "overall", "checks", "runnable_routes"
+        }
+        assert (await c.post("/api/diagnostics")).status_code == 405
         assert (await c.get("/api/status", headers={"Origin":"http://evil.local"})).status_code == 403
         other = env["parent"] / "beta"; other.mkdir()
         r = await c.post("/api/workspaces", json={"name":"Beta", "root":str(other)})

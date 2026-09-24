@@ -57,9 +57,18 @@ zero for pass, warning, or unknown-only reports. A runnable route is one exact
 workspace/runtime pair whose mapping, handoff write scope, agent switch, shared
 MCP gateway, runtime grant, current security profile, and current default model
 all satisfy run-start prerequisites. Listener health, gateway enablement, and
-runtime health do not establish that such a route exists. Bridge cannot observe
-tunnel or remote ChatGPT reachability, so external connection remains unknown.
+runtime health do not establish that such a route exists.
 Git Evidence reports review capability and never blocks an execution route.
+
+The local Manager reads this canonical report. Only `runnable_routes[].ready`
+for the selected exact workspace/runtime pair enables a prepared-handoff start;
+overall diagnostic health remains separate.
+If diagnostics cannot refresh, the Manager marks route readiness unavailable
+and disables starts while leaving other Manager data visible. Its authenticated
+`POST /api/workspaces/{workspace}/jobs/{job_id}/runs` action accepts only an
+explicit runtime and idempotency request ID for the path-owned prepared job, then
+delegates to the existing `service.start_agent_run` policy path. It accepts no
+arbitrary prompt or model override.
 
 The native CLI reads `~/.local/state/workspace-bridge` by default; pass the
 global `--state` option before `doctor` to select another location. Native checks:

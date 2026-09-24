@@ -148,8 +148,7 @@ The local-admin diagnostics API requires the admin bearer/session authentication
 It returns stable check codes and bounded workspace/runtime metadata, but never
 adapter URLs, credentials, raw environment values, prompts, tool arguments,
 provider payloads, or full external paths. Runtime failure text is reduced to
-fixed safe summaries. External tunnel and ChatGPT connectivity is unobserved and
-must not be inferred from an enabled local gateway.
+fixed safe summaries.
 
 Doctor uses a SQLite `mode=ro` connection, starts no run-reconciliation or
 notification worker, does not recover `sending` deliveries, and does not take or

@@ -53,6 +53,42 @@ export interface Status {
   runtimes?: { runtimes: Record<string, RuntimeInfo> };
   runtime_policies?: Record<string, ModelPolicy>;
 }
+export type DiagnosticStatus =
+  "pass" | "warning" | "unknown" | "action_required" | "failed";
+export interface DiagnosticCheck {
+  id: string;
+  code: string;
+  section: string;
+  status: DiagnosticStatus;
+  summary: string;
+  detail?: string;
+  remediation?: string;
+  workspace_id?: string;
+  runtime?: string;
+}
+export interface RunnableRoute {
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  runtime: string;
+  ready: boolean;
+  status: string;
+  summary: string;
+  blockers: string[];
+  profile?: { id: string; revision?: string } | null;
+  default_model_selector?: string | null;
+}
+export interface DiagnosticReport {
+  generated_at: string;
+  mode: string;
+  overall: {
+    status: DiagnosticStatus;
+    summary: string;
+    counts: Record<DiagnosticStatus, number>;
+  };
+  checks: DiagnosticCheck[];
+  runnable_routes: RunnableRoute[];
+}
 export interface Run {
   run_id: string;
   runtime?: string;
