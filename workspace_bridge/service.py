@@ -310,6 +310,7 @@ class Service:
                            "observed_revision": (observation.get("revision") if isinstance(observation, dict) else None),
                            "resolved_summary": (observation.get("resolvedSummary") if isinstance(observation, dict) else None)}
             profile_state = None
+            observed_profile_revision = None
             if source == "profile" and profile:
                 try:
                     catalog = self.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
@@ -317,19 +318,28 @@ class Service:
                                              if item.get("id") == profile["id"]), None)
                     # Revision drift never blocks: adapter redeploys rotate
                     # opaque revisions, so only a missing or unavailable
-                    # profile keeps the route from being ready.
+                    # profile keeps the route from being ready. The stored
+                    # route revision is last-bound evidence; the live catalog
+                    # revision is authoritative for new runs.
                     if not resolved_profile or resolved_profile.get("available") is False:
                         profile_state = "unavailable"
+                    elif (isinstance(resolved_profile.get("revision"), str)
+                          and resolved_profile.get("revision")):
+                        observed_profile_revision = resolved_profile["revision"]
+                        profile_state = ("current" if observed_profile_revision == profile["revision"]
+                                         else "stale")
                     else:
-                        profile_state = "current"
+                        profile_state = "unavailable"
                 except Exception:  # noqa: BLE001 - route stays blocked when freshness is unknown
                     profile_state = "unavailable"
             effective_security = None
             security_ready = False
             if source == "profile" and profile:
                 effective_security = {"source": "profile", "profile_id": profile["id"],
-                                      "bound_revision": profile["revision"], "freshness": profile_state}
-                security_ready = profile_state == "current"
+                                      "bound_revision": profile["revision"],
+                                      "observed_revision": observed_profile_revision,
+                                      "freshness": profile_state}
+                security_ready = profile_state in {"current", "stale"}
             elif source == "runtime-config" and binding:
                 effective_security = {"source": "runtime-config", "bound_revision": binding["revision"],
                     "observed_revision": binding["observed_revision"], "status": binding["status"],

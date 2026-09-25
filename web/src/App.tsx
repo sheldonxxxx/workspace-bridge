@@ -87,6 +87,24 @@ import {
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
+import { describeManagerIdentity } from "@/lib/manager-identity";
+
+function compiledManagerReleaseRaw(): unknown {
+  try {
+    return typeof __MANAGER_RELEASE__ !== "undefined"
+      ? (__MANAGER_RELEASE__ as unknown)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function shortBuildId(buildId?: string | null): string {
+  if (typeof buildId === "string" && /^sha256:[0-9a-f]{64}$/.test(buildId)) {
+    return `sha256:${buildId.slice(7, 19)}…`;
+  }
+  return "unknown";
+}
 
 type Section =
   | "overview"
@@ -2172,6 +2190,41 @@ export default function App() {
                     </div>
                   </>
                 )}
+                {(() => {
+                  if (!status) return null;
+                  const compiled = compiledManagerReleaseRaw();
+                  const served = status?.manager_release ?? null;
+                  const identity = describeManagerIdentity(compiled, served);
+                  if (identity === "mismatch") {
+                    return (
+                      <div className="diagnostic-warnings" role="alert">
+                        <strong>
+                          Manager build mismatch / refresh or rebuild required
+                        </strong>
+                        <div>
+                          <span>
+                            This cached Manager build differs from the
+                            Bridge-served build. Refresh the page or rebuild the
+                            Manager; no data was changed.
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (identity === "unavailable") {
+                    return (
+                      <div className="diagnostic-unavailable" role="status">
+                        <strong>Manager identity unavailable</strong>
+                        <p>
+                          The Bridge did not report a compiled Manager build.
+                          This is not a mismatch; refresh or rebuild the
+                          Manager.
+                        </p>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
                 <div className="diagnostic-observation-list">
                   <p>
                     Bridge gateway:{" "}
@@ -2179,6 +2232,25 @@ export default function App() {
                       ? "configured"
                       : "not configured"}{" "}
                     · {status?.bridge.enabled ? "enabled" : "disabled"}
+                  </p>
+                  <p
+                    title={status?.release?.build_id || "Bridge build unknown"}
+                  >
+                    Bridge release{" "}
+                    {status?.release?.product_version ||
+                      status?.version ||
+                      "unknown"}{" "}
+                    · {shortBuildId(status?.release?.build_id)}
+                  </p>
+                  <p
+                    title={
+                      status?.manager_release?.build_id ||
+                      "Manager build unknown"
+                    }
+                  >
+                    Manager release{" "}
+                    {status?.manager_release?.product_version || "unknown"} ·{" "}
+                    {shortBuildId(status?.manager_release?.build_id)}
                   </p>
                   {adapters.map((info) => (
                     <p key={info.id}>
@@ -2371,6 +2443,18 @@ export default function App() {
                             <div>
                               <dt>Node version</dt>
                               <dd>{node.node_version || "Not observed"}</dd>
+                            </div>
+                            <div>
+                              <dt>Release</dt>
+                              <dd
+                                title={
+                                  node.release?.build_id || "Node build unknown"
+                                }
+                              >
+                                {node.release
+                                  ? `${node.release.product_version} · ${shortBuildId(node.release.build_id)}`
+                                  : "Not observed"}
+                              </dd>
                             </div>
                             <div>
                               <dt>Allowed roots</dt>
@@ -2837,6 +2921,19 @@ export default function App() {
                           <div>
                             <dt>Native version</dt>
                             <dd>{info.native_version || "Not observed"}</dd>
+                          </div>
+                          <div>
+                            <dt>Release</dt>
+                            <dd
+                              title={
+                                info.release?.build_id ||
+                                "Adapter build unknown"
+                              }
+                            >
+                              {info.release
+                                ? `${info.release.product_version} · ${shortBuildId(info.release.build_id)}`
+                                : "Not observed"}
+                            </dd>
                           </div>
                           <div>
                             <dt>Node token</dt>

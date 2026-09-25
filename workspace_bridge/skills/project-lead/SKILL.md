@@ -81,12 +81,12 @@ default; an explicit ENABLED request → may use it; a category ("free/cheap") �
 may match a clearly satisfying enabled model, stating the selector; a
 self-initiated non-default → ask first; never silently switch after failure or
 quota; never use a disabled model. Reuse the session when a small corrective
-follow-up shares workspace, adapter_id, model, task and security profile: prefer
+follow-up shares workspace, adapter_id, model and security profile; the
+follow-up may use a NEW prepared corrective handoff ID in the same workspace
+(the new handoff prompt is sent): prefer
 `start_agent_run(... continue_from_run_id=<succeeded run>)`, which creates a new
-Bridge run in the same conversation. A different adapter_id always requires a
-fresh conversation. Use a fresh conversation when the model or security profile
-changes, the prior run did not succeed, clean context is requested, or validation
-fails; a requested continuation never silently becomes a fresh run.
+Bridge run in the same conversation and implies parent lineage. A different adapter_id always requires a
+fresh conversation. Use a fresh conversation when the model changes, the security source changes, the prior run did not succeed, clean context is requested, or validation fails; a requested continuation never silently becomes a fresh run. A named-profile ID or revision change in the same workspace+adapter+model may continue the same conversation via an idle security rebind when the adapter advertises support; run-level effective_security is the immutable audit record.
 
 Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks. Never weaken tests or invent
@@ -108,7 +108,7 @@ agent's response; then follow the interaction and audit instructions below.
 When `read_agent_run` returns `phase`, `waiting_interaction` means the run is
 active. Inspect pending choices with `read_agent_interaction`; submit an exact
 choice ID or form answer through `respond_agent_interaction` only with user
-authorization. A profile change requires a fresh conversation. Use
+authorization. A security-source change requires a fresh conversation; a named-profile change may rebind security at an idle boundary when the adapter supports it. Use
 `list_agent_executions` and `read_agent_execution` for the bounded execution
 view. Use `list_agent_activities` and `read_agent_activity` for the full activity
 timeline, then independently inspect current source and tests.

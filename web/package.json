@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:e2e": "playwright test",
-    "format:check": "prettier --check src/App.tsx src/app.css src/lib/api.ts vite.config.ts playwright.config.ts tests/manager.spec.ts",
+    "format:check": "prettier --check src/App.tsx src/app.css src/lib/api.ts src/lib/manager-identity.ts vite.config.ts manager-release.mjs manager-release.d.mts playwright.config.ts tests/manager.spec.ts tests/release.spec.ts test/manager-release.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

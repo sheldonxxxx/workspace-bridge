@@ -437,13 +437,15 @@ class CodexHostAdapter:
                     self._native_cli_version_checked = True
                 native_version = self._native_cli_version or "unknown"
         native_version = native_version[:80]
+        from .release import codex_release
         return {"protocol": {"major": 1, "minor": 0},
                 "runtime": {"id": "codex", "displayName": "Codex",
                             "adapterVersion": "1.0.0", "nativeVersion": native_version,
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
-                             "steering": 1}}
+                             "steering": 1, "securityRebind": 1},
+                "release": codex_release()}
 
     def models(self) -> dict:
         result = self.rpc.call("model/list", {"limit": 1000})
@@ -891,6 +893,108 @@ class CodexHostAdapter:
             raise AdapterFailure("Conversation not found", 404, "not_found")
         return dict(row)
 
+    REBIND_PENDING = "rebind-pending"
+
+    @staticmethod
+    def _is_invalidated(owned: dict) -> bool:
+        thread = owned.get("thread", "")
+        return (owned.get("revision") == "invalidated"
+                or owned.get("applied_revision") in ("invalidated", "rebind-pending")
+                or (isinstance(thread, str) and thread.startswith("invalidated-")))
+
+    def _write_rebind_pending(self, conversation_id: str) -> dict:
+        """Commit a durable rebind-pending sentinel BEFORE native mutation.
+
+        Caches and returns the exact old row values for a proven pre-update
+        failure rollback. Raises bounded `unavailable` if the marker cannot
+        be persisted; the caller must not touch native state in that case.
+        The marker contains no profile config, paths, prompts, or secrets.
+        """
+        try:
+            with self.lock, self.db:
+                row = self.db.execute("SELECT * FROM conversations WHERE id=?",
+                                      (conversation_id,)).fetchone()
+                if row is None:
+                    raise AdapterFailure("Conversation not found", 404, "not_found")
+                cached = dict(row)
+                self.db.execute(
+                    "UPDATE conversations SET applied_revision='rebind-pending' WHERE id=?",
+                    (conversation_id,))
+                return cached
+        except AdapterFailure:
+            raise
+        except Exception as exc:
+            raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from exc
+
+    def _restore_pending_to_cached(self, cached: dict) -> None:
+        """Restore exact old DB fields ONLY when proven no native call occurred.
+
+        The ONLY safe caller is a branch that raised before invoking any
+        native mutation RPC (e.g. an in-memory rebind conflict detected
+        before transport send). A generic `CodexRpcError` from an attempted
+        `thread/settings/update` or `thread/resume` is ambiguous: `CodexRpc`
+        sends the request before waiting, so timeout/transport/server errors
+        can occur after the native mutation was applied. Such errors must
+        NEVER restore old metadata; they leave pending/invalidation.
+        If this restore commit fails, the durable pending sentinel remains
+        and the conversation stays unavailable.
+        """
+        try:
+            with self.lock, self.db:
+                self.db.execute(
+                    "UPDATE conversations SET thread=?,profile=?,revision=?,applied_revision=? "
+                    "WHERE id=?",
+                    (cached["thread"], cached["profile"], cached["revision"],
+                     cached.get("applied_revision", cached["revision"]), cached["id"]))
+        except Exception as exc:
+            # Restore failed: ensure the durable pending sentinel remains
+            # for restart fail-closed, then report unavailable.
+            try:
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE conversations SET applied_revision='rebind-pending' WHERE id=?",
+                        (cached["id"],))
+            except Exception:
+                pass
+            raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from exc
+
+    def _invalidate_owned_conversation(self, conversation_id: str) -> None:
+        """Fail closed on ambiguous native security state.
+
+        An accepted-but-unconfirmed `thread/settings/update` (or an
+        unproven `thread/resume`) may already have mutated native settings.
+        The owned row must never keep advertising the old binding as proven.
+        Ownership of the native thread is invalidated: the native thread may
+        remain in Codex but becomes unowned/inaccessible through this adapter
+        conversation ID. No blank replacement thread is created. Historical
+        terminal runs remain readable via `_run` (terminal `run()` does not
+        require the conversation row). A durable rebind-pending sentinel was
+        committed before mutation, so even if this tombstone fails, restart
+        remains fail-closed via pending.
+        """
+        with self.lock, self.db:
+            row = self.db.execute("SELECT thread FROM conversations WHERE id=?",
+                                  (conversation_id,)).fetchone()
+            if row is None:
+                return
+            old_thread = row["thread"]
+            self._settings_updates.pop(old_thread, None)
+            tombstone = "invalidated-" + secrets.token_hex(12)
+            try:
+                self.db.execute(
+                    "UPDATE conversations SET thread=?,profile='',revision='invalidated',"
+                    "applied_revision='invalidated' WHERE id=?",
+                    (tombstone, conversation_id))
+            except Exception:
+                # Tombstone failed: fall back to the pending sentinel so
+                # restart still fails closed. Never return success.
+                try:
+                    self.db.execute(
+                        "UPDATE conversations SET applied_revision='rebind-pending' WHERE id=?",
+                        (conversation_id,))
+                except Exception:
+                    pass
+
     def _replacement_target(self, conversation_id: str) -> str:
         current = conversation_id
         seen = {current}
@@ -1080,6 +1184,8 @@ class CodexHostAdapter:
 
     def conversation(self, conversation_id: str) -> dict:
         owned = self._conversation(conversation_id)
+        if self._is_invalidated(owned):
+            raise AdapterFailure("Conversation is unavailable", 404, "not_found")
         source = owned.get("source", "profile")
         if source == "profile":
             options, revision = self._profile(owned["profile"], owned["workspace"],
@@ -1136,6 +1242,217 @@ class CodexHostAdapter:
                 "approvalRevision": owned.get("approval_revision", ""),
                 "resolvedSummary": self._stored_security_summary(owned)}
         return result
+
+    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
+        """Idle-boundary rebind of a named-profile conversation to a new profile.
+
+        Preserves the same WBRP conversation ID and native thread/history.
+        Requires the owned conversation and requested binding to both be
+        ``source: profile``. The thread must be idle (or ``notLoaded`` for
+        the same-thread resume path). A confirmed native settings update or
+        a verified same-thread resume is required before the owned
+        profile/revision is updated. Never creates a blank replacement
+        thread; failures raise ``security_rebind_unavailable`` (or
+        ``conversation_busy``/``binding_mismatch``) with no turn started.
+        """
+        if (not isinstance(security_binding, dict)
+                or security_binding.get("source") != "profile"
+                or not isinstance(security_binding.get("profile"), dict)):
+            raise AdapterFailure("Invalid security rebind binding")
+        target = security_binding.get("profile", {})
+        target_id = target.get("id")
+        requested_revision = target.get("revision")
+        if (not isinstance(target_id, str) or not target_id or len(target_id) > 100
+                or not isinstance(requested_revision, str) or not requested_revision
+                or len(requested_revision) > 100):
+            raise AdapterFailure("Invalid security rebind binding")
+        owned = self._conversation(conversation_id)
+        if self._is_invalidated(owned):
+            raise AdapterFailure("Conversation is unavailable", 404, "not_found")
+        if owned.get("source", "profile") != "profile":
+            raise AdapterFailure("Security source change requires a fresh conversation",
+                                 409, "security_rebind_unavailable")
+        with self.lock:
+            busy = self.db.execute(
+                "SELECT id FROM runs WHERE conversation=? AND phase IN ('starting','active')",
+                (owned["id"],)).fetchone()
+            if busy:
+                raise AdapterFailure("Conversation is busy", 409, "conversation_busy")
+        # Resolve the live target profile for this exact workspace/cwd.
+        try:
+            options, live_revision = self._profile(
+                target_id, owned["workspace"], owned["cwd"])
+        except AdapterFailure:
+            raise
+        except Exception as exc:
+            raise AdapterFailure(_clean(str(exc), 200), 502, "binding_mismatch") from None
+        if live_revision != requested_revision:
+            raise AdapterFailure("Requested security revision is not current", 409,
+                                 "binding_mismatch")
+        if owned["profile"] == target_id and owned["revision"] == live_revision:
+            # Already bound; prove idle and return the current binding.
+            try:
+                native = self.rpc.call("thread/read", {"threadId": owned["thread"],
+                                                       "includeTurns": False})
+            except CodexRpcError as exc:
+                raise AdapterFailure(_clean(str(exc), 300), 502,
+                                     "runtime_unavailable") from None
+            status = ((native.get("thread") or {}).get("status") or {}).get("type")
+            if status == "notLoaded":
+                # Same-thread resume path still verifies the binding below.
+                pass
+            elif status != "idle":
+                raise AdapterFailure("Conversation is not idle", 409, "conversation_busy")
+            elif (native.get("thread") or {}).get("id") != owned["thread"]:
+                raise AdapterFailure("Thread identity changed", 502, "binding_mismatch")
+            if status != "notLoaded":
+                return self.conversation(owned["id"])
+        try:
+            native = self.rpc.call("thread/read", {"threadId": owned["thread"],
+                                                   "includeTurns": False})
+        except CodexRpcError as exc:
+            raise AdapterFailure(_clean(str(exc), 300), 502, "runtime_unavailable") from None
+        if (native.get("thread") or {}).get("id") != owned["thread"] and (
+                (native.get("thread") or {}).get("status") or {}).get("type") != "notLoaded":
+            # A mismatched thread identity fails closed; notLoaded carries no id.
+            if ((native.get("thread") or {}).get("status") or {}).get("type") != "notLoaded":
+                raise AdapterFailure("Thread identity changed", 502, "binding_mismatch")
+        status = ((native.get("thread") or {}).get("status") or {}).get("type")
+        thread = owned["thread"]
+        if status == "notLoaded":
+            resume_params = {"threadId": thread, "cwd": owned["cwd"],
+                             "excludeTurns": True,
+                             "permissions": options["permissions"],
+                             "approvalPolicy": options["approvalPolicy"],
+                             "approvalsReviewer": options["approvalsReviewer"]}
+            # Durable pending marker BEFORE native mutation; abort on save
+            # failure with zero native calls.
+            try:
+                self._write_rebind_pending(owned["id"])
+            except AdapterFailure:
+                raise
+            except Exception as exc:
+                raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from exc
+            try:
+                resumed = self.rpc.call("thread/resume", resume_params, timeout=30)
+            except CodexRpcError as exc:
+                # Ambiguous by default: the resume request was transmitted
+                # before waiting, so a timeout/transport/server error can
+                # occur after the native thread was resumed/reconfigured.
+                # Keep the durable pending sentinel (fail-closed); never
+                # restore old metadata on this path.
+                raise AdapterFailure(_clean(str(exc), 300), 502,
+                                     "security_rebind_unavailable") from None
+            if ((resumed.get("thread") or {}).get("id") != thread
+                    or resumed.get("cwd") != owned["cwd"]):
+                self._invalidate_owned_conversation(owned["id"])
+                raise AdapterFailure("Resumed thread binding changed", 502,
+                                     "security_rebind_unavailable")
+            if "activePermissionProfile" in resumed:
+                active = resumed.get("activePermissionProfile")
+                if (not isinstance(active, dict)
+                        or active.get("id") != options["permissions"]):
+                    self._invalidate_owned_conversation(owned["id"])
+                    raise AdapterFailure("Resumed thread has a different permission profile",
+                                         502, "security_rebind_unavailable")
+            resumed_status = ((resumed.get("thread") or {}).get("status") or {}).get("type")
+            if resumed_status != "idle":
+                self._invalidate_owned_conversation(owned["id"])
+                if resumed_status == "active":
+                    raise AdapterFailure("Conversation is not idle", 409, "conversation_busy")
+                raise AdapterFailure("Security rebind could not be confirmed", 502,
+                                     "security_rebind_unavailable")
+        elif status != "idle":
+            raise AdapterFailure("Conversation is not idle", 409, "conversation_busy")
+        else:
+            # Durable pending marker BEFORE native mutation; abort on save
+            # failure with zero native calls. The cached old row is used ONLY
+            # for the proven no-native-call conflict below (in-memory waiter
+            # already present: this attempt made no native call, and the
+            # cache was read after any prior marker commit, so restoring it
+            # cannot clear another attempt's durability).
+            try:
+                cached_old = self._write_rebind_pending(owned["id"])
+            except AdapterFailure:
+                raise
+            except Exception as exc:
+                raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from exc
+            waiter = {"event": threading.Event(), "notification": None}
+            with self.lock:
+                if thread in self._settings_updates:
+                    # Proven no-native-call conflict: this attempt invoked no
+                    # native RPC, so restoring exact old DB state is safe.
+                    try:
+                        self._restore_pending_to_cached(cached_old)
+                    except AdapterFailure:
+                        raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from None
+                    raise AdapterFailure("Security rebind is already pending", 409,
+                                         "security_rebind_unavailable")
+                self._settings_updates[thread] = waiter
+            try:
+                settings = {"permissions": options["permissions"],
+                            "approvalPolicy": options["approvalPolicy"],
+                            "approvalsReviewer": options["approvalsReviewer"]}
+                update = getattr(self.rpc, "update_thread_settings", None)
+                if callable(update):
+                    try:
+                        update(thread, settings, timeout=10)
+                    except CodexRpcError as exc:
+                        # Ambiguous by default: the update request was
+                        # transmitted before waiting, so timeout/transport/
+                        # server errors can occur after native mutation.
+                        # Keep pending/invalidate; never restore old metadata.
+                        raise AdapterFailure(_clean(str(exc), 200), 502,
+                                             "security_rebind_unavailable") from None
+                else:
+                    try:
+                        self.rpc.call("thread/settings/update",
+                                      {"threadId": thread, **settings}, timeout=10)
+                    except CodexRpcError as exc:
+                        # Same ambiguity as above; never restore.
+                        raise AdapterFailure(_clean(str(exc), 200), 502,
+                                             "security_rebind_unavailable") from None
+                if not waiter["event"].wait(2.0):
+                    self._invalidate_owned_conversation(owned["id"])
+                    raise AdapterFailure("Security rebind was not confirmed", 502,
+                                         "security_rebind_unavailable")
+                notification = waiter.get("notification")
+                if (not isinstance(notification, dict)
+                        or notification.get("threadId") != thread
+                        or not isinstance(notification.get("threadSettings"), dict)):
+                    self._invalidate_owned_conversation(owned["id"])
+                    raise AdapterFailure("Security rebind was not confirmed", 502,
+                                         "security_rebind_unavailable")
+                applied = notification["threadSettings"]
+                active_profile = applied.get("activePermissionProfile")
+                if (not isinstance(active_profile, dict)
+                        or active_profile.get("id") != options["permissions"]
+                        or applied.get("approvalPolicy") != options["approvalPolicy"]
+                        or applied.get("approvalsReviewer") != options["approvalsReviewer"]):
+                    self._invalidate_owned_conversation(owned["id"])
+                    raise AdapterFailure("Security rebind settings mismatch", 502,
+                                         "security_rebind_unavailable")
+            finally:
+                with self.lock:
+                    self._settings_updates.pop(thread, None)
+        # Confirmed success: atomically replace pending with target binding.
+        # If this finalization fails, durable pending remains fail-closed and
+        # the current process must not return success.
+        try:
+            with self.lock, self.db:
+                self.db.execute(
+                    "UPDATE conversations SET profile=?,revision=?,applied_revision=? WHERE id=?",
+                    (target_id, live_revision, live_revision, owned["id"]))
+        except Exception as exc:
+            try:
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE conversations SET applied_revision='rebind-pending' WHERE id=?",
+                        (owned["id"],))
+            except Exception:
+                pass
+            raise AdapterFailure("Conversation is unavailable", 502, "unavailable") from exc
+        return self.conversation(owned["id"])
 
     def _run(self, run_id: str) -> dict:
         with self.lock:
@@ -1301,6 +1618,9 @@ class CodexHostAdapter:
                 break
             admission.release()
 
+        if self._is_invalidated(owned):
+            admission.release()
+            raise AdapterFailure("Conversation is unavailable", 404, "not_found")
         # The same per-conversation admission lock spans idle verification,
         # security refresh/replacement, and turn/start. Settings can therefore
         # never race ahead of an already admitted turn.
@@ -1449,7 +1769,9 @@ class CodexHostAdapter:
             admission.release()
 
     def find_run(self, conversation_id: str, client_run_id: str) -> dict:
-        self._conversation(conversation_id)
+        _owned = self._conversation(conversation_id)
+        if self._is_invalidated(_owned):
+            raise AdapterFailure("Conversation is unavailable", 404, "not_found")
         with self.lock:
             row = self.db.execute(
                 "SELECT id FROM runs WHERE conversation=? AND client_run=?",
@@ -1469,6 +1791,8 @@ class CodexHostAdapter:
                         (_now(), run_id))
             else:
                 owned = self._conversation(run["conversation"])
+                if self._is_invalidated(owned):
+                    raise AdapterFailure("Conversation is unavailable", 404, "not_found")
                 try:
                     snapshot = self.rpc.call("thread/turns/list", {
                         "threadId": owned["thread"], "limit": 20,
@@ -1952,6 +2276,11 @@ def make_app(adapter: CodexHostAdapter, token: str) -> Starlette:
                 result = await run_in_threadpool(adapter.create_conversation, body)
             elif len(parts) == 3 and parts[:2] == ["v1", "conversations"] and request.method == "GET":
                 result = await run_in_threadpool(adapter.conversation, parts[2])
+            elif len(parts) == 4 and parts[:2] == ["v1", "conversations"] and parts[3] == "security" and request.method == "POST":
+                binding = body.get("securityBinding")
+                if not isinstance(binding, dict):
+                    raise AdapterFailure("Invalid security rebind binding")
+                result = await run_in_threadpool(adapter.rebind_conversation, parts[2], binding)
             elif len(parts) == 4 and parts[:2] == ["v1", "conversations"] and parts[3] == "runs" and request.method == "POST":
                 result = await run_in_threadpool(adapter.start_run, parts[2], body)
             elif len(parts) == 5 and parts[:2] == ["v1", "conversations"] and parts[3] == "runs" and request.method == "GET":

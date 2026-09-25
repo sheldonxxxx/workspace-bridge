@@ -128,8 +128,8 @@ class AgentStartRun(Input):
     job_id: JobID = Field(description="Prepared handoff owned by this workspace. No arbitrary prompt or path is accepted.")
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$", description="Idempotency key; an exact retry returns the same run and conversation. Never replays across AdapterInstances.")
     model: str | None = Field(default=None, max_length=260, description="Optional exact canonical selector from list_agent_models for this adapter. Omit to use this adapter's configured default.")
-    parent_run_id: RunID | None = Field(default=None, description="Optional prior run id for traceability. Conversation continuation is allowed only on this exact adapter and unchanged connection revision.")
-    continue_from_run_id: RunID | None = Field(default=None, description="Optional succeeded run to continue in the same conversation. Must belong to this exact adapter and unchanged connection revision; stale connection fails with adapter_changed.")
+    parent_run_id: RunID | None = Field(default=None, description="Optional prior run id for traceability. When continue_from_run_id is supplied it defaults to that run and a different explicit value is rejected with continuation_parent_mismatch; without continuation it only records lineage.")
+    continue_from_run_id: RunID | None = Field(default=None, description="Optional succeeded run whose conversation is reused for a NEW prepared handoff in the same workspace; the new handoff prompt is sent. Requires same adapter, unchanged Node/adapter revision, exact model, idle conversation and compatible security. A named-profile ID/revision change may rebind at an idle boundary when the adapter advertises securityRebind; security-source changes fail with continuation_security_source_changed and adapters without rebind support fail with continuation_security_rebind_unsupported instead of starting fresh; runtime-config drift may refresh via the adapter. Implies parent_run_id.")
 
 
 class PreparedHandoffRun(Input):
@@ -207,7 +207,7 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "read_handoff": (Artifact, "Read TASK.md, CONTEXT.md or ACCEPTANCE.md. Use normal source browsing to audit the agent result. No completion report files are required.", True, True),
     "list_agent_adapters": (Empty, "List sanitized AdapterInstances and exact workspace-route availability. Runtime type describes protocol behavior; adapter_id selects the destination. Never infer a target from runtime type.", True, True),
     "list_agent_models": (AgentModelQuery, "Read models from one exact AdapterInstance. Returns exact selectors, adapter policy/default, and discovery/policy scope. A query filters candidates; it never selects a model.", True, True),
-    "start_agent_run": (AgentStartRun, "Start a prepared handoff on the explicitly selected AdapterInstance when its exact workspace route and local agent execution are enabled. The server builds the prompt from the handoff. Returns adapter_id, runtime_type, model and conversation. Connection changes invalidate explicit continuation with adapter_changed.", False, True),
+    "start_agent_run": (AgentStartRun, "Start a prepared handoff on the explicitly selected AdapterInstance when its exact workspace route and local agent execution are enabled. The server builds the prompt from the handoff. Returns adapter_id, runtime_type, model and conversation. A NEW prepared handoff may continue a succeeded run's conversation with continue_from_run_id; exact adapter/revision/model and compatible security are required. A named-profile change may rebind at an idle boundary when the adapter advertises securityRebind; security-source changes fail with continuation_security_source_changed and missing rebind support fails with continuation_security_rebind_unsupported instead of starting fresh; continuation implies parent lineage. Connection changes invalidate explicit continuation with adapter_changed.", False, True),
     "list_agent_runs": (AgentRunList, "List this workspace's runs across configured AdapterInstances (newest first) with adapter_id, name, runtime_type, model, conversation and timestamps.", True, True),
     "read_agent_run": (AgentRunRef, "Read one run's durable state, bounded result, sanitized error, notification summary and pending interactions. Notification delivery is not run success authority. Agent claims are unverified; audit current source with browsing tools. Read-only.", True, True),
     "cancel_agent_run": (AgentRunRef, "Cancel the native run bound to this workspace and handoff. Mutating and open-world; no arbitrary process kill.", False, True),
@@ -760,7 +760,10 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     service.diagnostic_report, offline=offline_value == "1",
                     listener=listener))
             if path == "/api/status":
-                return JSONResponse({"version": __version__, "mode": "control-plane",
+                from .release import bridge_release, read_manager_release
+                return JSONResponse({"version": __version__, "release": bridge_release(),
+                    "manager_release": read_manager_release(),
+                    "mode": "control-plane",
                     "mcp_port": public_mcp_port or service.config.get("mcp_port", 8765),
                     "admin_port": public_port or port,
                     "listen_mode": listen_mode,
@@ -879,12 +882,15 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     try:
                         client = service.adapter_registry.client(adapter_id, timeout=5)
                         descriptor = await run_in_threadpool(client.descriptor)
-                        return JSONResponse({"success": True, "adapter_id": adapter_id,
+                        payload: dict = {"success": True, "adapter_id": adapter_id,
                             "runtime_type": row["runtime_type"], "native_runtime": descriptor.runtime_id,
                             "native_instance": descriptor.instance_id,
                             "adapter_version": descriptor.adapter_version,
                             "native_version": descriptor.native_version,
-                            "protocol": 1, "features": descriptor.features})
+                            "protocol": 1, "features": descriptor.features}
+                        if descriptor.release is not None:
+                            payload["release"] = descriptor.release
+                        return JSONResponse(payload)
                     except BridgeError as exc:
                         return JSONResponse({"success": False, "code": exc.code,
                                              "message": "Connection could not be verified."})

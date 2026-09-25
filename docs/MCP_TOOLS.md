@@ -236,9 +236,12 @@ AdapterInstance and exact WorkspaceRoute must be enabled, agent execution must b
 enabled for the workspace, and the model must be enabled by local admin policy.
 An exact retry with the same request ID returns the existing run; reusing that
 ID for a different request or adapter is rejected. A continuation creates a new
-Bridge run in a completed run's conversation and fails closed if the adapter ID,
-connection revision, model, handoff, security binding, or conversation state does
-not match. Endpoint/token edits produce `adapter_changed`; renaming an adapter
+Bridge run in a succeeded run's conversation for a NEW prepared handoff in the
+same workspace; the new handoff's prompt and acceptance path are sent. It fails
+closed if the adapter ID, Node/adapter connection revision, exact model,
+compatible security, or idle conversation state does not match. The handoff ID
+is not required to match the source run. Endpoint/token edits produce
+`adapter_changed`; renaming an adapter
 does not change its connection revision.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
@@ -285,10 +288,12 @@ retain the runtime's own default. MCP cannot override it. It is idempotent per
 run from a different AdapterInstance. It accepts
 no free-form prompt or path and returns `run_id`, `conversation_id`, `adapter_id`,
 adapter name, runtime type, and exact model. For a small corrective follow-up
-with unchanged task, workspace, adapter ID, model, and profile,
-`continue_from_run_id` reuses a completed run's conversation as a new Bridge run
-(implies `parent_run_id`). Continuation fails closed without silently starting a
-fresh conversation and never sends into a busy conversation. Each run owns only
+in the same workspace with unchanged adapter ID, exact model, and compatible
+security, `continue_from_run_id` reuses a succeeded run's conversation as a new
+Bridge run for a NEW prepared handoff ID (the new handoff's prompt is sent).
+Continuation implies `parent_run_id`: when it is omitted the parent is
+canonicalized to the continuation source, and a different explicit parent is
+rejected with `continuation_parent_mismatch`. A named-profile ID/revision change may continue the same Bridge/runtime conversation via an idle security rebind when the adapter advertises `securityRebind`; the next prompt is sent only after the target binding is proven, prior runs keep their immutable `effective_security`, and a bounded `security_binding_rebound` activity records only old/new source/profile IDs/revisions and conversation IDs. Adapters without `securityRebind` fail such a transition with `continuation_security_rebind_unsupported` before any prompt. An ambiguous failed rebind may invalidate the runtime conversation, requiring a fresh conversation; a proven rebind is recorded before the next start, so even a failed start retains the rebound activity. Adapters persist an in-progress rebind marker before native mutation; an incomplete marker after restart refuses ownership. Security-source changes fail explicit continuation with `continuation_security_source_changed` instead of silently starting a fresh conversation; an ordinary fresh run without `continue_from_run_id` remains allowed under the new binding. Fresh named-profile runs use the live observed adapter profile revision. Same-source `runtime-config` drift may still refresh via the adapter (thread update or explicit runtime-owned replacement). Continuation fails closed without silently starting a fresh conversation and never sends into a busy conversation (`conversation_busy`). Each run owns only
 the activities and results recorded for that iteration. The caller must select
 the exact adapter explicitly; Bridge does not silently switch destinations after
 failure.

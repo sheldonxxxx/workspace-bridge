@@ -45,6 +45,7 @@ POST   /v1/profiles
 DELETE /v1/profiles/{id}
 POST   /v1/conversations
 GET    /v1/conversations/{id}
+POST   /v1/conversations/{id}/security
 POST   /v1/conversations/{id}/runs
 GET    /v1/conversations/{id}/runs/{clientRunId}
 GET    /v1/runs/{id}
@@ -61,7 +62,7 @@ GET    /v1/events?after=...&waitMs=...
 adapter/native versions, an instance ID, and a map of feature names to positive
 integer contract versions. Missing features mean unsupported. The required v1
 features are `models`, `conversations`, `runs`, `activities`, and
-`interactions`; `events`, `steering`, and `imageInput` are optional. A feature
+`interactions`; `events`, `steering`, `imageInput`, and `securityRebind` are optional. A feature
 may be advertised only when its full contract is implemented.
 Unknown optional feature names and higher optional feature versions are
 ignored by this v1 coordinator; the five core features must remain version 1.
@@ -126,9 +127,7 @@ after confirmation. The active turn keeps its captured settings. If the
 change cannot be represented or confirmed safely, the adapter creates a fresh
 native conversation and reports a bounded replacement reason.
 
-Profile-bound conversations remain pinned to their immutable revision. A
-workspace binding-source change requires a conversation created for the new
-source. Built-in profiles are immutable starting points. Custom definitions
+Profile-bound conversations record the live observed revision for new runs; the stored workspace-route revision is last-bound evidence (`bound_revision` vs `observed_revision`). An explicit `continue_from_run_id` authorizes carrying the existing conversation across a named-profile ID/revision change: when the adapter advertises the optional `securityRebind` capability, Bridge calls the bounded `rebind_conversation(conversation_id, security_binding)` (`POST /v1/conversations/{id}/security`) before the next prompt, requires the same runtime conversation ID/history to be idle and to report the requested `{source:'profile', profile:{id,revision}}`, updates the Bridge conversation only after proof, and records a bounded `security_binding_rebound` activity with only old/new source/profile IDs/revisions and conversation IDs. Busy, unconfirmed, or mismatched rebinds fail before any prompt with no blank-thread fallback; an ambiguous accepted-but-unproven native update invalidates the runtime conversation (requiring a fresh conversation) rather than continuing with unproven permissions, and adapters without `securityRebind` remain protocol-compatible but cannot transition. A proven rebind is audited with `security_binding_rebound` before the next prompt is sent, so even a rejected run start leaves the transition durably auditable. Adapters persist an in-progress rebind marker before native mutation; a restart encountering an incomplete rebind refuses ownership and requires a fresh conversation. Markers carry no profile config. A workspace binding-source change still requires a conversation created for the new source. Built-in profiles are immutable starting points. Custom definitions
 persist in the adapter's private state; edits require the prior definition
 revision. Deletion requires all workspaces to be reassigned and no active
 native run for that profile.

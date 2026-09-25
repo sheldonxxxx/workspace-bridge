@@ -35,9 +35,13 @@ are not returned through Runtime Protocol or stored in a conversation summary.
 
 Profile-bound `thread/start` and `thread/resume` use `permissions` and omit the
 mutually exclusive legacy `sandbox` field. The adapter confirms the active
-permission-profile ID when Codex reports it. An unavailable profile or changed
-effective profile revision prevents an old profile-bound conversation from
-being reused.
+permission-profile ID when Codex reports it. Direct profile-bound starts still
+require the requested live revision; an explicit continuation across a
+named-profile ID/revision change uses the idle-boundary `rebind_conversation`
+(`POST /v1/conversations/{id}/security`) path instead: the same thread ID is
+updated via `thread/settings/update` (or resumed with the same thread ID when
+`notLoaded`) and the owned profile/revision is updated only after a confirmed
+matching `thread/settings/updated` state. Unconfirmed, mismatched, or RPC-errored rebinds after the update/resume call is attempted fail with `security_rebind_unavailable`, keep pending/invalidated ownership (never restoring old metadata on an ambiguous error), create no blank thread, and never start a turn. A `rebind-pending` sentinel is committed before the native update/resume; restart encountering it refuses ownership.
 
 For compatibility, a stored legacy Bridge wrapper maps one-to-one:
 
@@ -48,7 +52,9 @@ For compatibility, a stored legacy Bridge wrapper maps one-to-one:
 | `danger-full-access` | `:danger-full-access` |
 
 New profiles and saves use only the `permissions` form. Existing conversations
-remain bound to the profile revision they were created with.
+remain bound to the profile revision they were created with until an explicit
+idle rebind proves the new named-profile binding; run-level `effective_security`
+is the immutable audit record.
 
 ## Following current Codex config
 

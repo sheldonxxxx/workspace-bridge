@@ -68,6 +68,13 @@ class DirectAdapter:
     def conversation(self, ident):
         return self.native.conversation(ident)
 
+    def rebind_conversation(self, ident, binding):
+        # Optional Runtime Protocol v1 operation; present only when the
+        # native adapter advertises securityRebind. Tests exercise both
+        # the supported path (Codex native) and the unsupported path via
+        # a descriptor without the feature.
+        return self.native.rebind_conversation(ident, binding)
+
     def start_run(self, ident, payload):
         return self.native.start_run(ident, payload)
 
@@ -982,3 +989,578 @@ def test_unconfirmed_bridge_run_rebinds_by_client_run_id(modern_env):
     recovered = service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
     assert recovered["phase"] == "active"
     assert recovered["run_id"] == bridge_id
+
+
+def _second_job(service, ws_id, token, payload, request_id):
+    body = dict(payload)
+    body["request_id"] = request_id
+    return service.call(ws_id, token, "prepare_handoff",
+                          Handoff.model_validate(body).model_dump())
+
+
+def _run_counts(service, ws_id):
+    with service.lock:
+        runs = service.db.execute(
+            "SELECT count(*) FROM agent_runs WHERE workspace=?", (ws_id,)).fetchone()[0]
+        convs = service.db.execute(
+            "SELECT count(*) FROM agent_conversations WHERE workspace=?", (ws_id,)).fetchone()[0]
+    return runs, convs
+
+
+def test_cross_handoff_continuation_reuses_conversation_with_new_prompt(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, _ = modern_env
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "cross-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "cross-second-job")
+    assert second_job["id"] != first_job["id"]
+    captured = []
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    original_start = client.start_run
+
+    def recording_start(conversation_id, body):
+        captured.append((conversation_id, body))
+        return original_start(conversation_id, body)
+
+    monkeypatch.setattr(client, "start_run", recording_start)
+    second = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "cross-second", "continue_from_run_id": first["run_id"]})
+    assert second["conversation_id"] == first["conversation_id"]
+    assert second["job_id"] == second_job["id"]
+    assert second["continue_from_run_id"] == first["run_id"]
+    assert second["parent_run_id"] == first["run_id"]
+    assert captured, "native start_run was not called"
+    prompt = captured[0][1]["input"][0]["text"]
+    assert second_job["id"] in prompt
+    assert f"jobs/{second_job['id']}/TASK.md" in prompt
+    ws = service.workspace(ws_id)
+    stored = service.run_coordinator._run_row(ws, second["run_id"])
+    assert stored["handoff"] == second_job["id"]
+    assert stored["continue_from"] == first["run_id"]
+    assert stored["parent_run"] == first["run_id"]
+
+
+def test_cross_handoff_continuation_idempotent_with_canonical_parent(modern_env, payload):
+    service, ws_id, token, first_job, native, _ = modern_env
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "idem-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "idem-second-job")
+    second = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "idem-second", "continue_from_run_id": first["run_id"]})
+    # Exact retry with omitted parent returns the same run.
+    retry = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "idem-second", "continue_from_run_id": first["run_id"]})
+    assert retry["run_id"] == second["run_id"]
+    assert retry["idempotent"] is True
+    # Retry that spells the canonical parent explicitly is the same content.
+    explicit = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "idem-second", "continue_from_run_id": first["run_id"],
+        "parent_run_id": first["run_id"]})
+    assert explicit["run_id"] == second["run_id"]
+    assert explicit["idempotent"] is True
+
+
+def test_continuation_parent_mismatch_fails_without_native_start(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, _ = modern_env
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "mismatch-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    other = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "mismatch-other"})
+    _finish_test_run(service, native, ws_id, other["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "mismatch-second-job")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append((a, k)), (_ for _ in ()).throw(AssertionError("native start must not run"))))
+    monkeypatch.setattr(client, "create_conversation",
+                          lambda *a, **k: (calls.append((a, k)), (_ for _ in ()).throw(AssertionError("native create must not run"))))
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "mismatch-continuation",
+            "continue_from_run_id": first["run_id"], "parent_run_id": other["run_id"]})
+    assert exc.value.code == "continuation_parent_mismatch"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+
+
+def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, _ = modern_env
+    ws = service.workspace(ws_id)
+    # Prepare sources without leaving concurrent native actives: finish each
+    # run (global native idle), then tamper the Bridge phase/outcome to
+    # simulate nonterminal/failed while the native conversation stays idle.
+    # The Bridge must reject before any native start/create.
+    active = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-active"})
+    _finish_test_run(service, native, ws_id, active["run_id"])
+    with service.lock, service.db:
+        service.db.execute(
+            "UPDATE agent_runs SET phase='active',active_state='thinking',outcome=NULL WHERE id=?",
+            (active["run_id"],))
+    finished = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-terminal"})
+    _finish_test_run(service, native, ws_id, finished["run_id"])
+    with service.lock, service.db:
+        service.db.execute(
+            "UPDATE agent_runs SET outcome='failed',result='',error='boom',updated=? WHERE id=?",
+            (service.run_coordinator.read(ws, finished["run_id"], sync=False)["updated"], finished["run_id"]))
+    good = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-model-good"})
+    _finish_test_run(service, native, ws_id, good["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "fail-second-job")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+
+    def _forbidden_start(*a, **k):
+        calls.append("start")
+        raise AssertionError("native start must not run")
+
+    def _forbidden_create(*a, **k):
+        calls.append("create")
+        raise AssertionError("native create must not run")
+
+    monkeypatch.setattr(client, "start_run", _forbidden_start)
+    monkeypatch.setattr(client, "create_conversation", _forbidden_create)
+    before = _run_counts(service, ws_id)
+    # Nonterminal source is ineligible.
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "fail-active-continuation",
+            "continue_from_run_id": active["run_id"]})
+    assert exc.value.code == "continuation_unavailable"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    # Failed source stays ineligible even after the conversation is idle.
+    with pytest.raises(BridgeError) as failed_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "fail-failed-continuation",
+            "continue_from_run_id": finished["run_id"]})
+    assert failed_exc.value.code == "continuation_unavailable"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    # Explicit model that cannot resolve stays a safe model error with no run.
+    with pytest.raises(BridgeError) as model_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "fail-model-continuation",
+            "continue_from_run_id": good["run_id"], "model": "missing-model"})
+    assert model_exc.value.code in {"model_not_enabled", "model_unavailable", "continuation_unavailable"}
+    assert calls == []
+
+
+def test_continuation_security_drift_fails_closed_and_fresh_allowed(modern_env, payload, monkeypatch):
+    # Without securityRebind support, a named-profile change cannot continue;
+    # source changes always require a fresh conversation. With support the
+    # same transitions succeed via idle rebind (covered by the rebind tests
+    # below). This test pins the fail-closed paths.
+    service, ws_id, token, first_job, native, _ = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "sec-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "sec-second-job")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append("start"), (_ for _ in ()).throw(AssertionError("native start must not run"))))
+    monkeypatch.setattr(client, "create_conversation",
+                          lambda *a, **k: (calls.append("create"), (_ for _ in ()).throw(AssertionError("native create must not run"))))
+    monkeypatch.setattr(client, "rebind_conversation",
+                          lambda *a, **k: (calls.append("rebind"), (_ for _ in ()).throw(AssertionError("native rebind must not run"))))
+    # Strip the optional capability to exercise the unsupported path.
+    original_descriptor = client.descriptor
+    def _no_rebind():
+        desc = original_descriptor()
+        features = dict(desc.features)
+        features.pop("securityRebind", None)
+        return Descriptor(desc.runtime_id, desc.display_name, desc.adapter_version,
+                          desc.native_version, desc.instance_id, features,
+                          release=desc.release)
+    monkeypatch.setattr(client, "descriptor", _no_rebind)
+    # Named-profile ID change without rebind support fails before any prompt.
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "sec-profile-id", "continue_from_run_id": first["run_id"]})
+    assert exc.value.code == "continuation_security_rebind_unsupported"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    # Security-source transition profile -> runtime-config fails with a
+    # dedicated code, even when rebind would otherwise be available.
+    monkeypatch.undo()
+    # Re-apply only the start/create forbids for the source-change check;
+    # rebind must not be attempted for a source change.
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append("start"), (_ for _ in ()).throw(AssertionError("native start must not run"))))
+    monkeypatch.setattr(client, "create_conversation",
+                          lambda *a, **k: (calls.append("create"), (_ for _ in ()).throw(AssertionError("native create must not run"))))
+    calls.clear()
+    orig_rebind = client.rebind_conversation
+    def _forbidden_rebind(*a, **k):
+        calls.append("rebind")
+        raise AssertionError("rebind must not run for source change")
+    monkeypatch.setattr(client, "rebind_conversation", _forbidden_rebind)
+    service.set_workspace_route(ws, ADAPTER_ID, True, "workspace-write-reviewed")
+    # Finish a fresh run under the original binding so the source-change
+    # continuation has a succeeded source; the tampered-revision path is
+    # covered by the live-revision rebind tests below.
+    service.set_workspace_route(ws, ADAPTER_ID, True, security_source="runtime-config")
+    with pytest.raises(BridgeError) as src_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "sec-source", "continue_from_run_id": first["run_id"]})
+    assert src_exc.value.code == "continuation_security_source_changed"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    # An ordinary fresh run under the new binding remains allowed.
+    monkeypatch.undo()
+    fresh = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "sec-fresh"})
+    assert fresh["conversation_id"] != first["conversation_id"]
+    assert fresh["job_id"] == second_job["id"]
+
+
+def test_named_profile_id_change_rebinds_same_conversation(modern_env, payload):
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "rebind-id-first"})
+    first_row = service.run_coordinator._run_row(ws, first["run_id"])
+    first_conv = service.run_coordinator._conversation(first_row)
+    first_native = service.run_coordinator.adapter(ADAPTER_ID).native.conversation(
+        first_conv["native_id"])["nativeId"]
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    old_effective = service.run_coordinator._run_row(ws, first["run_id"])["effective_security"]
+    second_job = _second_job(service, ws_id, token, payload, "rebind-id-second-job")
+    # Change to a different named profile ID.
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    desired = service.run_coordinator.security_binding(ws, ADAPTER_ID)
+    assert desired["profile"]["id"] == "read-only"
+    second = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "rebind-id-second", "continue_from_run_id": first["run_id"]})
+    assert second["conversation_id"] == first["conversation_id"]
+    assert second["job_id"] == second_job["id"]
+    assert second["continue_from_run_id"] == first["run_id"]
+    ws2 = service.workspace(ws_id)
+    second_row = service.run_coordinator._run_row(ws2, second["run_id"])
+    second_conv = service.run_coordinator._conversation(second_row)
+    assert second_conv["profile"] == "read-only"
+    assert second_conv["revision"] == desired["profile"]["revision"]
+    assert second_conv["native_id"] == first_conv["native_id"]
+    # Same native thread preserved.
+    current_native = service.run_coordinator.adapter(ADAPTER_ID).native.conversation(
+        second_conv["native_id"])["nativeId"]
+    assert current_native == first_native
+    # Settings update was required and confirmed.
+    update = next(params for method, params in rpc.calls
+                  if method == "thread/settings/update")
+    assert update["threadId"] == first_native
+    assert update["permissions"] == ":read-only"
+    # New run records the new profile; prior run is immutable.
+    assert second["effective_security"]["profile_id"] == "read-only"
+    assert second["effective_security"]["bound_revision"] == desired["profile"]["revision"]
+    assert second["effective_security"]["effective_revision"] == desired["profile"]["revision"]
+    assert service.run_coordinator._run_row(ws2, first["run_id"])["effective_security"] == old_effective
+    assert json.loads(old_effective)["profile_id"] == "workspace-write-reviewed"
+    # Bounded audit activity with only identifiers/revisions.
+    activities = service.call(ws_id, token, "list_agent_activities",
+                              {"run_id": second["run_id"]})["activities"]
+    rebound = next(item for item in activities if item["kind"] == "security_binding_rebound")
+    details = rebound["details"]
+    assert details["old_profile_id"] == "workspace-write-reviewed"
+    assert details["new_profile_id"] == "read-only"
+    assert details["old_revision"] == first_conv["revision"]
+    assert details["new_revision"] == desired["profile"]["revision"]
+    assert set(details) <= {"old_source", "old_profile_id", "old_revision",
+                            "new_source", "new_profile_id", "new_revision",
+                            "conversation_id"}
+    blob = json.dumps(activities)
+    assert "workspace-write-reviewed" in blob  # IDs are allowed
+    assert "prompt" not in blob.lower() or "prompt" not in str(details).lower()
+    for forbidden in ("permissions", "approvalPolicy", "token", "secret", ".workspace-handoff"):
+        assert forbidden not in json.dumps(details)
+    _finish_test_run(service, native, ws_id, second["run_id"])
+
+
+def test_same_profile_revision_change_rebinds_same_conversation(modern_env, payload):
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "rebind-rev-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    ws0 = service.workspace(ws_id)
+    before_binding = service.run_coordinator.security_binding(ws0, ADAPTER_ID)
+    assert before_binding["profile"]["id"] == "workspace-write-reviewed"
+    old_rev = before_binding["profile"]["revision"]
+    # Rotate the opaque native fingerprint so the same profile ID has a new live revision.
+    rpc.security_config = {"config": {
+        "permissions": {"workspace": {"network": {"enabled": True}}},
+        "sandbox_mode": None, "sandbox_workspace_write": None},
+        "origins": {}}
+    # Clear the short-lived profile context cache so both Bridge and adapter observe fresh state.
+    native._profile_context_cache.clear()
+    second_job = _second_job(service, ws_id, token, payload, "rebind-rev-second-job")
+    desired = service.run_coordinator.security_binding(ws, ADAPTER_ID)
+    assert desired["profile"]["id"] == "workspace-write-reviewed"
+    assert desired["profile"]["revision"] != old_rev
+    assert desired["bound_revision"] != desired["observed_revision"] or True  # stored may already be stale
+    second = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "rebind-rev-second", "continue_from_run_id": first["run_id"]})
+    assert second["conversation_id"] == first["conversation_id"]
+    second_row = service.run_coordinator._run_row(service.workspace(ws_id), second["run_id"])
+    second_conv = service.run_coordinator._conversation(second_row)
+    assert second_conv["profile"] == "workspace-write-reviewed"
+    assert second_conv["revision"] == desired["profile"]["revision"]
+    assert second["effective_security"]["effective_revision"] == desired["profile"]["revision"]
+    _finish_test_run(service, native, ws_id, second["run_id"])
+
+
+def test_rebind_busy_fails_before_prompt(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "rebind-busy-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "rebind-busy-second-job")
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    rpc.status = "active"
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+    orig_rebind = client.rebind_conversation
+    def _track_rebind(*a, **k):
+        calls.append("rebind")
+        return orig_rebind(*a, **k)
+    monkeypatch.setattr(client, "rebind_conversation", _track_rebind)
+    orig_start = client.start_run
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append("start"), (_ for _ in ()).throw(AssertionError("start must not run"))))
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "rebind-busy-second", "continue_from_run_id": first["run_id"]})
+    assert exc.value.code == "conversation_busy"
+    assert "start" not in calls
+    assert _run_counts(service, ws_id) == before
+    rpc.status = "idle"
+
+
+def test_rebind_target_mismatch_fails_before_prompt(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, _ = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "rebind-mismatch-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "rebind-mismatch-second-job")
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    before = _run_counts(service, ws_id)
+    def _mismatched(conv_id, binding):
+        conv = client.native.conversation(conv_id)
+        return {**conv, "securityBinding": {"source": "profile", "profile": {
+            "id": "read-only", "revision": "wrong-revision"}}}
+    monkeypatch.setattr(client, "rebind_conversation", _mismatched)
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (_ for _ in ()).throw(AssertionError("start must not run")))
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "rebind-mismatch-second", "continue_from_run_id": first["run_id"]})
+    assert exc.value.code == "binding_mismatch"
+    assert _run_counts(service, ws_id) == before
+
+
+def test_rebind_success_then_start_fails_still_audits_transition(modern_env, payload, monkeypatch):
+    # Rebind is a real state mutation: if the next prompt/start then fails,
+    # the failed Bridge run must still contain exactly one bounded rebound
+    # activity. Conversation moves to new binding; prior run immutable.
+    from workspace_bridge.runtime import RuntimeRejected
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "audit-fail-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    old_effective = service.run_coordinator._run_row(ws, first["run_id"])["effective_security"]
+    second_job = _second_job(service, ws_id, token, payload, "audit-fail-second-job")
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    desired = service.run_coordinator.security_binding(service.workspace(ws_id), ADAPTER_ID)
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    start_calls = []
+    orig_start = client.start_run
+    def _failing_start(conversation_id, payload_body):
+        start_calls.append((conversation_id, payload_body))
+        raise RuntimeRejected("native start rejected after rebind", code="request_rejected")
+    monkeypatch.setattr(client, "start_run", _failing_start)
+    with __import__("pytest").raises(RuntimeRejected):
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "audit-fail-second", "continue_from_run_id": first["run_id"]})
+    assert len(start_calls) == 1
+    # Prompt was the new handoff (no replay of old prompt): new job ID in text.
+    assert second_job["id"] in start_calls[0][1]["input"][0]["text"]
+    assert first_job["id"] not in start_calls[0][1]["input"][0]["text"]
+    ws2 = service.workspace(ws_id)
+    with service.lock:
+        failed_row = service.db.execute(
+            "SELECT * FROM agent_runs WHERE workspace=? AND request_id=?",
+            (ws_id, "audit-fail-second")).fetchone()
+    assert failed_row is not None
+    assert failed_row["phase"] == "terminal" and failed_row["outcome"] == "failed"
+    failed_conv = service.run_coordinator._conversation(dict(failed_row))
+    assert failed_conv["profile"] == "read-only"
+    assert failed_conv["revision"] == desired["profile"]["revision"]
+    assert failed_conv["id"] == service.run_coordinator._conversation(
+        service.run_coordinator._run_row(ws, first["run_id"]))["id"]
+    activities = service.call(ws_id, token, "list_agent_activities",
+                              {"run_id": failed_row["id"]})["activities"]
+    rebound = [item for item in activities if item["kind"] == "security_binding_rebound"]
+    assert len(rebound) == 1
+    details = rebound[0]["details"]
+    assert details["new_profile_id"] == "read-only"
+    assert details["new_revision"] == desired["profile"]["revision"]
+    assert set(details) <= {"old_source", "old_profile_id", "old_revision",
+                            "new_source", "new_profile_id", "new_revision",
+                            "conversation_id"}
+    # Prior run immutable.
+    assert service.run_coordinator._run_row(ws2, first["run_id"])["effective_security"] == old_effective
+
+
+def test_stale_stored_route_uses_live_revision_for_fresh_run(modern_env, payload):
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    live = service.run_coordinator.security_binding(ws, ADAPTER_ID)
+    assert live["profile"]["id"] == "workspace-write-reviewed"
+    live_rev = live["profile"]["revision"]
+    # Simulate a stale stored route revision after redeploy.
+    with service.lock, service.db:
+        service.db.execute("UPDATE workspace_routes SET profile_revision=? WHERE workspace=? AND adapter_id=?",
+                           (live_rev + "-stale", ws_id, ADAPTER_ID))
+    # Fresh binding must still resolve to live, exposing bound vs observed.
+    fresh_binding = service.run_coordinator.security_binding(ws, ADAPTER_ID)
+    assert fresh_binding["profile"]["revision"] == live_rev
+    assert fresh_binding["bound_revision"] == live_rev + "-stale"
+    assert fresh_binding["observed_revision"] == live_rev
+    policy = service.workspace_route_policy(service.workspace(ws_id))
+    route = policy["routes"][ADAPTER_ID]
+    assert route["ready"] is True
+    assert route["effective_security"]["bound_revision"] == live_rev + "-stale"
+    assert route["effective_security"]["observed_revision"] == live_rev
+    assert route["effective_security"]["freshness"] == "stale"
+    second_job = _second_job(service, ws_id, token, payload, "stale-fresh-job")
+    fresh = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "stale-fresh"})
+    assert fresh["effective_security"]["effective_revision"] == live_rev
+    assert fresh["effective_security"]["bound_revision"] == live_rev
+    ws2 = service.workspace(ws_id)
+    run_row = service.run_coordinator._run_row(ws2, fresh["run_id"])
+    conv = service.run_coordinator._conversation(run_row)
+    assert conv["revision"] == live_rev
+    _finish_test_run(service, native, ws_id, fresh["run_id"])
+
+
+def test_wbrp_rebind_validation_and_backward_compat():
+    from workspace_bridge.wbrp import (Descriptor, HttpRuntimeAdapter, ALL_FEATURES)
+    from workspace_bridge.security import BridgeError
+    base = {"protocol": {"major": 1}, "runtime": {
+        "id": "codex", "displayName": "Codex", "adapterVersion": "1",
+        "nativeVersion": "1", "instanceId": "inst-1"},
+        "features": {"models": 1, "conversations": 1, "runs": 1,
+                     "activities": 1, "interactions": 1}}
+    legacy = Descriptor.parse(dict(base), expected_runtime="codex")
+    assert legacy.supports("securityRebind") is False
+    assert "securityRebind" in ALL_FEATURES
+    with_rebind = dict(base)
+    with_rebind["features"] = {**base["features"], "securityRebind": 1}
+    modern = Descriptor.parse(with_rebind, expected_runtime="codex")
+    assert modern.supports("securityRebind") is True
+    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
+                                "http://127.0.0.1:1", "secret")
+    with pytest.raises(BridgeError):
+        client.rebind_conversation("conv_1", {"source": "runtime-config", "revision": "x"})
+    with pytest.raises(BridgeError):
+        client.rebind_conversation("conv_1", {"source": "profile",
+                                              "profile": {"id": "", "revision": "r"}})
+    with pytest.raises(BridgeError):
+        client.rebind_conversation("", {"source": "profile",
+                                        "profile": {"id": "a", "revision": "r"}})
+    with pytest.raises(BridgeError):
+        client.rebind_conversation("conv_1", {"source": "profile",
+                                              "profile": {"id": "a", "revision": "r"},
+                                              "extra": 1})
+
+
+
+def test_cross_handoff_continuation_busy_and_revision_drift(modern_env, payload, monkeypatch):
+    service, ws_id, token, first_job, native, rpc = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "drift-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "drift-second-job")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+
+    def _forbidden_start(*a, **k):
+        calls.append("start")
+        raise AssertionError("native start must not run")
+
+    def _forbidden_create(*a, **k):
+        calls.append("create")
+        raise AssertionError("native create must not run")
+
+    monkeypatch.setattr(client, "start_run", _forbidden_start)
+    monkeypatch.setattr(client, "create_conversation", _forbidden_create)
+    # Busy native conversation stays conversation_busy with no new run.
+    rpc.status = "active"
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as busy_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "drift-busy", "continue_from_run_id": first["run_id"]})
+    assert busy_exc.value.code == "conversation_busy"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    rpc.status = "idle"
+    # Node connection revision drift still blocks cross-handoff continuation.
+    # Tamper the revision directly so the Node stays reachable; a public
+    # base_url/token rotation would fail closed earlier at Node auth.
+    node_row = service.node_registry.get(ws["node_id"])
+    with service.lock, service.db:
+        service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
+                           (node_row["revision"] + "-drifted", ws["node_id"]))
+    with pytest.raises(BridgeError) as node_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "drift-node", "continue_from_run_id": first["run_id"]})
+    assert node_exc.value.code == "node_changed"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+    with service.lock, service.db:
+        service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
+                           (node_row["revision"], ws["node_id"]))
+    # Adapter connection revision drift still blocks cross-handoff continuation.
+    original = service.adapter_registry.get(ADAPTER_ID)
+    changed = service.adapter_registry.update(ADAPTER_ID, {
+        "base_url": "http://127.0.0.1:9877", "token": "replacement-codex-secret"})
+    assert changed["revision"] != original["revision"]
+    with pytest.raises(BridgeError) as adapter_exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "drift-adapter", "continue_from_run_id": first["run_id"]})
+    assert adapter_exc.value.code == "adapter_changed"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before

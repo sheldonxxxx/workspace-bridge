@@ -200,11 +200,13 @@ class NodeService:
                 "excludes": json.loads(row["excludes"]), "write_scope": row["write_scope"]}
 
     def status(self) -> dict:
+        from .release import node_release
         roots = []
         for root in self.allowed_roots:
             roots.append({"available": root.is_dir() and not root.is_symlink(),
                           "root_label": root.name[:80] or "root"})
-        return {"status": "ok", "protocol": 1, "node_version": __version__, "capabilities": [
+        return {"status": "ok", "protocol": 1, "node_version": __version__,
+                "release": node_release(), "capabilities": [
             "files", "search", "git", "handoff-artifacts", "runtime-adapters"],
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
@@ -463,16 +465,20 @@ class NodeService:
         except BridgeError as exc:
             return {"success": False, "runtime_type": runtime_type,
                     "code": exc.code, "message": "Connection could not be verified."}
-        return {"success": True, "adapter_id": adapter_id, "runtime_type": runtime_type,
+        result: dict = {"success": True, "adapter_id": adapter_id, "runtime_type": runtime_type,
                 "native_runtime": descriptor.runtime_id,
                 "native_instance": descriptor.instance_id[:200],
                 "adapter_version": descriptor.adapter_version,
                 "native_version": descriptor.native_version,
                 "protocol": 1, "features": descriptor.features}
+        if descriptor.release is not None:
+            result["release"] = descriptor.release
+        return result
 
     def runtime_call(self, adapter_id: str, operation: str, body: dict):
         allowed_ops = {"descriptor", "models", "profile_catalog", "profiles", "save_profile",
-                       "delete_profile", "create_conversation", "conversation", "start_run",
+                       "delete_profile", "create_conversation", "conversation",
+                       "rebind_conversation", "start_run",
                        "find_run", "run", "cancel", "steer", "interactions", "resolve",
                        "activities", "activity", "events"}
         if operation not in allowed_ops or not isinstance(body, dict):
@@ -518,9 +524,12 @@ class NodeService:
         args = arguments
         if operation == "descriptor":
             value = client.descriptor()
-            return {"runtime_id": value.runtime_id, "display_name": value.display_name,
+            result: dict = {"runtime_id": value.runtime_id, "display_name": value.display_name,
                     "adapter_version": value.adapter_version, "native_version": value.native_version,
                     "instance_id": value.instance_id, "features": value.features}
+            if value.release is not None:
+                result["release"] = value.release
+            return result
         if operation == "models": return client.models(args["workspace_id"])
         if operation == "profile_catalog": return client.profile_catalog(
             args.get("workspace_id"), args.get("directory"), fresh=bool(args.get("fresh", False)))
@@ -529,6 +538,21 @@ class NodeService:
         if operation == "save_profile": return client.save_profile(
             args["profile_id"], args["config"], args.get("expected_revision"))
         if operation == "delete_profile": return client.delete_profile(args["profile_id"])
+        if operation == "rebind_conversation":
+            binding = args.get("security_binding")
+            conv = args.get("conversation_id")
+            if (not isinstance(conv, str) or not conv or len(conv) > 200
+                    or not isinstance(binding, dict) or binding.get("source") != "profile"
+                    or not isinstance(binding.get("profile"), dict)
+                    or not isinstance(binding["profile"].get("id"), str)
+                    or not binding["profile"]["id"] or len(binding["profile"]["id"]) > 100
+                    or not isinstance(binding["profile"].get("revision"), str)
+                    or not binding["profile"]["revision"]
+                    or len(binding["profile"]["revision"]) > 100
+                    or set(binding) != {"source", "profile"}
+                    or set(binding["profile"]) != {"id", "revision"}):
+                raise BridgeError("Invalid security rebind binding", "invalid_arguments")
+            return client.rebind_conversation(conv, binding)
         if operation == "create_conversation": return client.create_conversation(args["payload"])
         if operation == "conversation": return client.conversation(args["conversation_id"])
         if operation == "start_run": return client.start_run(args["conversation_id"], args["payload"])

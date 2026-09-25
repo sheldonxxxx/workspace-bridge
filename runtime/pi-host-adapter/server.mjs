@@ -150,6 +150,13 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
             && req.method === "GET") {
           result = await protocol.conversation(key(2));
         } else if (segments.length === 4 && segments[1] === "conversations"
+            && segments[3] === "security" && req.method === "POST") {
+          const body = await readBody(req, bodyLimit);
+          if (!body || typeof body.securityBinding !== "object") {
+            throw new AdapterError("Invalid security rebind binding", 400, "invalid_arguments");
+          }
+          result = await protocol.rebindConversation(key(2), body.securityBinding);
+        } else if (segments.length === 4 && segments[1] === "conversations"
             && segments[3] === "runs" && req.method === "POST") {
           result = await protocol.startRun(key(2), await readBody(req, bodyLimit));
         } else if (segments.length === 5 && segments[1] === "conversations"

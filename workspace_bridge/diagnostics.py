@@ -14,7 +14,7 @@ from .wbrp import CORE_FEATURES, Descriptor, HttpRuntimeAdapter
 
 STATUSES = frozenset({"pass", "warning", "unknown", "action_required", "failed"})
 SECTIONS = frozenset({"core", "nodes", "workspaces", "adapters", "runnable_routes",
-                      "models_profiles", "git_evidence"})
+                      "models_profiles", "git_evidence", "release"})
 STATUS_ORDER = ("pass", "warning", "unknown", "action_required", "failed")
 MAX_WORKSPACES = 100
 MAX_ADAPTERS = 100
@@ -111,6 +111,7 @@ class DiagnosticReport:
     counts: dict[str, int]
     checks: list[DiagnosticCheck]
     runnable_routes: list[RunnableRoute]
+    release: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {"generated_at": self.generated_at, "mode": self.mode,
@@ -118,7 +119,8 @@ class DiagnosticReport:
                             "summary": self.overall_summary,
                             "counts": dict(self.counts)},
                 "checks": [item.to_dict() for item in self.checks],
-                "runnable_routes": [item.to_dict() for item in self.runnable_routes]}
+                "runnable_routes": [item.to_dict() for item in self.runnable_routes],
+                "release": dict(self.release)}
 
 
 def failure_report(*, mode: str = "offline", code: str = "core.config_state_readable",
@@ -126,15 +128,24 @@ def failure_report(*, mode: str = "offline", code: str = "core.config_state_read
                    section: str = "core") -> dict:
     check = DiagnosticCheck("doctor.initialization", code, section, "failed", summary,
                             remediation="Check the local configuration and private state files.")
+    try:
+        from .release import bridge_release
+        bridge = bridge_release()
+    except Exception:
+        bridge = None
+    release_data: dict[str, Any] = {"bridge": bridge, "manager": None,
+                                     "nodes": {}, "adapters": {}}
     return DiagnosticReport(_stamp(), mode, "failed", summary,
                             {status: int(status == "failed") for status in STATUS_ORDER},
-                            [check], []).to_dict()
+                            [check], [], release_data).to_dict()
 
 
 class _Builder:
     def __init__(self):
         self.checks: list[DiagnosticCheck] = []
         self.routes: list[RunnableRoute] = []
+        self.release_data: dict[str, Any] = {"bridge": None, "manager": None,
+                                              "nodes": {}, "adapters": {}}
 
     def add(self, code: str, section: str, status: str, summary: str, *,
             detail: str | None = None, remediation: str | None = None,
@@ -154,7 +165,8 @@ class _Builder:
                    "action_required": "Configuration or runnable-route prerequisites need administrator action.",
                    "failed": "One or more required diagnostic checks failed."}[overall]
         return DiagnosticReport(_stamp(), mode, overall, summary, counts,
-                                self.checks[:5000], self.routes[:MAX_ROUTES]).to_dict()
+                                self.checks[:5000], self.routes[:MAX_ROUTES],
+                                dict(self.release_data)).to_dict()
 
 
 def _adapter_probe(service, row: dict) -> tuple[Descriptor | None, dict | None]:
@@ -240,17 +252,63 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
     channels = service.notification_manager.status()
     out.add("core.notifications", "core", "pass",
             f"{channels['channel_count']} notification channel(s) configured; informational only.")
+    # M4.1 release identity: Bridge core is always observed locally.
+    # Product vs component versions stay distinct; build IDs are
+    # content-addressed source/package identities, not image digests.
+    try:
+        from .release import (ReleaseError, bridge_release, read_manager_release,
+                              short_build_id, validate_release)
+        _bridge_release = bridge_release()
+    except Exception:
+        _bridge_release = None
+    try:
+        _manager_release = read_manager_release()
+    except Exception:
+        _manager_release = None
+    out.release_data["bridge"] = _bridge_release
+    out.release_data["manager"] = _manager_release
+    if _bridge_release is not None:
+        out.add("release.bridge_identity", "release", "pass",
+                f"Bridge release {_bridge_release['product_version']} "
+                f"build {short_build_id(_bridge_release['build_id'])}.")
+    else:
+        out.add("release.bridge_identity", "release", "failed",
+                "Bridge release identity is unavailable.")
+    if _manager_release is not None:
+        out.add("release.manager_identity", "release", "pass",
+                f"Manager release {_manager_release['product_version']} "
+                f"build {short_build_id(_manager_release['build_id'])}.")
+    else:
+        out.add("release.manager_identity", "release", "unknown",
+                "Manager build identity was not observed.")
+    _bridge_product = (_bridge_release["product_version"]
+                       if isinstance(_bridge_release, dict) else None)
+    _bridge_build = (_bridge_release["build_id"]
+                     if isinstance(_bridge_release, dict) else None)
     nodes = service.node_registry.rows()
     node_health: dict[str, bool] = {}
+    node_releases: dict[str, dict | None] = {}
     for node in nodes:
         healthy = False
+        observed: dict | None = None
+        release_error: str | None = None
         if node["enabled"] and not offline:
             try:
-                service.node_registry.client(node["id"], timeout=3).status()
+                state = service.node_registry.client(node["id"], timeout=3).status()
                 healthy = True
+                raw = state.get("release") if isinstance(state, dict) else None
+                if raw is None:
+                    release_error = "missing"
+                else:
+                    try:
+                        observed = validate_release(raw)
+                    except ReleaseError as exc:
+                        release_error = getattr(exc, "kind", "invalid")
             except Exception:
                 healthy = False
         node_health[node["id"]] = healthy
+        node_releases[node["id"]] = observed
+        out.release_data["nodes"][node["id"]] = observed
         out.add("node.reachable", "nodes",
                 "pass" if healthy else ("unknown" if offline and node["enabled"] else
                                          "action_required" if not node["enabled"] else "failed"),
@@ -258,6 +316,40 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                 ("Node reachability was not checked offline." if offline and node["enabled"] else
                  "Authoritative Node is disabled or unavailable."),
                 remediation=None if healthy else "Check the Node endpoint, credential and Node service.")
+        # Release compatibility never blocks routes; protocol/security/model
+        # readiness remains the execution authority.
+        if offline and node["enabled"]:
+            out.add("release.node_identity", "release", "unknown",
+                    "Node release identity was not checked offline.")
+        elif not node["enabled"]:
+            out.add("release.node_identity", "release", "unknown",
+                    "Node release identity is unobserved while disabled.")
+        elif not healthy:
+            out.add("release.node_identity", "release", "unknown",
+                    "Node release identity is unobserved while unreachable.")
+        elif release_error == "missing":
+            out.add("release.node_identity", "release", "warning",
+                    "Node release identity is missing; staged rollout.",
+                    remediation="Update the Node to a release-identity build.")
+        elif release_error == "unsupported":
+            out.add("release.node_identity", "release", "action_required",
+                    "Node release contract is incompatible.",
+                    remediation="Align the Node release contract with the Bridge.")
+        elif release_error is not None:
+            out.add("release.node_identity", "release", "warning",
+                    "Node release identity is invalid.",
+                    remediation="Update the Node to a release-identity build.")
+        elif observed is not None and _bridge_product is not None and observed.get("product_version") != _bridge_product:
+            out.add("release.node_product_skew", "release", "warning",
+                    "Node product version differs from the Bridge.",
+                    remediation="Align Node and Bridge product versions.")
+        elif observed is not None and _bridge_build is not None and observed.get("build_id") != _bridge_build:
+            out.add("release.node_build_skew", "release", "warning",
+                    "Node Python-core build differs from the Bridge.",
+                    remediation="Deploy the same Workspace Bridge package to Node and Bridge.")
+        else:
+            out.add("release.node_identity", "release", "pass",
+                    "Node release identity matches the Bridge Python core.")
 
     root_access: dict[str, bool] = {}
     for ws in workspaces:
@@ -340,6 +432,48 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                         "Adapter protocol descriptor is incompatible or unavailable.",
                         adapter_id=aid, runtime_type=row["runtime_type"])
 
+    for row in adapters:
+        aid = row["id"]
+        runtime_type = row["runtime_type"]
+        descriptor, error = adapter_health.get(aid, (None, None))
+        observed = descriptor.release if descriptor is not None else None
+        out.release_data["adapters"][aid] = observed
+        if offline or (error and error.get("kind") in {"offline", "disabled"}):
+            out.add("release.adapter_identity", "release", "unknown",
+                    "Adapter release identity was not checked offline." if offline else
+                    "Adapter release identity is unobserved while disabled.",
+                    adapter_id=aid, runtime_type=runtime_type)
+        elif descriptor is None:
+            message = (error or {}).get("message", "") if isinstance(error, dict) else ""
+            if "release contract" in str(message).lower():
+                out.add("release.adapter_identity", "release", "action_required",
+                        "Adapter release contract is incompatible.",
+                        remediation="Align the adapter release contract with the Bridge.",
+                        adapter_id=aid, runtime_type=runtime_type)
+            else:
+                out.add("release.adapter_identity", "release", "unknown",
+                        "Adapter release identity is unobserved while unreachable.",
+                        adapter_id=aid, runtime_type=runtime_type)
+        elif observed is None:
+            out.add("release.adapter_identity", "release", "warning",
+                    "Adapter release identity is missing; staged rollout.",
+                    remediation="Update the adapter to a release-identity build.",
+                    adapter_id=aid, runtime_type=runtime_type)
+        elif _bridge_product is not None and observed.get("product_version") != _bridge_product:
+            out.add("release.adapter_product_skew", "release", "warning",
+                    "Adapter product version differs from the Bridge.",
+                    remediation="Align adapter and Bridge product versions.",
+                    adapter_id=aid, runtime_type=runtime_type)
+        elif (runtime_type == "codex" and _bridge_build is not None
+                and observed.get("build_id") != _bridge_build):
+            out.add("release.adapter_build_skew", "release", "warning",
+                    "Codex Python-core build differs from the Bridge.",
+                    remediation="Deploy the same Workspace Bridge package to Codex and Bridge.",
+                    adapter_id=aid, runtime_type=runtime_type)
+        else:
+            out.add("release.adapter_identity", "release", "pass",
+                    "Adapter release identity is present.",
+                    adapter_id=aid, runtime_type=runtime_type)
     health_by_id = {row["id"]: adapter_health.get(row["id"], (None, None))
                     for row in adapters}
     prerequisites = {ws["id"]: [

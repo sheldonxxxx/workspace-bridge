@@ -187,15 +187,31 @@ class NodeRuntimeAdapterProxy:
             if exc.code == "runtime_rejected":
                 raise RuntimeRejected("Runtime rejected the request") from None
             if exc.code in {"not_found", "binding_mismatch", "conversation_busy",
-                            "interaction_stale", "model_unavailable", "model_not_enabled"}:
+                            "interaction_stale", "model_unavailable", "model_not_enabled",
+                            "security_rebind_unavailable", "profile_mismatch",
+                            "profile_unavailable", "continuation_security_source_changed",
+                            "continuation_security_rebind_unsupported"}:
                 raise RuntimeRejected("Runtime rejected the request", code=exc.code) from None
             raise
 
     def descriptor(self) -> Descriptor:
+        from .release import ReleaseError, validate_release
+        from .runtime import RuntimeUnavailable, RuntimeUnsupported
         value = self._call("descriptor")
+        release = None
+        if isinstance(value, dict) and "release" in value:
+            try:
+                release = validate_release(value.get("release"))
+            except ReleaseError as exc:
+                if getattr(exc, "kind", "invalid") == "unsupported":
+                    raise RuntimeUnsupported(
+                        "Runtime release contract is unsupported") from None
+                raise RuntimeUnavailable(
+                    "Runtime release identity is invalid") from None
         return Descriptor(value["runtime_id"], value["display_name"],
                           value["adapter_version"], value["native_version"],
-                          value["instance_id"], value["features"])
+                          value["instance_id"], value["features"],
+                          release=release)
 
     def models(self, workspace_id: str) -> list[dict]:
         return self._call("models", workspace_id=workspace_id)
@@ -222,6 +238,10 @@ class NodeRuntimeAdapterProxy:
 
     def conversation(self, conversation_id: str) -> dict:
         return self._call("conversation", conversation_id=conversation_id)
+
+    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
+        return self._call("rebind_conversation", conversation_id=conversation_id,
+                          security_binding=security_binding)
 
     def start_run(self, conversation_id: str, payload: dict) -> dict:
         return self._call("start_run", conversation_id=conversation_id, payload=payload)

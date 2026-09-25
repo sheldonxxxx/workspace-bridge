@@ -84,6 +84,57 @@ Offline Doctor opens SQLite read-only, creates no service workers, does not
 recover notification `sending` rows, and runs while `serve` holds the process
 lock.
 
+## Release identity and compatibility (M4.1)
+
+Every deployed component exposes a bounded content-addressed identity
+(contract 1): `{ contract: 1, product: "workspace-bridge",
+product_version, component, component_version, build_id: "sha256:<64 hex>" }`.
+`build_id` is deterministic over production inputs only; it never uses live
+Git state, paths, timestamps, hostnames, tokens, mutable instance IDs, or
+environment-only values, and no paths or file inventories are exposed.
+
+Product vs component versions stay distinct: the product version is the
+Workspace Bridge release (`0.8.4`); the component version is the component's
+own version (Bridge/Node `0.8.4`, Codex `1.0.0`, Pi package `0.4.0`, Manager
+`0.8.4`). Adapter/native semantic versions (`adapterVersion`,
+`nativeVersion`, protocol/features, Node/adapter revisions) remain separate
+fields and are never overloaded by release identity.
+
+Bridge `/api/status` returns both `release` (Bridge core) and
+`manager_release` (validated `static/dist/release.json`, or `null` when
+missing/invalid rather than a fabricated match). Node `/v1/status` returns
+`release` with component `node`; Codex and Pi Runtime Protocol descriptors
+carry an additive optional `release` (legacy descriptors without it stay
+protocol-compatible; malformed present metadata fails descriptor validation).
+
+The Manager compares its full compile-time Manager identity with
+`/api/status.manager_release` (`contract`, `product`, `product_version`,
+`component`, `component_version`, `build_id`): any difference shows a
+non-destructive
+`Manager build mismatch / refresh or rebuild required` warning (an old cached
+JS bundle talking to a newer Bridge, including a version-only skew with an
+equal build ID); absent/invalid metadata on either side shows
+`Manager identity unavailable`, never a false mismatch. Bridge core and
+Manager build IDs/versions appear in the Overview status surface (short
+`sha256:` prefix, full ID in the title/details).
+
+Canonical diagnostics adds a `release` section. It always emits a Bridge
+identity check; live Node checks cover identity present/valid, exact
+product-version match, and exact Python-core build-ID match (Bridge+Node use
+the same Python core); live adapter checks cover identity present/valid and
+product-version match, plus Python-core build-ID match for Codex only (Pi uses
+an independent artifact build ID and is never compared to the Python core).
+Missing identity from an otherwise protocol-compatible Node/adapter is
+`warning` (staged rollout); product/build skew is `warning`; an explicitly
+incompatible release contract is `action_required`; offline/unobserved remote
+identity is `unknown`. Release warnings never enter `RunnableRoute.blockers`;
+Runtime Protocol compatibility, security, model, and workspace readiness
+remain the execution authority.
+
+This is source/package identity, not a container image digest or
+code-signing provenance; image/artifact provenance belongs to later
+release/deployment work.
+
 Diagnostics do not prove account authorization, model tool behavior, test
 execution, or ChatGPT's handling of a response. `scripts/smoke_mcp.py --url
 http://127.0.0.1:8765/mcp` exercises read-only discovery, workspace discovery,

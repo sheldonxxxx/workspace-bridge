@@ -22,6 +22,8 @@ class FakeCodexRpc:
         self.thread_start_error = None
         self.active_permission_profile_override = None
         self.settings_update_error = None
+        self.settings_update_error_after_apply = False
+        self.resume_error_after_apply = False
         self.settings_update_notify = True
         self.next_thread = 0
         self.next_turn = 0
@@ -82,8 +84,21 @@ class FakeCodexRpc:
             if self.settings_update_error:
                 raise CodexRpcError(self.settings_update_error)
             thread_id = params["threadId"]
+            if self.settings_update_error_after_apply:
+                settings = self.thread_settings[thread_id]
+                if self.active_permission_profile_override is not None:
+                    settings["activePermissionProfile"] = self.active_permission_profile_override
+                elif "permissions" in params:
+                    settings["activePermissionProfile"] = {"id": params["permissions"]}
+                if "approvalPolicy" in params:
+                    settings["approvalPolicy"] = params["approvalPolicy"]
+                if "approvalsReviewer" in params:
+                    settings["approvalsReviewer"] = params["approvalsReviewer"]
+                raise CodexRpcError("injected timeout after apply")
             settings = self.thread_settings[thread_id]
-            if "permissions" in params:
+            if self.active_permission_profile_override is not None:
+                settings["activePermissionProfile"] = self.active_permission_profile_override
+            elif "permissions" in params:
                 settings["activePermissionProfile"] = {"id": params["permissions"]}
             if "approvalPolicy" in params:
                 settings["approvalPolicy"] = params["approvalPolicy"]
@@ -93,6 +108,34 @@ class FakeCodexRpc:
                 self.on_notification("thread/settings/updated", {
                     "threadId": thread_id, "threadSettings": dict(settings)})
             return {}
+        if method == "thread/resume":
+            thread_id = params["threadId"]
+            if self.resume_error_after_apply:
+                settings = self.thread_settings.get(thread_id, {})
+                if "permissions" in params:
+                    settings = {**settings, "activePermissionProfile": {"id": params["permissions"]}}
+                if "approvalPolicy" in params:
+                    settings = {**settings, "approvalPolicy": params["approvalPolicy"]}
+                if "approvalsReviewer" in params:
+                    settings = {**settings, "approvalsReviewer": params["approvalsReviewer"]}
+                if self.active_permission_profile_override is not None:
+                    settings = {**settings, "activePermissionProfile": self.active_permission_profile_override}
+                self.thread_settings[thread_id] = settings
+                raise CodexRpcError("injected resume timeout after apply")
+            # Same-thread resume with target settings; preserves history.
+            settings = self.thread_settings.get(thread_id, {})
+            if "permissions" in params:
+                settings = {**settings, "activePermissionProfile": {"id": params["permissions"]}}
+            if "approvalPolicy" in params:
+                settings = {**settings, "approvalPolicy": params["approvalPolicy"]}
+            if "approvalsReviewer" in params:
+                settings = {**settings, "approvalsReviewer": params["approvalsReviewer"]}
+            # Honor an explicit mismatch override for negative tests.
+            if self.active_permission_profile_override is not None:
+                settings = {**settings, "activePermissionProfile": self.active_permission_profile_override}
+            self.thread_settings[thread_id] = settings
+            return {"thread": {"id": thread_id, "status": {"type": "idle"}},
+                    "cwd": params.get("cwd"), **settings}
         if method == "turn/start":
             self.status = "active"
             self.next_turn += 1
@@ -688,3 +731,403 @@ async def test_private_http_surface_requires_token(codex_adapter):
                                    headers={"X-Runtime-Token": "private-token"})
         assert allowed.status_code == 200
         assert allowed.json()["runtime"]["id"] == "codex"
+
+
+def _profile_revision_for(adapter, workspace, profile_id):
+    return next(row for row in adapter.profiles(
+        "ws_test", str(workspace), fresh=True)["profiles"]
+                if row["id"] == profile_id)["revision"]
+
+
+def test_named_profile_rebind_updates_same_thread_and_starts_next_turn(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    assert adapter.descriptor()["features"].get("securityRebind") == 1
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    rebound = adapter.rebind_conversation(conversation["id"], {
+        "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert rebound["id"] == conversation["id"]
+    assert rebound["status"] == "idle"
+    assert rebound["securityBinding"] == {"source": "profile", "profile": {
+        "id": "read-only", "revision": target_rev}}
+    assert rebound["nativeId"] == conversation["nativeId"]
+    update = next(params for method, params in rpc.calls
+                  if method == "thread/settings/update")
+    assert update["threadId"] == conversation["nativeId"]
+    assert update["permissions"] == ":read-only"
+    # Owned record updated only after proof; next turn uses the same thread.
+    second = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "second"}]})
+    assert second["conversationId"] == conversation["id"]
+    assert second["securityBinding"]["profile"] == {"id": "read-only", "revision": target_rev}
+    finish_fake_run(adapter, rpc, rebound, second)
+
+
+def test_named_profile_same_id_revision_change_rebinds(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    old_rev = _profile_revision_for(adapter, workspace, "workspace-write-reviewed")
+    rpc.security_config = {"config": {
+        "permissions": {"workspace": {"network": {"enabled": True}}},
+        "sandbox_mode": None, "sandbox_workspace_write": None},
+        "origins": {}}
+    new_rev = _profile_revision_for(adapter, workspace, "workspace-write-reviewed")
+    assert new_rev != old_rev
+    rebound = adapter.rebind_conversation(conversation["id"], {
+        "source": "profile", "profile": {
+            "id": "workspace-write-reviewed", "revision": new_rev}})
+    assert rebound["securityBinding"]["profile"]["revision"] == new_rev
+    assert rebound["nativeId"] == conversation["nativeId"]
+    second = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "next"}]})
+    assert second["securityBinding"]["profile"]["revision"] == new_rev
+
+
+def test_named_profile_rebind_unconfirmed_fails_without_turn_or_blank_thread(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    thread_id = conversation["nativeId"]
+    turns_before = rpc.next_turn
+    rpc.settings_update_notify = False
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code == "security_rebind_unavailable"
+    # The accepted update already mutated native settings despite missing
+    # confirmation: the fake proves ambiguity by applying params before the
+    # conditional notification.
+    assert rpc.thread_settings[thread_id]["activePermissionProfile"] == {"id": ":read-only"}
+    assert rpc.next_turn == turns_before
+    # No blank replacement thread was created and no turn started.
+    assert rpc.next_thread == 1
+    # Ambiguous native state must not leave owned metadata advertising old
+    # security: ownership is invalidated.
+    with __import__("pytest").raises(AdapterFailure) as gone:
+        adapter.conversation(conversation["id"])
+    assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+    with __import__("pytest").raises(AdapterFailure):
+        adapter.start_run(conversation["id"], {
+            "input": [{"type": "text", "text": "after"}]})
+
+
+def test_named_profile_rebind_mismatch_fails_without_turn(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    rpc.active_permission_profile_override = {"id": ":workspace"}
+    # Request read-only but force the native side to confirm the wrong profile.
+    # The accepted update mutates native state before the mismatched
+    # confirmation, so the result is ambiguous.
+    other_rev = _profile_revision_for(adapter, workspace, "read-only")
+    thread_id = conversation["nativeId"]
+    turns_before = rpc.next_turn
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": other_rev}})
+    assert exc.value.code in {"security_rebind_unavailable", "binding_mismatch"}
+    assert rpc.thread_settings[thread_id]["activePermissionProfile"] == {"id": ":workspace"}
+    assert rpc.next_turn == turns_before
+    assert rpc.next_thread == 1
+    with __import__("pytest").raises(AdapterFailure) as gone:
+        adapter.conversation(conversation["id"])
+    assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+
+
+def test_named_profile_rebind_busy_fails(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code == "conversation_busy"
+    assert not any(method == "thread/settings/update" for method, _ in rpc.calls)
+
+
+def test_named_profile_rebind_notloaded_resumes_same_thread(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    rpc.status = "notLoaded"
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    rebound = adapter.rebind_conversation(conversation["id"], {
+        "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert rebound["nativeId"] == conversation["nativeId"]
+    assert rebound["securityBinding"]["profile"]["id"] == "read-only"
+    resume = next(params for method, params in rpc.calls if method == "thread/resume")
+    assert resume["threadId"] == conversation["nativeId"]
+    assert resume["permissions"] == ":read-only"
+    rpc.status = "idle"
+    second = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "after-resume"}]})
+    assert second["conversationId"] == conversation["id"]
+
+
+def test_rebind_premarker_db_failure_prevents_native_mutation(codex_adapter, monkeypatch):
+    import sqlite3
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    rpc_calls_before = len(rpc.calls)
+    real_db = adapter.db
+    class _FailingDB:
+        def __init__(self, real):
+            self._real = real
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and "rebind-pending" in sql:
+                raise sqlite3.OperationalError("injected pre-marker failure")
+            return self._real.execute(sql, *args, **kwargs)
+        def __enter__(self):
+            return self._real.__enter__()
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+    monkeypatch.setattr(adapter, "db", _FailingDB(real_db))
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code in {"unavailable", "security_rebind_unavailable"}
+    # Target validation reads may occur before the marker; the native
+    # MUTATION (settings update / resume) must never occur.
+    assert not any(method == "thread/settings/update" for method, _ in rpc.calls[rpc_calls_before:])
+    assert not any(method == "thread/resume" for method, _ in rpc.calls[rpc_calls_before:])
+    monkeypatch.undo()
+    current = adapter.conversation(conversation["id"])
+    assert current["securityBinding"]["profile"]["id"] == "workspace-write-reviewed"
+
+
+def test_rebind_ambiguous_tombstone_failure_leaves_pending_fail_closed(
+        codex_adapter, monkeypatch):
+    import sqlite3
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    # Accepted but unconfirmed: native mutates, confirmation never arrives.
+    rpc.settings_update_notify = False
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    turns_before = rpc.next_turn
+    real_db = adapter.db
+    class _FailingTombstoneDB:
+        def __init__(self, real):
+            self._real = real
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and "invalidated" in sql:
+                raise sqlite3.OperationalError("injected tombstone failure")
+            return self._real.execute(sql, *args, **kwargs)
+        def __enter__(self):
+            return self._real.__enter__()
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+    monkeypatch.setattr(adapter, "db", _FailingTombstoneDB(real_db))
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code == "security_rebind_unavailable"
+    assert rpc.next_turn == turns_before
+    assert rpc.next_thread == 1
+    # Durable pending sentinel remains despite tombstone failure.
+    monkeypatch.undo()
+    with adapter.lock:
+        persisted = adapter.db.execute(
+            "SELECT applied_revision FROM conversations WHERE id=?",
+            (conversation["id"],)).fetchone()
+    assert persisted is not None and persisted["applied_revision"] == "rebind-pending"
+    # Restart/new instance from the same state treats it fail-closed.
+    adapter.close()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=FakeCodexRpc())
+    try:
+        with __import__("pytest").raises(AdapterFailure) as gone:
+            restarted.conversation(conversation["id"])
+        assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+    finally:
+        restarted.close()
+
+
+def test_rebind_settings_update_timeout_after_apply_stays_pending(
+        codex_adapter):
+    # Timeout AFTER native apply: generic CodexRpcError must never restore
+    # old metadata. Pending/invalidation remains; restart fails closed.
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    thread_id = conversation["nativeId"]
+    old_profile = conversation["securityBinding"]["profile"]["id"]
+    old_rev = conversation["securityBinding"]["profile"]["revision"]
+    rpc.settings_update_error_after_apply = True
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    turns_before = rpc.next_turn
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code in {"security_rebind_unavailable", "unavailable"}
+    # Native WAS mutated despite the error; old metadata must NOT be restored.
+    assert rpc.thread_settings[thread_id]["activePermissionProfile"] == {"id": ":read-only"}
+    with adapter.lock:
+        persisted = adapter.db.execute(
+            "SELECT profile, revision, applied_revision FROM conversations WHERE id=?",
+            (conversation["id"],)).fetchone()
+    assert persisted is not None
+    assert persisted["profile"] == old_profile and persisted["revision"] == old_rev
+    assert persisted["applied_revision"] in {"rebind-pending", "invalidated"}
+    assert rpc.next_turn == turns_before
+    assert rpc.next_thread == 1
+    with __import__("pytest").raises(AdapterFailure):
+        adapter.conversation(conversation["id"])
+    with __import__("pytest").raises(AdapterFailure):
+        adapter.start_run(conversation["id"], {
+            "input": [{"type": "text", "text": "after"}]})
+    adapter.close()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=FakeCodexRpc())
+    try:
+        with __import__("pytest").raises(AdapterFailure) as gone:
+            restarted.conversation(conversation["id"])
+        assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+    finally:
+        restarted.close()
+
+
+def test_rebind_resume_timeout_after_apply_stays_pending(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    thread_id = conversation["nativeId"]
+    old_rev = conversation["securityBinding"]["profile"]["revision"]
+    rpc.status = "notLoaded"
+    rpc.resume_error_after_apply = True
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    turns_before = rpc.next_turn
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code in {"security_rebind_unavailable", "unavailable"}
+    assert rpc.thread_settings[thread_id]["activePermissionProfile"] == {"id": ":read-only"}
+    with adapter.lock:
+        persisted = adapter.db.execute(
+            "SELECT profile, revision, applied_revision FROM conversations WHERE id=?",
+            (conversation["id"],)).fetchone()
+    assert persisted is not None
+    assert persisted["revision"] == old_rev
+    assert persisted["applied_revision"] in {"rebind-pending", "invalidated"}
+    assert rpc.next_turn == turns_before
+    assert rpc.next_thread == 1
+    rpc.status = "idle"
+    with __import__("pytest").raises(AdapterFailure):
+        adapter.conversation(conversation["id"])
+    adapter.close()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=FakeCodexRpc())
+    try:
+        with __import__("pytest").raises(AdapterFailure) as gone:
+            restarted.conversation(conversation["id"])
+        assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+    finally:
+        restarted.close()
+
+
+def test_rebind_waiter_conflict_restores_exact_old_state(codex_adapter):
+    import threading
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    thread_id = conversation["nativeId"]
+    old_rev = conversation["securityBinding"]["profile"]["revision"]
+    with adapter.lock:
+        before = dict(adapter.db.execute(
+            "SELECT thread, profile, revision, applied_revision FROM conversations WHERE id=?",
+            (conversation["id"],)).fetchone())
+    # Simulate an in-flight rebind holding the waiter; our attempt makes no
+    # native call, so exact restoration is proven safe.
+    adapter._settings_updates[thread_id] = {"event": threading.Event(), "notification": None}
+    try:
+        rpc_calls_before = len(rpc.calls)
+        target_rev = _profile_revision_for(adapter, workspace, "read-only")
+        with __import__("pytest").raises(AdapterFailure) as exc:
+            adapter.rebind_conversation(conversation["id"], {
+                "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+        assert exc.value.code == "security_rebind_unavailable"
+        assert "already pending" in str(exc.value).lower()
+        assert not any(method == "thread/settings/update"
+                       for method, _ in rpc.calls[rpc_calls_before:])
+        assert not any(method == "thread/resume" for method, _ in rpc.calls[rpc_calls_before:])
+        with adapter.lock:
+            after = dict(adapter.db.execute(
+                "SELECT thread, profile, revision, applied_revision FROM conversations WHERE id=?",
+                (conversation["id"],)).fetchone())
+        assert after == before
+        current = adapter.conversation(conversation["id"])
+        assert current["securityBinding"]["profile"]["revision"] == old_rev
+    finally:
+        adapter._settings_updates.pop(thread_id, None)
+
+
+def test_rebind_confirmed_success_finalization_failure_stays_pending(
+        codex_adapter, monkeypatch):
+    import sqlite3
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    target_rev = _profile_revision_for(adapter, workspace, "read-only")
+    real_db = adapter.db
+    class _FailingFinalDB:
+        def __init__(self, real):
+            self._real = real
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and "SET profile=" in sql:
+                raise sqlite3.OperationalError("injected finalization failure")
+            return self._real.execute(sql, *args, **kwargs)
+        def __enter__(self):
+            return self._real.__enter__()
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+    monkeypatch.setattr(adapter, "db", _FailingFinalDB(real_db))
+    with __import__("pytest").raises(AdapterFailure) as exc:
+        adapter.rebind_conversation(conversation["id"], {
+            "source": "profile", "profile": {"id": "read-only", "revision": target_rev}})
+    assert exc.value.code in {"unavailable", "security_rebind_unavailable"}
+    monkeypatch.undo()
+    with adapter.lock:
+        persisted = adapter.db.execute(
+            "SELECT applied_revision, profile, revision FROM conversations WHERE id=?",
+            (conversation["id"],)).fetchone()
+    assert persisted is not None and persisted["applied_revision"] == "rebind-pending"
+    adapter.close()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=FakeCodexRpc())
+    try:
+        with __import__("pytest").raises(AdapterFailure) as gone:
+            restarted.conversation(conversation["id"])
+        assert gone.value.code in {"not_found", "unavailable", "security_rebind_unavailable"}
+    finally:
+        restarted.close()

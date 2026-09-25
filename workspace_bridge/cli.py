@@ -110,6 +110,7 @@ def load_config(state: Path) -> dict:
 _DOCTOR_SECTIONS = (
     ("core", "Core"), ("nodes", "Nodes"), ("workspaces", "Workspaces"), ("adapters", "Adapters"),
     ("runnable_routes", "Runnable routes"), ("git_evidence", "Git evidence"),
+    ("release", "Release"),
 )
 
 

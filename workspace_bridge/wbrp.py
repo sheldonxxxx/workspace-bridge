@@ -19,7 +19,7 @@ from .security import BridgeError, redact
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
-OPTIONAL_FEATURES = frozenset({"events", "steering", "imageInput"})
+OPTIONAL_FEATURES = frozenset({"events", "steering", "imageInput", "securityRebind"})
 ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
 ACTIVE_STATES = frozenset({"running", "waiting_interaction"})
@@ -160,6 +160,7 @@ class Descriptor:
     native_version: str
     instance_id: str
     features: dict[str, int]
+    release: dict | None = None
 
     @classmethod
     def parse(cls, value: Any, *, expected_runtime: str) -> "Descriptor":
@@ -183,13 +184,28 @@ class Descriptor:
         instance_id = runtime.get("instanceId")
         if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 200:
             raise RuntimeUnavailable("Runtime instance identity is invalid")
+        # M4.1 additive optional release identity. Legacy descriptors
+        # without `release` remain protocol-compatible; a malformed present
+        # identity is a descriptor validation failure, not silent absence.
+        release: dict | None = None
+        if "release" in value:
+            from .release import ReleaseError, validate_release
+            try:
+                release = validate_release(value.get("release"))
+            except ReleaseError as exc:
+                if getattr(exc, "kind", "invalid") == "unsupported":
+                    raise RuntimeUnsupported(
+                        "Runtime release contract is unsupported") from None
+                raise RuntimeUnavailable(
+                    "Runtime release identity is invalid") from None
         return cls(runtime_id=expected_runtime,
                    display_name=str(runtime.get("displayName") or expected_runtime)[:120],
                    adapter_version=str(runtime.get("adapterVersion") or "")[:80],
                    native_version=str(runtime.get("nativeVersion") or "")[:80],
                    instance_id=instance_id,
                    features={name: int(version) for name, version in features.items()
-                             if name in ALL_FEATURES})
+                             if name in ALL_FEATURES},
+                   release=release)
 
     def supports(self, feature: str) -> bool:
         return self.features.get(feature) == 1
@@ -423,6 +439,37 @@ class HttpRuntimeAdapter:
 
     def conversation(self, conversation_id: str) -> dict:
         value = self._request("GET", f"/v1/conversations/{_identifier(conversation_id, 'conversation id')}")
+        if not isinstance(value, dict):
+            raise RuntimeUnavailable("Runtime conversation binding is invalid")
+        if "securityBinding" in value:
+            value = {**value, "securityBinding": _validate_security_binding(
+                value.get("securityBinding"))}
+        return value
+
+    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
+        """Rebind an idle profile conversation to the requested named profile.
+
+        Optional Runtime Protocol v1 operation behind ``securityRebind``.
+        Only ``{source:'profile', profile:{id,revision}}`` is accepted; no
+        arbitrary payload is forwarded. The adapter must prove the same
+        runtime conversation is idle under the requested binding.
+        """
+        ident = _identifier(conversation_id, "conversation id")
+        if (not isinstance(security_binding, dict)
+                or security_binding.get("source") != "profile"
+                or not isinstance(security_binding.get("profile"), dict)
+                or not isinstance(security_binding["profile"].get("id"), str)
+                or not security_binding["profile"]["id"]
+                or len(security_binding["profile"]["id"]) > 100
+                or not isinstance(security_binding["profile"].get("revision"), str)
+                or not security_binding["profile"]["revision"]
+                or len(security_binding["profile"]["revision"]) > 100
+                or set(security_binding) != {"source", "profile"}
+                or set(security_binding["profile"]) != {"id", "revision"}):
+            raise BridgeError("Invalid security rebind binding", "invalid_arguments")
+        value = self._request(
+            "POST", f"/v1/conversations/{ident}/security",
+            body={"securityBinding": security_binding})
         if not isinstance(value, dict):
             raise RuntimeUnavailable("Runtime conversation binding is invalid")
         if "securityBinding" in value:

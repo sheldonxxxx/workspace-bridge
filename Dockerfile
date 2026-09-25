@@ -10,9 +10,15 @@ WORKDIR /source/web
 COPY --link web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 # Build-inputs-only layer: test/lint/e2e config edits do not invalidate
-# the slow `npm run build` step. Keep this list in sync with vite.config.ts
-# inputs (index.html, vite/ts configs, components.json, public/, src/).
-COPY --link web/index.html web/vite.config.ts web/components.json web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json ./
+# the slow `npm run build` step. Keep this list in sync with
+# web/manager-release.mjs PRODUCTION_TOP_LEVEL_FILES plus public/ and src/.
+# `playwright.config.ts` is test-only and `components.json` is shadcn tooling
+# metadata not consumed by `npm run build`; neither is a production input.
+# The root canonical release metadata is copied to the exact path read by
+# web/vite.config.ts (`../pyproject.toml` relative to /source/web) so Docker
+# and local builds resolve the same product version with no literal fallback.
+COPY --link web/index.html web/vite.config.ts web/manager-release.mjs web/manager-release.d.mts web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json ./
+COPY --link pyproject.toml /source/pyproject.toml
 COPY --link web/public/ ./public/
 COPY --link web/src/ ./src/
 RUN npm run build

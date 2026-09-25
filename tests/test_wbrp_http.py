@@ -94,6 +94,34 @@ def test_codex_http_adapter_contract(tmp_path):
         assert dynamic_run["securityBinding"]["source"] == "runtime-config"
         assert dynamic_run["securityBinding"]["resolvedSummary"][
             "activePermissionProfile"] == ":workspace"
+        # Optional securityRebind: same conversation across a named-profile change.
+        # Use an idle conversation (the earlier runs remain active; the fake
+        # RPC uses a global status, so reset it for this idle-only check).
+        assert client.descriptor().supports("securityRebind")
+        native.rpc.status = "idle"
+        idle_conv = client.create_conversation({
+            "workspaceId": "ws-one", "directory": str(workspace),
+            "securityProfile": {"id": profile["id"], "revision": profile["revision"]},
+        })
+        target = next(row for row in client.profile_catalog(
+            "ws-one", str(workspace), fresh=True)["profiles"]
+                      if row["id"] == "workspace-write-reviewed")
+        rebound = client.rebind_conversation(idle_conv["id"], {
+            "source": "profile", "profile": {
+                "id": target["id"], "revision": target["revision"]}})
+        assert rebound["id"] == idle_conv["id"]
+        assert rebound["status"] == "idle"
+        assert rebound["securityBinding"] == {"source": "profile", "profile": {
+            "id": target["id"], "revision": target["revision"]}}
+        # Strict client validation: no arbitrary payload.
+        import pytest as _pytest
+        from workspace_bridge.security import BridgeError as _BridgeError
+        with _pytest.raises(_BridgeError):
+            client.rebind_conversation(idle_conv["id"], {
+                "source": "profile", "profile": {"id": "x"}})
+        with _pytest.raises(_BridgeError):
+            client.rebind_conversation("", {
+                "source": "profile", "profile": {"id": "x", "revision": "y"}})
     finally:
         server.should_exit = True
         thread.join(timeout=5)

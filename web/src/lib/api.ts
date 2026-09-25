@@ -66,6 +66,14 @@ export interface Workspace {
   available_adapters?: AvailableAdapter[];
   node_adapter_count?: number;
 }
+export interface ReleaseIdentity {
+  contract: number;
+  product: string;
+  product_version: string;
+  component: string;
+  component_version: string;
+  build_id: string;
+}
 export interface NodeInfo {
   id: string;
   name: string;
@@ -78,6 +86,7 @@ export interface NodeInfo {
   node_version?: string;
   capabilities?: string[];
   allowed_root_count?: number;
+  release?: ReleaseIdentity | null;
 }
 export interface AdapterInfo {
   id: string;
@@ -97,6 +106,7 @@ export interface AdapterInfo {
   native_version?: string;
   adapter_version?: string;
   detail?: string;
+  release?: ReleaseIdentity | null;
   model_policy?: ModelPolicy;
 }
 export interface ModelPolicy {
@@ -108,6 +118,8 @@ export interface ModelPolicy {
 }
 export interface Status {
   version: string;
+  release?: ReleaseIdentity | null;
+  manager_release?: ReleaseIdentity | null;
   listen_mode: string;
   mcp_port: number;
   bridge: { configured: boolean; enabled: boolean };

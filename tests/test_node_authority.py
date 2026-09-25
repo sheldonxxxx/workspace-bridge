@@ -134,3 +134,72 @@ def test_runtime_call_rejects_stale_adapter_revision_before_native_construction(
         assert missing.value.code == "invalid_arguments"
     finally:
         node.close()
+
+
+def test_runtime_rebind_conversation_validates_and_forwards(tmp_path, monkeypatch):
+    from workspace_bridge.node_service import NodeService
+    from workspace_bridge.security import BridgeError, digest
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    state = tmp_path / "node-state"
+    config = {"allowed_roots": [str(parent)],
+              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+    node = NodeService(state, config)
+    try:
+        created = node.save_adapter({
+            "name": "Rebind test", "runtime_type": "codex",
+            "base_url": "http://127.0.0.1:8780", "token": "secret",
+        })
+        # Invalid bindings fail before any native rebind call (no arbitrary payload).
+        rebound_calls = []
+        class _GuardedNative:
+            def __init__(self, *args, **kwargs):
+                pass
+            def rebind_conversation(self, conversation_id, binding):
+                rebound_calls.append((conversation_id, binding))
+                raise AssertionError("invalid rebind reached the native client")
+        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", _GuardedNative)
+        with __import__("pytest").raises(BridgeError) as exc:
+            node.runtime_call(created["id"], "rebind_conversation", {
+                "arguments": {"conversation_id": "conv_1",
+                              "security_binding": {"source": "profile",
+                                                   "profile": {"id": "a"}}},
+                "expected_adapter_revision": created["revision"]})
+        assert exc.value.code == "invalid_arguments"
+        assert rebound_calls == []
+        with __import__("pytest").raises(BridgeError) as exc2:
+            node.runtime_call(created["id"], "rebind_conversation", {
+                "arguments": {"conversation_id": "",
+                              "security_binding": {"source": "profile",
+                                                   "profile": {"id": "a", "revision": "r"}}},
+                "expected_adapter_revision": created["revision"]})
+        assert exc2.value.code == "invalid_arguments"
+        assert rebound_calls == []
+        # Unknown operation remains unknown.
+        with __import__("pytest").raises(BridgeError) as exc3:
+            node.runtime_call(created["id"], "unknown_op", {
+                "arguments": {}, "expected_adapter_revision": created["revision"]})
+        assert exc3.value.code == "not_found"
+        # Valid binding forwards to the native client with no extra payload.
+        forwarded = {}
+        class _FakeNative:
+            def __init__(self, *args, **kwargs):
+                pass
+            def rebind_conversation(self, conversation_id, binding):
+                forwarded["conversation_id"] = conversation_id
+                forwarded["binding"] = binding
+                return {"id": conversation_id, "status": "idle",
+                        "securityBinding": binding}
+        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", _FakeNative)
+        result = node.runtime_call(created["id"], "rebind_conversation", {
+            "arguments": {"conversation_id": "conv_123",
+                          "security_binding": {"source": "profile",
+                                               "profile": {"id": "read-only",
+                                                           "revision": "rev-1"}}},
+            "expected_adapter_revision": created["revision"]})
+        assert result["id"] == "conv_123"
+        assert forwarded["binding"] == {"source": "profile",
+                                        "profile": {"id": "read-only",
+                                                    "revision": "rev-1"}}
+    finally:
+        node.close()

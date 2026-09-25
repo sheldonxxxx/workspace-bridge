@@ -35,11 +35,19 @@ class NodeRegistry:
 
     @staticmethod
     def public(row: dict) -> dict:
-        return {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
+        view: dict = {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
                 "enabled": bool(row["enabled"]), "revision": row["revision"],
                 "created": row["created"], "updated": row["updated"],
                 "has_token": bool(row["token"]), "health": row.get("health", "unknown"),
                 "protocol": row.get("protocol"), "capabilities": row.get("capabilities", [])}
+        release = row.get("release")
+        if isinstance(release, dict):
+            try:
+                from .release import validate_release
+                view["release"] = validate_release(release)
+            except Exception:
+                pass
+        return view
 
     def client(self, node_id: str, *, timeout: float = 30) -> NodeClient:
         row = self.get(node_id)
@@ -58,6 +66,13 @@ class NodeRegistry:
                                 node_version=state.get("node_version"),
                                 capabilities=state.get("capabilities", []),
                                 allowed_root_count=len(state.get("allowed_roots", [])))
+                    release = state.get("release") if isinstance(state, dict) else None
+                    if isinstance(release, dict):
+                        try:
+                            from .release import validate_release
+                            view["release"] = validate_release(release)
+                        except Exception:
+                            pass
                 except BridgeError as exc:
                     if exc.code == "adapter_identity_conflict":
                         view.update(health="failed", error_code=exc.code,

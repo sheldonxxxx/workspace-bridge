@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { AdapterError, sanitizeModels } from "./adapter.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "./policy.mjs";
+import { piRelease } from "./release.mjs";
 import { SDK_VERSION } from "./sdk-transport.mjs";
 
 const now = () => new Date().toISOString();
@@ -116,7 +117,14 @@ export class PiRuntimeProtocol {
         || !Array.isArray(data.runs) || !Array.isArray(data.activities)) {
       throw new Error("Pi protocol state is incompatible");
     }
-    for (const row of data.conversations) this.conversations.set(row.id, row);
+    for (const row of data.conversations) {
+      // Durable rebind-pending marker: an incomplete profile transition must
+      // never re-own its session after restart. Omit pending conversations
+      // while retaining terminal runs (terminal _refresh does not require
+      // the conversation). Do not clear the marker into an ownable row.
+      if (row && row.securityRebindPending) continue;
+      this.conversations.set(row.id, row);
+    }
     for (const row of data.runs) {
       if (row.phase === "starting" || row.phase === "active") {
         row.phase = "terminal";
@@ -178,11 +186,18 @@ export class PiRuntimeProtocol {
     if (this.adapter.piUsable === false) {
       throw new AdapterError("Pi runtime is unavailable", 503, "unavailable");
     }
-    return { protocol: { major: 1, minor: 0 }, runtime: {
+    const value = { protocol: { major: 1, minor: 0 }, runtime: {
       id: "pi", displayName: "Pi", adapterVersion: "1.0.0",
       nativeVersion: bounded(this.adapter.piVersion, 80), instanceId: this.instanceId,
     }, features: { models: 1, conversations: 1, runs: 1,
-      activities: 1, interactions: 1 } };
+      activities: 1, interactions: 1, securityRebind: 1 } };
+    try {
+      value.release = piRelease();
+    } catch {
+      // Release identity is additive; a local hashing failure must not
+      // break the Runtime Protocol descriptor.
+    }
+    return value;
   }
 
   async models() {
@@ -265,7 +280,33 @@ export class PiRuntimeProtocol {
     return row;
   }
 
+  _assertNotRebindPending(row) {
+    if (row && row.securityRebindPending) {
+      throw new AdapterError("Conversation is unavailable", 502, "unavailable");
+    }
+  }
+
+  _setRebindPendingOrThrow(row) {
+    // Durable PRE-MUTATION marker persisted BEFORE disposing/reopening the
+    // native session. Contains no profile config, paths, prompts, or secrets.
+    // If this save fails, abort before touching native state with a bounded
+    // error (never raw paths/secrets).
+    row.securityRebindPending = true;
+    try {
+      this._save();
+    } catch {
+      try { delete row.securityRebindPending; } catch {}
+      throw new AdapterError("Conversation is unavailable", 502, "unavailable");
+    }
+  }
+
+  _clearRebindPendingAndSave(row) {
+    delete row.securityRebindPending;
+    this._save();
+  }
+
   async _hydrate(row) {
+    this._assertNotRebindPending(row);
     const profile = this.profiles.get(row.profile);
     if (!profile || profile.revision !== row.revision) {
       throw new AdapterError("Security profile changed", 409, "profile_mismatch");
@@ -315,9 +356,11 @@ export class PiRuntimeProtocol {
   }
 
   _publicConversation(row, status) {
+    const binding = { id: row.profile, revision: row.revision };
     return { id: row.id, runtime: "pi", nativeId: row.sessionId,
       workspaceId: row.workspaceId, status,
-      securityProfile: { id: row.profile, revision: row.revision } };
+      securityProfile: binding,
+      securityBinding: { source: "profile", profile: binding } };
   }
 
   async conversation(conversationId) {
@@ -327,8 +370,380 @@ export class PiRuntimeProtocol {
     return this._publicConversation(row, status === "idle" ? "idle" : "active");
   }
 
+  async _disposeAdapterSession(sessionId) {
+    try {
+      const entry = this.adapter?.sessions?.get(sessionId);
+      if (entry) {
+        try {
+          const result = entry.session?.dispose?.();
+          if (result && typeof result.then === "function") await result;
+        } catch {}
+        try { entry.disposed = true; } catch {}
+      }
+    } catch {}
+    try { this.adapter?.sessions?.delete(sessionId); } catch {}
+  }
+
+  _capturedOldSnapshot(entry, row) {
+    // Capture the immutable owned permission snapshot actually used by the
+    // loaded AgentSession. Never infer it from the current profile map,
+    // which may already contain the NEW same-ID definition.
+    if (!entry || entry.disposed) return null;
+    try {
+      const policy = JSON.parse(JSON.stringify(entry.permissionPolicy));
+      const policyRev = entry.policyRevision;
+      if (!policy || typeof policy !== "object" || typeof policyRev !== "string"
+          || !policyRev) return null;
+      const snapshot = { permissionPolicy: policy, policyRevision: policyRev };
+      if (entry.extensionPolicy !== undefined) {
+        try { snapshot.extensionPolicy = JSON.parse(JSON.stringify(entry.extensionPolicy)); } catch {}
+        snapshot.extensionRevision = entry.extensionRevision;
+      }
+      snapshot._rowProfile = row.profile;
+      snapshot._rowRevision = row.revision;
+      return snapshot;
+    } catch {
+      return null;
+    }
+  }
+
+  _capturedSnapshotProvesRow(captured, row) {
+    // Prove recreating from the captured snapshot corresponds to the exact
+    // old WBRP profile revision under current enforcement identity. If the
+    // enforcement fingerprint/SDK identity rotated, the same policy yields a
+    // different full revision and rollback cannot be claimed.
+    if (!captured || !captured.permissionPolicy
+        || typeof captured.policyRevision !== "string") return false;
+    try {
+      if (policyRevision(captured.permissionPolicy) !== captured.policyRevision) return false;
+      if (bindProfile(captured.permissionPolicy).revision !== row.revision) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _catalogProvesRow(row) {
+    // For UNLOADED conversations there is no owned snapshot to capture.
+    // Only claim the previous binding if the current catalog still exactly
+    // represents row.profile + row.revision.
+    try {
+      const cur = this.profiles.get(row.profile);
+      return !!cur && cur.revision === row.revision;
+    } catch {
+      return false;
+    }
+  }
+
+  async _rollbackToCapturedOrCatalog({ row, captured, oldSessionId, oldSessionFile, oldDirectory }) {
+    // Best-effort exact rollback. Returns true only when the previous
+    // binding is proven restored and idle with no pending permission.
+    // Never mutates row.profile/row.revision (row still holds old binding).
+    if (captured) {
+      if (!this._capturedSnapshotProvesRow(captured, row)) return false;
+      const opts = {
+        permission_policy: captured.permissionPolicy,
+        policy_revision: captured.policyRevision,
+      };
+      if (captured.extensionPolicy !== undefined) {
+        opts.extension_policy = captured.extensionPolicy;
+        if (captured.extensionRevision !== undefined) opts.extension_revision = captured.extensionRevision;
+      }
+      try {
+        if (oldSessionFile && fs.existsSync(oldSessionFile)) {
+          opts.resumeFile = oldSessionFile;
+          opts.expectedSessionId = oldSessionId;
+        }
+        await this.adapter.createSession(oldDirectory, "Recovered Bridge conversation", opts);
+      } catch {
+        return false;
+      }
+      try {
+        const status = await this.adapter.sessionStatus(oldDirectory, oldSessionId);
+        const pending = await this.adapter.listPermissions(oldDirectory, oldSessionId);
+        return status === "idle" && !pending.length;
+      } catch {
+        await this._disposeAdapterSession(oldSessionId);
+        return false;
+      }
+    }
+    // Unloaded: only restore from catalog when it still proves the old row.
+    if (!this._catalogProvesRow(row)) return false;
+    const cur = this.profiles.get(row.profile);
+    if (!cur) return false;
+    try {
+      if (oldSessionFile && fs.existsSync(oldSessionFile)) {
+        await this.adapter.createSession(oldDirectory, "Recovered Bridge conversation", {
+          permission_policy: cur.policy, policy_revision: cur.policyRev,
+          resumeFile: oldSessionFile, expectedSessionId: oldSessionId,
+        });
+      } else {
+        const restored = await this.adapter.createSession(oldDirectory,
+          "Recovered Bridge conversation", {
+            permission_policy: cur.policy, policy_revision: cur.policyRev,
+          });
+        row.sessionId = restored.id;
+        row.sessionFile = this.adapter.sessions.get(restored.id)?.sessionFile || "";
+        this._save();
+      }
+    } catch {
+      return false;
+    }
+    try {
+      const status = await this.adapter.sessionStatus(row.directory, row.sessionId);
+      // Empty-restore has no prior pending state; substantive restore must be idle+unblocked.
+      if (status !== "idle") return false;
+      try {
+        const pending = await this.adapter.listPermissions(row.directory, row.sessionId);
+        if (pending.length) return false;
+      } catch {
+        return false;
+      }
+      return true;
+    } catch {
+      await this._disposeAdapterSession(row.sessionId);
+      return false;
+    }
+  }
+
+  async _invalidateAfterAmbiguousRebind(row, sessionIdToDispose) {
+    // Remove/invalidate the WBRP conversation and ensure no ambiguous
+    // AgentSession remains usable. Historical terminal runs stay in the
+    // runs map (terminal _refresh does not require the conversation).
+    // A durable rebind-pending marker was persisted BEFORE native mutation,
+    // so even if this final persistence fails, restart remains fail-closed.
+    // Still attempt it; return bounded errors only, never raw paths/secrets.
+    if (sessionIdToDispose) await this._disposeAdapterSession(sessionIdToDispose);
+    try { this.conversations.delete(row.id); } catch {}
+    try { this._save(); } catch {}
+  }
+
+  _failClosedAfterFinalSaveFailure(row, sessionIdToDispose) {
+    // Final marker-clear save failed after a proven state change. Durable
+    // state still holds the pre-mutation pending marker, so restart is
+    // fail-closed. Make the current process fail-closed too.
+    return (async () => {
+      if (sessionIdToDispose) await this._disposeAdapterSession(sessionIdToDispose);
+      try { this.conversations.delete(row.id); } catch {}
+      throw new AdapterError("Conversation is unavailable", 502, "unavailable");
+    })();
+  }
+
+  async rebindConversation(conversationId, securityBinding) {
+    // Idle-boundary security rebind for a named-profile change.
+    // Preserves the same WBRP conversation ID and persisted history.
+    // No prompt is replayed and no blank replacement is created.
+    // Row metadata is committed to target only after complete
+    // post-reopen validation. Any ambiguous failure invalidates the
+    // conversation rather than claiming an unproven rollback.
+    // Special case: a truly empty conversation with no history/runs may
+    // take a new empty native session under the new profile while keeping
+    // the same WBRP conversation ID.
+    const target = securityBinding?.profile;
+    const targetId = target?.id;
+    const requestedRevision = target?.revision;
+    if (securityBinding?.source !== "profile"
+        || typeof targetId !== "string" || !targetId || targetId.length > 100
+        || typeof requestedRevision !== "string" || !requestedRevision
+        || requestedRevision.length > 100) {
+      throw new AdapterError("Invalid security rebind binding", 400, "invalid_arguments");
+    }
+    const row = this._conversation(conversationId);
+    this._assertNotRebindPending(row);
+    const live = this.profiles.get(targetId);
+    if (!live || live.revision !== requestedRevision) {
+      throw new AdapterError("Requested security revision is not current", 409, "binding_mismatch");
+    }
+    if ([...this.runs.values()].some((run) => run.conversationId === row.id
+        && (run.phase === "starting" || run.phase === "active"))) {
+      throw new AdapterError("Conversation is busy", 409, "conversation_busy");
+    }
+    if (row.profile === targetId && row.revision === live.revision) {
+      await this._hydrate(row);
+      const status = await this.adapter.sessionStatus(row.directory, row.sessionId);
+      if (status !== "idle") {
+        throw new AdapterError("Conversation is busy", 409, "conversation_busy");
+      }
+      const pending = await this.adapter.listPermissions(row.directory, row.sessionId);
+      if (pending.length) {
+        throw new AdapterError("Conversation has a pending permission", 409,
+          "security_rebind_unavailable");
+      }
+      return this._publicConversation(row, "idle");
+    }
+    const oldSessionId = row.sessionId;
+    const oldSessionFile = row.sessionFile;
+    const oldDirectory = row.directory;
+    const loadedEntry = this.adapter?.sessions?.get(oldSessionId) || null;
+    const loaded = !!loadedEntry && !loadedEntry.disposed;
+    // Capture the immutable owned snapshot BEFORE disposing. Do not infer
+    // it from the current profile map (unsafe for same-ID rev1->rev2).
+    const captured = loaded ? this._capturedOldSnapshot(loadedEntry, row) : null;
+    if (loaded) {
+      let status;
+      try {
+        status = await this.adapter.sessionStatus(oldDirectory, oldSessionId);
+      } catch {
+        throw new AdapterError("Owned Pi session is unavailable", 502, "unavailable");
+      }
+      if (status !== "idle") {
+        throw new AdapterError("Conversation is busy", 409, "conversation_busy");
+      }
+      let pending;
+      try {
+        pending = await this.adapter.listPermissions(oldDirectory, oldSessionId);
+      } catch {
+        throw new AdapterError("Owned Pi session is unavailable", 502, "unavailable");
+      }
+      if (pending.length) {
+        throw new AdapterError("Conversation has a pending permission", 409,
+          "security_rebind_unavailable");
+      }
+    }
+    const hasRuns = [...this.runs.values()].some((run) => run.conversationId === row.id);
+    const fileExists = Boolean(oldSessionFile) && fs.existsSync(oldSessionFile);
+    if (!hasRuns && !fileExists) {
+      // Truly empty conversation: no history and no session file. Replacing
+      // the native empty session is still a native mutation: persist the
+      // durable pre-marker BEFORE disposing/creating. Abort on save failure
+      // with zero native mutation.
+      this._setRebindPendingOrThrow(row);
+      if (loaded) await this._disposeAdapterSession(oldSessionId);
+      let fresh;
+      try {
+        fresh = await this.adapter.createSession(oldDirectory,
+          "Rebound empty Bridge conversation", {
+            permission_policy: live.policy, policy_revision: live.policyRev,
+          });
+      } catch (error) {
+        const restored = await this._rollbackToCapturedOrCatalog({
+          row, captured, oldSessionId, oldSessionFile, oldDirectory });
+        if (restored) {
+          try {
+            this._clearRebindPendingAndSave(row);
+          } catch {
+            await this._failClosedAfterFinalSaveFailure(row, row.sessionId);
+          }
+          throw new AdapterError("Security rebind failed and the previous binding was restored",
+            502, "security_rebind_unavailable");
+        }
+        await this._invalidateAfterAmbiguousRebind(row, row.sessionId);
+        // If rollback created a session but could not prove it, it was
+        // already disposed by the rollback helper/invalidator.
+        throw new AdapterError("Security rebind failed and the conversation is unavailable",
+          502, "unavailable");
+      }
+      // Validate the fresh empty session before committing row metadata.
+      try {
+        const status = await this.adapter.sessionStatus(oldDirectory, fresh.id);
+        if (status !== "idle") throw new Error("not idle");
+      } catch {
+        await this._disposeAdapterSession(fresh.id);
+        const restored = await this._rollbackToCapturedOrCatalog({
+          row, captured, oldSessionId, oldSessionFile, oldDirectory });
+        if (restored) {
+          try {
+            this._clearRebindPendingAndSave(row);
+          } catch {
+            await this._failClosedAfterFinalSaveFailure(row, row.sessionId);
+          }
+          throw new AdapterError("Security rebind failed and the previous binding was restored",
+            502, "security_rebind_unavailable");
+        }
+        await this._invalidateAfterAmbiguousRebind(row, row.sessionId);
+        throw new AdapterError("Security rebind failed and the conversation is unavailable",
+          502, "unavailable");
+      }
+      row.sessionId = fresh.id;
+      row.sessionFile = this.adapter.sessions.get(fresh.id)?.sessionFile || "";
+      row.profile = targetId;
+      row.revision = live.revision;
+      try {
+        this._clearRebindPendingAndSave(row);
+      } catch {
+        await this._failClosedAfterFinalSaveFailure(row, fresh.id);
+      }
+      return this._publicConversation(row, "idle");
+    }
+    // Substantive persisted session: persist the durable pre-marker BEFORE
+    // disposing/reopening the native session. Abort on marker-save failure
+    // with zero native mutation. Row metadata stays on old binding until
+    // post-reopen validation passes.
+    this._setRebindPendingOrThrow(row);
+    if (loaded) await this._disposeAdapterSession(oldSessionId);
+    let targetOpened = false;
+    let targetError = null;
+    try {
+      await this.adapter.createSession(oldDirectory, "Rebound Bridge conversation", {
+        permission_policy: live.policy, policy_revision: live.policyRev,
+        resumeFile: oldSessionFile, expectedSessionId: oldSessionId,
+      });
+      targetOpened = true;
+    } catch (error) {
+      targetOpened = false;
+      targetError = error;
+    }
+    if (!targetOpened) {
+      const restored = await this._rollbackToCapturedOrCatalog({
+        row, captured, oldSessionId, oldSessionFile, oldDirectory });
+      if (restored) {
+        try {
+          this._clearRebindPendingAndSave(row);
+        } catch {
+          await this._failClosedAfterFinalSaveFailure(row, oldSessionId);
+        }
+        throw new AdapterError("Security rebind failed and the previous binding was restored",
+          502, "security_rebind_unavailable");
+      }
+      await this._invalidateAfterAmbiguousRebind(row, oldSessionId);
+      if (targetError instanceof AdapterError) throw targetError;
+      throw new AdapterError("Security rebind failed and the conversation is unavailable",
+        502, "unavailable");
+    }
+    // Target reopened: validate BEFORE mutating row.profile/row.revision.
+    try {
+      const status = await this.adapter.sessionStatus(oldDirectory, oldSessionId);
+      if (status !== "idle") throw new Error("post-reopen not idle");
+      const pending = await this.adapter.listPermissions(oldDirectory, oldSessionId);
+      if (pending.length) throw new Error("post-reopen pending");
+      // Expected identity/history is already enforced by createSession
+      // (expectedSessionId + resumeFile); idle + no-pending completes proof.
+    } catch {
+      // Ambiguous target session must not remain usable.
+      await this._disposeAdapterSession(oldSessionId);
+      const restored = await this._rollbackToCapturedOrCatalog({
+        row, captured, oldSessionId, oldSessionFile, oldDirectory });
+      if (restored) {
+        try {
+          this._clearRebindPendingAndSave(row);
+        } catch {
+          await this._failClosedAfterFinalSaveFailure(row, oldSessionId);
+        }
+        throw new AdapterError("Security rebind failed and the previous binding was restored",
+          502, "security_rebind_unavailable");
+      }
+      await this._invalidateAfterAmbiguousRebind(row, oldSessionId);
+      throw new AdapterError("Security rebind failed and the conversation is unavailable",
+        502, "unavailable");
+    }
+    row.profile = targetId;
+    row.revision = live.revision;
+    try {
+      const reopened = this.adapter.sessions.get(oldSessionId);
+      if (reopened?.sessionFile) row.sessionFile = reopened.sessionFile;
+    } catch {}
+    try {
+      this._clearRebindPendingAndSave(row);
+    } catch {
+      await this._failClosedAfterFinalSaveFailure(row, oldSessionId);
+    }
+    return this._publicConversation(row, "idle");
+  }
+
+
   async startRun(conversationId, body) {
     const row = this._conversation(conversationId);
+    this._assertNotRebindPending(row);
     const input = body.input;
     if (!Array.isArray(input) || input.length !== 1
         || input[0]?.type !== "text" || typeof input[0].text !== "string"
