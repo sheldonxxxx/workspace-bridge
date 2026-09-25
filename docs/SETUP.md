@@ -119,6 +119,14 @@ curl -s http://127.0.0.1:8772/health   # expect {"error":"Unauthorized",...}
 
 The Codex SQLite state file is created automatically on first start.
 
+The Codex LaunchAgent must set `RunAtLoad=true` and `KeepAlive=true`.
+The Codex adapter and its owned `codex app-server --stdio` form one
+supervised failure domain: unexpected native app-server loss intentionally
+terminates the host adapter non-zero so launchd restarts the whole unit.
+Without supervisor restart the HTTP adapter would stay alive but
+permanently degraded. Active runs are marked `interrupted` on restart and
+are never replayed; idle persisted conversations remain resumable.
+
 ## 4. Register Node, workspaces, adapters (Manager or admin API)
 
 Open `http://127.0.0.1:<admin-port>/` with the admin token, or use the API

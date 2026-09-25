@@ -635,6 +635,47 @@ def test_restart_marks_unrecoverable_run_interrupted(codex_adapter):
         restarted.close()
 
 
+def test_native_engine_loss_terminates_once_with_static_diagnostic(tmp_path, caplog):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    workspace = projects / "workspace"
+    workspace.mkdir()
+    exits: list[int] = []
+    rpc = FakeCodexRpc()
+    adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc,
+                               _exit_process=lambda code: exits.append(code))
+    try:
+        assert callable(rpc.on_unexpected_exit)
+        assert getattr(rpc.on_unexpected_exit, "__self__", None) is adapter
+        with caplog.at_level("CRITICAL", logger="uvicorn.error"):
+            rpc.on_unexpected_exit()
+            rpc.on_unexpected_exit()
+        assert exits == [1]
+        assert caplog.records, "fatal native loss must be logged"
+        message = caplog.records[-1].getMessage()
+        assert "unexpected" in message.lower()
+        assert "supervisor" in message.lower()
+        assert len(message) <= 500
+        assert str(workspace) not in message
+        assert "token" not in message.lower()
+    finally:
+        adapter.close()
+    assert exits == [1]
+
+
+def test_adapter_close_does_not_terminate(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    workspace = projects / "workspace"
+    workspace.mkdir()
+    exits: list[int] = []
+    rpc = FakeCodexRpc()
+    adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc,
+                               _exit_process=lambda code: exits.append(code))
+    adapter.close()
+    assert exits == []
+
+
 @pytest.mark.asyncio
 async def test_private_http_surface_requires_token(codex_adapter):
     adapter, workspace, _ = codex_adapter

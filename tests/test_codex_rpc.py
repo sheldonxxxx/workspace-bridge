@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 
 import pytest
@@ -133,5 +134,81 @@ for raw in sys.stdin:
         with pytest.raises(CodexRpcError, match="fields are invalid"):
             rpc.update_thread_settings("thread-one", {
                 "permissions": "profile-one", "sandboxPolicy": {"type": "workspaceWrite"}})
+    finally:
+        rpc.close()
+
+
+def test_unexpected_stdio_exit_notifies_once_after_pending_released():
+    child = r'''import json, sys, time
+for raw in sys.stdin:
+    try:
+        request = json.loads(raw)
+    except Exception:
+        continue
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        print(json.dumps({"id": request["id"],
+                          "result": {"serverInfo": {"version": "test"}}}), flush=True)
+    elif request["method"] == "blocking":
+        time.sleep(10)
+'''
+    notified: list[int] = []
+    rpc = CodexRpc(command=(sys.executable, "-u", "-c", child),
+                   on_unexpected_exit=lambda: notified.append(1))
+    try:
+        assert rpc.initialize_result["serverInfo"]["version"] == "test"
+        outcome: list[str] = []
+
+        def blocking_call() -> None:
+            try:
+                rpc.call("blocking", {}, timeout=10)
+                outcome.append("returned")
+            except CodexRpcError:
+                outcome.append("released")
+
+        waiter = threading.Thread(target=blocking_call, daemon=True)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while not rpc._pending and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert rpc._pending, "blocking call was not registered as pending"
+        rpc._process.kill()
+        waiter.join(timeout=5)
+        assert outcome == ["released"]
+        deadline = time.monotonic() + 2
+        while not notified and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(notified) == 1
+        time.sleep(0.2)
+        assert len(notified) == 1
+        rpc.close()
+        time.sleep(0.2)
+        assert len(notified) == 1
+    finally:
+        rpc.close()
+
+
+def test_close_does_not_report_unexpected_exit():
+    child = r'''import json, sys
+for raw in sys.stdin:
+    try:
+        request = json.loads(raw)
+    except Exception:
+        continue
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        print(json.dumps({"id": request["id"],
+                          "result": {"serverInfo": {"version": "test"}}}), flush=True)
+'''
+    notified: list[int] = []
+    rpc = CodexRpc(command=(sys.executable, "-u", "-c", child),
+                   on_unexpected_exit=lambda: notified.append(1))
+    try:
+        assert rpc.initialize_result["serverInfo"]["version"] == "test"
+        rpc.close()
+        time.sleep(0.5)
+        assert notified == []
     finally:
         rpc.close()

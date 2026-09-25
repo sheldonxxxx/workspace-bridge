@@ -258,7 +258,8 @@ def _codex_cli_version(executable: Any) -> str:
 
 
 class CodexHostAdapter:
-    def __init__(self, state: Path, projects_root: Path, *, rpc: CodexRpc | None = None):
+    def __init__(self, state: Path, projects_root: Path, *, rpc: CodexRpc | None = None,
+                 _exit_process: Any | None = None):
         self.state = state.resolve()
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
@@ -359,13 +360,34 @@ class CodexHostAdapter:
                 "UPDATE runs SET phase='terminal',active_state=NULL,outcome='interrupted',"
                 "error='adapter_restarted',updated=? WHERE phase IN ('starting','active')",
                 (_now(),))
+        self._fatal_lock = threading.Lock()
+        self._fatal_reported = False
+        self._exit_process = _exit_process if _exit_process is not None else os._exit
         self.rpc = rpc or CodexRpc(on_notification=self._notification,
-                                   on_request=self._request)
+                                   on_request=self._request,
+                                   on_unexpected_exit=self._on_native_engine_lost)
         self._native_cli_version_checked = False
         self._native_cli_version = ""
         if rpc is not None:
             rpc.on_notification = self._notification
             rpc.on_request = self._request
+            try:
+                rpc.on_unexpected_exit = self._on_native_engine_lost
+            except Exception:
+                pass
+
+    def _on_native_engine_lost(self) -> None:
+        """Terminate the adapter so the supervisor restarts one failure domain."""
+        with self._fatal_lock:
+            if self._fatal_reported:
+                return
+            self._fatal_reported = True
+        _LOG.critical("Codex native app-server exited unexpectedly; "
+                      "terminating adapter for supervisor recovery")
+        try:
+            self._exit_process(1)
+        except Exception:
+            pass
 
     def _migrate_legacy_profile_rows(self) -> None:
         """Normalize persisted v1 sandbox wrappers to the equivalent v2 selector."""

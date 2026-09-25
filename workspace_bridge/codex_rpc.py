@@ -53,7 +53,8 @@ class CodexRpcError(Exception):
 class CodexRpc:
     def __init__(self, *, command: tuple[str, ...] = ("codex", "app-server", "--stdio"),
                  on_notification: Callable[[str, dict], None] | None = None,
-                 on_request: Callable[[int | str, str, dict], None] | None = None):
+                 on_request: Callable[[int | str, str, dict], None] | None = None,
+                 on_unexpected_exit: Callable[[], None] | None = None):
         self._process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
@@ -71,6 +72,9 @@ class CodexRpc:
         self._shutdown_started = False
         self.on_notification = on_notification
         self.on_request = on_request
+        self.on_unexpected_exit = on_unexpected_exit
+        self._unexpected_lock = threading.Lock()
+        self._unexpected_notified = False
         self._stderr_reader = threading.Thread(target=self._stderr_loop,
                                                name="codex-app-server-stderr",
                                                daemon=True)
@@ -282,6 +286,27 @@ class CodexRpc:
             summary = "".join(self._stderr_tail)
         return summary[-_MAX_DIAGNOSTIC:].strip()
 
+    def _notify_unexpected_exit(self) -> None:
+        """Report unexpected native-transport loss at most once.
+
+        Intentional shutdown via :meth:`close` never reports. Unexpected
+        stdio EOF is treated as native-engine loss even if the child has
+        not yet reaped, because the owned transport is unusable.
+        """
+        with self._unexpected_lock:
+            if self._unexpected_notified:
+                return
+            with self._shutdown_lock:
+                if self._shutdown_started:
+                    return
+            self._unexpected_notified = True
+            callback = self.on_unexpected_exit
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                pass
+
     def _read_loop(self) -> None:
         assert self._process.stdout is not None
         try:
@@ -344,6 +369,7 @@ class CodexRpc:
             with self._pending_lock:
                 for event, _ in self._pending.values():
                     event.set()
+            self._notify_unexpected_exit()
 
     def close(self) -> None:
         with self._shutdown_lock:
