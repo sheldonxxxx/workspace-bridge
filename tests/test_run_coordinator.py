@@ -232,7 +232,7 @@ def test_runtime_config_continuation_refreshes_same_conversation_before_next_tur
     assert "permissions" not in update
 
 
-def test_diagnostics_marks_binding_stale_after_native_requirements_change(modern_env):
+def test_diagnostics_ignores_profile_revision_drift(modern_env):
     service, ws_id, _, _, _, rpc = modern_env
     rpc.requirements = {
         "allowedApprovalPolicies": ["on-request", "untrusted"],
@@ -242,8 +242,8 @@ def test_diagnostics_marks_binding_stale_after_native_requirements_change(modern
     report = service.diagnostic_report()
     route = next(item for item in report["runnable_routes"]
                  if item["workspace_id"] == ws_id and item["adapter_id"] == ADAPTER_ID)
-    assert route["ready"] is False
-    assert "route.security_freshness" in route["blockers"]
+    assert route["ready"] is True
+    assert route["blockers"] == []
     assert "allowedApprovalPolicies" not in json.dumps(report)
 
 

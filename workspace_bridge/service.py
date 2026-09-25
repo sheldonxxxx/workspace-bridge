@@ -315,10 +315,11 @@ class Service:
                     catalog = self.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
                     resolved_profile = next((item for item in catalog.get("profiles", [])
                                              if item.get("id") == profile["id"]), None)
+                    # Revision drift never blocks: adapter redeploys rotate
+                    # opaque revisions, so only a missing or unavailable
+                    # profile keeps the route from being ready.
                     if not resolved_profile or resolved_profile.get("available") is False:
                         profile_state = "unavailable"
-                    elif resolved_profile.get("revision") != profile["revision"]:
-                        profile_state = "stale"
                     else:
                         profile_state = "current"
                 except Exception:  # noqa: BLE001 - route stays blocked when freshness is unknown
@@ -333,8 +334,11 @@ class Service:
                 effective_security = {"source": "runtime-config", "bound_revision": binding["revision"],
                     "observed_revision": binding["observed_revision"], "status": binding["status"],
                     "resolved_summary": binding["resolved_summary"]}
+                # Revision drift never blocks: the observed native config is
+                # authoritative, so only an unready or missing observation does.
                 security_ready = (binding["status"] == "ready" and
-                                  binding["revision"] == binding["observed_revision"] and
+                                  isinstance(binding["observed_revision"], str) and
+                                  bool(binding["observed_revision"]) and
                                   isinstance(binding["resolved_summary"], dict))
             model_policy = self.run_coordinator.model_policy(adapter_id)
             blockers = []
@@ -344,7 +348,7 @@ class Service:
             if not row["adapter_enabled"]: blockers.append("adapter_disabled")
             if not row["enabled"]: blockers.append("route_disabled")
             if not model_policy["configured"]: blockers.append("model_policy_unconfigured")
-            if not security_ready: blockers.append("security_unavailable_or_stale")
+            if not security_ready: blockers.append("security_unavailable")
             routes[adapter_id] = {"adapter_id": adapter_id, "name": row["name"],
                                   "runtime_type": row["runtime_type"],
                                   "adapter_enabled": bool(row["adapter_enabled"]),

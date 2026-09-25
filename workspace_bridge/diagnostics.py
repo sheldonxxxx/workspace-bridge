@@ -445,14 +445,15 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             if not ok:
                 blockers.append("route.security_freshness")
         else:
+            # Revision drift never blocks: adapter redeploys rotate opaque
+            # revisions, so only a missing or unavailable profile does.
             rows = catalog.get("profiles", []) if isinstance(catalog, dict) else []
             current = next((row for row in rows if row.get("id") == profile_id), None)
-            ok = bool(current and current.get("available") is not False
-                      and current.get("revision") == profile_revision)
+            ok = bool(current and current.get("available") is not False)
             out.add("route.security_freshness", "models_profiles",
                     "pass" if ok else "action_required",
-                    "Selected adapter profile revision is current." if ok else
-                    "Selected adapter profile is missing or changed.",
+                    "Selected adapter profile is assigned and available." if ok else
+                    "Selected adapter profile is missing or unavailable.",
                     workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
             if not ok:
                 blockers.append("route.security_freshness")

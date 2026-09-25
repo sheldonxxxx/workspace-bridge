@@ -362,8 +362,8 @@ class RunCoordinator:
             raise BridgeError("Runtime returned an invalid security profile",
                               "binding_mismatch")
         # A deliberate profile edit refreshes assignments to the new opaque
-        # revision. Native Codex policy changes outside Bridge leave these
-        # stored revisions untouched and therefore become visibly stale.
+        # revision so the recorded binding stays tidy. Stored revisions are
+        # informational only; drift never blocks routes or runs.
         with self.service.lock:
             assigned = [row["workspace"] for row in self.service.db.execute(
                 "SELECT workspace FROM workspace_routes WHERE adapter_id=? AND security_source='profile' AND profile_id=? "
@@ -375,7 +375,7 @@ class RunCoordinator:
                     adapter_id, ws, fresh=True)
                     if item.get("id") == profile_id
                     and item.get("available") is not False), None)
-            except Exception:  # noqa: BLE001 - a failed refresh leaves the old binding stale
+            except Exception:  # noqa: BLE001 - a failed refresh keeps the old recorded revision
                 current = None
             if current and isinstance(current.get("revision"), str):
                 with self.service.lock, self.service.db:
@@ -426,11 +426,12 @@ class RunCoordinator:
             raise BridgeError("Workspace runtime security binding is invalid",
                               "profile_unconfigured")
         available = self.profiles(adapter_id, ws, fresh=True)
-        if not any(item.get("id") == row["profile_id"] and
-                   item.get("revision") == row["profile_revision"]
+        # Revision drift never blocks: adapter redeploys rotate opaque
+        # profile revisions, so only a missing or unavailable profile fails.
+        if not any(item.get("id") == row["profile_id"]
                    and item.get("available") is not False for item in available):
-            raise BridgeError("Workspace runtime security profile changed",
-                              "profile_changed")
+            raise BridgeError("Workspace runtime security profile is unavailable",
+                              "profile_unavailable")
         return {"source": "profile", "profile": {
             "id": row["profile_id"], "revision": row["profile_revision"]}}
 
