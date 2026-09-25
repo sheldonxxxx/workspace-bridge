@@ -16,6 +16,7 @@ export class FakeSdkSession {
     this._listeners = new Set();
     this._messages = [];
     this._isStreaming = false;
+    this._isRetrying = false;
     this._pendingMessageCount = 0;
     this.promptCalls = [];
     this.promptImpl = null;
@@ -47,6 +48,10 @@ export class FakeSdkSession {
     return this._isStreaming;
   }
 
+  get isRetrying() {
+    return this._isRetrying;
+  }
+
   get pendingMessageCount() {
     return this._pendingMessageCount;
   }
@@ -57,6 +62,10 @@ export class FakeSdkSession {
 
   setStreaming(value) {
     this._isStreaming = Boolean(value);
+  }
+
+  setRetrying(value) {
+    this._isRetrying = Boolean(value);
   }
 
   setPendingMessageCount(value) {
@@ -141,7 +150,12 @@ export function createFakeTransport({ models = [], toolNames = [], sessionIdPref
         }
       });
     }
-    return { session };
+    // Mirror the real transport's sessionManager identity so WBRP
+    // conversation creation (which requires a sessionFile) works.
+    const sessionManager = {
+      getSessionFile: () => session.sessionFile,
+    };
+    return { session, sessionManager };
   }
 
   async function listModelsFn() {

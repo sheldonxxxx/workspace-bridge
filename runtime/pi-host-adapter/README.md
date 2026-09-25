@@ -49,6 +49,44 @@ report active state, terminal outcome, current interactions, and bounded activit
 records. On adapter restart, an in-progress run is marked `interrupted`; Bridge
 never replays the prompt or adopts an unrelated Pi session.
 
+## Native retry ownership and managed backoff policy
+
+Native `AgentSession` owns transient retry because it can safely omit failed
+assistant attempts and retry only the LLM turn. The Bridge never replays
+prompts: there is no RunCoordinator/Bridge retry loop and no re-call of
+`startRun`/`promptAsync` after acceptance. That would risk replaying
+prompts/tools.
+
+Bridge-managed sessions use a bounded OpenCode-like budget applied as a
+deterministic non-persistent `SettingsManager.applyOverrides` deep merge
+(never saved to `settings.json`, never mutating the user's normal Pi
+profile): `retry.enabled=true`, `retry.maxRetries=5`,
+`retry.baseDelayMs=2000`, `retry.maxAgentDelayMs=30000`; provider
+`retry.provider.maxRetries=0` and `retry.provider.maxRetryDelayMs=60000`.
+Unrelated retry/provider settings such as `timeoutMs` are preserved. The
+schedule is 2s exponential backoff capped at 30s per delay (~60s total
+scheduled wait: 2+4+8+16+30 without provider latency); provider SDK
+retries remain disabled. Known hard quota/billing errors (for example
+`GoUsageLimitError`/`FreeUsageLimitError`, `insufficient_quota`,
+quota/billing exhaustion) are classified by Pi as non-retryable and fail
+promptly without consuming the budget.
+
+A Pi session in retry backoff reports `isStreaming=false` with
+`isRetrying=true`; the adapter's logical busy is
+`isStreaming || isRetrying`, so `getSession().status` and
+`sessionStatus()` stay `busy`/`active` and Runtime Protocol polling
+treats native retry backoff as active work. A run refresh/read stays
+`active`/`running` while retrying even when the last assistant message
+is a transient 429 error; only after `isRetrying=false` and truly idle
+may terminal classification inspect the final assistant message.
+
+Retry lifecycle is observable through sanitized `provider_retry` INFO
+records containing only safe scalar fields (`session_id`, `attempt`,
+`max_attempts`, `delay_ms`, `success`/`state`). Raw `errorMessage`,
+provider payload/body, model, prompt, tool args, paths, tokens, and
+headers are never logged. Final exhausted failure stays represented by
+the existing run error path.
+
 ## Temporary SDK event diagnostics
 
 Remove this instrumentation and section after the missing tool-completion

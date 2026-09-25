@@ -469,6 +469,11 @@ export class PiRuntimeProtocol {
     const partial = collectRunUsage(this.adapter, row.directory, row.sessionId,
       run.usageBase);
     if (partial) run.usage = partial;
+    // Terminal classification runs only on truly idle sessions. The
+    // adapter's idle already implies not retrying (logical busy is
+    // isStreaming || isRetrying), so a transient 429 assistant error
+    // during native retry backoff stays active/running here and is never
+    // terminal-failed. No Bridge-level prompt/run replay is introduced.
     if (status === "idle" && !pending.length) {
       const messages = await this.adapter.messages(row.directory, row.sessionId, 20);
       const last = [...messages].reverse().find((message) => message.role === "assistant");

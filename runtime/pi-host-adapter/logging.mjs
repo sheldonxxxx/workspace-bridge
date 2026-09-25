@@ -35,12 +35,15 @@ export const EVENTS = new Set([
   "request_error",
   "process_error",
   "sdk_tool_event_trace",
+  "provider_retry",
 ]);
 
 // Bounded scalar fields only. IDs/state names/counts/durations/sanitized
 // codes and boolean health flags are acceptable; everything else is dropped.
 // Never add directory/title/model/prompt/tool args/results/token/policy
-// bodies here.
+// bodies here. Retry lifecycle adds only attempt/max_attempts/delay_ms/
+// success/state (bounded scalars); raw errorMessage/finalError/payloads
+// are never allowlisted.
 export const ALLOWED_FIELDS = new Set([
   "adapter_version",
   "agent_dir_allowed",
@@ -63,6 +66,12 @@ export const ALLOWED_FIELDS = new Set([
   "journal_state",
   "journal_update_seq",
   "duration_ms",
+  // provider_retry lifecycle fields (bounded scalars only).
+  "attempt",
+  "max_attempts",
+  "delay_ms",
+  "success",
+  "state",
 ]);
 
 const MAX_STR = 200;

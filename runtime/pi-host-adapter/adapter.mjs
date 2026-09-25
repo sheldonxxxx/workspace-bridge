@@ -615,11 +615,16 @@ export class PiAdapter {
     const entry = this._boundEntry(sessionId, directory);
     if (!entry) return null;
     const state = this._sdkState(entry, String(sessionId));
+    // Logical busy spans streaming work AND native retry backoff.
+    // Pi sets isStreaming=false during backoff while isRetrying=true;
+    // that state is active work and must never read as idle.
+    const busy = state.isStreaming || state.isRetrying;
     return {
       session: { id: String(sessionId), directory: entry.cwd, title: entry.title },
-      status: state.isStreaming ? "busy" : "idle",
+      status: busy ? "busy" : "idle",
       state: {
         isStreaming: state.isStreaming,
+        isRetrying: state.isRetrying,
         messageCount: state.messageCount,
         pendingMessageCount: state.pendingMessageCount,
       },
@@ -629,20 +634,25 @@ export class PiAdapter {
   async sessionStatus(directory, sessionId) {
     const entry = this._boundEntry(sessionId, directory);
     if (!entry) throw new AdapterError("Session not found", 404, "not_found");
-    return this._sdkState(entry, String(sessionId)).isStreaming ? "busy" : "idle";
+    const state = this._sdkState(entry, String(sessionId));
+    return (state.isStreaming || state.isRetrying) ? "busy" : "idle";
   }
 
   // Authoritative in-process state read. The session object is owned by
   // this entry, so no drift check is needed; a disposed entry never
-  // reaches here.
+  // reaches here. Includes AgentSession.isRetrying (Pi 0.87.0): logical
+  // busy is isStreaming || isRetrying. Fail closed if SDK state access
+  // itself throws as today.
   _sdkState(entry, ownedSessionId) {
     let sessionId = "";
     let isStreaming = false;
+    let isRetrying = false;
     let messageCount = null;
     let pendingMessageCount = null;
     try {
       sessionId = entry.session.sessionId;
       isStreaming = Boolean(entry.session.isStreaming);
+      isRetrying = Boolean(entry.session.isRetrying);
       const messages = entry.session.messages;
       messageCount = Array.isArray(messages) ? messages.length : null;
       const pending = entry.session.pendingMessageCount;
@@ -654,7 +664,7 @@ export class PiAdapter {
       entry.disposed = true;
       throw new AdapterError("Pi session is unavailable", 502, "unavailable");
     }
-    return { isStreaming, messageCount, pendingMessageCount };
+    return { isStreaming, isRetrying, messageCount, pendingMessageCount };
   }
 
   async promptAsync(directory, sessionId, text, model = null, thinkingLevel = null) {
@@ -967,6 +977,16 @@ export class PiAdapter {
     if (!entry || !event || typeof event !== "object") return;
     if (entry.disposed) return;
     if (this.sessions.get(String(sessionId)) !== entry) return;
+    // Native transient retry lifecycle (Pi 0.87.0): auto_retry_start/end
+    // are delivered through this same subscription. They are observed
+    // here for sanitized operational logging only; the Bridge never
+    // replays prompts and RunCoordinator adds no retry loop.
+    if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+      try {
+        this._logRetryEvent(sessionId, event);
+      } catch { /* logging never affects sessions */ }
+      return;
+    }
     if (event.type === "tool_execution_start" || event.type === "tool_execution_end"
         || event.type === "agent_end") {
       this._sdkDiagnostic({
@@ -1011,6 +1031,44 @@ export class PiAdapter {
       return pending && typeof pending.size === "number" ? pending.size : null;
     } catch {
       return null;
+    }
+  }
+
+  // Sanitized native retry lifecycle observer (Pi 0.87.0
+  // auto_retry_start/end). Emits a dedicated structured operational event
+  // with allowlisted bounded scalar fields only: session_id, attempt,
+  // max_attempts, delay_ms, success/state. Never logs errorMessage,
+  // finalError, provider payload/body, model, prompt, tool args, paths,
+  // tokens, or headers. auto_retry_start is INFO; the final exhausted
+  // failure stays represented by the existing run error path. Logging
+  // failures never affect sessions.
+  _logRetryEvent(sessionId, event) {
+    if (!this.onLog) return;
+    const sid = String(sessionId || "").slice(0, 200);
+    const safeInt = (value) => (Number.isSafeInteger(value) && value >= 0
+      ? Math.min(value, 1000000000000) : null);
+    if (event.type === "auto_retry_start") {
+      const attempt = safeInt(event.attempt);
+      const maxAttempts = safeInt(event.maxAttempts);
+      const delayMs = Number.isSafeInteger(event.delayMs) && event.delayMs >= 0
+        ? Math.min(event.delayMs, 1000000000000) : null;
+      const fields = { session_id: sid, state: "retrying" };
+      if (attempt !== null) fields.attempt = attempt;
+      if (maxAttempts !== null) fields.max_attempts = maxAttempts;
+      if (delayMs !== null) fields.delay_ms = delayMs;
+      try { this.onLog("INFO", "pi-adapter", "provider_retry", fields); } catch { /* no-op */ }
+      return;
+    }
+    if (event.type === "auto_retry_end") {
+      const attempt = safeInt(event.attempt);
+      const success = event.success === true;
+      const fields = {
+        session_id: sid,
+        success,
+        state: success ? "succeeded" : "failed",
+      };
+      if (attempt !== null) fields.attempt = attempt;
+      try { this.onLog("INFO", "pi-adapter", "provider_retry", fields); } catch { /* no-op */ }
     }
   }
 

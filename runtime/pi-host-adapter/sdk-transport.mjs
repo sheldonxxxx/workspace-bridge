@@ -57,6 +57,55 @@ export const SDK_VERSION = "0.87.0";
 const SDK_EVENT_STALL_WARN_MS = 10_000;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+// Bridge-managed native auto-retry policy (Pi 0.87.0 SettingsManager).
+// Native AgentSession owns transient retry because it can safely omit
+// failed assistant attempts and retry only the LLM turn; the Bridge never
+// replays prompts. Target: 5 attempts at 2s exponential backoff capped at
+// 30s per delay (~60s total scheduled wait: 2+4+8+16+30 without provider
+// latency); provider/SDK retries stay disabled (maxRetries=0,
+// maxRetryDelayMs=60000 cap retained). Known hard quota/billing errors are
+// classified by Pi as non-retryable and fail promptly. Applied via the
+// non-persistent SettingsManager.applyOverrides deep merge (never marks
+// modified, never saves to settings.json, never mutates the user's normal
+// Pi profile); unrelated retry/provider settings such as timeoutMs are
+// preserved.
+export const MANAGED_RETRY = Object.freeze({
+  enabled: true,
+  maxRetries: 5,
+  baseDelayMs: 2000,
+  maxAgentDelayMs: 30000,
+  providerMaxRetries: 0,
+  providerMaxRetryDelayMs: 60000,
+});
+
+export function managedRetryOverride() {
+  return {
+    retry: {
+      enabled: true,
+      maxRetries: 5,
+      baseDelayMs: 2000,
+      maxAgentDelayMs: 30000,
+      provider: {
+        maxRetries: 0,
+        maxRetryDelayMs: 60000,
+      },
+    },
+  };
+}
+
+// Apply the Bridge-managed retry policy non-persistently. Uses only the
+// pinned Pi 0.87.0 SettingsManager.applyOverrides deep merge, which
+// mutates the in-memory merged view without marking modified fields and
+// without enqueueing a settings.json write. Returns the settingsManager
+// for chaining. Throws fail-closed when the pinned API is unavailable.
+export function applyManagedRetryPolicy(settingsManager) {
+  if (!settingsManager || typeof settingsManager.applyOverrides !== "function") {
+    throw new Error("Pi SettingsManager.applyOverrides is unavailable");
+  }
+  settingsManager.applyOverrides(managedRetryOverride());
+  return settingsManager;
+}
+
 // Built-in tool names known to the Pi SDK (createAllToolDefinitions).
 // Everything else registered on a session is an extension/custom tool.
 export const SDK_BUILTIN_TOOLS = new Set(
@@ -127,6 +176,14 @@ export async function createSdkSession({
     const detail = errors.map((e) => `${e.path}: ${e.error}`).join("; ").slice(0, 400);
     throw new Error(`Pi extension loading failed: ${detail}`);
   }
+  // Bridge-managed native retry budget (non-persistent override, never
+  // saved to settings.json). Applied AFTER loader.reload() because the
+  // pinned Pi 0.87.0 DefaultResourceLoader.reload() calls
+  // SettingsManager.reload(), which recomputes the merged view from
+  // files and would wipe an earlier applyOverrides. Native AgentSession
+  // owns transient retry; provider/SDK retries stay disabled.
+  // Re-applied after createAgentSession below for the same reason.
+  applyManagedRetryPolicy(settingsManager);
   const sessionDir = sessionDirFor(agentDir, cwd);
   if (resumeFile && (path.dirname(path.resolve(resumeFile)) !== sessionDir
       || !fs.lstatSync(resumeFile, { throwIfNoEntry: true })?.isFile()
@@ -149,6 +206,11 @@ export async function createSdkSession({
     options.excludeTools = excludeTools.split(",").map((s) => s.trim()).filter(Boolean);
   }
   const { session } = await createAgentSession(options);
+  // Re-apply after session creation: createAgentSession must not wipe
+  // the in-memory override, but re-applying is idempotent and keeps the
+  // managed budget authoritative even if the SDK reloads settings
+  // internally during construction.
+  applyManagedRetryPolicy(settingsManager);
   await session.bindExtensions({ uiContext, mode: "rpc" });
   // With enabled extensions no tools allowlist is passed (it would hide
   // extension tools), so activate the intended built-in set explicitly
