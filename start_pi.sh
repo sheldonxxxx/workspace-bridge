@@ -1,6 +1,12 @@
-cd /Volumes/data2/workspace-bridge/runtime/pi-host-adapter
-
-WB_RUNTIME_TOKEN="bf937f5dbd3cb9d523a3fe6105cbd912e19b762918806da35d8b99e2ad35abac" \
-WB_PI_PROJECTS_DIR="/Volumes/data2" \
-PI_CODING_AGENT_DIR="$HOME/.pi/workspace-bridge" \
-node main.mjs
+#!/usr/bin/env bash
+# Pi adapter is managed by launchd (com.workspace-bridge.pi-host-adapter).
+# Use kickstart/bootout instead of running node directly: the plist holds the
+# current token and a second process would conflict on port 8780.
+set -Eeuo pipefail
+LABEL="com.workspace-bridge.pi-host-adapter"
+case "${1:-status}" in
+  status) curl -s http://127.0.0.1:8780/health; echo ;;
+  start) launchctl kickstart -k "gui/$(id -u)/${LABEL}" ;;
+  stop) launchctl bootout "gui/$(id -u)/${LABEL}" ;;
+  *) echo "usage: start_pi.sh [status|start|stop]" >&2; exit 1 ;;
+esac

@@ -1,16 +1,37 @@
 # Runtime protocol v1
 
 Workspace Bridge owns workspace authorization, handoffs, model policy, run
-records, and audit. A runtime adapter owns its native process or SDK, session
-files, model syntax, and security enforcement. Pi and Codex adapters implement
-the same resource contract; Bridge never sends a vendor RPC to an adapter.
+records, and audit. An authoritative Node owns the workspace filesystem/Git/
+handoff data plane and runtime adapter registry/secrets. A runtime adapter owns
+its native process or SDK, session files, model syntax, and security enforcement.
+Pi and Codex adapters implement the same resource contract; Bridge never sends a
+vendor RPC directly to an adapter.
+
+## Bridge routing identities
+
+`RuntimeType` is the protocol family (`pi` or `codex`) in the native descriptor.
+It describes behavior and does not identify a destination. `AdapterInstance` is
+one Node-owned destination with an opaque `adapter_id`, unique display name,
+runtime type, Node-local/reachable base URL, Node-held per-instance token,
+enabled state, and connection revision. Multiple AdapterInstances can share one
+runtime type. `WorkspaceRoute` is the exact `(workspace_id, adapter_id)`
+permission and security binding, and its adapter must belong to the workspace's
+authoritative Node.
+
+Bridge stores sanitized adapter references, Node credentials, model policies,
+routes, conversations, and runs in private SQLite. Its local Manager owns
+Bridge-to-Node connection settings; each Node stores adapter credentials in
+private Node SQLite. The native Pi/Codex daemon's listen port, bootstrap token, state path,
+and process lifecycle remain configured on that host. A daemon's own
+`WB_RUNTIME_TOKEN` is its HTTP credential; it is not a Bridge-wide registry or
+shared Bridge environment variable.
 
 ## Resources
 
 | Resource | Meaning |
 | --- | --- |
-| Conversation | Bridge-owned native context bound to one workspace, runtime, security source, and applied security revision. |
-| Run | One accepted operation in a conversation. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. |
+| Conversation | Bridge-owned native context bound to one workspace, exact same-Node `adapter_id`, Node/adapter connection revisions, descriptive `runtime_type`, security source, and applied security revision. |
+| Run | One accepted operation on one AdapterInstance in a conversation, with immutable Node/adapter revision and effective-security evidence. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. |
 | Activity | One command, file change, tool call, search, subagent action, or other observable action within a run. |
 | Interaction | One live blocking request with exact adapter-provided response options or form fields. |
 
@@ -36,7 +57,7 @@ GET    /v1/activities/{id}
 GET    /v1/events?after=...&waitMs=...
 ```
 
-`descriptor` has `protocol: {major: 1, minor: 0}`, a stable runtime ID,
+`descriptor` has `protocol: {major: 1, minor: 0}`, a stable runtime-type ID,
 adapter/native versions, an instance ID, and a map of feature names to positive
 integer contract versions. Missing features mean unsupported. The required v1
 features are `models`, `conversations`, `runs`, `activities`, and
@@ -65,8 +86,8 @@ profile mismatch. A model selector is an opaque string returned by the adapter
 and is passed back unchanged. Model changes do not alter the conversation's
 security binding.
 
-The local manager can create, edit, and delete named custom security profiles.
-GET /profiles returns each profile's opaque config, revision, and mutable flag
+The local Manager discovers and edits security profiles through the selected
+Node-owned AdapterInstance. `GET /profiles` returns each profile's opaque config, revision, and mutable flag
 so the manager can show only controls that runtime implements. A runtime may
 need workspace context to discover profiles. In that case Bridge supplies the
 exact workspace ID and a validated directory; the adapter independently
@@ -76,10 +97,12 @@ security revisions. For Codex, the response can also include a separate
 `runtimeConfig` observation containing an opaque revision and bounded summary;
 it is not a profile row. Raw native rules and managed config are never exposed.
 
-Workspace bindings identify `source: profile` with a profile ID/revision or
-`source: runtime-config` with no profile ID. The latter follows current Codex
-config for the workspace; revision changes do not invalidate the binding. A
-conversation records its own applied revision and bounded security summary.
+WorkspaceRoute bindings identify `source: profile` with a profile ID/revision or
+`source: runtime-config` with no profile ID. The latter is supported only by a
+Codex AdapterInstance and follows that destination's current config for the
+workspace; revision changes do not invalidate the binding. A conversation
+records its adapter ID, runtime type, adapter connection revision, applied
+security revision, and bounded security summary.
 Before a later Codex turn, the adapter verifies the thread is idle, reads the
 current native security state, and applies supported changes through
 `thread/settings/update` before `turn/start`. It confirms
@@ -114,10 +137,12 @@ For example, Pi exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
 the live app-server model list and are passed to `turn/start` as `effort`.
 
 The Bridge admits a run only when the workspace is enabled, the workspace-wide
-agent switch is enabled, the selected runtime is explicitly enabled for that
-workspace, the handoff is prepared in that workspace, the selected model is
-allowed, and the conversation binding matches. Installing a new runtime
-never grants access to any existing workspace.
+agent switch is enabled, the exact same-Node WorkspaceRoute and AdapterInstance
+are enabled, the handoff is prepared in that workspace, the selected model is
+allowed by that adapter's policy, the Node is reachable, and the conversation
+binding matches. Each accepted run stores a bounded immutable
+`effective_security` snapshot alongside the Node and adapter revisions.
+Installing an AdapterInstance never grants access to any existing workspace.
 
 ## Interactions and evidence
 

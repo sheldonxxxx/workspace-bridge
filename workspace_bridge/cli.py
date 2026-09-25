@@ -12,7 +12,6 @@ import uvicorn
 from . import __version__
 from .api import make_admin, make_mcp
 from .oplog import configure_operational_logging, emit, error_code
-from .wbrp import adapters_from_environment
 from .security import BridgeError, digest, open_absolute_dir
 from .service import Service
 from .diagnostics import failure_report
@@ -73,26 +72,16 @@ def resolve_bind_hosts(container_mode: bool, extra_admin_hosts: tuple[str, ...])
     return mcp_bind, admin_bind
 
 
-def initialize(state: Path, parents: list[str], mcp_port: int, admin_port: int) -> dict:
-    if not parents:
-        raise BridgeError("At least one --allow-parent is required; no default broad filesystem access")
+def initialize(state: Path, mcp_port: int, admin_port: int) -> dict:
     if not 1024 <= mcp_port <= 65535 or not 1024 <= admin_port <= 65535 or mcp_port == admin_port:
         raise BridgeError("Choose distinct unprivileged TCP ports")
-    resolved = []
-    for value in parents:
-        parent = Path(value).expanduser().resolve(strict=True)
-        if not parent.is_dir() or len(parent.parts) < 3 or parent == Path.home():
-            raise BridgeError("Use a dedicated project-parent directory, not a home or filesystem root")
-        resolved.append(str(parent))
     state = state.expanduser().resolve()
-    if any(state == Path(p) or Path(p) in state.parents for p in resolved):
-        raise BridgeError("Keep server state outside approved project parents")
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     if (state / "config.json").exists():
         raise BridgeError("Already initialized; existing state was not overwritten")
     os.chmod(state, 0o700)
     token = secrets.token_urlsafe(32)
-    config = {"schema_version": 1, "allowed_parents": resolved, "mcp_port": mcp_port,
+    config = {"schema_version": 1, "mcp_port": mcp_port,
               "admin_port": admin_port, "admin_token_hash": digest(token.encode())}
     for filename, text in (("config.json", json.dumps(config, indent=2)), ("admin-token", token + "\n")):
         fd = os.open(state / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -119,7 +108,7 @@ def load_config(state: Path) -> dict:
 
 
 _DOCTOR_SECTIONS = (
-    ("core", "Core"), ("workspaces", "Workspaces"), ("runtimes", "Runtimes"),
+    ("core", "Core"), ("nodes", "Nodes"), ("workspaces", "Workspaces"), ("adapters", "Adapters"),
     ("runnable_routes", "Runnable routes"), ("git_evidence", "Git evidence"),
 )
 
@@ -137,21 +126,21 @@ def _print_doctor_human(report: dict) -> None:
             rows += [check for check in checks if check.get("section") == "models_profiles"]
             routes = report.get("runnable_routes", [])
             if not routes and not rows:
-                print("  No configured workspace/runtime routes.")
+                print("  No configured workspace/adapter routes.")
             for route in routes:
                 state = "ready" if route.get("ready") else "blocked"
                 model = route.get("default_model_selector")
                 suffix = f"; default model {model}" if model else ""
-                print(f"  [{state}] {route.get('workspace_name')} / {route.get('runtime')}{suffix}")
+                print(f"  [{state}] {route.get('workspace_name')} / {route.get('adapter_name')} ({route.get('runtime_type')}){suffix}")
                 if route.get("blockers"):
                     print("    blockers: " + ", ".join(route["blockers"]))
-        if section in {"workspaces", "models_profiles", "runtimes", "core", "git_evidence"}:
+        if section in {"workspaces", "models_profiles", "adapters", "core", "git_evidence", "nodes"}:
             for check in rows:
                 scope = []
                 if check.get("workspace_id"):
                     scope.append(check["workspace_id"])
-                if check.get("runtime"):
-                    scope.append(check["runtime"])
+                if check.get("adapter_id"):
+                    scope.append(check["adapter_id"])
                 prefix = f"{' / '.join(scope)}: " if scope else ""
                 print(f"  [{check['status']}] {prefix}{check['summary']}")
                 if check["status"] in {"failed", "action_required"}:
@@ -199,7 +188,7 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
         if state_missing:
             summary = "No Workspace Bridge state was found at the selected state location."
             remediation = (
-                "Native setup: run `workspace-bridge init --allow-parent <projects-dir>`.\n"
+                "Native setup: run `workspace-bridge init`, then add an authoritative Node in the Manager.\n"
                 "Then rerun `workspace-bridge doctor`.\n"
                 "For Docker, run `docker exec workspace-bridge workspace-bridge --state /state doctor`."
             )
@@ -215,12 +204,6 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
         _print_doctor(report, as_json)
         return 1
 
-    runtime_configuration_error = False
-    try:
-        adapters = adapters_from_environment()
-    except BridgeError:
-        adapters = {}
-        runtime_configuration_error = True
     try:
         extra_hosts = admin_allowed_hosts_from_env()
         invalid_admin_host_config = False
@@ -235,8 +218,16 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
         "invalid_admin_host_config": invalid_admin_host_config,
     }
     try:
-        service = Service(state, config, adapters=adapters, read_only=True,
+        service = Service(state, config, read_only=True,
                           run_coordinator_background=False)
+    except BridgeError as exc:
+        report = failure_report(mode="offline" if offline else "live",
+                                code=exc.code,
+                                summary=("Bridge state is incompatible with schema v3; use a fresh state path."
+                                         if exc.code == "state_schema_incompatible"
+                                         else "Private Bridge state database could not be opened."))
+        _print_doctor(report, as_json)
+        return 1
     except Exception:  # noqa: BLE001 - no private initialization detail is printed
         report = failure_report(mode="offline" if offline else "live",
                                 code="core.state_readable",
@@ -244,9 +235,7 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
         _print_doctor(report, as_json)
         return 1
     try:
-        report = service.diagnostic_report(
-            offline=offline, listener=listener,
-            runtime_configuration_error=runtime_configuration_error)
+        report = service.diagnostic_report(offline=offline, listener=listener)
     finally:
         service.close()
     _print_doctor(report, as_json)
@@ -283,7 +272,7 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
     except Exception:  # noqa: BLE001 - counts are best-effort only
         total = enabled = 0
     emit(_ops_log, "INFO", "bridge", "bridge_ready", version=__version__,
-         runtime_configured=bool(service.run_coordinator.adapters),
+         adapters_configured=bool(service.adapter_registry.rows()),
          workspace_count=total, enabled_count=enabled)
     configs = [
         uvicorn.Config(make_mcp(service, config["mcp_port"], public_port=mcp_public_port,
@@ -328,8 +317,7 @@ def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Local, workspace-scoped MCP planning and review bridge")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     sub = parser.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="Initialize private state and explicit allowed project parents")
-    init.add_argument("--allow-parent", action="append", required=True)
+    init = sub.add_parser("init", help="Initialize private Bridge control-plane state")
     init.add_argument("--mcp-port", type=int, default=8765)
     init.add_argument("--admin-port", type=int, default=8766)
     run = sub.add_parser("serve", help="Start both loopback listeners, single process only")
@@ -338,9 +326,9 @@ def main(argv: list[str] | None = None):
     run.add_argument("--mcp-public-port", type=int, help="Exact published loopback port; container mode only")
     run.add_argument("--admin-public-port", type=int, help="Exact published management loopback port; container mode only")
     sub.add_parser("rotate-bridge-token", help="Create/rotate the shared MCP credential while stopped; shown once")
-    doctor = sub.add_parser("doctor", help="Report local readiness and runtime diagnostics")
+    doctor = sub.add_parser("doctor", help="Report local readiness and adapter diagnostics")
     doctor.add_argument("--json", action="store_true", help="Emit canonical DiagnosticReport JSON")
-    doctor.add_argument("--offline", action="store_true", help="Skip all runtime/network calls")
+    doctor.add_argument("--offline", action="store_true", help="Skip adapter/network calls")
     doctor.add_argument("--container", action="store_true", help=argparse.SUPPRESS)
     doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
     doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
@@ -369,7 +357,7 @@ def main(argv: list[str] | None = None):
         # re-resolves it when listeners start.
         configure_operational_logging()
         if args.command == "init":
-            config = initialize(state, args.allow_parent, args.mcp_port, args.admin_port)
+            config = initialize(state, args.mcp_port, args.admin_port)
             print(f"Initialized {state}\nLocal management: http://127.0.0.1:{config['admin_port']}/")
             print("Run workspace-bridge serve, then workspace-bridge show-admin-token in another terminal.")
             return
@@ -395,8 +383,7 @@ def main(argv: list[str] | None = None):
                     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise BridgeError("A bridge process already owns this state directory; rotate online in the local manager") from None
-            service = Service(state, config, recover_incomplete=args.command == "serve",
-                              adapters=adapters_from_environment())
+            service = Service(state, config, recover_incomplete=args.command == "serve")
             try:
                 if args.command == "rotate-bridge-token":
                     result = service.manage_bridge("rotate_token")

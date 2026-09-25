@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "2.5.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "2.6.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -50,13 +50,14 @@ def test_skill_is_complete_versioned_and_bounded():
     "You own understanding", "less-capable coding model", "smallest coherent, testable milestone",
     "context_hashes", "copy_prompt", "user will paste", "corrective handoff",
     "agent-reported tests", "higher-priority instructions", "untrusted",
+    "list_agent_adapters", "adapter_id", "runtime_type",
 ])
 def test_skill_covers_project_lead_contract(text):
     assert text in read_project_lead_skill()["content"]
 
 
 @pytest.mark.parametrize("text", [
-    "silent user",
+    "silent model choice",
     "explicit",
     "category",
     "free/cheap",
@@ -82,19 +83,25 @@ def test_mcp_instructions_match_skill_model_rule():
     assert "model-choice rule" in INSTRUCTIONS
     assert "always uses the global default" not in INSTRUCTIONS
     start_description = TOOLS["start_agent_run"][1]
-    assert "admin-enabled" in start_description or "currently available" in start_description
+    assert "currently available" in start_description or "enabled" in start_description
     assert "model_override_forbidden" not in start_description
     assert "scope" in TOOLS["list_agent_models"][1]
 
 
-def test_skill_defaults_silent_dispatch_to_pi():
+def test_skill_selects_an_exact_adapter_destination():
     content = read_project_lead_skill()["content"]
-    assert "a silent user \u2192 Pi" in content
+    assert "Choose by `adapter_id`" in content
+    assert "use the ready workspace default" in content
+    assert "If there is no default and exactly" in content
+    assert "if several are ready, ask which one to" in content
+    assert "A configured but unavailable default never silently fails over." in content
+    assert "several routes are available, ask which one to" not in content
+    assert "When several routes are available, ask which one to use rather than guessing." not in content
+    assert "never by mapping `pi` or" in content
     for tool in ("list_agent_models", "start_agent_run", "read_agent_run",
                  "respond_agent_interaction", "list_agent_executions"):
         assert tool in content, tool
-    assert "silent/default runtime is Pi" in INSTRUCTIONS or \
-        "silent user choice means runtime pi" in INSTRUCTIONS
+    assert "adapter_id" in INSTRUCTIONS and "never map pi or codex" in INSTRUCTIONS
 
 
 def test_tool_schema_is_read_only_unscoped_and_empty():
@@ -143,7 +150,7 @@ async def test_skill_works_with_no_enabled_mapping_and_never_opens_workspace(env
     env["service"].manage_workspace(env["id"], "disable")
     def denied(*args, **kwargs):
         raise AssertionError("Skill must not open or select a workspace")
-    monkeypatch.setattr(env["service"], "safe_root", denied)
+    monkeypatch.setattr(env["service"].node_registry, "client", denied)
     monkeypatch.setattr(env["service"], "workspace", denied)
     skill = value(await rpc(env))
     assert skill == read_project_lead_skill()

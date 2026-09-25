@@ -25,7 +25,7 @@ def env_path(path: Path) -> str:
     return "'" + value + "'"
 
 
-def configure(projects: Path, state: Path, output: Path, mcp_port: int = 8765,
+def configure(state: Path, output: Path, mcp_port: int = 8765,
               admin_port: int = 8766) -> Path:
     uid, gid = os.getuid(), os.getgid()
     if uid == 0:
@@ -33,23 +33,20 @@ def configure(projects: Path, state: Path, output: Path, mcp_port: int = 8765,
     if (not 1024 <= mcp_port <= 65535 or not 1024 <= admin_port <= 65535
             or mcp_port == admin_port):
         raise ValueError("Choose distinct host ports in 1024..65535")
-    projects = projects.expanduser().resolve(strict=True)
     state = state.expanduser().absolute()
     if state.is_symlink():
         raise ValueError("State path must not be a symlink")
     state = state.resolve()
     output = output.expanduser().absolute()
     package = Path(__file__).resolve().parents[1]
-    if not projects.is_dir() or len(projects.parts) < 3 or projects == Path.home().resolve():
-        raise ValueError("Choose an existing dedicated project-parent directory, not your home or filesystem root")
-    if any(overlaps(projects, Path(p)) for p in RESERVED):
-        raise ValueError("Project path overlaps a reserved container path")
-    if overlaps(projects, state) or package == projects or projects in package.parents:
-        raise ValueError("Keep the server package and private state outside the project mount")
-    if output == projects or projects in output.parents:
-        raise ValueError("Keep Compose configuration outside the project mount")
+    if any(overlaps(state, Path(p)) for p in RESERVED):
+        raise ValueError("State path overlaps a reserved container path")
+    if overlaps(package, state):
+        raise ValueError("Keep private state outside the source checkout")
+    if output == state or state in output.parents:
+        raise ValueError("Keep Compose configuration outside private state")
     # Compose single quotes preserve spaces, # and $ without env interpolation.
-    project_value, state_value = env_path(projects), env_path(state)
+    state_value = env_path(state)
     if output.exists() or output.is_symlink():
         raise ValueError("Output already exists; edit it deliberately or choose --output .env.new")
     if not output.parent.is_dir():
@@ -61,7 +58,7 @@ def configure(projects: Path, state: Path, output: Path, mcp_port: int = 8765,
     else:
         state.mkdir(parents=True, mode=0o700)
     text = ("# Local Compose settings; no credentials. Keep this file outside projects.\n"
-            f"WB_UID={uid}\nWB_GID={gid}\nWB_PROJECTS_DIR={project_value}\nWB_STATE_DIR={state_value}\n"
+            f"WB_UID={uid}\nWB_GID={gid}\nWB_STATE_DIR={state_value}\n"
             f"WB_MCP_PORT={mcp_port}\nWB_ADMIN_PORT={admin_port}\n")
     fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as handle:
@@ -71,7 +68,6 @@ def configure(projects: Path, state: Path, output: Path, mcp_port: int = 8765,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--projects-dir', type=Path, required=True)
     parser.add_argument('--state-dir', type=Path, default=Path.home()/'.local/state/workspace-bridge-docker')
     parser.add_argument('--mcp-port', type=int, default=8765)
     parser.add_argument('--admin-port', type=int, default=8766)
@@ -80,11 +76,11 @@ def main():
     try:
         if os.name != 'posix':
             raise ValueError('Use Linux, macOS or WSL2, not native Windows paths')
-        output = configure(args.projects_dir, args.state_dir, args.output, args.mcp_port, args.admin_port)
+        output = configure(args.state_dir, args.output, args.mcp_port, args.admin_port)
     except (OSError, ValueError) as exc:
         print(f'Compose setup: {exc}', file=sys.stderr)
         raise SystemExit(1) from None
-    print(f'Created {output}. No Docker command was run and no project was enabled.')
+    print(f'Created {output}. No Docker command was run and no workspace was enabled.')
     print('Next: docker compose config --quiet && docker compose up -d --build')
     print('Admin token: docker compose exec bridge workspace-bridge --state /state show-admin-token')
 

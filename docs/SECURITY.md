@@ -13,13 +13,15 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 ## Implemented controls
 
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
-- Explicit project-parent allowlist; canonical configured-root boundary; overlapping mappings rejected even if disabled; current allowed-parent validation; default-disabled registration. The same configured path stays usable across reboot/remount even when device/inode identity changes; each request still re-validates the current root and enforces containment.
+- Each Workspace is bound to one authoritative Node. The Node owns the host `allowed_roots` ceiling and validates the canonical node-local root on registration and every data-plane request; Bridge cannot edit that ceiling or inspect a local fallback checkout. Overlapping mappings on one Node are rejected even when disabled, and registrations start disabled.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
 - Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each serialized call, and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, or arbitrary command surface is exposed as an MCP tool. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, hooks, network transports, terminal prompting, or repository mutation.
-- Agent execution requires both the workspace agent switch and an explicit grant for the selected runtime, each defaulting to OFF. It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_agent_run` is handoff-bound, accepts no free-form prompt or path, resolves an opaque model selector against that runtime's admin-enabled allowlist plus default, and fails closed without a policy. There is no arbitrary command endpoint. Runtime adapters are private host processes.
-- Runtime Protocol v1 binds each conversation to one workspace and native runtime. A conversation using a Bridge profile stays pinned to that profile revision. A Codex runtime-config binding instead follows the effective native configuration for that workspace and stores the revision and bounded summary actually applied to its thread. Pi enforces its trusted permission extension in an isolated profile; Codex uses its native app-server policy. These mechanisms make different claims. Codex confirms the active native profile when the server reports it; a mismatch fails the binding. The Codex read-only profile denies native approval escalation automatically. Interactions require a live exact request, not merely a persisted ID.
-- Local administrators can create, edit, assign, and delete custom runtime security profiles. Pi profiles expose the validated file-tool, external path, protected path, shell, and session-grant controls; Codex profiles expose only a native permission-profile ID, approval policy, and reviewer choices. Codex also supports following its native config without a Bridge profile. Codex owns filesystem/network rules and config layering. Discovery, assignment, and diagnostics use the exact workspace context. For runtime-config conversations, an effective security change is applied between turns when Codex accepts and confirms `thread/settings/update`; an active turn retains its captured settings. Unsupported, rejected, legacy-unrepresentable, or unconfirmed changes use a fresh conversation. Codex profile-bound starts send the permissions field and omit legacy sandbox; runtime-config starts omit security overrides so Codex resolves its own layers. Pi shell Allow and Codex full access can run with broad host authority, so the manager labels those choices explicitly.
-- Per-runtime model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass policy, or act on arbitrary runtime conversations.
+- `RuntimeType` (`pi` or `codex`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Agent execution requires both the workspace agent switch and that exact route and adapter to be enabled, each defaulting to OFF. It is not implied by workspace enablement or `write_scope`; MCP has no tool to change it. `start_agent_run(adapter_id, ...)` is handoff-bound, accepts no free-form prompt or path, resolves a model against that adapter's admin-enabled allowlist plus default, and fails closed without a policy. There is no arbitrary command endpoint.
+- Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security binding. A Bridge-profile conversation stays pinned to the profile revision discovered from that adapter. A Codex `runtime-config` route instead follows the effective native configuration for that exact adapter and workspace and stores the revision and bounded summary applied to its thread. Pi enforces its trusted permission extension in an isolated profile; Codex uses its native app-server policy. These mechanisms make different claims. Codex confirms the active native profile when the server reports it; a mismatch fails the binding. The Codex read-only profile denies native approval escalation automatically. Interactions require a live exact request, not merely a persisted ID.
+- Local administrators can create, edit, assign, and delete custom security profiles through a Node-owned AdapterInstance. Profile discovery and model policy are not shared between adapters just because they have the same runtime type. Pi profiles expose validated file-tool, external path, protected path, shell, and session-grant controls; Codex profiles expose only a native permission-profile ID, approval policy, and reviewer choices. Codex also supports following its native config without a Bridge profile. Codex owns filesystem/network rules and config layering. Discovery, assignment, and diagnostics use the exact workspace context. For runtime-config conversations, an effective security change is applied between turns when Codex accepts and confirms `thread/settings/update`; an active turn retains its captured settings. Unsupported, rejected, or unconfirmed changes use a fresh conversation. Codex profile-bound starts send the permissions field and omit legacy sandbox; runtime-config starts omit security overrides so Codex resolves its own layers. Pi shell Allow and Codex full access can run with broad host authority, so the Manager labels those choices explicitly.
+- Per-adapter model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass policy, or act on arbitrary adapter conversations.
+- Node tokens are plaintext in private Bridge SQLite; runtime adapter tokens are plaintext in the private Node SQLite during this development phase. Both state databases are mode `0600` and their containing directories are private. Normal list/detail/status APIs return `has_token` only; add/edit forms do not read tokens back, and blank update fields preserve them. Node and adapter responses are scrubbed before they reach models, profiles, run data, diagnostics, events, logs, or errors. Backups remain sensitive.
+- Fresh writable state creates schema v3 directly. Non-v3 state is rejected as `state_schema_incompatible`; Bridge and Node do not migrate or alter it. Use fresh state paths for this development architecture cutover.
 - All writes reject secret-like/binary/control content and administrator exclusions. Staging uses private files and complete-content publication, not in-place truncation. Rechecks catch ordinary target/parent changes; they are not a sandbox or a portable atomic compare-and-swap against hostile external writers. Parent folders may remain after a later write failure; read back after an ambiguous I/O failure.
 - Built-in sensitive-name and build-directory exclusions. Additional administrator globs are conservative and case-insensitive. Repository ignore files cannot grant access or relax policy.
 - Git evidence requires a direct real `.git` directory and rejects linked worktrees, bare repositories, symlinked/hardlinked metadata, shared object stores and external config includes. Changed paths are filtered through workspace exclusions before any patch command; denied paths are represented by aggregate counts only. Patch text uses the normal secret redactor. Status hashes bind pagination/diffs to the filtered current state, but do not attribute edits to an agent or user.
@@ -46,7 +48,7 @@ The heuristic recognizes several common token/password/private-key patterns. It 
 ## Lifecycle notifications
 
 The Bridge persists only canonical event identity, bounded workspace/handoff labels,
-runtime and run ids, timestamps, and allowlisted request kind/action metadata. It
+Node and adapter ID/name, runtime type and run IDs, timestamps, and allowlisted request kind/action metadata. It
 does not persist prompts, results, source, commands, external paths, arbitrary
 provider payloads, webhook endpoints, or tokens in notification tables. The
 `WB_DISCORD_WEBHOOK_URL` value is read from local process configuration and held
@@ -124,16 +126,21 @@ ran or that an independent audit occurred.
 
 ## Runtime Protocol agent execution
 
-Agent adapters are private host processes configured through
-`WB_RUNTIME_ADAPTERS` and protected by `WB_RUNTIME_TOKEN`. They bind to host
-loopback, have no published container port, and do not receive provider
-credentials from Bridge. Without the token, operational requests fail closed;
-`/health` exposes only readiness and lock state.
+Bridge-to-Node endpoints and Node tokens are managed in the local Manager and
+stored in private Bridge SQLite. Node-owned adapter endpoints and per-instance
+tokens are stored in private Node SQLite; Bridge does not use
+`WB_RUNTIME_ADAPTERS` or a global `WB_RUNTIME_TOKEN`. Native Pi/Codex daemon listen ports, bootstrap
+tokens, state paths, and process lifecycle remain configured on their hosts. A
+daemon's own `WB_RUNTIME_TOKEN` is its HTTP credential, not a Bridge registry
+setting. Adapters bind to host loopback, have no published container port, and
+do not receive provider credentials from Bridge. Without the daemon token,
+operational requests fail closed; `/health` exposes only readiness and lock state.
 
-Each conversation is bound to one enabled workspace and runtime, and to either an
+Each conversation is bound to one enabled workspace and exact same-Node AdapterInstance, and to either an
 immutable Bridge security profile revision or the observed native Codex
-configuration. Bridge rechecks the workspace grant, prepared handoff, security
-binding, and model policy before a run. For runtime-config conversations, it
+configuration. Bridge rechecks the exact WorkspaceRoute, prepared handoff,
+security binding, adapter connection revision, and adapter-scoped model policy
+before a run. For runtime-config conversations, it
 checks for drift and applies or replaces native settings at an idle turn boundary.
 Responses are limited to live,
 adapter-provided interactions and are revalidated by the adapter. Pi and Codex
@@ -145,7 +152,7 @@ its file, external-path, protected-path, and shell controls before allowing writ
 ## Diagnostics and Doctor
 
 The local-admin diagnostics API requires the admin bearer/session authentication.
-It returns stable check codes and bounded workspace/runtime metadata, but never
+It returns stable check codes and bounded workspace/adapter metadata, but never
 adapter URLs, credentials, raw environment values, prompts, tool arguments,
 provider payloads, or full external paths. Runtime failure text is reduced to
 fixed safe summaries.
@@ -199,18 +206,17 @@ is included. Both bridge ports are explicitly host-loopback only; the native Pi
 host adapter has **no** Compose service and publishes **no** port. Use a current
 Docker Engine (28+ avoids the documented old localhost-publication L2 exposure).
 Never attach untrusted services to its Compose network or add a public reverse proxy.
-The bridge reaches private host adapters through the `WB_RUNTIME_ADAPTERS` URL map
-(`host.docker.internal` on Docker Desktop/OrbStack) or explicit reachable host
-URLs (Linux Engine). Provider credentials stay on the host only and are never
-logged or returned.
+The Manager stores Bridge-to-Node endpoints and Node tokens in private Bridge
+SQLite. Node-owned adapter endpoints and per-instance tokens stay in the private
+Node SQLite. Docker Desktop/OrbStack commonly use `host.docker.internal`; Linux
+Engine needs a reachable Node URL. Native daemon process tokens and provider
+credentials remain host-side and are never returned by Bridge APIs.
 
-The project-parent bind is writable so handoffs and later authorized source writes
-can reach the host. All mounted files, including disabled mappings, are visible to
-the container process; only the MCP layer enforces enabled mappings, exclusions and
-write scope. A process compromise is not constrained to the handoff directory.
-Mount only intended projects under a dedicated parent; no home/root binds. The
-optional read-only source recipe in DOCKER.md is a separate hardening choice and
-must be tested on the target filesystem; cross-device traversal stays denied.
+The Bridge container has no workspace data bind. The selected Node controls
+handoffs and later authorized source writes, and its host identity can access every
+configured `allowed_roots` entry. A Node compromise is not constrained to one
+handoff directory; mount only intended projects under a dedicated host root and do
+not use a home/root bind.
 Outbound network access is not disabled by this Compose file. Image pixel secrets
 are still not redacted. The same configured path remains usable after a
 reboot/remount or native-to-container device/inode change; each request

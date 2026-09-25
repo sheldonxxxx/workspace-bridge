@@ -27,27 +27,10 @@ def port_value(name: str, default: int) -> int:
     return int(text)
 
 
-def project_parent(value: str) -> Path:
-    path = Path(value)
-    if (not path.is_absolute() or len(path.parts) < 3 or str(path) != value
-            or path == Path.home() or path.resolve(strict=True) != path):
-        raise BridgeError("WB_PROJECTS_DIR must be a canonical absolute dedicated project-parent path")
-    # Do not let a configured bind hide the application, state or system paths.
-    reserved = (Path('/state'), Path('/opt'), Path('/usr'), Path('/etc'), Path('/bin'),
-                Path('/sbin'), Path('/lib'), Path('/lib64'), Path('/dev'), Path('/proc'), Path('/sys'))
-    if any(path == p or p in path.parents or path in p.parents for p in reserved):
-        raise BridgeError("Project mount overlaps a reserved container path")
-    fd = open_absolute_dir(str(path))
-    os.close(fd)
-    return path
-
-
-def bootstrap(state: Path, parent: Path) -> dict:
+def bootstrap(state: Path) -> dict:
     """Called with a prepared, user-owned state bind, not a root-owned volume."""
     if not state.is_absolute() or state.resolve(strict=True) != state:
         raise BridgeError("Container state must be an existing canonical directory")
-    if state == parent or state in parent.parents or parent in state.parents:
-        raise BridgeError("Private state and project parent must not overlap")
     st = state.stat()
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
         raise BridgeError("State bind must be owned by WB_UID and mode 0700; prepare it on the host")
@@ -62,13 +45,12 @@ def bootstrap(state: Path, parent: Path) -> dict:
         if not config_path.exists():
             if config_path.is_symlink() or any(p.name != 'bootstrap.lock' for p in state.iterdir()):
                 raise BridgeError("Missing config in nonempty state; restore a backup or use fresh private state")
-            initialize(state, [str(parent)], INTERNAL_MCP_PORT, INTERNAL_ADMIN_PORT)
+            initialize(state, INTERNAL_MCP_PORT, INTERNAL_ADMIN_PORT)
             print("Initialized fresh Docker state. No workspace is enabled. Retrieve the admin token with docker compose exec.", flush=True)
         config = load_config(state)
-        if (config.get('allowed_parents') != [str(parent)]
-                or config.get('mcp_port') != INTERNAL_MCP_PORT
+        if (config.get('mcp_port') != INTERNAL_MCP_PORT
                 or config.get('admin_port') != INTERNAL_ADMIN_PORT):
-            raise BridgeError("State configuration does not match this Compose deployment. Do not reinitialize or overwrite it; see docs/DOCKER.md")
+            raise BridgeError("State listener configuration does not match this Compose deployment. Do not reinitialize or overwrite it; see docs/DOCKER.md")
         return config
     finally:
         os.close(lock)
@@ -87,7 +69,6 @@ def main(argv: list[str] | None = None):
         if args not in (['serve'], ['show-admin-token'], ['rotate-bridge-token']) \
                 and not doctor_args_valid:
             raise BridgeError("Supported container commands: serve, doctor, show-admin-token, rotate-bridge-token")
-        parent = project_parent(os.environ.get('WB_PROJECTS_DIR', ''))
         state = Path(os.environ.get('WB_STATE_DIR', '/state'))
         mcp_port = port_value('WB_MCP_PORT', INTERNAL_MCP_PORT)
         admin_port = port_value('WB_ADMIN_PORT', INTERNAL_ADMIN_PORT)
@@ -98,7 +79,7 @@ def main(argv: list[str] | None = None):
             # serve() re-reads both. Diagnostic commands stay available.
             admin_allowed_hosts_from_env()
             log_level_from_env()
-            bootstrap(state, parent)
+            bootstrap(state)
             cli_main(['--state', str(state), 'serve', '--container',
                       '--mcp-public-port', str(mcp_port), '--admin-public-port', str(admin_port)])
         elif doctor_args_valid:

@@ -1,7 +1,7 @@
 # Operating instructions — v0.8.4
 
 Read `read_project_lead_skill()` before leading a task and reload after context loss.
-The packaged SKILL.md (2.5.0) is the canonical workflow, not project-provided text.
+The packaged SKILL.md (2.6.0) is the canonical workflow, not project-provided text.
 
 Workspace Bridge's Doctor report is local-admin diagnostics, not an MCP tool or
 proof that this ChatGPT connection can reach the tunnel. Do not infer remote
@@ -25,11 +25,17 @@ Two loops are available. **Manual (always supported):** inspect and resolve desi
 publish a small handoff, return the actual path/copy prompt, then let the user
 manually dispatch the local agent; after the user pastes its reply, audit real current
 source/callers/tests. **Automated (only when the local admin enabled agent execution
-for the workspace):** after `prepare_handoff`, optionally call
-`list_agent_models(runtime, query=...)` to inspect that runtime's enabled model list and
-default, then `start_agent_run(runtime, job_id, request_id)` with an explicit runtime
-(a silent runtime choice means Pi) without a model to use
-that runtime's default. An explicit enabled model may be chosen only per the
+for the workspace):** after `prepare_handoff`, call
+`list_agent_adapters(workspace_id)` to discover exact AdapterInstance IDs and
+route availability. `runtime_type` describes behavior; only `adapter_id` selects
+a destination. Never map Pi/Codex to an arbitrary instance. If no adapter is
+explicitly requested, use the ready workspace default. If there is no default
+and exactly one ready target exists, use it; if there is no default and several
+ready targets exist, ask which destination to use. A configured but unavailable
+default never silently fails over. Then call `list_agent_models(adapter_id, query=...)` to inspect that
+adapter's enabled model list and default, and `start_agent_run(adapter_id,
+job_id, request_id)` without a model to use that adapter's default. An explicit
+enabled model may be chosen only per the
 project-lead skill model-choice rule (the user requested it or a matching
 category; a self-initiated change needs prior user approval; never silently
 switch after failure). Never invent or broaden a selector, never pass a
@@ -38,8 +44,9 @@ free-form prompt/path, and treat `agent_execution=disabled` or
 closed. After dispatch, report the handoff path/copy prompt and, for an
 automated run, its run ID and initial status directly to the user. Do not poll or
 watch implementation; resume when the user asks to continue/review or shares the
-agent reply. A corrective iteration reuses the session when a safe continuation
-path exists and task/model/scope match; otherwise it is a new handoff and run.
+agent reply. A corrective iteration reuses the session only when the exact
+adapter ID, task/model/scope match and its connection revision is unchanged;
+otherwise it is a new handoff and run.
 
 When a run reaches `waiting_interaction`, inspect the exact pending request with
 `read_agent_run`/`read_agent_interaction` and compare its choices or fields against

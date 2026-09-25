@@ -1,1053 +1,1018 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
+
+const LOCAL_PI = "adapter_111111111111111111111111";
+const GPU_PI = "adapter_222222222222222222222222";
+const LOCAL_CODEX = "adapter_333333333333333333333333";
+const REMOTE_PI = "adapter_666666666666666666666666";
+const WS_ID = "ws_aaaaaaaaaaaaaaaaaaaaaaaa";
+const JOB_ID = "job_bbbbbbbbbbbbbbbbbbbbbbbb";
+const LOCAL_NODE = "node_aaaaaaaaaaaaaaaaaaaaaaaa";
+const GPU_NODE = "node_bbbbbbbbbbbbbbbbbbbbbbbb";
+
+type AdapterRow = {
+  id: string;
+  name: string;
+  runtime_type: "pi" | "codex";
+  base_url: string;
+  enabled: boolean;
+  revision: string;
+  has_token: boolean;
+  node_id: string;
+  node_name: string;
+  healthy: boolean;
+  adapter_version: string;
+  native_version: string;
+  model_policy: { configured: boolean; enabled: string[]; default: string };
+  savedToken: string;
+};
+
+function adapter(
+  id: string,
+  name: string,
+  runtime_type: "pi" | "codex",
+  base_url: string,
+  model: string,
+  savedToken: string,
+  node_id = LOCAL_NODE,
+  node_name = "Local Mac",
+): AdapterRow {
+  return {
+    id,
+    name,
+    runtime_type,
+    base_url,
+    enabled: true,
+    revision: `revision-${id.slice(-3)}`,
+    has_token: true,
+    node_id,
+    node_name,
+    healthy: true,
+    adapter_version: "1.4.0",
+    native_version: "2026.09",
+    model_policy: { configured: true, enabled: [model], default: model },
+    savedToken,
+  };
+}
+
 const workspace = {
-  id: "ws-1",
+  id: WS_ID,
   name: "Alpine archive",
   root: "/Projects/alpine-archive",
   enabled: true,
   agent_enabled: true,
-  write_scope: "handoff",
+  write_scope: "handoff" as const,
   excludes: "[]",
-  runtime_grants: {
-    pi: { enabled: true, profile: { id: "read-only" }, security_binding: null },
-    codex: { enabled: false, profile: null, security_binding: null },
+  node_id: LOCAL_NODE,
+  node_name: "Local Mac",
+  routes: {
+    [LOCAL_PI]: {
+      adapter_id: LOCAL_PI,
+      name: "Local Pi",
+      runtime_type: "pi" as const,
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      adapter_enabled: true,
+      enabled: true,
+      is_default: true,
+      security_binding: {
+        source: "profile" as const,
+        profile: { id: "read-only", revision: "local-profile-rev" },
+      },
+      profile: { id: "read-only", revision: "local-profile-rev" },
+      effective_security: {
+        source: "profile",
+        profile_id: "read-only",
+        bound_revision: "local-profile-rev",
+        freshness: "current",
+      },
+    },
+    [GPU_PI]: {
+      adapter_id: GPU_PI,
+      name: "GPU Pi",
+      runtime_type: "pi" as const,
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      adapter_enabled: true,
+      enabled: true,
+      is_default: false,
+      security_binding: {
+        source: "profile" as const,
+        profile: { id: "gpu-read-only", revision: "gpu-profile-rev" },
+      },
+      profile: { id: "gpu-read-only", revision: "gpu-profile-rev" },
+      effective_security: {
+        source: "profile",
+        profile_id: "gpu-read-only",
+        bound_revision: "gpu-profile-rev",
+        freshness: "current",
+      },
+    },
+    [LOCAL_CODEX]: {
+      adapter_id: LOCAL_CODEX,
+      name: "Local Codex",
+      runtime_type: "codex" as const,
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      adapter_enabled: true,
+      enabled: true,
+      is_default: false,
+      security_binding: {
+        source: "runtime-config" as const,
+        revision: "codex-config-rev",
+        status: "ready",
+        resolved_summary: {
+          activePermissionProfile: ":read-only",
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+        },
+      },
+      profile: null,
+      effective_security: {
+        source: "runtime-config",
+        bound_revision: "codex-config-rev",
+        freshness: "current",
+        status: "ready",
+        resolved_summary: {
+          activePermissionProfile: ":read-only",
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+        },
+      },
+    },
   },
 };
-const run = {
-  run_id: "run-1",
-  runtime: "pi",
-  phase: "active",
-  active_state: "waiting_interaction",
-  handoff_title: "Review project structure",
-  workspace_name: "Alpine archive",
-  workspace_id: "ws-1",
-  model: "muse-spark",
-  created: "2026-09-24T10:00:00Z",
-  conversation_id: "conv-1",
+
+const handoff = {
+  id: JOB_ID,
+  title: "Review project structure",
+  state: "prepared",
+  path: "/Projects/alpine-archive/.workspace-handoff/job-b",
+  copy_prompt: "Review the structure",
 };
-const diagnosticsReport = {
+
+const routeReport = {
   generated_at: "2026-09-25T08:00:00Z",
   mode: "live",
   overall: {
     status: "unknown",
-    summary: "Some runtime freshness was not observed.",
-    counts: { pass: 8, warning: 1, unknown: 1, action_required: 0, failed: 0 },
+    summary: "Some adapter freshness was not observed.",
+    counts: { pass: 10, warning: 0, unknown: 1, action_required: 0, failed: 0 },
   },
   checks: [
     {
-      id: "conversation.security_update_pending:ws-1:pi",
-      code: "conversation.security_update_pending",
+      id: `model.default_freshness:${WS_ID}:${LOCAL_CODEX}`,
+      code: "model.default_freshness",
       section: "models_profiles",
-      status: "warning",
-      summary:
-        "A prior conversation will refresh its security settings before its next turn.",
-      workspace_id: "ws-1",
-      runtime: "pi",
+      status: "action_required",
+      summary: "The Local Codex default model is unavailable.",
+      remediation: "Choose a currently discovered model for Local Codex.",
+      workspace_id: WS_ID,
+      adapter_id: LOCAL_CODEX,
+      runtime_type: "codex",
     },
   ],
   runnable_routes: [
     {
-      id: "ws-1:pi",
-      workspace_id: "ws-1",
-      workspace_name: "Alpine archive",
-      runtime: "pi",
+      id: `${WS_ID}:${LOCAL_PI}`,
+      workspace_id: WS_ID,
+      workspace_name: workspace.name,
+      adapter_id: LOCAL_PI,
+      adapter_name: "Local Pi",
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      runtime_type: "pi",
       ready: true,
+      is_default: true,
       status: "ready",
-      summary: "This exact workspace/runtime path is ready to start.",
+      summary: "This exact workspace and adapter route is ready.",
       blockers: [],
-      profile: { id: "read-only", revision: "default-revision" },
-      default_model_selector: "muse-spark",
+      security_source: "profile",
+      profile: { id: "read-only", revision: "local-profile-rev" },
+      default_model_selector: "pi-local-fast",
+    },
+    {
+      id: `${WS_ID}:${GPU_PI}`,
+      workspace_id: WS_ID,
+      workspace_name: workspace.name,
+      adapter_id: GPU_PI,
+      adapter_name: "GPU Pi",
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      runtime_type: "pi",
+      ready: true,
+      is_default: false,
+      status: "ready",
+      summary: "This exact workspace and adapter route is ready.",
+      blockers: [],
+      security_source: "profile",
+      profile: { id: "gpu-read-only", revision: "gpu-profile-rev" },
+      default_model_selector: "pi-gpu-large",
+    },
+    {
+      id: `${WS_ID}:${LOCAL_CODEX}`,
+      workspace_id: WS_ID,
+      workspace_name: workspace.name,
+      adapter_id: LOCAL_CODEX,
+      adapter_name: "Local Codex",
+      node_id: LOCAL_NODE,
+      node_name: "Local Mac",
+      runtime_type: "codex",
+      ready: false,
+      is_default: false,
+      status: "blocked",
+      summary: "Route has one blocker.",
+      blockers: ["model.default_freshness"],
+      security_source: "runtime-config",
+      profile: null,
+      default_model_selector: "codex-5",
     },
   ],
 };
-function runnableRoute(
-  workspaceId: string,
-  workspaceName: string,
-  runtime: string,
-  ready: boolean,
-  blockers: string[] = [],
-) {
+
+function publicAdapter(row: AdapterRow) {
+  const { savedToken: _savedToken, ...publicRow } = row;
+  return publicRow;
+}
+
+function profileCatalog(id: string) {
+  const profileId = id === GPU_PI ? "gpu-read-only" : "read-only";
+  const permission = id === LOCAL_CODEX ? ":read-only" : undefined;
   return {
-    id: `${workspaceId}:${runtime}`,
-    workspace_id: workspaceId,
-    workspace_name: workspaceName,
-    runtime,
-    ready,
-    status: ready ? "ready" : "blocked",
-    summary: ready
-      ? "This exact workspace/runtime path is ready to start."
-      : `Runnable path has ${blockers.length} blocker(s).`,
-    blockers,
-    profile: runtime === "pi" ? { id: "read-only" } : null,
-    default_model_selector: runtime === "pi" ? "muse-spark" : "gpt-test",
+    adapter_id: id,
+    profiles: [
+      {
+        id: profileId,
+        revision: `profile-rev-${id.slice(-3)}`,
+        mutable: false,
+        available: true,
+        config: permission
+          ? {
+              permissions: permission,
+              approvalPolicy: "on-request",
+              approvalsReviewer: "user",
+            }
+          : {
+              external_access: { default_mode: "deny", roots: [] },
+              protected_patterns: [".git/**", ".env*"],
+            },
+      },
+    ],
+    permissionProfiles: permission
+      ? [{ id: permission, allowed: true, description: "Read only" }]
+      : [],
+    ...(id === LOCAL_CODEX
+      ? {
+          runtimeConfig: {
+            supported: true,
+            available: true,
+            status: "ready",
+            revision: "codex-config-rev",
+            resolvedSummary: {
+              activePermissionProfile: ":read-only",
+              approvalPolicy: "on-request",
+              approvalsReviewer: "user",
+              provenance: "native",
+            },
+          },
+        }
+      : {}),
   };
 }
-function reportWith(
-  routes: unknown[],
-  checks: unknown[] = [],
-  status = "unknown",
-) {
-  return {
-    ...diagnosticsReport,
-    overall: { ...diagnosticsReport.overall, status },
-    checks: [...diagnosticsReport.checks, ...checks],
-    runnable_routes: routes,
-  };
-}
-const piReadOnlyConfig = {
-  version: 3,
-  write_tools_enabled: false,
-  tools: {
-    read: "allow",
-    grep: "allow",
-    find: "allow",
-    ls: "allow",
-    edit: "ask",
-    write: "ask",
-  },
-  protected_patterns: [".git/**", ".env", ".env.*"],
-  protected_template_exceptions: [
-    ".env.example",
-    ".env.sample",
-    ".env.template",
-  ],
-  allow_session_always: true,
-  external_access: { default_mode: "deny", roots: [] },
-  shell_mode: "deny",
-};
+
 async function mockApi(
   page: Page,
-  options: { diagnostics?: unknown; workspaces?: unknown; runs?: unknown } = {},
+  options: {
+    zeroRoute?: boolean;
+    blockedDefault?: boolean;
+    runSnapshot?: boolean;
+  } = {},
 ) {
-  await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const data: Record<string, unknown> = {
-      "/api/status": {
-        version: "0.8.4",
-        listen_mode: "loopback",
-        allowed_parents: ["/Projects"],
-        mcp_port: 8765,
-        bridge: { configured: true, enabled: true },
-        runtimes: {
-          runtimes: {
-            pi: {
-              configured: true,
-              healthy: true,
-              protocol: 1,
-              native_version: "0.87.0",
-            },
-            codex: { configured: true, healthy: false, protocol: 1 },
-          },
-        },
-        runtime_policies: {
-          pi: {
-            configured: true,
-            enabled: ["muse-spark"],
-            default: "muse-spark",
-            enabled_count: 1,
-          },
-        },
+  const adapters = [
+    adapter(
+      LOCAL_PI,
+      "Local Pi",
+      "pi",
+      "http://host.docker.internal:8780",
+      "pi-local-fast",
+      "local-pi-private-token",
+    ),
+    adapter(
+      GPU_PI,
+      "GPU Pi",
+      "pi",
+      "http://gpu-host:8780",
+      "pi-gpu-large",
+      "gpu-pi-private-token",
+    ),
+    adapter(
+      LOCAL_CODEX,
+      "Local Codex",
+      "codex",
+      "http://host.docker.internal:8772",
+      "codex-5",
+      "codex-private-token",
+    ),
+  ];
+  if (options.zeroRoute) {
+    adapters.push(
+      adapter(
+        REMOTE_PI,
+        "GPU-only Pi",
+        "pi",
+        "http://gpu-only:8780",
+        "pi-gpu-only",
+        "gpu-only-private-token",
+        GPU_NODE,
+        "GPU Server",
+      ),
+    );
+  }
+  type WorkspacePayload = typeof workspace & {
+    available_adapters?: Array<{
+      adapter_id: string;
+      name: string;
+      runtime_type: "pi" | "codex";
+      enabled: boolean;
+      node_id: string;
+      route_enabled?: boolean;
+      readiness?: string;
+    }>;
+  };
+  const workspacePayload = JSON.parse(
+    JSON.stringify(workspace),
+  ) as WorkspacePayload;
+  const diagnosticsPayload = JSON.parse(
+    JSON.stringify(routeReport),
+  ) as typeof routeReport;
+  if (options.zeroRoute) {
+    workspacePayload.routes = {};
+    workspacePayload.available_adapters = [
+      {
+        adapter_id: LOCAL_CODEX,
+        name: "Local Codex",
+        runtime_type: "codex",
+        enabled: true,
+        node_id: LOCAL_NODE,
+        route_enabled: false,
+        readiness: "unbound",
       },
-      "/api/diagnostics": options.diagnostics ?? diagnosticsReport,
-      "/api/workspaces": options.workspaces ?? { workspaces: [workspace] },
-      "/api/events": {
-        events: [
-          {
-            at: "2026-09-24T10:00:00Z",
-            workspace: "ws-1",
-            action: "enable",
-            outcome: "ok",
-          },
-        ],
-      },
-      "/api/runs": options.runs ?? { runs: [run], next_offset: null },
-      "/api/workspaces/ws-1/jobs": {
-        handoffs: [
-          {
-            id: "job-1",
-            title: "Review project structure",
-            state: "prepared",
-            path: "/Projects/alpine-archive/.workspace-handoff/job-1",
-            copy_prompt: "Review the structure",
-          },
-        ],
-      },
-      "/api/workspaces/ws-1/runs": { runs: [run] },
-      "/api/runs/run-1": {
-        ...run,
-        interactions: [
-          {
-            id: "req-1",
-            kind: "choice",
-            state: "pending",
-            details: {
-              title: "Allow file read?",
-              resource: "src/main.py",
-              choices: [
-                { id: "approve", label: "Allow once", semantic: "approve" },
-                { id: "reject", label: "Reject" },
-              ],
-            },
-          },
-        ],
-      },
-      "/api/runs/run-1/activities": { activities: [] },
-      "/api/runs/run-1/executions": { executions: [] },
-      "/api/runtimes/pi/models": {
-        models: [{ selector: "muse-spark", displayName: "Muse Spark" }],
-        policy: {
-          configured: true,
-          enabled: ["muse-spark"],
-          default: "muse-spark",
-        },
-      },
-      "/api/runtimes/pi/profiles": {
-        profiles: [
-          {
-            id: "read-only",
-            revision: "default-revision",
-            mutable: false,
-            config: piReadOnlyConfig,
-          },
-        ],
-      },
-    };
-    const body =
-      path === "/api/runtimes/pi/models"
-        ? data[path]
-        : (data[path] ?? { ok: true });
-    await route.fulfill({
-      status: 200,
+    ];
+    workspacePayload.node_adapter_count = 1;
+    diagnosticsPayload.runnable_routes = [];
+  }
+  if (options.blockedDefault) {
+    const localDefault = diagnosticsPayload.runnable_routes.find(
+      (route) => route.adapter_id === LOCAL_PI,
+    );
+    if (localDefault) {
+      localDefault.ready = false;
+      localDefault.status = "blocked";
+      localDefault.summary = "The workspace default route is blocked.";
+      localDefault.blockers = ["route.security_freshness"];
+      localDefault.is_default = true;
+    }
+  }
+  const snapshotRun = {
+    run_id: "run-snapshot",
+    adapter_id: LOCAL_PI,
+    adapter_name: "Local Pi",
+    node_id: LOCAL_NODE,
+    node_name: "Local Mac",
+    node_revision: "node-run-rev",
+    adapter_revision: "adapter-run-rev",
+    runtime_type: "pi",
+    phase: "terminal",
+    outcome: "succeeded",
+    workspace_id: WS_ID,
+    workspace_name: workspace.name,
+    job_id: JOB_ID,
+    handoff_title: handoff.title,
+    model: "pi-local-fast",
+    conversation_id: "conversation-snapshot",
+    created: "2026-09-25T08:10:00Z",
+    updated: "2026-09-25T08:12:00Z",
+    effective_security: {
+      source: "profile",
+      profile_id: "read-only",
+      bound_revision: "profile-run-rev",
+      effective_revision: "profile-run-rev",
+    },
+  };
+  const nodes = [
+    {
+      id: LOCAL_NODE,
+      name: "Local Mac",
+      base_url: "http://127.0.0.1:8770",
+      enabled: true,
+      revision: "node-local-rev",
+      has_token: true,
+      health: "healthy",
+      protocol: 1,
+      node_version: "2026.09",
+      capabilities: ["workspace", "runtime"],
+      allowed_root_count: 1,
+    },
+    {
+      id: GPU_NODE,
+      name: "GPU Server",
+      base_url: "http://gpu-node:8770",
+      enabled: true,
+      revision: "node-gpu-rev",
+      has_token: true,
+      health: "healthy",
+      protocol: 1,
+      node_version: "2026.09",
+      capabilities: ["workspace", "runtime"],
+      allowed_root_count: 1,
+    },
+  ];
+  const calls: Array<{
+    path: string;
+    method: string;
+    body?: Record<string, unknown>;
+  }> = [];
+  const starts: Array<Record<string, unknown>> = [];
+  const tests: Array<Record<string, unknown>> = [];
+  const updates: Array<{ id: string; body: Record<string, unknown> }> = [];
+  const respond = async (route: Route, body: unknown, status = 200) =>
+    route.fulfill({
+      status,
       contentType: "application/json",
       body: JSON.stringify(body),
     });
-  });
-}
-test("desktop operations and request review", async ({ page }) => {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  await mockApi(page);
-  await page.goto("./");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.getByText("System health").first()).toBeVisible();
-  await page.screenshot({
-    path: "test-results/desktop-overview.png",
-    fullPage: true,
-  });
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await expect(page.getByText("Alpine archive").first()).toBeVisible();
-  await page.screenshot({
-    path: "test-results/desktop-workspaces.png",
-    fullPage: true,
-  });
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
-    .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await expect(
-    page.getByText("Review project structure").first(),
-  ).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: /Runs/ })
-    .click();
-  await page.getByRole("button", { name: "Review run" }).click();
-  await expect(page.getByText("Allow file read?")).toBeVisible();
-  await page.screenshot({
-    path: "test-results/desktop-runs.png",
-    fullPage: true,
-  });
-  expect(errors).toEqual([]);
-});
-test("canonical Ready route stays startable while overall health is unknown", async ({
-  page,
-}) => {
-  await mockApi(page);
-  let request: Record<string, unknown> | undefined;
-  await page.route("**/api/workspaces/ws-1/jobs/job-1/runs", async (route) => {
-    request = route.request().postDataJSON();
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        ...run,
-        run_id: "run-started",
-        phase: "active",
-        active_state: "running",
-        model: "muse-spark",
-      }),
-    });
-  });
-  await page.goto("./");
-  await expect(page.getByText("Health unknown")).toBeVisible();
-  await expect(
-    page.getByText(
-      "A prior conversation will refresh its security settings before its next turn.",
-    ),
-  ).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
-    .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await expect(page.getByText("Default model: muse-spark")).toBeVisible();
-  const start = page.getByRole("button", { name: "Start run" });
-  await expect(start).toBeEnabled();
-  await start.click();
-  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
-  expect(request).toMatchObject({ runtime: "pi" });
-  expect(Object.keys(request || {}).sort()).toEqual(["request_id", "runtime"]);
-  expect(request?.request_id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
-});
-test("globally complete setup facts cannot override a blocked exact route", async ({
-  page,
-}) => {
-  const report = reportWith(
-    [
-      runnableRoute("ws-1", "Alpine archive", "pi", false, [
-        "model.default_freshness",
-      ]),
-    ],
-    [
-      {
-        id: "model.default_freshness:ws-1:pi",
-        code: "model.default_freshness",
-        section: "models_profiles",
-        status: "action_required",
-        summary: "Configured default model is unavailable for this workspace.",
-        remediation:
-          "Choose a currently discovered model as the runtime default.",
-        workspace_id: "ws-1",
-        runtime: "pi",
-      },
-    ],
-  );
-  await mockApi(page, {
-    diagnostics: report,
-    runs: { runs: [], next_offset: null },
-  });
-  await page.goto("./");
-  await expect(page.getByText("System health").first()).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Workspaces", exact: true })
-    .click();
-  await expect(
-    page.locator(".runtime-access").getByText("Blocked"),
-  ).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
-    .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await expect(
-    page.getByText(
-      "Choose a currently discovered model as the runtime default.",
-    ),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
-});
-test("workspace and runtime route status never cross-combines", async ({
-  page,
-}) => {
-  const beta = {
-    ...workspace,
-    id: "ws-2",
-    name: "Beta archive",
-    root: "/Projects/beta-archive",
-    runtime_grants: {
-      pi: {
-        enabled: false,
-        profile: { id: "read-only" },
-        security_binding: null,
-      },
-      codex: { enabled: true, profile: null, security_binding: null },
-    },
-  };
-  const report = reportWith([
-    runnableRoute("ws-1", "Alpine archive", "pi", true),
-    runnableRoute("ws-1", "Alpine archive", "codex", false, [
-      "runtime.reachable",
-    ]),
-    runnableRoute("ws-2", "Beta archive", "pi", false, ["profile.freshness"]),
-    runnableRoute("ws-2", "Beta archive", "codex", true),
-  ]);
-  await mockApi(page, {
-    diagnostics: report,
-    workspaces: { workspaces: [workspace, beta] },
-    runs: { runs: [], next_offset: null },
-  });
-  await page.goto("./");
-  await expect(page.getByText("System health").first()).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Workspaces", exact: true })
-    .click();
-  const cards = page.locator(".workspace-entry");
-  await expect(
-    cards.nth(0).locator(".runtime-access").nth(0).getByText("Ready"),
-  ).toBeVisible();
-  await expect(
-    cards.nth(0).locator(".runtime-access").nth(1).getByText("Blocked"),
-  ).toBeVisible();
-  await expect(
-    cards.nth(1).locator(".runtime-access").nth(0).getByText("Blocked"),
-  ).toBeVisible();
-  await expect(
-    cards.nth(1).locator(".runtime-access").nth(1).getByText("Ready"),
-  ).toBeVisible();
-});
-test("blocked route shows scoped remediation and opens its Manager section", async ({
-  page,
-}) => {
-  const report = reportWith(
-    [
-      runnableRoute("ws-1", "Alpine archive", "pi", false, [
-        "workspace.agent_enabled",
-      ]),
-    ],
-    [
-      {
-        id: "workspace.agent_enabled:ws-1",
-        code: "workspace.agent_enabled",
-        section: "workspaces",
-        status: "action_required",
-        summary: "Agent runs are disabled for this workspace.",
-        remediation:
-          "Enable agent runs for this workspace in the local manager.",
-        workspace_id: "ws-1",
-      },
-      {
-        id: "workspace.agent_enabled:ws-other",
-        code: "workspace.agent_enabled",
-        section: "workspaces",
-        status: "action_required",
-        summary: "Wrong workspace must never appear here.",
-        remediation: "This is unrelated.",
-        workspace_id: "ws-other",
-      },
-    ],
-  );
-  await mockApi(page, { diagnostics: report });
-  await page.goto("./");
-  await expect(
-    page.getByText("Agent runs are disabled for this workspace."),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Wrong workspace must never appear here."),
-  ).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Resolve", exact: true })
-    .first()
-    .click();
-  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible();
-});
-test("diagnostics failure marks routes unavailable and leaves other pages usable", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await page.goto("./");
-  await expect(page.getByText("Default model: muse-spark")).toBeVisible();
-  await page.route("**/api/diagnostics", async (route) => {
-    await route.fulfill({
-      status: 503,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "probe unavailable" }),
-    });
-  });
-  await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(
-    page.getByText("Current system observations are unavailable."),
-  ).toBeVisible();
-  await expect(
-    page.getByText("stale and cannot authorize a start."),
-  ).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
-    .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Workspaces", exact: true })
-    .click();
-  await expect(page.getByText("Alpine archive").first()).toBeVisible();
-});
-test("Codex config binding remains separate from exact route readiness", async ({
-  page,
-}) => {
-  const codexWorkspace = {
-    ...workspace,
-    runtime_grants: {
-      ...workspace.runtime_grants,
-      codex: {
-        enabled: true,
-        profile: null,
-        security_binding: {
-          source: "runtime-config",
-          status: "ready",
-          resolved_summary: {
-            activePermissionProfile: "workspace-write",
-            approvalPolicy: "on-request",
-            approvalsReviewer: "user",
-          },
-        },
-      },
-    },
-  };
-  const report = reportWith([
-    runnableRoute("ws-1", "Alpine archive", "pi", true),
-    runnableRoute("ws-1", "Alpine archive", "codex", false, [
-      "runtime.required_features",
-    ]),
-  ]);
-  await mockApi(page, {
-    diagnostics: report,
-    workspaces: { workspaces: [codexWorkspace] },
-  });
-  await page.goto("./");
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Workspaces", exact: true })
-    .click();
-  const codex = page
-    .locator(".runtime-access")
-    .filter({ hasText: "Codex config" });
-  await expect(
-    codex.getByText("Security source: Codex config", { exact: true }),
-  ).toBeVisible();
-  await expect(codex.getByText("Blocked")).toBeVisible();
-  await page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
-    .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await page.getByLabel("Runtime / Route").selectOption("codex");
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
-});
-test("ambiguous handoff start retry reuses its request ID", async ({
-  page,
-}) => {
-  await mockApi(page);
-  const requests: Array<Record<string, unknown>> = [];
-  await page.route("**/api/workspaces/ws-1/jobs/job-1/runs", async (route) => {
-    requests.push(route.request().postDataJSON());
-    if (requests.length === 1) {
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "temporary response failure" }),
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    const body =
+      method === "GET"
+        ? undefined
+        : (request.postDataJSON() as Record<string, unknown>);
+    calls.push({ path, method, body });
+
+    if (path === "/api/status") {
+      await respond(route, {
+        version: "0.8.4",
+        listen_mode: "loopback",
+        mcp_port: 8765,
+        bridge: { configured: true, enabled: true },
+        nodes,
+        adapters: { adapters: adapters.map(publicAdapter) },
       });
       return;
     }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        ...run,
-        run_id: "run-retried",
-        model: "muse-spark",
-      }),
-    });
+    if (path === "/api/diagnostics") {
+      await respond(route, diagnosticsPayload);
+      return;
+    }
+    if (path === "/api/workspaces") {
+      await respond(route, { workspaces: [workspacePayload] });
+      return;
+    }
+    if (path === "/api/events") {
+      await respond(route, { events: [] });
+      return;
+    }
+    if (path === "/api/runs" && method === "GET") {
+      await respond(route, {
+        runs: options.runSnapshot ? [snapshotRun] : [],
+        next_offset: null,
+      });
+      return;
+    }
+    if (path === `/api/runs/${snapshotRun.run_id}` && method === "GET") {
+      await respond(route, snapshotRun);
+      return;
+    }
+    if (
+      path.startsWith(`/api/runs/${snapshotRun.run_id}/activities`) ||
+      path.startsWith(`/api/runs/${snapshotRun.run_id}/executions`)
+    ) {
+      await respond(route, {
+        activities: [],
+        executions: [],
+        next_cursor: null,
+      });
+      return;
+    }
+    if (path === `/api/workspaces/${WS_ID}/jobs`) {
+      await respond(route, { handoffs: [handoff] });
+      return;
+    }
+    if (path === `/api/workspaces/${WS_ID}/runs`) {
+      await respond(route, {
+        runs: options.runSnapshot ? [snapshotRun] : [],
+      });
+      return;
+    }
+    if (path === `/api/workspaces/${WS_ID}/document`) {
+      await respond(route, {
+        content:
+          "Handoff summary: inspect the project and run the agreed checks.",
+      });
+      return;
+    }
+    if (path === "/api/nodes/test" && method === "POST") {
+      await respond(route, { success: true });
+      return;
+    }
+    if (path === "/api/nodes" && method === "POST") {
+      const created = {
+        ...nodes[0],
+        id: "node_cccccccccccccccccccccccc",
+        name: String(body?.name || "New Node"),
+        base_url: String(body?.base_url || "http://new-node:8770"),
+      };
+      nodes.push(created);
+      await respond(route, created, 201);
+      return;
+    }
+    const nodeMatch = path.match(/^\/api\/nodes\/(node_[0-9a-f]{24})$/);
+    if (nodeMatch && method === "PATCH") {
+      const node = nodes.find((item) => item.id === nodeMatch[1]);
+      if (node) Object.assign(node, body || {});
+      await respond(route, node || { ok: true });
+      return;
+    }
+    if (path === "/api/adapters" && method === "GET") {
+      await respond(route, { adapters: adapters.map(publicAdapter) });
+      return;
+    }
+    if (path === "/api/adapters" && method === "POST") {
+      const created = adapter(
+        "adapter_444444444444444444444444",
+        String(body?.name),
+        body?.runtime_type === "codex" ? "codex" : "pi",
+        String(body?.base_url),
+        "new-default",
+        String(body?.token),
+      );
+      adapters.push(created);
+      await respond(route, publicAdapter(created), 201);
+      return;
+    }
+    if (path === "/api/adapters/test" && method === "POST") {
+      tests.push(body || {});
+      await respond(route, {
+        success: true,
+        adapter_id: body?.adapter_id,
+        runtime_type: body?.runtime_type,
+        native_runtime: body?.runtime_type,
+        native_version: "2026.09",
+        adapter_version: "1.4.0",
+      });
+      return;
+    }
+    const adapterMatch = path.match(
+      /^\/api\/adapters\/(adapter_[0-9a-f]{24})(?:\/(.*))?$/,
+    );
+    if (adapterMatch) {
+      const [, id, leaf] = adapterMatch;
+      const row = adapters.find((item) => item.id === id);
+      if (!row) {
+        await respond(route, { error: "Unknown adapter" }, 404);
+        return;
+      }
+      if (!leaf && method === "PATCH") {
+        updates.push({ id, body: body || {} });
+        Object.assign(row, body);
+        if (body?.token) row.savedToken = String(body.token);
+        await respond(route, publicAdapter(row));
+        return;
+      }
+      if (!leaf && method === "GET") {
+        await respond(route, publicAdapter(row));
+        return;
+      }
+      if (leaf === "models" && method === "GET") {
+        const model =
+          id === LOCAL_PI
+            ? {
+                selector: "pi-local-fast",
+                displayName: "Local Pi model",
+                reasoningOptions: ["low", "high"],
+              }
+            : id === GPU_PI
+              ? {
+                  selector: "pi-gpu-large",
+                  displayName: "GPU Pi model",
+                  reasoningOptions: ["low", "high"],
+                }
+              : {
+                  selector: "codex-5",
+                  displayName: "Codex model",
+                  reasoningOptions: ["low", "high"],
+                };
+        await respond(route, {
+          adapter_id: id,
+          models: [model],
+          policy: row.model_policy,
+        });
+        return;
+      }
+      if (leaf === "profiles" && method === "GET") {
+        await respond(route, profileCatalog(id));
+        return;
+      }
+    }
+    if (
+      path.startsWith(`/api/workspaces/${WS_ID}/jobs/`) &&
+      path.endsWith("/runs") &&
+      method === "POST"
+    ) {
+      starts.push(body || {});
+      const selected = adapters.find((item) => item.id === body?.adapter_id);
+      await respond(route, {
+        run_id: `run-${starts.length}`,
+        conversation_id: `conversation-${starts.length}`,
+        adapter_id: selected?.id,
+        adapter_name: selected?.name,
+        runtime_type: selected?.runtime_type,
+        phase: "active",
+        active_state: "running",
+        model: selected?.model_policy.default,
+      });
+      return;
+    }
+    if (
+      path.startsWith(`/api/workspaces/${WS_ID}/routes/`) &&
+      method === "POST"
+    ) {
+      await respond(route, { ok: true });
+      return;
+    }
+    await respond(route, { ok: true });
   });
-  await page.goto("./");
+  return { calls, starts, tests, updates, adapters };
+}
+
+async function navigate(page: Page, title: string) {
   await page
     .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name: "Handoffs" })
+    .getByRole("button", { name: title, exact: true })
     .click();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await page.getByRole("button", { name: "Start run" }).click();
-  await expect(page.getByText("temporary response failure")).toBeVisible();
-  await page.getByRole("button", { name: "Start run" }).click();
-  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
-  expect(requests).toHaveLength(2);
-  expect(requests[0]).toEqual(requests[1]);
-  expect(Object.keys(requests[0]).sort()).toEqual(["request_id", "runtime"]);
-});
-test("overview and handoffs fit a mobile viewport without horizontal overflow", async ({
+}
+
+test("same-runtime adapter instances stay distinct in workspaces and exact handoff start", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await mockApi(page);
+  const api = await mockApi(page);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("./");
-  const noHorizontalOverflow = async () =>
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await navigate(page, "Workspaces");
+  await expect(page.getByText("Local Pi · Pi", { exact: true })).toBeVisible();
+  await expect(page.getByText("GPU Pi · Pi", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Local Codex · Codex", { exact: true }),
+  ).toBeVisible();
+
+  await navigate(page, "Handoffs");
+  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
+  await expect(page.getByText("Default model: pi-local-fast")).toBeVisible();
+  const target = page.getByLabel("Execution target", { exact: true });
+  await target.selectOption(LOCAL_CODEX);
+  await expect(
+    page.getByText("The Local Codex default model is unavailable."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+  await target.selectOption(GPU_PI);
+  await expect(page.getByRole("button", { name: "Start run" })).toBeEnabled();
+  await page.getByRole("button", { name: "Start run" }).click();
+  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
+  expect(api.starts).toHaveLength(1);
+  expect(api.starts[0]?.adapter_id).toBe(GPU_PI);
+  expect("runtime" in api.starts[0]).toBe(false);
+  expect(Object.keys(api.starts[0] || {}).sort()).toEqual([
+    "adapter_id",
+    "request_id",
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("adapter add/edit forms test current values and never read a token back", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+
+  await page.getByRole("button", { name: "Add adapter" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Backup Pi");
+  await page
+    .getByLabel("Base URL", { exact: true })
+    .fill("http://gpu-backup:8780");
+  await page
+    .getByLabel("Adapter token", { exact: true })
+    .fill("new-private-token");
+  await page.getByRole("button", { name: "Test connection" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Connected: pi" }),
+  ).toBeVisible();
+  expect(api.tests.at(-1)).toMatchObject({
+    name: "Backup Pi",
+    token: "new-private-token",
+  });
+  await page
+    .getByRole("button", { name: "Add adapter", exact: true })
+    .last()
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Backup Pi · Pi" }),
+  ).toBeVisible();
+  await expect(page.getByText("new-private-token")).toHaveCount(0);
+
+  const gpuRow = page
+    .locator(".adapter-card")
+    .filter({ hasText: "GPU Pi · Pi" });
+  await gpuRow.getByRole("button", { name: "Edit" }).click();
+  const tokenField = page.getByLabel("Adapter token", { exact: true });
+  await expect(tokenField).toHaveValue("");
+  await page
+    .getByLabel("Base URL", { exact: true })
+    .fill("http://gpu-updated:8780");
+  await page.getByRole("button", { name: "Test connection" }).click();
+  expect(api.tests.at(-1)).toMatchObject({
+    adapter_id: GPU_PI,
+    base_url: "http://gpu-updated:8780",
+    token: "",
+  });
+  await page.getByRole("button", { name: "Save adapter" }).click();
+  await expect(
+    gpuRow.getByText("http://gpu-updated:8780").first(),
+  ).toBeVisible();
+  expect(api.updates.at(-1)).toEqual({
+    id: GPU_PI,
+    body: {
+      name: "GPU Pi",
+      base_url: "http://gpu-updated:8780",
+      token: "",
+      enabled: true,
+    },
+  });
+  expect(api.adapters.find((item) => item.id === GPU_PI)?.savedToken).toBe(
+    "gpu-pi-private-token",
+  );
+
+  await gpuRow.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByLabel("Adapter token", { exact: true })).toHaveValue(
+    "",
+  );
+  await expect(page.getByText("gpu-pi-private-token")).toHaveCount(0);
+});
+
+test("model and profile discovery use each adapter ID", async ({ page }) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const gpuRow = page
+    .locator(".adapter-card")
+    .filter({ hasText: "GPU Pi · Pi" });
+  await gpuRow.getByRole("button", { name: "Models" }).click();
+  await expect(
+    page.getByRole("heading", { name: "GPU Pi models" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: /GPU Pi model pi-gpu-large/ }),
+  ).toBeVisible();
+  expect(
+    api.calls.some((call) => call.path === `/api/adapters/${GPU_PI}/models`),
+  ).toBe(true);
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  const profileTabs = page.getByRole("group", { name: "Adapter" });
+  await profileTabs.getByRole("button", { name: "GPU Pi · Pi" }).click();
+  await expect(
+    page.getByRole("heading", { name: "gpu-read-only" }),
+  ).toBeVisible();
+  expect(
+    api.calls.some((call) => call.path === `/api/adapters/${GPU_PI}/profiles`),
+  ).toBe(true);
+  expect(
+    api.calls.some(
+      (call) => call.path === `/api/adapters/${LOCAL_PI}/profiles`,
+    ),
+  ).toBe(true);
+});
+
+test("manager pages fit desktop and mobile viewports", async ({ page }) => {
+  await mockApi(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("./");
+  const noOverflow = async () =>
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
-  await noHorizontalOverflow();
+  await noOverflow();
+  await navigate(page, "Workspaces");
+  await noOverflow();
+
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page
     .getByRole("navigation", { name: "Mobile navigation" })
     .getByRole("button", { name: "Handoffs" })
     .click();
-  await expect(
-    page.getByRole("navigation", { name: "Mobile navigation" }),
-  ).toBeHidden();
-  await page.getByLabel("Workspace", { exact: true }).selectOption("ws-1");
-  await noHorizontalOverflow();
-  await page.screenshot({
-    path: "test-results/mobile-handoffs.png",
-    fullPage: true,
-  });
-});
-test("workspace settings use one save and ID copy sits by the name", async ({
-  page,
-}) => {
-  await mockApi(page);
-  const saves: unknown[] = [];
-  await page.route("**/api/workspaces/ws-1", async (route) => {
-    saves.push(route.request().postDataJSON());
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ workspace }),
-    });
-  });
-  await page.goto("./");
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  const card = page.locator(".workspace-entry");
-  const name = card.locator(".workspace-name-line");
-  await expect(
-    name.getByRole("heading", { name: "Alpine archive" }),
-  ).toBeVisible();
-  await expect(
-    name.getByRole("button", { name: "Copy workspace ID for Alpine archive" }),
-  ).toBeVisible();
-  await card.getByRole("button", { name: /Settings/ }).click();
-  await page.screenshot({
-    path: "test-results/workspace-settings.png",
-    fullPage: true,
-  });
-  await expect(
-    card.getByRole("button", { name: "Save settings" }),
-  ).toBeDisabled();
-  await card.getByLabel("File write access").selectOption("none");
-  await card.getByLabel("Extra exclusions").fill("private/**");
-  await expect(
-    card.getByRole("button", { name: "Save settings" }),
-  ).toBeEnabled();
-  await card.getByRole("button", { name: "Save settings" }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
-  await expect.poll(() => saves.length).toBe(1);
-  expect(saves[0]).toEqual({
-    operation: "set_settings",
-    write_scope: "none",
-    excludes: ["private/**"],
-  });
-});
-test("custom Pi profile builder creates, edits and deletes external access rules", async ({
-  page,
-}) => {
-  await mockApi(page);
-  const profileRows: Array<{
-    id: string;
-    revision: string;
-    mutable: boolean;
-    config: Record<string, unknown>;
-  }> = [
-    {
-      id: "read-only",
-      revision: "default-revision",
-      mutable: false,
-      config: piReadOnlyConfig,
-    },
-  ];
-  const assignments: unknown[] = [];
-  const saved: unknown[] = [];
-  await page.route("**/api/runtimes/pi/profiles*", async (route) => {
-    if (route.request().method() === "POST") {
-      const body = route.request().postDataJSON();
-      saved.push(body);
-      const row = {
-        id: body.id,
-        revision: `revision-${saved.length}`,
-        mutable: true,
-        config: body.config,
-      };
-      const index = profileRows.findIndex((profile) => profile.id === row.id);
-      if (index >= 0) profileRows[index] = row;
-      else profileRows.push(row);
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(row),
-      });
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ profiles: profileRows }),
-    });
-  });
-  await page.route("**/api/runtimes/pi/profiles/*", async (route) => {
-    const id = new URL(route.request().url()).pathname.split("/").pop();
-    const index = profileRows.findIndex((profile) => profile.id === id);
-    if (index >= 0) profileRows.splice(index, 1);
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ deleted: id }),
-    });
-  });
-  await page.route("**/api/workspaces/ws-1/runtimes/pi", async (route) => {
-    assignments.push(route.request().postDataJSON());
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: "{}",
-    });
-  });
-  await page.goto("./");
-  await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await page.getByRole("button", { name: "Create from selected" }).click();
-  await page.getByLabel("Profile ID").fill("reviewed-shared");
-  await page.getByLabel("Enable edit and write").check();
-  await page.getByLabel("Default file access").selectOption("deny");
-  await page.getByRole("button", { name: "Add external root" }).click();
+  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
+  await noOverflow();
+  await page.getByRole("button", { name: "Open navigation" }).click();
   await page
-    .getByRole("textbox", { name: "External root 1", exact: true })
-    .fill("/Volumes/shared");
-  await page.getByLabel("Access for external root 1").selectOption("ask");
-  await page.screenshot({
-    path: "test-results/profile-editor-desktop.png",
-    fullPage: true,
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({
-    path: "test-results/profile-editor-mobile.png",
-    fullPage: true,
-  });
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole("button", { name: "Create profile" }).click();
-  await expect.poll(() => saved.length).toBe(1);
-  expect(
-    (saved[0] as { config: typeof piReadOnlyConfig }).config.external_access
-      .roots,
-  ).toEqual([{ path: "/Volumes/shared", mode: "ask" }]);
-
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change security" }).first().click();
-  await page.getByRole("button", { name: /reviewed-shared/ }).click();
-  await page.getByRole("button", { name: "Save security source" }).click();
-  await expect.poll(() => assignments.length).toBe(1);
-  expect(assignments[0]).toEqual({
-    enabled: true,
-    profile_id: "reviewed-shared",
-    security_source: "profile",
-  });
-
-  await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await page.getByRole("button", { name: /reviewed-shared/ }).click();
-  await page.getByRole("button", { name: "Edit controls" }).click();
-  await page.getByLabel("Shell commands").selectOption("ask");
-  await page.getByRole("button", { name: "Save controls" }).click();
-  await expect.poll(() => saved.length).toBe(2);
-  expect((saved[1] as { expected_revision: string }).expected_revision).toBe(
-    "revision-1",
-  );
-
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change security" }).first().click();
-  await page.getByRole("button", { name: /read-only/ }).click();
-  await page.getByRole("button", { name: "Save security source" }).click();
-  await expect.poll(() => assignments.length).toBe(2);
-
-  await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await page.getByRole("button", { name: /reviewed-shared/ }).click();
-  await page.getByRole("button", { name: "Delete", exact: true }).click();
-  await page.getByRole("button", { name: "Delete profile" }).click();
-  await expect
-    .poll(() => profileRows.some((profile) => profile.id === "reviewed-shared"))
-    .toBe(false);
-});
-test("Codex profile editor selects native permission profiles in workspace context", async ({
-  page,
-}) => {
-  await mockApi(page);
-  const codexConfig = {
-    permissions: ":read-only",
-    approvalPolicy: "on-request",
-    approvalsReviewer: "user",
-  };
-  const profileRows = [
-    {
-      id: "read-only",
-      revision: "native-rev",
-      definitionRevision: "definition-rev",
-      available: true,
-      mutable: false,
-      config: codexConfig,
-    },
-  ];
-  const profileQueries: string[] = [];
-  const saved: Array<{ id: string; config: Record<string, unknown> }> = [];
-  await page.route("**/api/runtimes/codex/profiles*", async (route) => {
-    const request = route.request();
-    if (request.method() === "POST") {
-      const body = request.postDataJSON();
-      saved.push(body);
-      profileRows.push({
-        id: body.id,
-        revision: "saved-rev",
-        definitionRevision: "saved-definition-rev",
-        available: true,
-        mutable: true,
-        config: body.config,
-      });
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(profileRows.at(-1)),
-      });
-    }
-    const url = new URL(request.url());
-    profileQueries.push(url.searchParams.get("workspace_id") || "");
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        profiles: profileRows,
-        permissionProfiles: [
-          { id: ":read-only", description: "Read files", allowed: true },
-          {
-            id: "workspace-net",
-            description: "Project network",
-            allowed: true,
-          },
-        ],
-      }),
-    });
-  });
-
-  await page.goto("./");
-  await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await page.getByRole("button", { name: "Codex", exact: true }).click();
-  await expect(page.getByRole("button", { name: "read-only" })).toBeVisible();
-  expect(profileQueries.at(-1)).toBe("ws-1");
-  await page.getByRole("button", { name: "Create from selected" }).click();
-  await page.getByLabel("Profile ID").fill("workspace-network");
-  await expect(page.getByLabel("Permission profile")).toBeVisible();
-  await expect(page.getByLabel("Sandbox")).toHaveCount(0);
-  await page.getByLabel("Permission profile").selectOption("workspace-net");
-  const approvalOptions = page.getByLabel("Approvals").locator("option");
-  await expect(approvalOptions).toHaveCount(2);
-  expect(
-    await approvalOptions.evaluateAll((options) =>
-      options.map((option) => (option as HTMLOptionElement).value),
-    ),
-  ).toEqual(["on-request", "never"]);
-  await page.getByLabel("Approvals").selectOption("on-request");
-  await page
-    .getByRole("button", { name: "Create profile", exact: true })
+    .getByRole("navigation", { name: "Mobile navigation" })
+    .getByRole("button", { name: "Adapters" })
     .click();
-  await expect.poll(() => saved.length).toBe(1);
-  expect(saved[0]).toEqual({
-    id: "workspace-network",
-    config: {
-      permissions: "workspace-net",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-    },
-    expected_revision: null,
-  });
-  expect(saved[0].config).not.toHaveProperty("sandbox");
+  await expect(
+    page.getByRole("heading", { name: "Adapters", level: 1 }),
+  ).toBeVisible();
+  await noOverflow();
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await page
+    .getByRole("navigation", { name: "Mobile navigation" })
+    .getByRole("button", { name: "Nodes" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Nodes", level: 1 }),
+  ).toBeVisible();
+  await noOverflow();
 });
 
-test("Codex workspace can follow current config with a live resolved summary", async ({
+test("Nodes show authority status and keep Node and adapter tokens write-only", async ({
   page,
 }) => {
-  await mockApi(page);
-  const selection: unknown[] = [];
-  const runtimeConfig = {
-    supported: true,
-    available: true,
-    status: "ready",
-    revision: "opaque-security-revision",
-    resolvedSummary: {
-      activePermissionProfile: ":workspace",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      provenance: "implicit/default",
-    },
-  };
-  await page.route("**/api/runtimes/codex/profiles*", async (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        profiles: [
-          {
-            id: "read-only",
-            revision: "profile-revision",
-            mutable: false,
-            available: true,
-          },
-        ],
-        permissionProfiles: [],
-        runtimeConfig,
-      }),
-    }),
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Nodes");
+  await expect(
+    page.getByRole("heading", { name: "Nodes", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Local Mac" })).toBeVisible();
+  await expect(page.getByText("Node Protocol", { exact: true })).toHaveCount(
+    2,
   );
-  await page.route("**/api/workspaces/ws-1/runtimes/codex", async (route) => {
-    selection.push(route.request().postDataJSON());
-    workspace.runtime_grants.codex.security_binding = {
-      source: "runtime-config",
-      revision: "old-observation",
-      status: "ready",
-      observed_revision: runtimeConfig.revision,
-      resolved_summary: runtimeConfig.resolvedSummary,
-    };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: "{}",
-    });
-  });
+  await expect(page.getByText("Local Pi · Pi", { exact: true })).toBeVisible();
 
-  await page.goto("./");
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: "Change security" }).nth(1).click();
-  const configMode = page.getByRole("radio", {
-    name: /Use Codex config \(config.toml\)/,
+  await page
+    .getByRole("button", { name: "Add Node", exact: true })
+    .first()
+    .click();
+  await page.getByLabel("Name", { exact: true }).fill("Review Node");
+  await page
+    .getByLabel("Node URL", { exact: true })
+    .fill("http://review-node:8770");
+  await page
+    .getByLabel("Node token", { exact: true })
+    .fill("review-node-secret");
+  await page.getByRole("button", { name: "Test connection" }).click();
+  await expect(page.getByRole("status")).toHaveText(
+    "Connected: Node Protocol is ready.",
+  );
+  expect(api.calls.at(-1)).toMatchObject({
+    path: "/api/nodes/test",
+    method: "POST",
+    body: { token: "review-node-secret", base_url: "http://review-node:8770" },
   });
-  await expect(configMode).toBeEnabled();
-  await configMode.check();
-  await expect(page.getByText(":workspace", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("implicit/default", { exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Save security source" }).click();
-  await expect.poll(() => selection.length).toBe(1);
-  expect(selection[0]).toEqual({
-    enabled: false,
-    security_source: "runtime-config",
-    profile_id: null,
-  });
-  await expect(
-    page.getByText("Use Codex config (config.toml)").first(),
-  ).toBeVisible();
-  await expect(page.getByText(/Following current Codex config/)).toBeVisible();
-});
+  await page
+    .getByRole("button", { name: "Add Node", exact: true })
+    .last()
+    .click();
+  await expect(page.getByText("review-node-secret")).toHaveCount(0);
+  expect(
+    api.calls.some(
+      (call) => call.path === "/api/nodes" && call.method === "POST",
+    ),
+  ).toBe(true);
 
-test("mobile navigation, models, and no overflow", async ({ page }) => {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  await mockApi(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("./");
-  await page.screenshot({
-    path: "test-results/mobile-overview.png",
-    fullPage: true,
-  });
-  await page.getByRole("button", { name: "Open navigation" }).click();
-  await page.getByRole("button", { name: "Runtimes", exact: true }).click();
-  await expect(page.getByText("Bridge connection")).toBeVisible();
-  await page.getByRole("button", { name: "Manage models" }).first().click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await page.screenshot({
-    path: "test-results/mobile-models.png",
-    fullPage: true,
-  });
+  const localNode = page.locator(".node-card").filter({ hasText: "Local Mac" });
+  await localNode.getByRole("button", { name: "Edit" }).first().click();
+  await expect(page.getByLabel("Node token", { exact: true })).toHaveValue("");
+  await expect(page.getByText("node-test-token")).toHaveCount(0);
   await page.getByRole("button", { name: "Cancel" }).click();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.setViewportSize({ width: 320, height: 700 });
-  await page.getByRole("button", { name: "Open navigation" }).click();
-  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
-  await page.getByRole("button", { name: /Settings/ }).click();
-  await page.screenshot({
-    path: "test-results/mobile-workspace-settings.png",
-    fullPage: true,
-  });
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  expect(errors).toEqual([]);
+  await localNode.getByRole("button", { name: "Add adapter" }).click();
+  await expect(
+    page.getByText(/owning Node's private SQLite state/),
+  ).toBeVisible();
+  await expect(page.getByText(/Manager never reads it back/)).toBeVisible();
 });
 
-test("login keeps token out of storage and returns to locked view", async ({
+test("zero-route workspaces offer only same-Node targets and no implicit fallback", async ({
   page,
 }) => {
-  let signedIn = false;
-  await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path === "/api/status" && !signedIn)
-      return route.fulfill({
-        status: 401,
-        contentType: "application/json",
-        body: '{"error":"Admin token required"}',
-      });
-    if (path === "/api/login") {
-      signedIn =
-        route.request().headers().authorization === "Bearer current-token";
-      return route.fulfill({
-        status: signedIn ? 200 : 401,
-        contentType: "application/json",
-        body: signedIn ? '{"status":"ok"}' : '{"error":"Admin token required"}',
-      });
-    }
-    if (path === "/api/logout") {
-      signedIn = false;
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "{}",
-      });
-    }
-    const data =
-      path === "/api/status"
-        ? {
-            version: "0.8.4",
-            listen_mode: "loopback",
-            allowed_parents: ["/Projects"],
-            mcp_port: 8765,
-            bridge: { configured: false, enabled: false },
-            runtimes: { runtimes: {} },
-            runtime_policies: {},
-          }
-        : path === "/api/workspaces"
-          ? { workspaces: [] }
-          : path === "/api/events"
-            ? { events: [] }
-            : path === "/api/runs"
-              ? { runs: [], next_offset: null }
-              : {};
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(data),
-    });
-  });
+  const api = await mockApi(page, { zeroRoute: true });
   await page.goto("./");
+  await navigate(page, "Workspaces");
+  const card = page
+    .locator(".workspace-entry")
+    .filter({ hasText: workspace.name });
+  await expect(card.getByText("No execution targets configured")).toBeVisible();
+  const addTarget = card.getByLabel(
+    `Add execution target for ${workspace.name}`,
+  );
   await expect(
-    page.getByRole("heading", { name: "Open the console" }),
-  ).toBeVisible();
-  await page.getByLabel("Admin token").fill("wrong-token");
-  await page.getByRole("button", { name: "Open manager" }).click();
-  await expect(page.getByRole("alert")).toContainText("not current");
-  await page.getByLabel("Admin token").fill("current-token");
-  await page.getByRole("button", { name: "Open manager" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    addTarget.getByRole("option", { name: /Local Codex/ }),
+  ).toHaveCount(1);
+  await expect(
+    addTarget.getByRole("option", { name: /GPU-only Pi/ }),
+  ).toHaveCount(0);
+  await addTarget.selectOption(LOCAL_CODEX);
+  await card.getByRole("button", { name: "Add target" }).click();
   expect(
-    await page.evaluate(() =>
-      Object.values(localStorage).some((v) => v.includes("current-token")),
+    api.calls.find(
+      (call) => call.path === `/api/workspaces/${WS_ID}/routes/${LOCAL_CODEX}`,
     ),
-  ).toBe(false);
-  await page.getByRole("button", { name: "Lock console" }).click();
+  ).toMatchObject({ method: "POST", body: { enabled: false } });
+
+  await navigate(page, "Handoffs");
+  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
+  const route = page.getByLabel("Execution target", { exact: true });
+  await expect(route).toBeDisabled();
   await expect(
-    page.getByRole("heading", { name: "Open the console" }),
+    route.getByRole("option", { name: "No canonical route reported" }),
+  ).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+});
+
+test("handoff summaries, blocked defaults, and run security snapshots stay explicit", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { blockedDefault: true, runSnapshot: true });
+  await page.goto("./");
+  await navigate(page, "Workspaces");
+  await expect(page.getByText("Route readiness").first()).toBeVisible();
+  await expect(
+    page.getByText(/Profile read-only · revision local-profil/).first(),
   ).toBeVisible();
+  await expect(
+    page.getByText(
+      /Codex runtime config · :read-only · approval on-request · reviewer user/,
+    ),
+  ).toBeVisible();
+  const workspaceCard = page
+    .locator(".workspace-entry")
+    .filter({ hasText: workspace.name });
+  await workspaceCard.getByRole("button", { name: "Clear default" }).click();
+  await expect
+    .poll(() =>
+      api.calls.some(
+        (call) =>
+          call.path === `/api/workspaces/${WS_ID}/routes/default` &&
+          call.method === "DELETE",
+      ),
+    )
+    .toBe(true);
+  const gpuRoute = workspaceCard
+    .locator(".target-row")
+    .filter({ hasText: "GPU Pi · Pi" });
+  await gpuRoute.getByRole("button", { name: "Set as default" }).click();
+  await expect
+    .poll(() =>
+      api.calls.some(
+        (call) =>
+          call.path === `/api/workspaces/${WS_ID}/routes/default` &&
+          call.method === "POST" &&
+          call.body?.adapter_id === GPU_PI,
+      ),
+    )
+    .toBe(true);
+  await navigate(page, "Handoffs");
+  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
+  await expect(
+    page.getByLabel("Execution target", { exact: true }),
+  ).toHaveValue(LOCAL_PI);
+  await expect(
+    page.getByText(/Security: Profile read-only/).first(),
+  ).toBeVisible();
+  await expect(page.getByText(/Node: Local Mac/).first()).toBeVisible();
+  await expect(
+    page.getByText(/Default model: pi-local-fast/).first(),
+  ).toBeVisible();
+  const routeSelector = page.getByLabel("Execution target", { exact: true });
+  await routeSelector.selectOption(LOCAL_CODEX);
+  await expect(
+    page.getByText(
+      /Security: Codex runtime config · :read-only · approval on-request · reviewer user/,
+    ),
+  ).toBeVisible();
+  await routeSelector.selectOption(LOCAL_PI);
+  await expect(
+    page.getByText("Blocked by route.security_freshness."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+  await page.getByRole("button", { name: "TASK" }).click();
+  await expect(
+    page.getByText("Handoff summary: inspect the project"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).last().click();
+
+  await navigate(page, "Runs");
+  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
+  await page.getByRole("button", { name: "Open run" }).click();
+  await expect(page.getByText("Security used for this run")).toBeVisible();
+  await expect(
+    page.getByText(/Profile read-only · bound revision profile-run-rev/),
+  ).toBeVisible();
+  await expect(page.getByText(/Local Mac · rev node-run-rev/)).toBeVisible();
 });

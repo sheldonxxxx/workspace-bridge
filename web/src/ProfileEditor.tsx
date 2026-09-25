@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, runtimeName, type Workspace } from "@/lib/api";
+import { api, runtimeName, type AdapterInfo, type Workspace } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,17 +95,19 @@ function SelectField({
 }
 
 export function ProfileManager({
-  runtimes,
+  adapters,
   workspaces,
   onChanged,
   notify,
 }: {
-  runtimes: string[];
+  adapters: AdapterInfo[];
   workspaces: Workspace[];
   onChanged: () => Promise<void>;
   notify: (message: string) => void;
 }) {
-  const [runtime, setRuntime] = useState(runtimes[0] || "pi");
+  const [adapterId, setAdapterId] = useState(adapters[0]?.id || "");
+  const adapter = adapters.find((item) => item.id === adapterId);
+  const runtimeType = adapter?.runtime_type || "pi";
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [permissionProfiles, setPermissionProfiles] = useState<
     NativePermissionProfile[]
@@ -129,29 +131,27 @@ export function ProfileManager({
     : workspaces[0]?.id || "";
   const selected = profiles.find((profile) => profile.id === selectedId);
   const selectedConfig = selected?.config;
-  const available = runtimes.includes(runtime);
-  const firstRuntime = runtimes[0];
+  const available = Boolean(adapter);
   const assignedWorkspaces = workspaces.filter(
-    (workspace) =>
-      workspace.runtime_grants?.[runtime]?.profile?.id === selectedId,
+    (workspace) => workspace.routes?.[adapterId]?.profile?.id === selectedId,
   );
   const pi = draft as unknown as PiConfig;
   const codex = draft as unknown as CodexConfig;
 
   useEffect(() => {
-    if (!available && firstRuntime) setRuntime(firstRuntime);
-  }, [available, firstRuntime]);
+    if (!available && adapters[0]) setAdapterId(adapters[0].id);
+  }, [available, adapters]);
 
   const profilesUrl = useCallback(() => {
-    if (runtime === "codex" && effectiveContextWorkspaceId) {
+    if (adapterId && effectiveContextWorkspaceId) {
       const query = new URLSearchParams({
         workspace_id: effectiveContextWorkspaceId,
         fresh: "1",
       });
-      return `/api/runtimes/${runtime}/profiles?${query.toString()}`;
+      return `/api/adapters/${adapterId}/profiles?${query.toString()}`;
     }
-    return `/api/runtimes/${runtime}/profiles`;
-  }, [runtime, effectiveContextWorkspaceId]);
+    return `/api/adapters/${adapterId}/profiles`;
+  }, [adapterId, effectiveContextWorkspaceId]);
 
   useEffect(() => {
     let live = true;
@@ -176,7 +176,7 @@ export function ProfileManager({
     return () => {
       live = false;
     };
-  }, [runtime, available, effectiveContextWorkspaceId, profilesUrl]);
+  }, [adapterId, available, effectiveContextWorkspaceId, profilesUrl]);
 
   async function reload(selectId: string) {
     const data = await api<{
@@ -199,7 +199,7 @@ export function ProfileManager({
     setError("");
     try {
       const saved = await api<Profile>(
-        `/api/runtimes/${runtime}/profiles`,
+        `/api/adapters/${adapterId}/profiles`,
         "POST",
         {
           id: draftId,
@@ -232,7 +232,7 @@ export function ProfileManager({
     setBusy(true);
     setError("");
     try {
-      await api(`/api/runtimes/${runtime}/profiles/${selected.id}`, "DELETE");
+      await api(`/api/adapters/${adapterId}/profiles/${selected.id}`, "DELETE");
       await reload(
         profiles.find((profile) => profile.id !== selected.id)?.id || "",
       );
@@ -249,7 +249,7 @@ export function ProfileManager({
     if (!selected || !selectedConfig) return;
     setDraftId(mode === "edit" ? selected.id : "");
     setDraft(copy(selectedConfig));
-    if (runtime === "pi") {
+    if (runtimeType === "pi") {
       const config = selectedConfig as unknown as PiConfig;
       setProtectedText((config.protected_patterns || []).join("\n"));
       setExceptionText((config.protected_template_exceptions || []).join("\n"));
@@ -268,29 +268,29 @@ export function ProfileManager({
         <div
           className="profiles-runtime-tabs"
           role="group"
-          aria-label="Runtime"
+          aria-label="Adapter"
         >
-          {runtimes.map((id) => (
+          {adapters.map((item) => (
             <button
-              key={id}
+              key={item.id}
               type="button"
-              aria-pressed={runtime === id}
-              className={runtime === id ? "current" : ""}
-              onClick={() => setRuntime(id)}
+              aria-pressed={adapterId === item.id}
+              className={adapterId === item.id ? "current" : ""}
+              onClick={() => setAdapterId(item.id)}
             >
-              {runtimeName(id)}
+              {item.name} · {runtimeName(item.runtime_type)}
             </button>
           ))}
         </div>
-        {runtimes.length === 0 ? (
+        {adapters.length === 0 ? (
           <p className="profiles-empty">
-            Connect a runtime to manage its security profiles.
+            Add an adapter to manage its security profiles.
           </p>
         ) : (
           <div className="profiles-layout">
             <aside
               className="profiles-list-panel"
-              aria-label={`${runtimeName(runtime)} profiles`}
+              aria-label={`${adapter?.name || "Adapter"} profiles`}
             >
               <h2>Saved profiles</h2>
               <p>Choose one to inspect or use as a starting point.</p>
@@ -350,7 +350,7 @@ export function ProfileManager({
                       <span>Revision {selected.revision.slice(0, 12)}</span>
                       <span>
                         {selectedConfig
-                          ? runtime === "pi"
+                          ? runtimeType === "pi"
                             ? `Files outside workspace: ${(selectedConfig as unknown as PiConfig).external_access?.default_mode || "deny"}`
                             : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
                           : "Controls unavailable from the installed adapter"}
@@ -365,8 +365,9 @@ export function ProfileManager({
                   )}
                   {selected && !selectedConfig && (
                     <p className="profile-error" role="status">
-                      Update the native {runtimeName(runtime)} adapter to create
-                      or edit profiles. Existing profiles can still be assigned.
+                      Update the native {runtimeName(runtimeType)} adapter to
+                      create or edit profiles. Existing profiles can still be
+                      assigned.
                     </p>
                   )}
                   <div className="profile-actions">
@@ -415,7 +416,7 @@ export function ProfileManager({
                       />
                     </div>
                   )}
-                  {runtime === "codex" && (
+                  {runtimeType === "codex" && (
                     <div className="form-field">
                       <Label htmlFor="codex-discovery-workspace">
                         Native profile choices
@@ -436,12 +437,12 @@ export function ProfileManager({
                         ))}
                       </select>
                       <small>
-                        Codex resolves named permission profiles per project.
-                        This list checks the selected workspace.
+                        Native profile choices are discovered for this exact
+                        adapter and workspace.
                       </small>
                     </div>
                   )}
-                  {runtime === "pi" ? (
+                  {runtimeType === "pi" ? (
                     <>
                       <section className="profile-section">
                         <h3>File tools</h3>

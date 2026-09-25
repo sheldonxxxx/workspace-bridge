@@ -93,27 +93,36 @@ class NotificationEvent:
     workspace_id: str
     workspace_name: str
     handoff_title: str
-    runtime: str
+    adapter_id: str
+    adapter_name: str
+    runtime_type: str
     occurred_at: str
+    node_id: str = ""
+    node_name: str = ""
     subject_id: str = ""
     request_kind: str = ""
     action: str = ""
 
     @classmethod
     def build(cls, *, event_type: str, run_id: str, workspace_id: str,
-              workspace_name: str, handoff_title: str, runtime: str,
+              workspace_name: str, handoff_title: str, adapter_id: str,
+              adapter_name: str, runtime_type: str,
+              node_id: str = "", node_name: str = "",
               occurred_at: str | None = None, subject_id: str = "",
               request_kind: str = "", action: str = "") -> "NotificationEvent":
         if event_type not in EVENT_TYPES:
             raise BridgeError("Unknown notification event type", "invalid_notification")
         safe_run = _safe_id(run_id)
         safe_workspace = _safe_id(workspace_id)
-        safe_runtime = _safe_id(runtime)
+        safe_adapter = _safe_id(adapter_id)
+        safe_node = _safe_id(node_id)
         raw_subject = subject_id if isinstance(subject_id, str) else ""
         safe_subject = _safe_id(raw_subject)
         if raw_subject and not safe_subject:
             safe_subject = "sub_" + hashlib.sha256(raw_subject.encode("utf-8", errors="replace")).hexdigest()[:32]
-        if not safe_run or not safe_workspace or not safe_runtime:
+        if (not safe_run or not safe_workspace
+                or not re.fullmatch(r"adapter_[0-9a-f]{24}", safe_adapter)
+                or runtime_type not in {"pi", "codex"}):
             raise BridgeError("Invalid notification identity", "invalid_notification")
         if event_type == "run_needs_attention" and not safe_subject:
             raise BridgeError("Attention notifications require a subject id", "invalid_notification")
@@ -135,7 +144,10 @@ class NotificationEvent:
             event_type=event_type, run_id=safe_run, workspace_id=safe_workspace,
             workspace_name=_safe_label(workspace_name, "workspace", 100),
             handoff_title=_safe_label(handoff_title, "handoff", 100),
-            runtime=safe_runtime, occurred_at=stamp, subject_id=safe_subject,
+            adapter_id=safe_adapter,
+            adapter_name=_safe_label(adapter_name, "adapter", 80),
+            runtime_type=runtime_type, occurred_at=stamp, node_id=safe_node,
+            node_name=_safe_label(node_name, "Node", 80), subject_id=safe_subject,
             request_kind=kind, action=safe_action)
 
 
@@ -226,6 +238,8 @@ class DiscordChannel:
         headline = "Agent run needs attention" if attention else f"Agent run {state}"
         fields = [
             {"name": "Workspace", "value": event.workspace_name, "inline": True},
+            {"name": "Node", "value": event.node_name or event.node_id or "Unknown", "inline": True},
+            {"name": "Adapter", "value": event.adapter_name, "inline": True},
             {"name": "Handoff", "value": event.handoff_title, "inline": True},
             {"name": "Run", "value": event.run_id[:80], "inline": True},
             {"name": "Outcome", "value": state[:40], "inline": True},
@@ -319,7 +333,9 @@ class NotificationManager:
             id TEXT PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE,
             run_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
             workspace_name TEXT NOT NULL, handoff_title TEXT NOT NULL,
-            runtime TEXT NOT NULL, event_type TEXT NOT NULL,
+            adapter_id TEXT NOT NULL, adapter_name TEXT NOT NULL,
+            runtime_type TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '',
+            node_name TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL,
             subject_id TEXT NOT NULL DEFAULT '', request_kind TEXT NOT NULL DEFAULT '',
             action TEXT NOT NULL DEFAULT '', occurred_at TEXT NOT NULL,
             created_at TEXT NOT NULL);
@@ -357,16 +373,20 @@ class NotificationManager:
         event = NotificationEvent.build(
             event_type=event.event_type, run_id=event.run_id,
             workspace_id=event.workspace_id, workspace_name=event.workspace_name,
-            handoff_title=event.handoff_title, runtime=event.runtime,
+            handoff_title=event.handoff_title, adapter_id=event.adapter_id,
+            adapter_name=event.adapter_name, runtime_type=event.runtime_type,
+            node_id=event.node_id, node_name=event.node_name,
             occurred_at=event.occurred_at, subject_id=event.subject_id,
             request_kind=event.request_kind, action=event.action)
         self.service.db.execute(
             "INSERT OR IGNORE INTO notification_events(id,dedupe_key,run_id,workspace_id,"
-            "workspace_name,handoff_title,runtime,event_type,subject_id,request_kind,action,"
-            "occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "workspace_name,handoff_title,adapter_id,adapter_name,runtime_type,node_id,node_name,event_type,"
+            "subject_id,request_kind,action,occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (event.id, event.dedupe_key, event.run_id, event.workspace_id,
-             event.workspace_name, event.handoff_title, event.runtime, event.event_type,
-             event.subject_id, event.request_kind, event.action, event.occurred_at, self._now()))
+             event.workspace_name, event.handoff_title, event.adapter_id,
+             event.adapter_name, event.runtime_type, event.node_id, event.node_name,
+             event.event_type, event.subject_id, event.request_kind, event.action,
+             event.occurred_at, self._now()))
         row = self.service.db.execute(
             "SELECT id FROM notification_events WHERE dedupe_key=?", (event.dedupe_key,)).fetchone()
         event_id = row["id"]
@@ -380,18 +400,22 @@ class NotificationManager:
         return event_id, created
 
     def record_run_event_locked(self, *, run_id: str, workspace_id: str,
-                                job_id: str, runtime: str, event_type: str,
-                                subject_id: str = "", request_kind: str = "",
+                                job_id: str, adapter_id: str, runtime_type: str,
+                                event_type: str, subject_id: str = "", request_kind: str = "",
                                 action: str = "", occurred_at: str | None = None) -> tuple[str, bool]:
         """Insert a run event inside the caller's state transaction."""
         row = self.service.db.execute(
             "SELECT w.name,j.title FROM workspaces w LEFT JOIN jobs j ON j.id=? "
             "WHERE w.id=?", (job_id, workspace_id)).fetchone()
+        adapter = self.service.adapter_registry.get(adapter_id)
         event = NotificationEvent.build(
             event_type=event_type, run_id=run_id, workspace_id=workspace_id,
             workspace_name=row["name"] if row else "workspace",
             handoff_title=row["title"] if row and row["title"] else "handoff",
-            runtime=runtime, occurred_at=occurred_at, subject_id=subject_id,
+            adapter_id=adapter_id,
+            adapter_name=adapter["name"], runtime_type=runtime_type,
+            node_id=adapter.get("node_id", ""), node_name=adapter.get("node_name", ""),
+            occurred_at=occurred_at, subject_id=subject_id,
             request_kind=request_kind, action=action)
         return self._record_event_locked(event)
 
@@ -401,13 +425,15 @@ class NotificationManager:
         return event_id
 
     def publish_run_event(self, *, run_id: str, workspace_id: str, job_id: str,
-                          runtime: str, event_type: str, subject_id: str = "",
+                          adapter_id: str, runtime_type: str,
+                          event_type: str, subject_id: str = "",
                           request_kind: str = "", action: str = "",
                           occurred_at: str | None = None) -> str:
         with self.service.lock, self.service.db:
             event_id, _ = self.record_run_event_locked(
                 run_id=run_id, workspace_id=workspace_id, job_id=job_id,
-                runtime=runtime, event_type=event_type, subject_id=subject_id,
+                adapter_id=adapter_id, runtime_type=runtime_type,
+                event_type=event_type, subject_id=subject_id,
                 request_kind=request_kind, action=action, occurred_at=occurred_at)
         return event_id
 
@@ -451,7 +477,9 @@ class NotificationManager:
                 id=row["id"], dedupe_key=row["dedupe_key"], event_type=row["event_type"],
                 run_id=row["run_id"], workspace_id=row["workspace_id"],
                 workspace_name=row["workspace_name"], handoff_title=row["handoff_title"],
-                runtime=row["runtime"], occurred_at=row["occurred_at"],
+                adapter_id=row["adapter_id"], adapter_name=row["adapter_name"],
+                runtime_type=row["runtime_type"], occurred_at=row["occurred_at"],
+                node_id=row["node_id"], node_name=row["node_name"],
                 subject_id=row["subject_id"], request_kind=row["request_kind"],
                 action=row["action"])
             try:
@@ -496,6 +524,9 @@ class NotificationManager:
         for event in events:
             delivery = event_deliveries.get(event["id"], [])
             event_rows.append({"id": event["id"], "event_type": event["event_type"],
+                               "node_id": event["node_id"], "node_name": event["node_name"],
+                               "adapter_id": event["adapter_id"],
+                               "adapter_name": event["adapter_name"],
                                "subject_id": event["subject_id"] or None,
                                "occurred_at": event["occurred_at"],
                                "channels": {item["channel_id"]: item["status"] for item in delivery}})

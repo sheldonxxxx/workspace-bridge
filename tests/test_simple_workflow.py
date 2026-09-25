@@ -16,6 +16,7 @@ EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
             'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',
+            'list_agent_adapters',
             'read_agent_run',
             'cancel_agent_run', 'list_agent_executions', 'read_agent_execution',
             'read_agent_interaction', 'respond_agent_interaction',
@@ -39,6 +40,15 @@ def test_tool_surface_and_mutations_are_deliberate():
     assert set(TOOLS) == EXPECTED
     assert {n for n, (_, _, ro, _) in TOOLS.items() if not ro} == MUTATING
     assert not any(hasattr(Service, n) for n in (*RETIRED, 'snapshot', 'snapshot_once', 'artifact_state'))
+
+
+def test_workspace_info_describes_exact_adapter_workflow(env):
+    info = env['service'].call(env['id'], env['token'], 'workspace_info', {})
+    workflow = info['workflow']
+    assert 'explicit runtime' not in workflow
+    assert workflow.index('list_agent_adapters') < workflow.index('adapter_id')
+    assert workflow.index('adapter_id') < workflow.index('list_agent_models')
+    assert workflow.index('list_agent_models') < workflow.index('start_agent_run')
 
 
 def test_fresh_state_has_no_review_or_audit_tables(env):

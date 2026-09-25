@@ -93,7 +93,7 @@ def test_mapping_parent_and_overlap(env):
 
 def test_init_preserves_state(env):
     before = (env["state"] / "config.json").read_bytes()
-    with pytest.raises(BridgeError): initialize(env["state"], [str(env["parent"])], 8765, 8766)
+    with pytest.raises(BridgeError): initialize(env["state"], 8765, 8766)
     assert (env["state"] / "config.json").read_bytes() == before
 
 def test_no_symlink_ancestor(env):
@@ -108,11 +108,9 @@ def test_casefold_extra_policy():
     assert not allowed('PRIVATE/key.txt', ['private/*'])
 
 def test_removed_parent_revokes_access(env):
-    from workspace_bridge.service import Service
+    node_service = env["node"]["service"]
     other = env['tmp'] / 'other-parent'; other.mkdir()
-    second = Service(env['state'], {**env['config'], 'allowed_parents': [str(other)]})
-    try:
-        with pytest.raises(BridgeError, match='approved parent'):
-            second.info(second.workspace(env['id']))
-    finally:
-        second.close()
+    node_service.allowed_roots = [other]
+    with pytest.raises(BridgeError) as exc:
+        env["service"].info(env["service"].workspace(env["id"]))
+    assert exc.value.code == "root_denied"

@@ -21,6 +21,16 @@ def test_descriptor_ignores_future_optional_capabilities():
     assert "futureFeature" not in descriptor.features
 
 
+def test_http_adapter_scrubs_its_token_from_remote_payloads():
+    token = "adapter-token-should-not-escape"
+    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "pi",
+                                "http://127.0.0.1:8780", token)
+    response = client._scrub_secret({"message": f"rejected with {token}",
+                                     "nested": [f"echo:{token}"]})
+    assert token not in str(response)
+    assert response["message"] == "rejected with [REDACTED_SECRET]"
+
+
 def test_codex_http_adapter_contract(tmp_path):
     projects = tmp_path / "projects"
     workspace = projects / "work"
@@ -39,7 +49,10 @@ def test_codex_http_adapter_contract(tmp_path):
                 break
             time.sleep(0.01)
         assert server.started
-        client = HttpRuntimeAdapter("codex", f"http://127.0.0.1:{port}", "secret")
+        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
+                                    f"http://127.0.0.1:{port}", "secret")
+        assert client.adapter_id == "adapter_000000000000000000000001"
+        assert client.runtime_type == "codex"
         assert client.descriptor().supports("interactions")
         assert client.models("ws-one")[0]["selector"] == "gpt-test"
         profile_catalog = client.profile_catalog("ws-one", str(workspace), fresh=True)

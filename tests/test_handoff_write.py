@@ -280,7 +280,7 @@ def test_logs_do_not_contain_document_content_or_paths(env):
 
 def test_skill_and_tools_describe_handoff_only_and_manual_review():
     skill=read_project_lead_skill()
-    assert skill['version']=='2.5.0'
+    assert skill['version']=='2.6.0'
     for value in ['write_file','edit_file','expected_sha256','.workspace-handoff/','re-read and reconcile','No special report files','Audit using normal tools']:
         assert value in skill['content']
     for name in ['write_file','edit_file']:
@@ -364,6 +364,8 @@ def test_existing_state_opens_without_migration_and_notes_survive(env,payload):
     job=call(env,'prepare_handoff',**payload);created=write(env)
     columns=[tuple(r) for r in env['service'].db.execute('PRAGMA table_info(jobs)')]
     reopened=Service(env['state'],env['config'])
+    reopened._node_transport = {env['node_id']: env['node']['transport']}
+    reopened._node_transport_services = {env['node_id']: env['node']['service']}
     try:
         reopened.authenticate(env['id'],env['token'])
         assert columns==[tuple(r) for r in reopened.db.execute('PRAGMA table_info(jobs)')]

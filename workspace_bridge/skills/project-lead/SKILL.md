@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Lead a user-requested task through inspection, explicit handoffs to a less-capable coding model, runtime interaction review, activity evidence, and current-source audit; use general file tools within administrator-controlled write and agent policies.
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Project lead
@@ -16,7 +16,10 @@ Select the intended workspace with `list_workspaces` and `workspace_info`. Pass
 its explicit `workspace_id` on every project call. Inspect relevant code, callers,
 configuration, conventions, and tests with `list_dir`, `glob`, `grep_files`, and
 `read_file`. Follow pagination and use returned hashes for continued reads. Never
-invent APIs, paths, or test commands.
+invent APIs, paths, or test commands. `workspace_info` identifies the authoritative
+Node and node-local root; all file, Git, handoff, and execution evidence must use
+that same Node. If the Node is unavailable, stop rather than inspecting a local
+checkout or selecting a different workspace.
 
 Choose the smallest coherent, testable milestone. Resolve the approach before
 handoff: behavior, changes, non-goals, edge cases, checks, stop conditions.
@@ -57,30 +60,40 @@ Optional `context_hashes` check named files at publication; they are not a basel
 Return the actual `copy_prompt` and absolute handoff path for manual dispatch; the
 user will paste the agent reply into ChatGPT when an automated run is not used.
 
-When the agent policy allows it, prefer the runtime-neutral workflow:
-`list_agent_models(runtime)` shows that runtime's enabled list and default;
-`start_agent_run(runtime, ...)` resolves the model on the server. Never invent
-a selector. Runs are handoff-bound, idempotent per `request_id` within the
-selected runtime, and fail closed without a policy. Runtime choice: an explicit
-user request for an available runtime → use it; a silent user → Pi
-(default behavior); never silently switch runtimes after failure or quota; a
-self-initiated switch away from the user's/current/default runtime → ask first.
-Model choice (the enabled list is the boundary; intent is yours): silent user →
-that runtime's default; an explicit ENABLED request → may use it; a category
-("free/cheap") → may match a clearly satisfying enabled model, stating the
-selector; a self-initiated non-default → ask first; never silently switch after
-failure or quota; never use a disabled model. Reuse the session when
-a small corrective follow-up shares workspace, runtime, model, task and security
-profile: prefer `start_agent_run(... continue_from_run_id=<succeeded run>)`,
-which creates a new Bridge run in the same conversation. A runtime change always
-requires a fresh conversation. Use a fresh conversation when the model or security
-profile changes, the prior run did not succeed, clean context is requested, or
-validation fails; a requested continuation never silently becomes a fresh run.
+When the agent policy allows it, call `list_agent_adapters(workspace_id)` first.
+An AdapterInstance is one exact execution destination; `runtime_type` only
+describes its protocol family. Choose by `adapter_id`, never by mapping `pi` or
+`codex` to an arbitrary configured instance. The result is limited to adapters
+owned by the workspace's authoritative Node and includes the default flag,
+effective security binding, model, and readiness. If no adapter was explicitly
+requested, use the ready workspace default. If there is no default and exactly
+one ready target exists, it may be used; if several are ready, ask which one to
+use. A configured but unavailable default never silently fails over.
+Do not silently switch destinations after failure or quota.
+
+`list_agent_models(adapter_id)` shows that adapter's enabled list and default;
+`start_agent_run(adapter_id, ...)` resolves the model on the server. Never invent
+a selector. The selected route must be currently available and explicitly enabled.
+Runs are handoff-bound, idempotent per `request_id` within the exact
+adapter destination, and fail closed without a policy. Model choice (the enabled
+list is the boundary; intent is yours): silent model choice → that adapter's
+default; an explicit ENABLED request → may use it; a category ("free/cheap") →
+may match a clearly satisfying enabled model, stating the selector; a
+self-initiated non-default → ask first; never silently switch after failure or
+quota; never use a disabled model. Reuse the session when a small corrective
+follow-up shares workspace, adapter_id, model, task and security profile: prefer
+`start_agent_run(... continue_from_run_id=<succeeded run>)`, which creates a new
+Bridge run in the same conversation. A different adapter_id always requires a
+fresh conversation. Use a fresh conversation when the model or security profile
+changes, the prior run did not succeed, clean context is requested, or validation
+fails; a requested continuation never silently becomes a fresh run.
 
 Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks. Never weaken tests or invent
 success. It replies with a summary, affected paths, actual check commands/outcomes,
 failures or unrun checks, and risks/blockers. No special report files or JSON schema.
+Run history must retain the immutable effective security snapshot and Node/adapter
+revisions used for the start; do not infer old security from current settings.
 
 ## Report after handoff
 Once an agent has received the handoff—or a manual handoff is ready for the user

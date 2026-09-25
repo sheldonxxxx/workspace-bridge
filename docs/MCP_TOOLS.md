@@ -7,7 +7,7 @@ Local diagnostics are not an MCP tool. The authenticated local manager exposes
 local MCP gateway being enabled does not establish runtime readiness or remote
 ChatGPT/tunnel connectivity; the latter remains unobserved by Bridge.
 
-`workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
+`workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. `workspace_info` also reports the authoritative Node ID/name and node-local root. All file, Git, handoff, and runtime evidence resolves through that Node; Bridge never falls back to a local checkout when it is unavailable. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
 
 ## read_project_lead_skill
 
@@ -40,7 +40,7 @@ Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_sco
 workspace_info(workspace_id)
 ```
 
-Returns the selected root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), the separate `agent_execution` (`enabled`/`disabled`) policy, writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+Returns the selected Node ID/name, node-local root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), the separate `agent_execution` (`enabled`/`disabled`) policy, writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
 
 ## list_dir
 
@@ -205,9 +205,10 @@ current-source reads and runtime activity evidence.
 ## Agent run tools (Runtime Protocol v1)
 
 ```text
-list_agent_models(workspace_id, runtime, query="", limit=25)
-start_agent_run(workspace_id, runtime, job_id, request_id, model=null, parent_run_id=null, continue_from_run_id=null)
-list_agent_runs(workspace_id, runtime=null, offset=0, limit=20)
+list_agent_adapters(workspace_id)
+list_agent_models(workspace_id, adapter_id, query="", limit=25)
+start_agent_run(workspace_id, adapter_id, job_id, request_id, model=null, parent_run_id=null, continue_from_run_id=null)
+list_agent_runs(workspace_id, adapter_id=null, offset=0, limit=20)
 read_agent_run(workspace_id, run_id)
 cancel_agent_run(workspace_id, run_id)
 list_agent_executions(workspace_id, run_id, offset=0, limit=50)
@@ -218,16 +219,33 @@ list_agent_activities(workspace_id, run_id, offset=0, limit=50)
 read_agent_activity(workspace_id, run_id, activity_id)
 ```
 
-`start_agent_run` accepts only a prepared handoff in the selected workspace. It
-does not accept a free-form prompt or path. The runtime must be configured, agent
-execution enabled for the workspace, and the exact model enabled by local admin
-policy. An exact retry with the same request ID returns the existing run; reusing
-that ID for a different request is rejected. A continuation creates a new Bridge
-run in a completed run's conversation and fails closed if the runtime, model,
-handoff, profile revision, or conversation state does not match.
+Call `list_agent_adapters` first. It returns only configured AdapterInstances
+owned by the selected workspace's authoritative Node, including sanitized
+`adapter_id`, display name, `node_id`/`node_name`, `runtime_type`, route and
+adapter enablement, default flag, default model, effective security summary,
+and canonical readiness. It does not return endpoints or tokens. `runtime_type`
+(`pi` or `codex`) describes protocol behavior; only `adapter_id` selects a
+destination. Do not infer an AdapterInstance from a runtime type. Use a ready
+default when one is reported; if there is no default and exactly one ready target
+exists it may be used, otherwise ask which destination to use. Never fail over
+from an unavailable default.
+
+`start_agent_run` accepts only a prepared handoff and exact `adapter_id` in the
+selected workspace. It does not accept a free-form prompt or path. That
+AdapterInstance and exact WorkspaceRoute must be enabled, agent execution must be
+enabled for the workspace, and the model must be enabled by local admin policy.
+An exact retry with the same request ID returns the existing run; reusing that
+ID for a different request or adapter is rejected. A continuation creates a new
+Bridge run in a completed run's conversation and fails closed if the adapter ID,
+connection revision, model, handoff, security binding, or conversation state does
+not match. Endpoint/token edits produce `adapter_changed`; renaming an adapter
+does not change its connection revision.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
 sanitized error, notification delivery summary, and pending `interactions`.
+It also includes the immutable `node_id`/revision, adapter revision, and
+`effective_security` snapshot used immediately before that run started; this
+snapshot remains historical if workspace settings later change.
 Use `read_agent_interaction` to inspect the exact live request and supported
 choices. Submit the adapter's opaque choice ID unchanged with
 `respond_agent_interaction` only when the user has authorized that response; the
@@ -243,35 +261,38 @@ Run listings stay compact. `/api/status` reports configured channel ids and
 readiness without endpoints or credentials. Notification status is delivery
 evidence only and never establishes run success.
 
-`list_agent_models` reads one runtime's model list for an explicit `runtime`
-(for example `pi` or `codex`; unknown runtimes fail
-`unknown_runtime`) and returns exact canonical selectors annotated with their
-runtime-global policy status (`enabled`, `policy_default`), plus runtime,
-discovery scope and policy scope. A `query` filters or ranks candidates; it
-never selects one. `start_agent_run` is handoff-bound on the explicitly selected
-runtime: it requires a prepared handoff in the same workspace, fails closed when
+`list_agent_models` reads one AdapterInstance's model list for its explicit
+`adapter_id` and returns exact canonical selectors annotated with that adapter's
+policy status (`enabled`, `policy_default`), runtime type, discovery scope, and
+policy scope. A `query` filters or ranks candidates; it never selects one.
+`start_agent_run` is handoff-bound on the explicitly selected adapter: it
+requires a prepared handoff in the same workspace, fails closed when
 `agent_execution=disabled`, fails closed with `model_policy_unconfigured` until
-the local administrator saves that runtime's policy, and resolves the model
-against the admin-enabled allowlist plus default: omitting `model` uses the
-selected runtime's configured default, while an explicit `model` is allowed only
+the local administrator saves that adapter's policy, and resolves the model
+against the adapter-enabled allowlist plus default: omitting `model` uses the
+selected adapter's configured default, while an explicit `model` is allowed only
 when its exact selector is enabled and currently available
 (`model_not_enabled`/`model_unavailable` otherwise; MCP cannot change the
 policy). The local administrator may save an optional thinking or reasoning
 default for each model; runs use that effort when configured and otherwise
 retain the runtime's own default. MCP cannot override it. It is idempotent per
-`request_id` and
-never replays a run from a different runtime. It accepts no free-form prompt or
-path and returns `run_id`, `conversation_id`, and the exact model. For a small
-corrective follow-up with unchanged task, workspace, runtime, model, and profile,
+`request_id` within the exact `(workspace_id, adapter_id)` and never replays a
+run from a different AdapterInstance. It accepts
+no free-form prompt or path and returns `run_id`, `conversation_id`, `adapter_id`,
+adapter name, runtime type, and exact model. For a small corrective follow-up
+with unchanged task, workspace, adapter ID, model, and profile,
 `continue_from_run_id` reuses a completed run's conversation as a new Bridge run
 (implies `parent_run_id`). Continuation fails closed without silently starting a
 fresh conversation and never sends into a busy conversation. Each run owns only
 the activities and results recorded for that iteration. The caller must select
-the runtime explicitly; Bridge does not silently switch runtimes after failure.
+the exact adapter explicitly; Bridge does not silently switch destinations after
+failure.
 
-`list_agent_runs` lists this workspace's runs across runtimes (newest first) with
-phase, active state, outcome, runtime, model, conversation id, and timestamps;
-pass `runtime` to filter to one configured runtime. `cancel_agent_run` requests
+`list_agent_runs` lists this workspace's runs across AdapterInstances (newest
+first) with phase, active state, outcome, Node and adapter ID/name, runtime type,
+model, security-used snapshot, conversation id, and timestamps; pass `adapter_id`
+to filter to one destination.
+`cancel_agent_run` requests
 cancellation of only the bound conversation and records the result from the
 adapter snapshot. `list_agent_executions` /
 `read_agent_execution` expose persisted tool-execution evidence (bounded
@@ -280,7 +301,11 @@ secrets). They project command, file-change, tool-call, search, and subagent
 activities; these are adapter snapshots rather than an independent completeness
 audit.
 
-The run's `runtime` field identifies the owning backend.
+The run's `node_id` plus `adapter_id` identify the owning destination;
+`runtime_type` is descriptive metadata. If a ChatGPT connector or cached tool
+registration still advertises older `runtime=` arguments, refresh or reconnect
+that connector before dispatch. Do not add compatibility aliases for a stale
+registration.
 
 A run's final result is what the agent reported. It is unverified evidence: audit
 current source with the general tools. This server does not independently run tests

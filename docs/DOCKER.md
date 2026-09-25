@@ -1,10 +1,12 @@
 # Docker Compose — v0.8.4
 
-Runs **Workspace Bridge** with an internal tunnel sidecar on the shared Compose
-network. Runtime adapters run natively on the host and are reached through
-private Runtime Protocol URLs. The image is built locally from this source; no
-public Workspace Bridge image has been published. Agents are not part of this
-stack; they run natively on the host and are managed by you.
+Runs the **Workspace Bridge** control plane with an internal tunnel sidecar on the
+shared Compose network. The authoritative `workspace-bridge-node` service is a
+separate private process on each data-plane host; it owns workspace files, Git,
+handoffs and Node-side adapter secrets. Native adapter daemons run on those hosts
+and are reached through the Node Protocol. The image is built locally from this
+source; no public Workspace Bridge image has been published. Nodes and agents are
+not part of this Compose stack; run and manage them on their hosts.
 
 ## Requirements and scope
 
@@ -21,27 +23,23 @@ are installed in the image. Builds require access to the Python image registry
 and Python package index. The Docker base tag can be pinned to a reviewed digest
 with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 
-**Validation boundary:** `docker compose config` validated, the bridge
-(`workspace-bridge:0.8.4`) image built, and a disposable bridge container smoke
-passed here: the bridge served MCP (401 unauthenticated) and the loopback
-manager and status resolved, and a new workspace defaulted to
-disabled/handoff/agent-disabled. The full Compose stack with the tunnel sidecar
-and a live host Pi agent was **not** run in this environment.
-`scripts/test_docker.py` performs the real Compose build/start/health
-checks on a Docker-equipped host; do not confuse a successful image build or YAML
-parse with a successful end-to-end run.
+**Validation boundary:** this checkout did not run a live Docker Compose plus Node
+service smoke. `docker compose config` and the in-process Docker contract tests
+cover only the Bridge control-plane shape. The existing
+`scripts/test_docker.py` and `scripts/validate_container_transport.py` fixtures
+still encode the pre-Node local-bind flow, so they are not v3 end-to-end evidence.
+Before deployment, exercise the Bridge, the selected Node, and the tunnel together
+on a Docker-equipped host; do not treat an image build or YAML parse as a proof of
+the authority boundary.
 
 ## Quick start
 
-Extract the package **outside** the projects you will map. Use your normal host
-user, not `sudo`; the helper detects UID/GID and the runtime refuses root.
-The projects directory must already exist and should contain only intended project
-folders, for example `$HOME/Projects/project-a` and `$HOME/Projects/project-b`.
+Extract the package outside the Node host roots. Use your normal host user, not
+`sudo`; the helper detects UID/GID and the runtime refuses root.
 
 ```sh
 cd /path/to/workspace-bridge
 python3 scripts/configure_docker.py \
-  --projects-dir "$HOME/Projects" \
   --mcp-port 8875 \
   --admin-port 8766
 
@@ -53,31 +51,35 @@ docker exec workspace-bridge workspace-bridge --state /state doctor
 ```
 
 Run Doctor inside the Bridge container to inspect the state mounted at `/state`
-with the same runtime adapter environment and container network context as the
-live service. Use `--json` for the canonical report or `--offline` to skip
-runtime/network checks:
+with the same saved adapter inventory and container network context as the live
+service. Use `--json` for the canonical report or `--offline` to skip
+adapter/network checks:
 
 ```sh
 docker exec workspace-bridge workspace-bridge --state /state doctor --json
 docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
-The helper creates `.env` (0600) and a private state directory (0700), defaulting
+The helper creates `.env` (0600) and a private Bridge state directory (0700), defaulting
 to `$HOME/.local/state/workspace-bridge-docker`. Set `--state-dir /absolute/path`
 for a different **separate** state location. It does not overwrite an existing
-`.env`, change project files, run Docker or enable mappings. Later, edit `.env`
+`.env`, change Node files, run Docker or enable mappings. Later, edit `.env`
 deliberately; rerunning the helper is not required.
 
-Open **http://127.0.0.1:8766/** and enter the admin token locally. Register each
-actual host project path, create one bridge token, then enable only intended
-mappings. The project parent is mounted at the **same absolute path inside the
-container**, so host runtime adapters use the same workspace paths. Register a
-project child, not the parent itself. Do not use `/state` or invented `/workspace` aliases.
+Open **http://127.0.0.1:8766/** and enter the admin token locally. Add each
+Node (its endpoint and write-only token), then register workspace roots that are
+canonical paths on that Node. Add AdapterInstances from the Node detail and
+configure exact execution routes. Node adapter tokens are stored in private Node
+SQLite and are never read back by normal APIs. Do not use `/state` or invented
+`/workspace` aliases as workspace roots.
 
-The first startup initializes **only fresh** Docker state. It refuses incomplete
-nonempty state, mismatched parents/internal ports or unsafe ownership instead of
-resetting credentials. Container recreation retains state, mappings, tokens,
-handoffs and selected write scopes. A new mapping is still disabled and handoff-only.
+The first startup initializes **only fresh** Docker control-plane state. Bridge state
+schema v3 is the development contract; non-v3 state reports
+`state_schema_incompatible` and is never migrated or altered. Use a separate fresh
+state path for this cutover. Runtime adapter secrets and workspace data remain in
+the private Node service. Container recreation retains Node records, mappings,
+handoffs and selected write scopes. A new mapping is still disabled and
+handoff-only.
 
 ### Without host Python
 
@@ -87,10 +89,11 @@ id -u
 id -g
 ```
 
-Edit `.env`: replace `WB_UID`, `WB_GID`, `WB_PROJECTS_DIR`, `WB_STATE_DIR` with your
-actual non-root numeric identity and canonical absolute POSIX paths. Paths can be
-single-quoted in `.env`. Do not put tokens/API keys in this file. The state directory
-must be outside the project parent and owned by the configured UID.
+Edit `.env`: replace `WB_UID`, `WB_GID`, and `WB_STATE_DIR` with your actual
+non-root numeric identity and canonical private state path. Paths can be
+single-quoted in `.env`. Do not put tokens/API keys in this file. Node state and
+workspace roots are configured on the Node host, not mounted into this Bridge
+container.
 
 ```sh
 mkdir -p "$HOME/.local/state/workspace-bridge-docker"
@@ -101,12 +104,12 @@ docker compose config --quiet
 docker compose up -d --build
 ```
 
-The bind sources must exist; Compose does not silently create them as root-owned
-folders (`create_host_path: false`). On Linux, use the same UID/GID as the normal
-Pi agent user so that mode-0600 handoff files are readable on the host. On Docker
-Desktop, verify bind ownership and read/write behavior with a disposable project;
-file-sharing implementations can differ. Do not work
-around failures with root, privileged mode or world-writable state.
+The state bind source must exist; Compose does not silently create it as a root-owned
+folder (`create_host_path: false`). On Linux, use the same UID/GID as the normal
+Bridge service user. On Docker Desktop, verify state bind ownership and read/write
+behavior with a disposable state directory; file-sharing implementations can differ.
+Node roots and handoff files stay on the Node host. Do not work around failures with
+root, privileged mode or world-writable state.
 
 ## Ports and the single tunnel
 
@@ -174,27 +177,75 @@ tunnel using the existing setup guide. They are not image build arguments or
 Compose environment variables. The container's admin token is available with the
 explicit `exec ... show-admin-token` command, never printed in startup logs.
 
-## Runtime adapters (optional)
+## Native Node on macOS
 
-Agent execution is disabled until you enable it per workspace and grant a runtime.
-Host adapters stay **locked** until `WB_RUNTIME_TOKEN` is set: with an empty token,
-operational endpoints return 401 and runs fail closed. `/health` remains readable
-without revealing secrets. Pi and Codex adapters run natively on the host, bind to
-loopback, and have no Compose service or published port.
+The local Compose topology has two container services — Bridge and the MCP
+tunnel — plus host-native processes on macOS:
 
-1. Start the chosen host adapter. For Pi, use the
-   [LaunchAgent setup](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd).
-   The Codex adapter starts and owns its dedicated app-server process.
-2. In `.env`, set `WB_RUNTIME_ADAPTERS` to a JSON map of runtime IDs to private
-   adapter URLs, and set a random `WB_RUNTIME_TOKEN` shared by Bridge and the
-   adapters. For example:
-   `WB_RUNTIME_ADAPTERS={"pi":"http://host.docker.internal:8780","codex":"http://host.docker.internal:8772"}`.
-   Docker Desktop and OrbStack use `host.docker.internal`; Linux Docker Engine
-   needs an explicit reachable host URL. Do not assume `localhost` inside a
-   container means the host.
-3. Run `docker compose up -d`. The manager's **Runtimes** page shows configured
-   adapter health, and `docker compose logs bridge` reports reachability without
-   printing credentials.
+```text
+Docker:       workspace-bridge Bridge + mcp-tunnel
+macOS host:   workspace-bridge-node LaunchAgent + native Pi/Codex adapters
+              |-- identical absolute workspace paths and host-owned allowed_roots
+```
+
+Do not add the Node to `compose.yaml`: keeping it native preserves the same
+host filesystem/data-plane boundary and absolute paths used by the local
+runtime adapters. Remote Linux/systemd or a Node container is a future/alternate
+deployment, not this local-Mac flow.
+
+For Docker Desktop, initialize the Node with an explicit non-loopback listen
+host, then use the host alias from Bridge:
+
+```sh
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" init \
+  --allow-root "/Volumes/data2" --host 0.0.0.0 --port 8770
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" show-token
+```
+
+On macOS, a successful LaunchAgent start does not prove that the native process
+can read a workspace. Privacy controls such as Files & Folders and external or
+removable-storage access can gate the executable/interpreter or a root under
+`/Volumes/data2`. Check `service status` for the bounded allowed-root
+availability summary, then verify the selected workspace through Manager and
+Bridge. Grant only the required access to the actual executable/interpreter if
+prompted; Full Disk Access is not mandatory when a narrower permission is
+sufficient. Do not automate these prompts.
+
+Register `http://host.docker.internal:8770` in Manager, replacing `8770` with
+the configured Node port. `localhost` inside the Bridge container is the
+container itself, and a Node bound only to `127.0.0.1` is not assumed to be
+reachable from Docker Desktop. Binding `0.0.0.0` makes the authenticated Node
+listen on host interfaces; restrict access with the macOS firewall/private
+network and do not expose the Node through the MCP tunnel or a public reverse
+proxy. Node token authentication remains mandatory. The LaunchAgent stores no
+Node or adapter token in its plist; state/config/token files remain private.
+
+## Adapter instances (optional)
+
+Agent execution is disabled until you enable it for a workspace and exact
+WorkspaceRoute. Start the native Pi or Codex daemon on its host and configure its
+own listen address, bootstrap token and process lifecycle there. The Bridge
+container does not start or publish those daemons.
+
+In the local Manager's **Adapters** area, add one AdapterInstance for each
+destination. Save a distinct name, runtime type, endpoint reachable from the
+container, and the credential expected by that daemon. Docker Desktop and
+OrbStack commonly use `host.docker.internal`; Linux Engine needs a reachable host
+address. Do not assume `localhost` inside a container means the host. The
+per-instance Bridge connection token is stored as plaintext in private SQLite
+during this development phase; the file is mode `0600`, and the UI never reads
+the token back. `.env` does not contain `WB_RUNTIME_ADAPTERS` or a Bridge-wide
+`WB_RUNTIME_TOKEN`. The same native daemon may still use `WB_RUNTIME_TOKEN` in
+its separate host process environment.
+
+The Manager's **Adapters** area shows each instance's health and allows a
+sanitized connection test. Configure model policy and profiles per adapter, then
+enable exact targets on each workspace. Two Pi instances can be configured
+independently. Bridge changes apply without container recreation or service
+restart. For daemon setup, see the [Pi LaunchAgent guide](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd)
+or the Codex adapter setup instructions.
 
 After restart, Bridge reconciles runs against Runtime Protocol adapter snapshots.
 It does not replay prompts or adopt unowned Pi TUI or Codex Desktop/TUI sessions.
@@ -218,7 +269,7 @@ tunnel-client sidecar (`mcp-tunnel`), is configured for JSON logs too
 (placeholders, not real IDs/secrets):
 
 ```json
-{"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"runtime_configured":true,"workspace_count":3}
+{"component":"bridge","event":"bridge_ready","level":"INFO","enabled_count":2,"adapters_configured":2,"workspace_count":3}
 {"component":"bridge","event":"boundary_reject","level":"WARNING","reason":"untrusted-origin"}
 {"component":"bridge","event":"request_error","level":"ERROR","code":"RuntimeError","source":"mcp","action":"read_file","workspace_id":"ws_…"}
 ```
@@ -292,8 +343,9 @@ Workspace Bridge source is copied, so source/UI/test edits reuse the cached
 dependency layer. The builder uses a BuildKit pip cache mount; the runtime stage
 still installs offline (`--no-index`) from prebuilt wheels with no cache. The
 runtime stage also installs Debian's `git` package without recommended packages
-for Bridge's read-only Git Evidence tools (`git_status` and `git_diff`). Agent
-runtimes and their Git installations remain separate and host-side. The image
+for images that may host the Node data-plane service; the Bridge control plane does
+not inspect workspace Git state directly. Agent runtimes and their Git installations
+remain separate and host-side. The image
 uses explicit `COPY` allowlists, a non-root runtime, a read-only root filesystem,
 and health checks.
 
@@ -311,58 +363,19 @@ noexec/nosuid/nodev `/tmp`. There is no Docker socket, host networking, privileg
 mode, host-home mount or automatic credential mount. The build context is an
 allowlist, so local `.env`, projects and state do not enter the image.
 
-**The project-parent bind itself is writable.** This permits handoff creation and
-later explicitly enabled workspace writes without remounting. The server still
-enforces `none`/`handoff`/`workspace`, current hashes, enabled mappings and exclusions.
-A read-only container root does not make its writable bind mounts read-only.
-A compromised service/decoder process could access everything mounted under that
-parent, including disabled mappings; API policy is not an OS sandbox. Mount only
-intended projects, not your home or entire disk. Network egress is not disabled.
-Do not attach untrusted containers to this service's Compose network.
+The Bridge container has no workspace data bind. The selected Node permits handoff
+creation and later explicitly enabled workspace writes while enforcing
+`none`/`handoff`/`workspace`, current hashes, enabled mappings and exclusions. A
+compromised Node process remains able to access its configured allowed roots, so
+use a dedicated Node identity and mount only intended projects. Network egress is
+not disabled. Do not attach untrusted containers to this service's Compose network.
 
 Text/image reading, metadata stripping, preview limits and image-secret caveats
 are unchanged. Write/edit remain text-only. No snapshot-review engine is restored.
 
-### Optional OS-level read-only source mount
+### Node-side filesystem hardening
 
-For stronger protection, make the parent bind read-only and overlay each selected
-project's handoff folder read-write. First precreate the real handoff directory
-as your user. Example for the actual child `project-a`:
-
-```sh
-mkdir -p "$HOME/Projects/project-a/.workspace-handoff"
-chmod 700 "$HOME/Projects/project-a/.workspace-handoff"
-```
-
-Place this in local, untracked `compose.override.yaml` (replace `project-a`):
-
-```yaml
-services:
-  bridge:
-    volumes:
-      - type: bind
-        source: ${WB_PROJECTS_DIR}
-        target: ${WB_PROJECTS_DIR}
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${WB_PROJECTS_DIR}/project-a/.workspace-handoff
-        target: ${WB_PROJECTS_DIR}/project-a/.workspace-handoff
-        read_only: false
-        bind:
-          create_host_path: false
-```
-
-Compose merges mounts by target, preserving the private state bind. Add one explicit
-handoff overlay per project, then inspect `docker compose config` and recreate.
-Validate on a disposable project: the bridge intentionally refuses cross-device
-traversal. Separate bind mounts must present the same filesystem device to the
-bridge; some Desktop/filesystem configurations may not, and are not validated here.
-Do not disable the device check to make this work. In that case retain application
-policy plus a suitably constrained OS identity, or use a tested mount arrangement.
-Source writes stay OS-denied with this overlay even when the UI says `workspace`;
-remounting for broader writes requires a separate deliberate local action.
+Configure the Node service with host-local `allowed_roots` and a dedicated service identity. Bridge cannot edit that ceiling and never falls back to a local bind. Apply any host read-only or handoff-overlay policy on the Node host, then verify it with Node diagnostics.
 
 ## Operating commands
 
@@ -397,19 +410,13 @@ manager before connecting ChatGPT.
 
 ## Validation on your host
 
-```sh
-# Uses newly created temporary projects/state, not your .env or real mappings:
-python3 scripts/test_docker.py
-```
-
-This builds/starts the image, checks non-root/read-only-root settings, loopback
-published ports, health, two workspaces, native PNG content, actual host handoff
-paths, protected writes, stale hashes, hostile Origin rejection and retained
-credentials/mappings after recreation. It tears down only its own temporary Compose
-project. It requires Docker and fails rather than claiming success when absent.
-The CI workflow runs the same script. It does not check actual ChatGPT pixel
-recognition, host adapter execution, or tunnel authentication; those remain
-separate live checks.
+The v3 authority boundary requires a live Bridge plus an explicitly configured
+Node, with the tunnel and any native adapter daemon checked separately. This
+checkout did not run that Docker/Node integration smoke. The older
+`scripts/test_docker.py` and `scripts/validate_container_transport.py` scripts
+still construct local project fixtures for the pre-Node service and must be
+migrated before being used as v3 validation. Use the Manager and Node diagnostics
+to verify the selected Node root, adapter, route readiness and handoff path.
 
 ## Primary references
 

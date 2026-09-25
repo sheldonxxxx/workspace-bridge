@@ -331,7 +331,10 @@ def test_diff_output_time_bounds_and_git_errors_are_sanitized(env, tmp_path):
 
     scripts = tmp_path / "git-shims"
     scripts.mkdir()
-    safe = env["service"].safe_root(env["service"].workspace(env["id"]))
+    node_workspace = env["node"]["service"].authoritative_workspace(
+        env["service"].workspace(env["id"])
+    )
+    safe = env["node"]["service"].safe_root(node_workspace)
     try:
         noisy = scripts / "noisy"
         noisy.write_text("#!" + sys.executable + "\nimport sys\nsys.stdout.write('x' * 10000)\n")
@@ -379,4 +382,4 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
             "params": {"name": "git_diff", "arguments": {"workspace_id": env["id"],
                                                                   "mode": "head", "ref": "HEAD~1"}}})
         assert invalid.json()["error"]["code"] == -32602
-        assert len(TOOLS) == 25
+    assert len(TOOLS) == 26

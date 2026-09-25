@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, runtimeName, type Workspace } from "@/lib/api";
+import { api, type Workspace } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,14 +32,14 @@ type RuntimeConfigSecurity = {
 
 export function ProfileAssignment({
   workspace,
-  runtime,
+  adapterId,
   onClose,
   onManage,
   onChanged,
   notify,
 }: {
   workspace: Workspace;
-  runtime: string;
+  adapterId: string;
   onClose: () => void;
   onManage: () => void;
   onChanged: () => Promise<void>;
@@ -48,12 +48,11 @@ export function ProfileAssignment({
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [runtimeConfig, setRuntimeConfig] =
     useState<RuntimeConfigSecurity | null>(null);
+  const route = workspace.routes?.[adapterId];
   const [securitySource, setSecuritySource] = useState<
     "profile" | "runtime-config"
-  >(workspace.runtime_grants?.[runtime]?.security_binding?.source || "profile");
-  const [selectedId, setSelectedId] = useState(
-    workspace.runtime_grants?.[runtime]?.profile?.id || "",
-  );
+  >(route?.security_binding?.source || "profile");
+  const [selectedId, setSelectedId] = useState(route?.profile?.id || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -64,7 +63,7 @@ export function ProfileAssignment({
       fresh: "1",
     });
     api<{ profiles: Profile[]; runtimeConfig?: RuntimeConfigSecurity }>(
-      `/api/runtimes/${runtime}/profiles?${query.toString()}`,
+      `/api/adapters/${adapterId}/profiles?${query.toString()}`,
     )
       .then((data) => {
         if (!live) return;
@@ -85,15 +84,15 @@ export function ProfileAssignment({
     return () => {
       live = false;
     };
-  }, [runtime, workspace.id]);
+  }, [adapterId, workspace.id]);
 
   async function assign() {
-    if (!selectedId) return;
+    if (securitySource === "profile" && !selectedId) return;
     setBusy(true);
     setError("");
     try {
-      await api(`/api/workspaces/${workspace.id}/runtimes/${runtime}`, "POST", {
-        enabled: workspace.runtime_grants?.[runtime]?.enabled || false,
+      await api(`/api/workspaces/${workspace.id}/routes/${adapterId}`, "POST", {
+        enabled: route?.enabled || false,
         security_source: securitySource,
         profile_id: securitySource === "profile" ? selectedId : null,
       });
@@ -115,14 +114,14 @@ export function ProfileAssignment({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="profile-assignment-dialog">
         <DialogHeader>
-          <DialogTitle>Change profile</DialogTitle>
+          <DialogTitle>Route security</DialogTitle>
           <DialogDescription>
-            Choose a {runtimeName(runtime)} profile for {workspace.name}. New
-            conversations use the selected profile. Codex choices are checked
-            against this workspace's native permission-profile catalog.
+            Choose a {route?.name || "adapter"} profile for {workspace.name}.
+            New conversations use the selected profile. Native choices are
+            checked against this workspace's native permission-profile catalog.
           </DialogDescription>
         </DialogHeader>
-        {runtime === "codex" && (
+        {route?.runtime_type === "codex" && (
           <fieldset className="profile-assignment-modes">
             <legend>Security source</legend>
             <label className="profile-assignment-mode">
@@ -216,7 +215,7 @@ export function ProfileAssignment({
           className="profile-manage-link"
           onClick={onManage}
         >
-          Manage profiles
+          Manage adapter profiles
         </Button>
         {error && (
           <p className="profile-error" role="alert">

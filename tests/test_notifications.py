@@ -33,7 +33,9 @@ class FakeResponse:
 def make_event(*, event_type="run_completed", subject_id="", run_id="run_abc"):
     return NotificationEvent.build(
         event_type=event_type, run_id=run_id, workspace_id="ws_alpha",
-        workspace_name="Alpha", handoff_title="Improve add", runtime="codex",
+        workspace_name="Alpha", handoff_title="Improve add",
+        adapter_id="adapter_000000000000000000000001", adapter_name="Local Codex",
+        runtime_type="codex",
         occurred_at="2026-09-19T00:00:00+00:00", subject_id=subject_id,
         request_kind="permission" if subject_id else "", action="external_directory" if subject_id else "")
 
@@ -315,7 +317,7 @@ def test_service_starts_and_stops_notification_dispatcher(tmp_path):
     parent = tmp_path / "projects"
     parent.mkdir()
     state = tmp_path / "bridge-state"
-    config = initialize(state, [str(parent)], 8765, 8766)
+    config = initialize(state, 8765, 8766)
     service = Service(state, config, run_coordinator_background=False)
     thread = service.notification_manager._thread
     assert thread is not None and thread.daemon and thread.ident is not None

@@ -9,24 +9,25 @@ ID. The separate loopback manager cannot be reached on the MCP listener.
 `workspace_bridge/diagnostics.py` is the sole server-side evaluator for the
 canonical `DiagnosticReport`, `DiagnosticCheck`, and `RunnableRoute` schema.
 Doctor and authenticated local-admin `GET /api/diagnostics` call the same
-service method. A route is evaluated for one concrete workspace/runtime pair;
-facts from other workspaces or runtimes cannot satisfy its prerequisites.
+service method. A route is evaluated for one concrete workspace/adapter pair;
+facts from another adapter instance cannot satisfy its prerequisites, including
+when two adapters share the same runtime type.
 
-Listener health, shared MCP gateway configuration/enabled state, runtime adapter
-health, and an exact runnable route are separate observations.
+Listener health, shared MCP gateway configuration/enabled state, Node health,
+adapter-instance health, and an exact runnable route are separate observations.
 Git Evidence is a read-only review capability and does not gate route readiness.
 The status vocabulary is `pass`, `warning`, `action_required`, `failed`, and
 `unknown`, ranked from lowest to highest severity as pass, warning, unknown,
 action required, and failed. Unknown is never promoted to pass.
 
 The authenticated Manager consumes `/api/diagnostics`; only
-`runnable_routes[].ready` for the exact workspace/runtime pair represents route
-readiness. `overall.status`, adapter health, Bridge gateway configuration and
+`runnable_routes[].ready` for the exact `(workspace_id, adapter_id)` pair
+represents route readiness. `overall.status`, adapter health, Bridge gateway configuration and
 enablement, and run interactions remain
 separate concepts. A diagnostics fetch failure makes route readiness unavailable
 in the UI and disables handoff starts without discarding other Manager data.
 
-Offline diagnostics read local state only and mark runtime, profile, and model
+Offline diagnostics read local state only and mark adapter, profile, and model
 freshness unknown. Doctor's service mode opens SQLite read-only, performs no
 notification recovery, starts no workers, and does not contend for the serve
 process lock. Runtime calls in live mode use bounded private Runtime Protocol
@@ -38,14 +39,21 @@ unevaluated; the client does not reconstruct prerequisites.
 ## Component map
 
 - `api.py`: strict typed tool schemas, tools-only MCP adapter and loopback manager API.
-- `service.py`: shared auth, mappings, safe source access, planning publication,
-  handoff reads, per-workspace write and agent policy, and metadata.
+- `service.py`: shared auth, mappings, Node-routed workspace operations, planning
+  publication, handoff reads, per-workspace write and agent policy, adapter
+  references, and WorkspaceRoutes.
+- `node_service.py` / `node_api.py`: private Node data-plane service/API for
+  allowed roots, files, images, Git, handoffs, and Node-owned adapter secrets.
+- `node_registry.py` / `node_client.py`: Bridge's authenticated Node inventory
+  and bounded Node Protocol/runtime proxy.
+- `adapter_registry.py`: sanitized Bridge cache of Node-owned AdapterInstances
+  and on-demand Node runtime proxies.
 - `diagnostics.py`: the canonical bounded diagnostics evaluator and exact
-  workspace/runtime runnable-route model shared by Doctor and the admin API.
+  workspace/adapter runnable-route model shared by Doctor and the admin API.
 - `git_evidence.py`: fixed-function, bounded read-only Git status and diff
   collection. It keeps `.git` excluded from normal file access and stores no snapshots.
-- `run_coordinator.py`: runtime-neutral conversation, run, interaction, and
-  activity persistence and reconciliation for Runtime Protocol v1 adapters.
+- `run_coordinator.py`: adapter-ID-keyed conversation, run, interaction, and
+  activity persistence and reconciliation for Runtime Protocol v1 clients.
 - `wbrp.py`: validated, bounded private HTTP client for every v1 adapter.
 - `codex_host_adapter.py` / `codex_rpc.py`: dedicated Codex app-server v2 host
   adapter with native thread ownership and reviewed interactions.
@@ -55,8 +63,9 @@ unevaluated; the client does not reconstruct prerequisites.
 - `notifications.py`: Bridge-owned semantic notification events, durable per-channel
   outbox state, and named channel adapters; Discord is configured from local
   environment and contains its own formatting, retries, and HTTP behavior.
-- `security.py`: pinned roots, descriptor-relative no-follow traversal, exclusions,
-  bounded reads, fixed planning publication and hash-checked policy-scoped text writes.
+- `security.py`: shared validation primitives used by the Node for descriptor-
+  relative no-follow traversal, exclusions, bounded reads, fixed planning
+  publication, and hash-checked policy-scoped text writes.
 - `media.py` / `image_worker.py`: typed native image results and fixed, timed
   decoding from authorized bytes; no caller-selected process, URL or file paths.
 - `browse.py`: live directory trees, globs and bounded regex/literal search with
@@ -64,17 +73,19 @@ unevaluated; the client does not reconstruct prerequisites.
 - `embedded_skill.py` and `skills/project-lead/SKILL.md`: fixed package-owned
   project-lead guidance, retrieved on demand.
 - `web/` and `static/dist/`: local manager source and compiled assets, with
-  workspace controls, Runtime Protocol run views, profiles, shared-token controls,
-  and copyable manual handoffs.
+  adapter inventory, exact workspace routes, adapter-scoped models/profiles,
+  Runtime Protocol run views, shared-token controls, and copyable handoffs.
 - `runtime/pi-host-adapter/`: private Node Runtime Protocol v1 adapter around the
   natively hosted Pi agent; it never starts or packages Pi itself.
 
 ## Read and write boundaries
 
-Authenticate the shared credential → validate the explicit enabled workspace →
-open the pinned root → apply Bridge-owned policy → return bounded, untrusted
-source with pagination. A serialized service lock protects internal operations,
-not external file writers. Hashes detect stale reads/listings; they do not recreate
+Authenticate the shared credential → resolve the explicit enabled workspace to
+its authoritative Node → have the Node validate the node-local root and apply
+its host `allowed_roots` ceiling → return bounded, untrusted source with
+pagination. Bridge does not open the workspace root itself and never falls back
+to a local checkout. A serialized service lock protects internal operations, not
+external file writers. Hashes detect stale reads/listings; they do not recreate
 source history. Ignore files do not grant access.
 
 `prepare_handoff` publishes three exclusively created planning documents under a
@@ -84,9 +95,9 @@ files before publication. No whole-tree capture occurs. `write_file` and
 `workspace`. The current mapping policy is loaded under the serialized operation
 lock, not taken from an MCP argument. `none` also denies `prepare_handoff`. Only
 the separate manager API can set policy. Existing files need a matching SHA-256.
-SafeRoot stages complete bytes in a private same-directory temporary file,
-rechecks the target/parent, then publishes with no-clobber linking for creation or
-atomic replacement for an update. This is not an OS-atomic compare-and-swap
+The Node-side SafeRoot stages complete bytes in a private same-directory
+temporary file, rechecks the target/parent, then publishes with no-clobber
+linking for creation or atomic replacement for an update. This is not an OS-atomic compare-and-swap
 against arbitrary external writers. The service lock serializes this process's
 tool calls, not other local programs. Notes are plain files; no source snapshots
 or persisted audit subsystem is introduced. New mappings default to handoff-only
@@ -96,18 +107,29 @@ Normal file tools allow explicit handoff reads and scans; default source-root
 scans still exclude it. Published job hashes and metadata remain original and may
 therefore differ from a deliberately edited document.
 
-## Runtime Protocol v1
+## RuntimeType, AdapterInstance, and WorkspaceRoute
 
-`RunCoordinator` is the only Bridge run path. It validates handoffs, workspace
-grants, security bindings and model policy before creating or reusing a runtime
-conversation.
-It persists Bridge-owned runs, live interactions, and bounded activity snapshots
-in `runtime_runs`, `runtime_conversations`, `runtime_interactions`, and
-`runtime_activities`. Pi and Codex adapters implement the same private `/v1/*`
-contract. Adapter-specific permission, approval, and filesystem controls remain
-inside each native runtime and are exposed through reviewed interaction choices.
-All configured adapters share these run tables and APIs; the Bridge has no direct
-Pi session endpoint.
+`RuntimeType` describes protocol behavior: currently `pi` or `codex`. It is not
+an endpoint or destination. A Node owns each `AdapterInstance`, including its
+opaque `adapter_id`, unique display name, immutable runtime type, private base URL
+and token, enabled state, and connection revision. Multiple instances can use the
+same runtime type. The Bridge cache contains only sanitized references; runtime
+calls go through the owning Node.
+
+`WorkspaceRoute` binds one workspace to one exact same-Node adapter ID and stores
+the route's enabled/default state and security binding. Model policy and profile
+discovery are scoped to an adapter instance. Diagnostics identify a route by
+`(workspace_id, adapter_id)` and independently probe every adapter. The MCP
+discovery tool returns sanitized adapter IDs and exact route availability; no
+runtime-type fallback exists.
+
+`RunCoordinator` validates handoffs, exact routes, security bindings and
+adapter-scoped model policy before creating or reusing a conversation. It stores
+Bridge-owned runs, conversations, live interactions, and bounded activity in
+`agent_runs`, `agent_conversations`, `agent_interactions`, and `agent_activities`.
+Runs and conversations persist both `adapter_id` and descriptive `runtime_type`.
+Adapter-specific permission, approval, and filesystem controls remain inside
+their native daemon and are exposed through reviewed interaction choices.
 
 Security discovery may depend on an exact workspace context. The generic Bridge
 stores either an opaque profile ID/revision or the explicit `runtime-config`
@@ -119,21 +141,22 @@ and bounded summary actually applied to its native thread. Before the next turn,
 Codex refreshes supported changes at an idle boundary and creates a fresh thread
 when the native transition cannot be represented or confirmed.
 
-The manual handoff path remains available independently of runtime adapters.
-Agent execution is a per-workspace local-admin policy, disabled by default and
+The manual handoff path remains available independently of adapters. Agent
+execution is a per-workspace local-admin policy, disabled by default and
 independent from `write_scope`; MCP cannot change it. `start_agent_run` accepts a
-prepared handoff only, never a free-form prompt or path. A continuation creates a
-new Bridge run inside the same conversation only after runtime, model, security
-source, handoff, and conversation state checks pass. Runtime-config revision
-drift is refreshed before the next turn; a workspace source change or unsafe
-native update starts a conversation with the selected security source and
-records the replacement reason.
+prepared handoff and exact `adapter_id`, never a free-form prompt or path. A
+continuation creates a new Bridge run inside the same conversation only after
+adapter ID, connection revision, model, security source, handoff, and conversation
+state checks pass. Endpoint/token changes invalidate explicit continuation with
+`adapter_changed`; a rename leaves the connection revision unchanged. Codex
+runtime-config drift is observed from the selected Codex adapter and refreshed
+before the next turn.
 
 The authenticated local Manager's `POST
 /api/workspaces/{workspace}/jobs/{job_id}/runs` wrapper accepts only an explicit
-runtime and idempotency request ID; the prepared job ID comes from the path. It
+adapter ID and idempotency request ID; the prepared job ID comes from the path. It
 delegates directly to `service.start_agent_run`, preserving the existing
-workspace grant, handoff ownership, model policy, security binding, and adapter
+workspace route, handoff ownership, model policy, security binding, and adapter
 checks. It accepts no arbitrary prompt or model override.
 
 Runtime conversations are routing context and security bindings, not OS
@@ -183,8 +206,12 @@ The worker neither receives workspace paths nor produces persistent preview file
 
 ## State and compatibility
 
-Fresh databases contain mappings, gateway auth, jobs, content-free operation
-events, and Runtime Protocol conversation/run/interaction/activity tables. Job
+Fresh v3 Bridge databases contain Nodes, workspace mappings, sanitized adapter
+references, workspace routes/defaults, adapter-scoped model policies, jobs,
+content-free operation events, and the `agent_*` Runtime Protocol execution
+tables. Each Node has its own fresh private state. Existing non-v3 databases fail
+with `state_schema_incompatible`; the development architecture cutover has no
+migration or API compatibility layer. Use a fresh state path. Job
 publication uses `publishing`, `prepared`, and `failed`; these states say nothing
 about implementation completion. New
 mappings have a `write_scope` of `handoff` and agent execution disabled until
@@ -208,20 +235,29 @@ then calls the same CLI/service with explicit container listener options. Intern
 ports stay 8765/8766; exact loopback public ports are additional permitted
 Host/Origin authorities. No wildcard, container DNS allowlist, proxy-header trust,
 policy override, or MCP tool is added. The manager reports the published MCP port
-for host tunnel profiles. Native startup still binds 127.0.0.1.
+for host tunnel profiles. Native Node startup defaults to 127.0.0.1 for host-only
+use; Docker Desktop reachability requires an explicit non-loopback Node listen
+choice and the `host.docker.internal:<node-port>` endpoint.
 
-Compose uses a separate private state bind and a dedicated project-parent bind at
-the same absolute host path, preserving consistent workspace paths for host
-adapters. State and the
-parent must not overlap. Write scope remains none/handoff/workspace; read-only
-rootfs does not make the writable project bind read-only. The host tunnel remains
-separate, and the package-owned skill is version 2.5.0.
+Compose carries Bridge control-plane state separately from the Node data plane.
+Register a Node endpoint and configure its host `allowed_roots`; do not treat a
+Bridge project bind or a local checkout as a fallback authority. Write scope
+remains none/handoff/workspace, the host tunnel remains separate, and the
+package-owned skill is version 2.6.0.
 
-## Runtime adapters
+## Native adapter daemon boundary
 
-`WB_RUNTIME_ADAPTERS` maps runtime IDs to private host adapter URLs, and
-`WB_RUNTIME_TOKEN` authenticates every adapter request. The Pi adapter implements
-Runtime Protocol v1 over its isolated native SDK owner. The Codex adapter owns a
-dedicated app-server process and native thread state. Both bind to host loopback
-and have no Compose service or published port. See
-[Runtime Protocol](RUNTIME_PROTOCOL.md) and [Docker](DOCKER.md).
+The local Manager owns Bridge's Node connection inventory: Node endpoint and
+token, enablement, and exact workspace routes live in private SQLite. Each Node
+owns its adapter endpoint/token records in private Node SQLite. Tokens are
+intentionally plaintext during this development phase; both databases are mode
+`0600`, and API responses, diagnostics, logs, errors, and events never return
+token values. Blank edit tokens preserve the saved value. Endpoint/token edits
+take effect on the next request.
+
+Native Pi/Codex daemon listen ports, tokens, state paths, and LaunchAgent/app-
+server lifecycle remain configured on their hosts. The daemon's own bootstrap
+credential (which may also be named `WB_RUNTIME_TOKEN`) is distinct from
+the Node's saved per-adapter connection token. There is no Bridge-side
+`WB_RUNTIME_ADAPTERS` registry or global Bridge token. See [Runtime Protocol](RUNTIME_PROTOCOL.md)
+and [Docker](DOCKER.md).

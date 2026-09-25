@@ -850,10 +850,10 @@ a {
   font-size: 11px;
   overflow: hidden;
 }
-.access-matrix {
+.workspace-toggles {
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   display: grid;
 }
 .access-cell {
@@ -861,7 +861,7 @@ a {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
-  padding: 19px 23px;
+  padding: 17px 25px;
   display: flex;
 }
 .access-cell:last-child {
@@ -872,7 +872,7 @@ a {
 }
 .access-cell p {
   color: var(--quiet);
-  max-width: 190px;
+  max-width: 250px;
   margin-top: 3px;
   font-size: 11px;
 }
@@ -886,6 +886,233 @@ a {
   font-size: 11px;
   height: auto !important;
   padding: 0 !important;
+}
+.execution-targets {
+  gap: 11px;
+  padding: 16px 25px 21px;
+  display: grid;
+}
+.execution-targets-heading {
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  display: flex;
+}
+.execution-targets-heading strong {
+  font-size: 12px;
+}
+.execution-targets-heading p {
+  color: var(--quiet);
+  margin-top: 3px;
+  font-size: 11px;
+}
+.target-count {
+  color: var(--quiet);
+  background: var(--muted);
+  white-space: nowrap;
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 680;
+}
+.target-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  padding: 13px 16px 12px;
+  display: grid;
+}
+.target-main {
+  min-width: 0;
+  gap: 6px;
+  display: grid;
+}
+.target-title-line {
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  display: flex;
+}
+.target-title-line strong {
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+}
+.effective-security-detail {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.target-facts {
+  color: var(--quiet);
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  font-size: 10px;
+  display: flex;
+}
+.target-side {
+  flex: none;
+  flex-direction: column;
+  align-items: end;
+  gap: 9px;
+  display: flex;
+}
+.target-side .runtime-route-readiness {
+  margin-top: 0;
+}
+.target-actions {
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  margin-top: 2px;
+  display: flex;
+}
+.execution-target-add {
+  border-top: 1px dashed var(--line);
+  align-items: center;
+  gap: 10px;
+  padding-top: 13px;
+  display: flex;
+}
+.execution-target-add .native-select {
+  width: min(330px, 100%);
+}
+.execution-target-empty {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  align-content: start;
+  gap: 4px;
+  padding: 13px 16px;
+  display: grid;
+}
+.execution-target-empty strong {
+  font-size: 12px;
+}
+.execution-target-empty p {
+  color: var(--quiet);
+  font-size: 11px;
+}
+.execution-target-empty .inline-action {
+  margin-top: 3px;
+}
+.node-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+.node-list {
+  gap: 16px;
+  display: grid;
+}
+.node-card-head {
+  border-bottom: 1px solid var(--line);
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  padding: 17px 25px;
+  display: flex;
+}
+.node-identity {
+  align-items: center;
+  min-width: 0;
+  gap: 14px;
+  display: flex;
+}
+.node-symbol {
+  background: var(--secondary);
+  width: 39px;
+  height: 39px;
+  color: var(--secondary-foreground);
+  border-radius: 8px;
+  flex: none;
+  place-items: center;
+  display: grid;
+}
+.node-title {
+  min-width: 0;
+}
+.node-title > .path-text {
+  margin-top: 3px;
+}
+.node-card-body {
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(190px, 0.56fr) minmax(0, 1fr);
+  align-items: stretch;
+  display: grid;
+}
+.node-spec {
+  border-right: 1px solid var(--line);
+  align-content: start;
+  margin: 0;
+  padding: 8px 25px 14px;
+  display: grid;
+}
+.node-spec > div {
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 0;
+  display: grid;
+}
+.node-spec > div:last-child {
+  border-bottom: 0;
+}
+.node-spec dt {
+  color: var(--quiet);
+  font-size: 11px;
+}
+.node-spec dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-size: 11px;
+}
+.node-adapters {
+  min-width: 0;
+  align-content: start;
+  display: grid;
+}
+.node-adapters h4 {
+  color: var(--quiet);
+  padding: 16px 25px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.node-adapter-row {
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px 16px;
+  padding: 11px 25px;
+  display: flex;
+}
+.node-adapter-row strong {
+  min-width: 0;
+  flex: 1 1 220px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.node-adapter-fact {
+  color: var(--quiet);
+  white-space: nowrap;
+  font-size: 11px;
+}
+.node-adapters .muted-note {
+  padding: 12px 25px 14px;
+}
+.node-card-foot {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 25px;
+  display: flex;
+}
+.node-card-foot small {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  font-size: 10px;
 }
 .workspace-footer {
   justify-content: space-between;
@@ -1008,35 +1235,49 @@ a {
   border-top: 1px solid var(--line);
   padding: 19px;
 }
-.runtimes-page > .section-heading {
-  border: 0;
-  padding: 0 0 20px;
+.adapter-detail-panel {
+  margin-top: 18px;
+}
+.adapter-detail-panel .profiles-runtime-tabs {
+  padding: 0 26px;
+}
+.adapter-detail-panel .profiles-layout {
+  padding: 0 26px 26px;
+}
+.external-connection-note {
+  color: var(--quiet);
+  margin-top: 12px;
+  font-size: 11px;
+}
+.nodes-toolbar {
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+.page-toolbar {
+  justify-content: flex-end;
+  margin-bottom: 16px;
 }
 .adapter-list {
-  border: 1px solid var(--line);
-  background: var(--line);
-  border-radius: 10px;
-  gap: 1px;
+  gap: 16px;
   display: grid;
+}
+.adapter-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: 0;
   overflow: hidden;
 }
-.adapter-row {
-  background: var(--panel);
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+.adapter-card-head {
+  border-bottom: 1px solid var(--line);
+  justify-content: space-between;
   align-items: center;
-  gap: 19px;
-  padding: 24px 26px;
-  display: grid;
+  gap: 14px;
+  padding: 17px 25px;
+  display: flex;
 }
-.adapter-symbol,
-.connection-symbol {
-  background: var(--secondary);
-  width: 39px;
-  height: 39px;
-  color: var(--secondary-foreground);
-  border-radius: 8px;
-  place-items: center;
-  display: grid;
+.adapter-card .node-symbol {
+  border-radius: 50%;
 }
 .adapter-heading {
   align-items: center;
@@ -1046,18 +1287,37 @@ a {
 .adapter-heading h3 {
   font-size: 16px;
 }
-.adapter-info > p {
-  color: var(--quiet);
-  margin-top: 5px;
-  font-size: 12px;
+.adapter-policy-block {
+  min-width: 0;
+  align-content: start;
+  display: grid;
 }
-.adapter-policy {
+.adapter-policy-block h4 {
   color: var(--quiet);
-  flex-wrap: wrap;
-  gap: 17px;
-  margin-top: 12px;
+  padding: 16px 25px 8px;
   font-size: 11px;
-  display: flex;
+  font-weight: 700;
+}
+.adapter-policy-summary {
+  gap: 3px;
+  padding: 0 25px;
+  display: grid;
+}
+.adapter-policy-summary strong {
+  font-size: 14px;
+}
+.adapter-policy-summary span {
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.adapter-policy-empty {
+  color: var(--quiet);
+  padding: 0 25px;
+  font-size: 11px;
+}
+.adapter-policy-cta {
+  padding: 12px 25px 16px;
 }
 .connection-panel {
   border: 1px solid var(--line);
@@ -1515,6 +1775,13 @@ a {
   .profiles-detail-panel {
     padding: 17px;
   }
+  .adapter-detail-panel .profiles-runtime-tabs,
+  .adapter-detail-panel .profiles-layout {
+    padding-inline: 18px;
+  }
+  .adapter-detail-panel .profiles-layout {
+    padding-bottom: 18px;
+  }
   .profiles-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     max-height: 240px;
@@ -1920,14 +2187,12 @@ a {
   .overview-columns {
     grid-template-columns: 1fr;
   }
-  .access-matrix {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .node-card-body {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .access-cell:nth-child(2n) {
+  .node-spec {
     border-right: 0;
-  }
-  .access-cell:nth-child(n + 3) {
-    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
   }
 }
 @media (width<=740px) {
@@ -2108,7 +2373,7 @@ a {
   .workspace-identity > button {
     width: 100%;
   }
-  .access-matrix {
+  .workspace-toggles {
     grid-template-columns: 1fr;
   }
   .access-cell {
@@ -2118,6 +2383,41 @@ a {
   }
   .access-cell:first-child {
     border-top: 0;
+  }
+  .execution-targets {
+    padding-inline: 17px;
+  }
+  .target-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .target-side {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+  .node-card-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 16px 18px;
+  }
+  .node-spec {
+    padding-inline: 18px;
+  }
+  .node-spec > div {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+  .node-adapters h4 {
+    padding-inline: 18px;
+  }
+  .node-adapter-row {
+    padding-inline: 18px;
+  }
+  .node-adapters .muted-note {
+    padding-inline: 18px;
+  }
+  .node-card-foot {
+    padding-inline: 18px;
   }
   .workspace-settings {
     grid-template-columns: 1fr;
@@ -2133,14 +2433,23 @@ a {
   .row-actions {
     justify-content: flex-start;
   }
-  .adapter-row {
-    grid-template-columns: 35px minmax(0, 1fr);
-    gap: 12px;
-    padding: 19px;
+  .adapter-card-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 16px 18px;
   }
-  .adapter-row > button {
-    grid-column: 2;
-    justify-self: start;
+  .adapter-policy-block h4 {
+    padding-inline: 18px;
+  }
+  .adapter-policy-summary,
+  .adapter-policy-empty {
+    padding-inline: 18px;
+  }
+  .adapter-policy-cta {
+    padding: 12px 18px 14px;
+  }
+  .adapter-card .node-card-foot {
+    padding-inline: 18px;
   }
   .connection-panel {
     padding: 18px;
@@ -2200,10 +2509,4 @@ a {
   align-items: center;
   gap: 7px;
   display: flex;
-}
-@media (width<=520px) {
-  .adapter-actions {
-    grid-column: 2;
-    justify-self: start;
-  }
 }

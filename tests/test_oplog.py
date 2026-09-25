@@ -140,7 +140,8 @@ def test_compose_passes_log_level_to_bridge():
     assert set(cfg["services"]) == {"bridge", "mcp-tunnel"}
     env = cfg["services"]["bridge"]["environment"]
     assert "WB_LOG_LEVEL" in env
-    assert "WB_RUNTIME_ADAPTERS" in env
+    assert "WB_RUNTIME_ADAPTERS" not in env
+    assert "WB_RUNTIME_TOKEN" not in env
 
 
 def test_env_example_documents_log_level():

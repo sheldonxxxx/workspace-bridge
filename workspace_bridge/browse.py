@@ -52,7 +52,12 @@ class Browser:
     def __init__(self, service: Service):
         self.service = service
         # Private, high-entropy key material already outside all mapped roots.
-        self.cursor_key = hashlib.sha256((service.config["admin_token_hash"] + ":browse-v1").encode()).digest()
+        secret = (service.config.get("cursor_secret") or
+                  service.config.get("node_token_hash") or
+                  service.config.get("admin_token_hash"))
+        if not isinstance(secret, str) or len(secret) < 32:
+            raise ValueError("A private cursor secret is required")
+        self.cursor_key = hashlib.sha256((secret + ":browse-v1").encode()).digest()
 
     def _cursor(self, payload: dict) -> str:
         raw = packed(payload)

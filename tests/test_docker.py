@@ -13,7 +13,7 @@ import yaml
 
 from workspace_bridge.api import Boundary, make_admin, make_mcp
 from workspace_bridge.cli import initialize, main as cli_main
-from workspace_bridge.docker_entrypoint import bootstrap, main as entry_main, port_value, project_parent
+from workspace_bridge.docker_entrypoint import bootstrap, main as entry_main, port_value
 from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
 from workspace_bridge import container_health
@@ -141,79 +141,50 @@ def test_env_port_default_and_override(monkeypatch):
 
 def test_fresh_bootstrap_preserves_credentials_and_policy(tmp_path,capsys):
     state=tmp_path/'state';state.mkdir(mode=0o700)
-    parent=tmp_path/'projects';parent.mkdir()
-    cfg=bootstrap(state,parent)
+    cfg=bootstrap(state)
     token=(state/'admin-token').read_bytes()
     assert token.decode().strip() not in capsys.readouterr().out
-    svc=Service(state,cfg)
-    root=parent/'alpha';root.mkdir()
-    ws=svc.add_workspace('A',str(root),[])['workspace']
-    assert not ws['enabled'] and ws['write_scope']=='handoff'
-    svc.manage_workspace(ws['id'],'set_write_scope',write_scope='none')
-    bridge_token=svc.manage_bridge('rotate_token')['token'];svc.close()
-    assert bootstrap(state,parent)==cfg
+    assert bootstrap(state)==cfg
     assert (state/'admin-token').read_bytes()==token
-    svc=Service(state,cfg)
-    assert svc.workspace(ws['id'],False)['write_scope']=='none'
-    assert not svc.workspace(ws['id'],False)['enabled']
-    svc.authenticate_bridge(bridge_token);svc.close()
 
 
 @pytest.mark.parametrize('file',['bridge.sqlite3','admin-token','unrelated.txt'])
 def test_bootstrap_nonempty_without_config_denied(tmp_path,file):
     state=tmp_path/'state';state.mkdir(mode=0o700)
-    parent=tmp_path/'projects';parent.mkdir()
     (state/file).write_text('preserve me')
-    with pytest.raises(BridgeError,match='nonempty'):bootstrap(state,parent)
+    with pytest.raises(BridgeError,match='nonempty'):bootstrap(state)
     assert not (state/'config.json').exists()
     assert (state/file).read_text()=='preserve me'
 
 
-def test_bootstrap_wrong_parent_denied_without_rewrite(tmp_path):
+def test_bootstrap_existing_listener_config_denied_without_rewrite(tmp_path):
     state=tmp_path/'state';state.mkdir(mode=0o700)
-    parent=tmp_path/'projects';parent.mkdir()
-    other=tmp_path/'other';other.mkdir()
-    initialize(state,[str(other)],8765,8766)
+    initialize(state,8875,8876)
     before=(state/'config.json').read_bytes()
-    with pytest.raises(BridgeError,match='does not match'):bootstrap(state,parent)
+    with pytest.raises(BridgeError,match='does not match'):bootstrap(state)
     assert (state/'config.json').read_bytes()==before
 
 
 def test_bootstrap_native_ports_not_rewritten(tmp_path):
     state=tmp_path/'state';state.mkdir(mode=0o700)
-    parent=tmp_path/'projects';parent.mkdir()
-    initialize(state,[str(parent)],8875,8876)
-    with pytest.raises(BridgeError,match='does not match'):bootstrap(state,parent)
+    initialize(state,8875,8876)
+    with pytest.raises(BridgeError,match='does not match'):bootstrap(state)
 
 
 @pytest.mark.parametrize('mode',[0o755,0o750,0o777])
 def test_bootstrap_insecure_state_denied(tmp_path,mode):
     state=tmp_path/'state';state.mkdir();state.chmod(mode)
-    parent=tmp_path/'projects';parent.mkdir()
-    with pytest.raises(BridgeError,match='0700'):bootstrap(state,parent)
+    with pytest.raises(BridgeError,match='0700'):bootstrap(state)
     assert (state.stat().st_mode&0o777)==mode
 
 
 def test_bootstrap_symlink_denied(tmp_path):
     state=tmp_path/'state';state.mkdir(mode=0o700)
-    parent=tmp_path/'projects';parent.mkdir()
     link=tmp_path/'link';link.symlink_to(state)
-    with pytest.raises(BridgeError):bootstrap(link,parent)
+    with pytest.raises(BridgeError):bootstrap(link)
     (state/'bootstrap.lock').symlink_to(tmp_path/'outside')
-    with pytest.raises(OSError):bootstrap(state,parent)
+    with pytest.raises(OSError):bootstrap(state)
     assert not (tmp_path/'outside').exists()
-
-
-@pytest.mark.parametrize('path',['/','/home','relative/path','/usr/local','/opt/app','/state/projects','/proc/self'])
-def test_invalid_project_parents(path):
-    with pytest.raises((BridgeError,OSError)):project_parent(path)
-
-
-def test_project_parent_valid_and_symlink(tmp_path):
-    parent=tmp_path/'projects';parent.mkdir()
-    assert project_parent(str(parent))==parent
-    link=tmp_path/'alias';link.symlink_to(parent)
-    with pytest.raises(BridgeError):project_parent(str(link))
 
 
 @pytest.mark.parametrize('argv',[
@@ -235,9 +206,7 @@ def test_entrypoint_refuses_root(monkeypatch):
 
 def test_entrypoint_invokes_cli_with_explicit_container_flags(tmp_path,monkeypatch):
     import workspace_bridge.docker_entrypoint as entry
-    parent=tmp_path/'projects';parent.mkdir()
     monkeypatch.setattr(os,'getuid',lambda:1001)
-    monkeypatch.setenv('WB_PROJECTS_DIR',str(parent))
     monkeypatch.setenv('WB_STATE_DIR',str(tmp_path/'state'))
     monkeypatch.setenv('WB_MCP_PORT','8875');monkeypatch.setenv('WB_ADMIN_PORT','8876')
     boot=Mock(); cli=Mock()
@@ -255,18 +224,18 @@ def test_compose_security_and_same_host_path():
     assert svc['read_only'] and svc['init']
     assert svc['cap_drop']==['ALL'] and 'no-new-privileges:true' in svc['security_opt']
     assert all(p.startswith('127.0.0.1:') for p in svc['ports'])
-    assert svc['volumes'][1]['source']==svc['volumes'][1]['target']
+    assert len(svc['volumes']) == 1
+    assert svc['volumes'][0]['target'] == '/state'
     assert all(mount['bind']['create_host_path'] is False for mount in svc['volumes'])
     assert not any('docker.sock' in str(m) for m in svc['volumes'])
     assert 'privileged' not in svc and 'network_mode' not in svc
     assert svc['restart']=='unless-stopped'
     assert svc['mem_limit']=='1536m' and svc['pids_limit']==64
     assert svc['healthcheck']['test']==['CMD','python','-m','workspace_bridge.container_health']
-    # The bridge only reaches the native Pi host adapter URL plus the shared
-    # runtime token; provider credentials stay on the host and never enter
-    # the bridge container.
-    assert 'WB_RUNTIME_ADAPTERS' in svc['environment']
-    assert 'WB_RUNTIME_TOKEN' in svc['environment']
+    # Adapter URLs and Bridge-side tokens live in private SQLite state;
+    # native daemon bootstrap remains configured on the adapter host.
+    assert 'WB_RUNTIME_ADAPTERS' not in svc['environment']
+    assert 'WB_RUNTIME_TOKEN' not in svc['environment']
     assert set(cfg['services']) == {'bridge', 'mcp-tunnel'}
     # Tunnel sidecar: internal-only client, no published ports, no project/state mounts.
     tunnel=cfg['services']['mcp-tunnel']
@@ -366,19 +335,17 @@ def test_setup_generates_private_config_no_source_changes(tmp_path,monkeypatch):
     monkeypatch.setattr(os,'getuid',lambda:uid)
     parent=tmp_path/'projects # dollar$';parent.mkdir()
     state=tmp_path/'private';out=tmp_path/'.env'
-    setup.configure(parent,state,out,8875,8876)
+    setup.configure(state,out,8875,8876)
     content=out.read_text()
-    assert f"WB_PROJECTS_DIR='{parent}'" in content
     assert 'WB_MCP_PORT=8875' in content and 'WB_ADMIN_PORT=8876' in content
     assert 'TOKEN' not in content and 'API_KEY' not in content
     assert state.stat().st_mode&0o777==0o700 and out.stat().st_mode&0o777==0o600
-    assert not list(parent.iterdir())
-    with pytest.raises(ValueError,match='already exists'):setup.configure(parent,state,out)
+    with pytest.raises(ValueError,match='already exists'):setup.configure(state,out)
 
 
 def test_setup_rejects_root(tmp_path,monkeypatch):
     monkeypatch.setattr(os,'getuid',lambda:0)
-    with pytest.raises(ValueError,match='root'):setup.configure(tmp_path,tmp_path/'state',tmp_path/'.env')
+    with pytest.raises(ValueError,match='root'):setup.configure(tmp_path/'state',tmp_path/'.env')
 
 
 @pytest.mark.parametrize('bad', ["/home/a/quo'te", '/home/a/path\\bad', '/home/a/a:b', '/home/a/new\nline'])
@@ -388,9 +355,9 @@ def test_setup_env_rejects_unsafe_characters(bad):
 
 def test_setup_state_overlap_rejected(tmp_path,monkeypatch):
     monkeypatch.setattr(os,'getuid',lambda:1001)
-    parent=tmp_path/'projects';parent.mkdir()
-    with pytest.raises(ValueError,match='outside'):setup.configure(parent,parent/'state',tmp_path/'.env')
-    assert not (parent/'state').exists()
+    state=tmp_path/'state'; state.mkdir()
+    with pytest.raises(ValueError,match='outside'):setup.configure(state,state/'nested.env')
+    assert not (state/'nested.env').exists()
 
 
 def test_health_exact_urls_and_no_proxy(monkeypatch):
@@ -418,7 +385,7 @@ def test_health_unavailable(monkeypatch):
 def test_no_skill_or_remote_schema_expansion():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==25 and SKILL_VERSION=='2.5.0'
+    assert len(TOOLS)==26 and SKILL_VERSION=='2.6.0'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
 
 
@@ -519,10 +486,7 @@ def test_resolve_bind_hosts():
 
 def test_entrypoint_rejects_bad_allowed_hosts(tmp_path, monkeypatch):
     import workspace_bridge.docker_entrypoint as entry
-    parent = tmp_path / 'projects'
-    parent.mkdir()
     monkeypatch.setattr(os, 'getuid', lambda: 1001)
-    monkeypatch.setenv('WB_PROJECTS_DIR', str(parent))
     monkeypatch.setenv('WB_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('WB_ADMIN_ALLOWED_HOSTS', 'bad:host')
     with pytest.raises(SystemExit) as exc:

@@ -5,7 +5,7 @@
 ChatGPT reads your project, resolves the technical approach, and writes a handoff.
 By default you paste its instructions and path into the local agent manually. When a local
 administrator enables agent execution for a workspace, ChatGPT can instead start one
-bounded agent run on an explicitly configured runtime
+bounded agent run on an explicitly configured adapter instance
 for that prepared handoff through Workspace Bridge and read
 the final result back itself. Runtime questions and choices are resumable through
 the Runtime Protocol interaction flow. When the run finishes, Workspace Bridge records a
@@ -19,7 +19,7 @@ and bounded diffs are available as live review evidence. Source is read-only by
 default; a local administrator can explicitly enable text writes per workspace and
 separately enable agent execution (default off). The bridge never runs shell commands,
 never exposes an arbitrary command tool, and never starts or hosts an agent server:
-private host adapters connect to the locally managed runtimes.
+private adapter daemons provide native runtime behavior.
 
 ## Connection and management
 
@@ -44,7 +44,7 @@ no mutable shared active-workspace setting.
 ## Diagnostics and runnable routes
 
 `workspace-bridge doctor` reports local configuration, workspace prerequisites,
-runtime health, current profile/model freshness, runnable workspace/runtime paths,
+adapter-instance health, current profile/model freshness, runnable workspace/adapter routes,
 and read-only Git Evidence. Use `workspace-bridge doctor --json` for canonical
 DiagnosticReport JSON or add `--offline` to skip all runtime/network calls. The
 authenticated local-admin `GET /api/diagnostics` endpoint returns the same report;
@@ -54,19 +54,20 @@ Diagnostic statuses are `pass`, `warning`, `action_required`, `failed`, and
 `unknown`. Overall severity is deterministic: failed, action required, unknown,
 warning, then pass. Doctor exits nonzero for failed/action-required reports and
 zero for pass, warning, or unknown-only reports. A runnable route is one exact
-workspace/runtime pair whose mapping, handoff write scope, agent switch, shared
-MCP gateway, runtime grant, current security profile, and current default model
-all satisfy run-start prerequisites. Listener health, gateway enablement, and
-runtime health do not establish that such a route exists.
+workspace/adapter pair whose mapping, handoff write scope, agent switch, shared
+MCP gateway, exact WorkspaceRoute, current security profile, and current
+adapter-scoped default model all satisfy run-start prerequisites. Listener
+health, gateway enablement, and adapter health do not establish that such a
+route exists.
 Git Evidence reports review capability and never blocks an execution route.
 
 The local Manager reads this canonical report. Only `runnable_routes[].ready`
-for the selected exact workspace/runtime pair enables a prepared-handoff start;
+for the selected exact workspace/adapter pair enables a prepared-handoff start;
 overall diagnostic health remains separate.
 If diagnostics cannot refresh, the Manager marks route readiness unavailable
 and disables starts while leaving other Manager data visible. Its authenticated
 `POST /api/workspaces/{workspace}/jobs/{job_id}/runs` action accepts only an
-explicit runtime and idempotency request ID for the path-owned prepared job, then
+exact `adapter_id` and idempotency request ID for the path-owned prepared job, then
 delegates to the existing `service.start_agent_run` policy path. It accepts no
 arbitrary prompt or model override.
 
@@ -80,7 +81,7 @@ workspace-bridge doctor --offline
 ```
 
 For Docker deployments, run Doctor inside the Bridge container so it reads the
-same `/state`, runtime adapter environment, and container network context as the
+same `/state` and container network context as the
 live Bridge process:
 
 ```sh
@@ -92,9 +93,8 @@ docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 Offline Doctor uses SQLite read-only, starts no runtime or notification workers,
 does not recover notification deliveries, and does not take the serve process
 lock. Runtime/profile/model freshness is unknown offline; such a route is never
-reported ready. The Manager will consume these server-authoritative routes in
-the next productization milestone; its current readiness presentation remains
-legacy client logic for now.
+reported ready. The Manager consumes these server-authoritative route identities
+directly.
 
 The manager adds mappings, enables/disables access, edits exclusions, copies
 workspace IDs and handoff prompts, sets each workspace's write permission **and its
@@ -102,7 +102,7 @@ separate agent-execution policy** (default off), shows the three planning docume
 and access events, lists linked agent runs with their conversation IDs, model, state
 and notification status, shows live Runtime Protocol interactions and recorded
 activities, lets the admin answer supported choices or stop an active run, enforces
-per-runtime model policies, creates/rotates the shared
+per-adapter model policies, creates/rotates the shared
 credential, pauses MCP access, and generates a single tunnel profile.
 
 The local manager uses React, TypeScript, Vite, Tailwind CSS, and owned
@@ -111,7 +111,7 @@ same loopback listener. Frontend source lives in `web/`; run `npm ci` and
 `npm run build` there after UI changes. The compiled assets are included in
 the Python package, so installing or running the server does not require Node.
 
-## Twenty-five tools
+## Twenty-six tools
 
 | Purpose | Tools |
 |---|---|
@@ -119,7 +119,7 @@ the Python package, so installing or running the server does not require Node.
 | Workspace selection | `list_workspaces`, `workspace_info` |
 | General inspection and audit | `list_dir`, `glob`, `grep_files`, `read_file` |
 | Read-only Git evidence | `git_status`, `git_diff` |
-| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_agent_models`, `start_agent_run`, `list_agent_runs`, `read_agent_run`, `cancel_agent_run`, `list_agent_executions`, `read_agent_execution`, `read_agent_interaction`, `respond_agent_interaction`, `list_agent_activities`, `read_agent_activity` |
+| Handoff and optional agent dispatch | `prepare_handoff`, `list_handoffs`, `read_handoff`, `list_agent_adapters`, `list_agent_models`, `start_agent_run`, `list_agent_runs`, `read_agent_run`, `cancel_agent_run`, `list_agent_executions`, `read_agent_execution`, `read_agent_interaction`, `respond_agent_interaction`, `list_agent_activities`, `read_agent_activity` |
 | Policy-controlled writing | `write_file`, `edit_file` |
 
 The embedded skill tells ChatGPT to own decisions, give the less-capable implementer
@@ -157,35 +157,36 @@ setup, persistent state and security details.
 
 ```sh
 # From this package directory, OUTSIDE the projects being mapped:
-python3 scripts/configure_docker.py --projects-dir "$HOME/Projects" --mcp-port 8875
+python3 scripts/configure_docker.py --state-dir "$HOME/.local/state/workspace-bridge-docker" --mcp-port 8875
 docker compose config --quiet
 docker compose up -d --build
 docker compose exec bridge workspace-bridge --state /state show-admin-token
 docker exec workspace-bridge workspace-bridge --state /state doctor
 ```
 
-Open `http://127.0.0.1:8766/`, add your actual host project paths, create a bridge
-token and enable intended mappings. The same absolute project paths are mounted
-inside the container, so the Pi agent can read copied handoff paths on the host.
-Point the host tunnel to `http://127.0.0.1:8875/mcp` (or your configured host port).
-Both published ports bind to host loopback only. Internal ports remain 8765/8766.
+Open `http://127.0.0.1:8766/`, add an authoritative Node endpoint and token,
+then add workspace mappings using roots on that Node. The Bridge container is the
+control plane and does not inspect a local project bind; the Node service owns
+those files, Git data, handoffs, and runtime adapters. Point the host tunnel to
+`http://127.0.0.1:8875/mcp` (or your configured host port). Both published ports
+bind to host loopback only. Internal ports remain 8765/8766.
 
 The optional setup script needs host Python 3; manual `.env.example` setup does
 not. Runtime Python/Pillow dependencies are installed in the image. Persistent
 state defaults to a **separate** `~/.local/state/workspace-bridge-docker` directory;
 the existing native installation is not overwritten. No workspace is auto-enabled.
 The image uses a non-root user, read-only container root, capability dropping,
-private state and a bounded temporary filesystem. The **project bind is writable**
-for handoffs; the default source-write prohibition is an application policy,
-not an OS read-only mount. Review the Docker guide before enabling source writes.
+private Bridge state and a bounded temporary filesystem. It has no workspace data
+bind: the authoritative Node host owns project files, Git, handoffs and source
+writes under its own `allowed_roots` policy.
 
-The image is built locally, not pulled as a published Workspace Bridge image. In this
-delivery environment `docker compose config` validated, both the bridge and adapter
-images built successfully, and a disposable bridge+adapter container smoke passed
-(loopback-only published ports, adapter with no published port, new workspace
-disabled/handoff/agent-disabled). The full Compose stack with the tunnel sidecar and
-a live host Pi agent was not run here; `scripts/test_docker.py` exercises the
-real container on a Docker-equipped host. See [Docker guide](docs/DOCKER.md).
+The image is built locally, not pulled as a published Workspace Bridge image. The
+v3 Node split has not been validated with a live Docker Compose plus Node service
+smoke in this checkout. The older `scripts/test_docker.py` and
+`scripts/validate_container_transport.py` fixtures still describe the pre-Node
+local-bind flow and are not v3 evidence; validate the Bridge and its authoritative
+Node together on a Docker-equipped host before relying on a Compose deployment.
+See [Docker guide](docs/DOCKER.md).
 
 ## Install
 
@@ -201,13 +202,36 @@ python3 -m venv .venv
 python -m pip install -e '.[test]'
 python -m pytest -q
 
-mkdir -p "$HOME/Projects"
-workspace-bridge init --allow-parent "$HOME/Projects"
+workspace-bridge init
+# Host-only Node (safe loopback default):
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" init \
+  --allow-root "$HOME/Projects"
+# For Docker Desktop, run the init command instead with --host 0.0.0.0.
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
 workspace-bridge serve
 ```
 
-Use your actual dedicated project parent. A permitted parent does not expose every
-child automatically. In another terminal in the same environment:
+On macOS, `service install` creates the per-user
+`~/Library/LaunchAgents/com.workspace-bridge.node.plist` and keeps the native
+Node running outside Compose. It does not print or store the Node token in the
+plist. `service status` is read-only and reports the plist, `gui/<uid>` launchd
+state, configured listen address, and a bounded authenticated `/v1/status`
+result. `service uninstall` removes only that managed plist; Node state, tokens,
+adapters, allowed roots, and private logs remain.
+
+When the Bridge runs in Docker Desktop, a Node initialized with `--host
+0.0.0.0` is registered in Manager as `http://host.docker.internal:8770` (use
+the configured port). A Node bound only to `127.0.0.1` is intentionally not
+assumed to be reachable from the Bridge container. Non-loopback binding exposes
+the authenticated Node on host interfaces, so use a host firewall/private
+network and never put it behind the MCP tunnel. Compose still contains only
+Bridge and the MCP tunnel; native Node and Pi/Codex adapter daemons stay on the
+macOS host with identical absolute workspace paths.
+
+Add the Node URL and one-time Node token in the Manager, then register only
+canonical child roots on that Node. The Node `allowed_roots` ceiling is configured
+on its host and is not editable by Bridge. In another terminal in the same environment:
 
 ```sh
 workspace-bridge show-admin-token
@@ -217,7 +241,7 @@ Open `http://127.0.0.1:8766/`, enter the admin token, add individual mappings, c
 one bridge token, and enable only intended projects. Generate the tunnel profile
 and follow [tunnel setup](docs/TUNNEL_SETUP.md). Neither token belongs in ChatGPT,
 the Pi agent, project files, or handoffs. Only `/mcp` is tunnelled; the management page
-stays local. The endpoint, token format and tunnel profile are unchanged from v0.2.
+stays local. The MCP endpoint remains `/mcp`; refresh any cached connector registration after MCP schema changes.
 
 ## Daily loop
 
@@ -298,34 +322,47 @@ or handoff path in every write mode. The user still pastes the agent's reply int
 ChatGPT for general-tool review; workspace permission alone does not authorize
 ChatGPT to take over implementation. See [file access guide](docs/FILE_ACCESS.md).
 
-## Runtime Protocol v1 adapters (opt-in)
+## Nodes, adapter instances, and workspace routes
 
-Bridge can coordinate Pi and Codex through the same private [Runtime Protocol
-v1](docs/RUNTIME_PROTOCOL.md). Set `WB_RUNTIME_ADAPTERS` to a JSON object that
-maps each runtime ID to its private host URL, for example
-`{"pi":"http://host.docker.internal:8780","codex":"http://host.docker.internal:8772"}`.
-The existing Pi host adapter serves `/v1/*` on its current port. To start the
-dedicated Codex host adapter, install this checkout in a host Python environment
-and run `workspace-bridge-codex-adapter` with `WB_CODEX_ADAPTER_STATE`,
-`WB_CODEX_PROJECTS_ROOT`, and `WB_RUNTIME_TOKEN` set. It binds to host loopback
-on port 8772 by default and starts its own Codex app-server process; it does not
-attach to a Desktop or TUI thread. Keep adapter state outside project roots.
+Bridge uses the private [Runtime Protocol v1](docs/RUNTIME_PROTOCOL.md) for Pi
+and Codex behavior. A Node is the authoritative data-plane service for one
+machine and owns its allowed roots, workspace files/Git/handoffs, and runtime
+adapter registry. A `RuntimeType` is the protocol family (`pi` or `codex`);
+an `AdapterInstance` is one Node-owned destination with its own name, endpoint,
+token, enabled state, and connection revision. Two Pi instances can coexist on
+one Node, such as local and GPU-backed daemons. A `WorkspaceRoute` binds one
+workspace to one exact same-Node adapter ID and one optional default.
 
-For each workspace, enable the agent switch, grant each intended runtime, select
-the Codex security source, and save that runtime's enabled model list and
-default in the local manager. Every new runtime grant starts disabled. Pi profile
-changes apply to new conversations. Codex can update named permissions between
-turns when the app-server confirms the change; unsafe or unconfirmed changes start
-a fresh conversation. Open **Profiles** in the manager to create, edit, and delete
-custom profiles using the controls supported by Pi or Codex. Assign a saved
-profile from the workspace's **Change security** dialog. Codex can also follow the
-effective native settings from `config.toml` without creating a Bridge profile.
-Pi's external access controls govern
-file tools outside the workspace; shell commands and any enabled host extensions
-have separate authority. Assign another profile in every
-workspace before deleting one. Native Pi and Codex security mechanisms differ;
-review each profile's claims before enabling write access. All configured runtimes
-use the same run, interaction, activity, and execution APIs and Bridge database schema.
+Create, edit, test, disable, and delete Nodes and their adapter instances from
+the local Manager's **Nodes** area. Bridge stores only the Node token and a
+sanitized adapter cache; runtime adapter tokens remain in the private Node
+SQLite. Both databases are mode `0600`. Normal APIs show only whether a token
+exists, never its value. Blank token fields preserve the stored token. Endpoint
+and token edits take effect on the next request without restarting Bridge.
+
+Enable exact targets from each workspace's **Execution targets** controls. The
+surface is present even when no routes exist and discovers only adapters from
+the workspace's authoritative Node. Model policy and native profile discovery
+belong to each adapter instance. Codex `runtime-config` security follows the
+selected Codex adapter and exact workspace route. Diagnostics and Handoff start
+controls use the exact `(workspace_id, adapter_id)` pair and show Node, model,
+readiness, and effective security. MCP callers first use
+`list_agent_adapters`; `runtime_type` is descriptive, while `adapter_id` selects
+the destination. There is no implicit cross-Node or runtime-type fallback.
+
+Bridge-side endpoints and tokens live in SQLite, not `WB_RUNTIME_ADAPTERS` or
+a Bridge-wide `WB_RUNTIME_TOKEN`. Native Pi/Codex daemon ports, tokens, state,
+and launch services remain configured on their host machines for now. The
+Manager owns how Bridge connects to a daemon; daemon lifecycle automation is a
+separate future milestone. Existing non-v3 Bridge or Node databases are rejected with
+`state_schema_incompatible`; use fresh state paths because this development
+cutover does not migrate older state.
+
+Pi's external access controls govern file tools outside the workspace; shell
+commands and enabled host extensions have separate authority. Native Pi and
+Codex security mechanisms differ; review each profile's claims before enabling
+write access. All adapters share the Runtime Protocol, but routes, model policy,
+profiles, and execution history remain scoped to each adapter ID.
 
 Codex profiles select a native permission-profile ID with an approval policy and
 reviewer. The separate **Use Codex config (config.toml)** source follows the
@@ -346,8 +383,9 @@ request and run-state paths. The current adapter is Discord, configured locally 
 run orchestration. Pending rows for removed channels are disabled so they cannot
 block configured channels.
 
-Events contain bounded workspace and handoff labels, Bridge run/runtime identifiers,
-timestamps, and optional request kind/action metadata. They never contain prompts,
+Events contain bounded workspace and handoff labels, Bridge run and adapter IDs,
+adapter names, runtime types, timestamps, and optional request kind/action metadata.
+They never contain prompts,
 results, source, commands, external paths, webhook URLs, tokens, or raw provider
 payloads. Delivery failures are bounded, isolated per channel, and never change run
 state. A crash after remote acceptance but before the sent result is persisted can

@@ -25,6 +25,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Server,
   Settings2,
   Shield,
   Sun,
@@ -71,11 +72,13 @@ import {
   runtimeName,
   type DiagnosticCheck,
   type DiagnosticReport,
+  type AdapterInfo,
   type Event,
   type Handoff,
   type Json,
   type Model,
   type ModelPolicy,
+  type NodeInfo,
   type Run,
   type RunnableRoute,
   type Status,
@@ -87,11 +90,11 @@ import { ProfileAssignment } from "./ProfileAssignment";
 
 type Section =
   | "overview"
+  | "nodes"
   | "workspaces"
-  | "profiles"
+  | "adapters"
   | "handoffs"
   | "runs"
-  | "runtimes"
   | "audit";
 type ConfirmState = {
   title: string;
@@ -113,16 +116,24 @@ const sections: Array<{
     description: "What is ready and what needs attention",
   },
   {
+    id: "nodes",
+    title: "Nodes",
+    icon: Server,
+    description:
+      "Each Node is the authority for a machine-local workspace root, Git evidence, handoffs, and runtime adapters",
+  },
+  {
     id: "workspaces",
     title: "Workspaces",
     icon: FolderClosed,
     description: "Access to your projects",
   },
   {
-    id: "profiles",
-    title: "Profiles",
-    icon: Shield,
-    description: "Security controls for each runtime",
+    id: "adapters",
+    title: "Adapters",
+    icon: Command,
+    description:
+      "Runtime execution destinations with model policy and security profiles",
   },
   {
     id: "handoffs",
@@ -135,12 +146,6 @@ const sections: Array<{
     title: "Runs",
     icon: Play,
     description: "Agent progress and live requests",
-  },
-  {
-    id: "runtimes",
-    title: "Runtimes",
-    icon: Command,
-    description: "Adapters, models, and connection",
   },
   {
     id: "audit",
@@ -189,7 +194,7 @@ function routeChecks(
       (check) =>
         check.code === code &&
         (!check.workspace_id || check.workspace_id === route.workspace_id) &&
-        (!check.runtime || check.runtime === route.runtime),
+        (!check.adapter_id || check.adapter_id === route.adapter_id),
     ),
   }));
 }
@@ -200,15 +205,21 @@ function diagnosticDestination(
   const value = code || check?.code || "";
   if (check?.section === "workspaces" || value.startsWith("workspace."))
     return "workspaces";
-  if (value.startsWith("profile.")) return "profiles";
-  return "runtimes";
+  if (value.startsWith("profile.") || value.startsWith("adapter."))
+    return "adapters";
+  return "adapters";
 }
-function securitySource(ws: Workspace | undefined, runtime: string): string {
-  const grant = ws?.runtime_grants?.[runtime];
-  if (grant?.security_binding?.source === "runtime-config")
-    return "Codex config";
-  const profileId = grant?.security_binding?.profile?.id || grant?.profile?.id;
-  return profileId ? `Profile ${profileId}` : "Security source not reported";
+function securityDetail(
+  grant: Workspace["routes"][string] | undefined,
+): string {
+  const effective = grant?.effective_security;
+  if (!effective)
+    return "Unavailable — route cannot run until security resolves.";
+  if (effective.source === "profile") {
+    return `Profile ${effective.profile_id || "unknown"} · revision ${(effective.bound_revision || "unknown").slice(0, 12)} · ${effective.freshness || "unknown"}`;
+  }
+  const summary = effective.resolved_summary || {};
+  return `Codex runtime config · ${String(summary.activePermissionProfile || "permission profile unknown")} · approval ${String(summary.approvalPolicy || "unknown")} · reviewer ${String(summary.approvalsReviewer || "unknown")} · ${effective.status || "unavailable"}`;
 }
 function isDiagnosticReport(value: unknown): value is DiagnosticReport {
   if (!value || typeof value !== "object") return false;
@@ -225,7 +236,7 @@ function isDiagnosticReport(value: unknown): value is DiagnosticReport {
     report.runnable_routes.every(
       (route) =>
         typeof route.workspace_id === "string" &&
-        typeof route.runtime === "string" &&
+        typeof route.adapter_id === "string" &&
         typeof route.ready === "boolean",
     ),
   );
@@ -254,19 +265,25 @@ function RouteSummary({
       <div className="diagnostic-route-head">
         <div>
           <strong>{route.workspace_name}</strong>
-          <span>{runtimeName(route.runtime)}</span>
+          <span>
+            {route.adapter_name} · {runtimeName(route.runtime_type)}
+          </span>
         </div>
-        <StateBadge
-          value={
-            unavailable
-              ? "Diagnostics unavailable"
-              : route.ready
-                ? "Ready"
-                : "Blocked"
-          }
-        />
+        <div className="row-actions">
+          {route.is_default && <StateBadge value="Workspace default" />}
+          <StateBadge
+            value={
+              unavailable
+                ? "Diagnostics unavailable"
+                : route.ready
+                  ? "Ready"
+                  : "Blocked"
+            }
+          />
+        </div>
       </div>
       <p className="diagnostic-route-facts">
+        <span>Node: {route.node_name || route.node_id || "Not reported"}</span>
         <span>
           Default model: {route.default_model_selector || "Not reported"}
         </span>
@@ -365,13 +382,22 @@ function RunCard({
       <div className="run-main">
         <div className="run-state">
           <StateBadge value={attention ? "Needs review" : displayState(run)} />
-          <span>{runtimeName(run.runtime || "unknown")}</span>
+          <span>
+            {run.adapter_name || "Unknown adapter"} ·{" "}
+            {runtimeName(run.runtime_type || "unknown")}
+          </span>
         </div>
         <h3>{run.handoff_title || run.job_id || "Untitled handoff"}</h3>
         <p>
           {run.workspace_name || run.workspace_id || "Workspace"}{" "}
           <span aria-hidden="true">/</span> {run.model || "Default model"}
         </p>
+        <small className="run-route-context">
+          Node: {run.node_name || run.node_id || "Unknown"} · security snapshot
+          {run.effective_security?.source
+            ? ` · ${run.effective_security.source}`
+            : " unavailable"}
+        </small>
       </div>
       <div className="run-side">
         <span className="run-updated">
@@ -622,6 +648,7 @@ function WorkspaceCard({
   diagnostics,
   diagnosticsUnavailable,
   onManage,
+  onRoute,
   onProfile,
   onHandoffs,
   onNavigate,
@@ -633,6 +660,7 @@ function WorkspaceCard({
   diagnostics: DiagnosticReport | null;
   diagnosticsUnavailable: boolean;
   onManage: (ws: Workspace, operation: string, extra?: Json) => Promise<void>;
+  onRoute: (ws: Workspace, adapterId: string, body: Json) => Promise<void>;
   onProfile: (ws: Workspace, runtimeId: string) => void;
   onHandoffs: (ws: Workspace) => void;
   onNavigate: (section: Section) => void;
@@ -695,13 +723,19 @@ function WorkspaceCard({
               <Clipboard size={14} />
             </Button>
           </div>
-          <p title={ws.root}>{ws.root}</p>
+          <p className="path-text" title={ws.root}>
+            {ws.root}
+          </p>
+          <p className="workspace-node-label">
+            Node: <strong>{ws.node_name || ws.node_id}</strong> · node-local
+            root
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => onHandoffs(ws)}>
           Handoffs <ArrowRight size={14} />
         </Button>
       </div>
-      <div className="access-matrix">
+      <div className="workspace-toggles">
         <div className="access-cell">
           <div>
             <strong>Bridge access</strong>
@@ -743,94 +777,200 @@ function WorkspaceCard({
             }
           />
         </div>
-        {Object.entries(ws.runtime_grants || {}).map(([id, grant]) => {
-          const route = diagnostics?.runnable_routes.find(
-            (item) => item.workspace_id === ws.id && item.runtime === id,
-          );
-          const blockers = route ? routeChecks(diagnostics, route) : [];
-          const status = diagnosticsUnavailable
-            ? "Diagnostics unavailable"
-            : route
-              ? route.ready
-                ? "Ready"
-                : "Blocked"
-              : "Not evaluated";
-          return (
-            <div className="access-cell runtime-access" key={id}>
-              <div>
-                <strong>{runtimeName(id)} runtime</strong>
-                <p>Security source: {securitySource(ws, id)}</p>
-                <p>Runtime grant: {grant.enabled ? "Enabled" : "Disabled"}</p>
-                {grant.security_binding?.source === "runtime-config" && (
-                  <p className="runtime-security-summary">
-                    {grant.security_binding.status === "ready"
-                      ? `Following current Codex config · ${grant.security_binding.resolved_summary?.activePermissionProfile || "Codex default"} · ${grant.security_binding.resolved_summary?.approvalPolicy || "approval unknown"} · ${grant.security_binding.resolved_summary?.approvalsReviewer || "reviewer unknown"}`
-                      : "Codex security config is currently unavailable"}
-                  </p>
-                )}
-                <div className="runtime-route-readiness">
-                  <span>Route readiness</span>
-                  <StateBadge value={status} />
-                </div>
-                {!diagnosticsUnavailable && route && !route.ready && (
-                  <div className="runtime-route-blocker">
-                    <p>{blockers[0]?.check?.summary || route.summary}</p>
-                    {blockers[0]?.check?.remediation && (
-                      <small>{blockers[0].check.remediation}</small>
+      </div>
+      <div className="execution-targets">
+          <div className="execution-targets-heading">
+            <div>
+              <strong>Execution targets</strong>
+              <p>Every run uses an adapter owned by this workspace’s Node.</p>
+            </div>
+            <span className="target-count">
+              {Object.keys(ws.routes || {}).length} configured
+            </span>
+          </div>
+          {Object.keys(ws.routes || {}).length === 0 && (
+            <div className="execution-target-empty">
+              <strong>No execution targets configured</strong>
+              <p>
+                Add a same-Node adapter below, then choose its security and
+                readiness before starting a run.
+              </p>
+            </div>
+          )}
+          {Object.entries(ws.routes || {}).map(([id, grant]) => {
+            const route = diagnostics?.runnable_routes.find(
+              (item) => item.workspace_id === ws.id && item.adapter_id === id,
+            );
+            const blockers = route ? routeChecks(diagnostics, route) : [];
+            const status = diagnosticsUnavailable
+              ? "Diagnostics unavailable"
+              : route
+                ? route.ready
+                  ? "Ready"
+                  : "Blocked"
+                : "Not evaluated";
+            return (
+              <div className="target-row" key={id}>
+                <div className="target-main">
+                  <div className="target-title-line">
+                    <strong>
+                      {grant.name} · {runtimeName(grant.runtime_type)}
+                    </strong>
+                    {grant.is_default && (
+                      <StateBadge value="Workspace default" />
                     )}
+                  </div>
+                  <p className="effective-security-detail">
+                    {securityDetail(grant)}
+                  </p>
+                  <p className="target-facts">
+                    <span>Node: {grant.node_name || ws.node_name || ws.node_id}</span>
+                    <span>
+                      Default model: {grant.default_model || "Not configured"}
+                    </span>
+                    <span>
+                      Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </p>
+                  {grant.security_binding?.source === "runtime-config" &&
+                    grant.security_binding.status !== "ready" && (
+                      <p className="runtime-security-summary">
+                        Codex security config is currently unavailable
+                      </p>
+                    )}
+                  {!diagnosticsUnavailable && route && !route.ready && (
+                    <div className="runtime-route-blocker">
+                      <p>{blockers[0]?.check?.summary || route.summary}</p>
+                      {blockers[0]?.check?.remediation && (
+                        <small>{blockers[0].check.remediation}</small>
+                      )}
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="inline-action"
+                        onClick={() =>
+                          onNavigate(
+                            diagnosticDestination(
+                              blockers[0]?.check,
+                              blockers[0]?.code,
+                            ),
+                          )
+                        }
+                      >
+                        View blockers
+                      </Button>
+                    </div>
+                  )}
+                  <div className="target-actions">
                     <Button
                       variant="link"
                       size="sm"
                       className="inline-action"
-                      onClick={() =>
-                        onNavigate(
-                          diagnosticDestination(
-                            blockers[0]?.check,
-                            blockers[0]?.code,
-                          ),
-                        )
-                      }
+                      onClick={() => onProfile(ws, id)}
                     >
-                      View blockers
+                      Change security
                     </Button>
+                    {grant.is_default ? (
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="inline-action"
+                        onClick={() =>
+                          void onRoute(ws, id, { clear_default: true })
+                        }
+                      >
+                        Clear default
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="inline-action"
+                        disabled={!grant.enabled || grant.ready === false}
+                        onClick={() =>
+                          void onRoute(ws, id, { is_default: true })
+                        }
+                      >
+                        Set as default
+                      </Button>
+                    )}
                   </div>
-                )}
-                <Button
-                  variant="link"
-                  size="sm"
-                  className="inline-action"
-                  onClick={() => onProfile(ws, id)}
-                >
-                  Change security
-                </Button>
+                </div>
+                <div className="target-side">
+                  <div className="runtime-route-readiness">
+                    <span>Route readiness</span>
+                    <StateBadge value={status} />
+                  </div>
+                  <Switch
+                    aria-label={`${grant.name} route for ${ws.name}`}
+                    checked={grant.enabled}
+                    onCheckedChange={(enabled) =>
+                      change(
+                        enabled
+                          ? `Enable ${grant.name} here?`
+                          : `Disable ${grant.name} here?`,
+                        enabled
+                          ? "The workspace agent switch and model policy must also be enabled."
+                          : "Active runs are not stopped automatically.",
+                        () => onRoute(ws, id, { enabled }),
+                        !enabled,
+                      )
+                    }
+                  />
+                </div>
               </div>
-              <Switch
-                aria-label={`${runtimeName(id)} runtime for ${ws.name}`}
-                checked={grant.enabled}
-                onCheckedChange={(enabled) =>
-                  change(
-                    enabled
-                      ? `Allow ${runtimeName(id)} here?`
-                      : `Revoke ${runtimeName(id)} here?`,
-                    enabled
-                      ? "The workspace agent switch and model policy must also be enabled."
-                      : "Active runs are not stopped automatically.",
-                    () =>
-                      api(`/api/workspaces/${ws.id}/runtimes/${id}`, "POST", {
-                        enabled,
-                      }).then(() =>
-                        onNotice(
-                          `${runtimeName(id)} ${enabled ? "allowed" : "revoked"} for ${ws.name}.`,
-                        ),
-                      ),
-                    !enabled,
-                  )
-                }
-              />
+            );
+          })}
+          {(ws.available_adapters || []).length > 0 ? (
+            <div className="execution-target-add">
+              <select
+                className="native-select"
+                aria-label={`Add execution target for ${ws.name}`}
+                id={`target-add-${ws.id}`}
+                defaultValue=""
+              >
+                <option value="">Choose a same-Node adapter</option>
+                {(ws.available_adapters || []).map((adapter) => (
+                  <option key={adapter.adapter_id} value={adapter.adapter_id}>
+                    {adapter.name} · {runtimeName(adapter.runtime_type)}
+                  </option>
+                ))}
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const select = document.getElementById(
+                    `target-add-${ws.id}`,
+                  ) as HTMLSelectElement | null;
+                  if (!select?.value) {
+                    onNotice("Choose an adapter owned by this Node first.");
+                    return;
+                  }
+                  void onRoute(ws, select.value, { enabled: false });
+                  select.value = "";
+                }}
+              >
+                <Plus size={14} /> Add target
+              </Button>
             </div>
-          );
-        })}
-      </div>
+          ) : Object.keys(ws.routes || {}).length === 0 ? (
+            <div className="execution-target-empty">
+              <strong>No runtime adapters on this Node</strong>
+              <p>
+                Configure an adapter on the Nodes page before adding a target.
+              </p>
+              <Button
+                variant="link"
+                size="sm"
+                className="inline-action"
+                onClick={() => onNavigate("nodes")}
+              >
+                Configure Node adapters
+              </Button>
+            </div>
+          ) : null}
+        </div>
       <div className="workspace-footer">
         <span>
           <StateBadge value={ws.enabled ? "Bridge on" : "Bridge off"} />{" "}
@@ -928,7 +1068,8 @@ function thinkingEffortLabel(effort: string) {
 }
 
 function ModelDialog({
-  runtime,
+  adapterId,
+  adapter,
   open,
   onClose,
   workspaces,
@@ -936,7 +1077,8 @@ function ModelDialog({
   onSaved,
   onNotice,
 }: {
-  runtime: string | null;
+  adapterId: string | null;
+  adapter?: AdapterInfo;
   open: boolean;
   onClose: () => void;
   workspaces: Workspace[];
@@ -956,11 +1098,11 @@ function ModelDialog({
   const [loading, setLoading] = useState(false);
   const load = useCallback(
     async (selected: string) => {
-      if (!runtime || !selected) return;
+      if (!adapterId || !selected) return;
       setLoading(true);
       try {
         const data = await api<{ models: Model[]; policy?: ModelPolicy }>(
-          `/api/runtimes/${runtime}/models?limit=100&workspace_id=${encodeURIComponent(selected)}`,
+          `/api/adapters/${adapterId}/models?limit=100&workspace_id=${encodeURIComponent(selected)}`,
         );
         setModels(data.models || []);
         if (data.policy) {
@@ -974,7 +1116,7 @@ function ModelDialog({
         setLoading(false);
       }
     },
-    [runtime, onNotice],
+    [adapterId, onNotice],
   );
   useEffect(() => {
     if (open && workspaceId) void load(workspaceId);
@@ -984,9 +1126,21 @@ function ModelDialog({
       .toLowerCase()
       .includes(filter.toLowerCase()),
   );
+  const allVisibleEnabled =
+    visible.length > 0 && visible.every((m) => enabled.includes(m.selector));
+  function toggleAllVisible() {
+    if (!visible.length) return;
+    setEnabled((old) =>
+      allVisibleEnabled
+        ? old.filter((x) => !visible.some((m) => m.selector === x))
+        : [...new Set([...old, ...visible.map((m) => m.selector)])],
+    );
+    if (allVisibleEnabled && visible.some((m) => m.selector === defaultModel))
+      setDefaultModel("");
+  }
   async function save() {
     if (
-      !runtime ||
+      !adapterId ||
       !workspaceId ||
       !enabled.length ||
       !defaultModel ||
@@ -996,13 +1150,13 @@ function ModelDialog({
       return;
     }
     try {
-      await api(`/api/runtimes/${runtime}/model-policy`, "POST", {
+      await api(`/api/adapters/${adapterId}/model-policy`, "POST", {
         workspace_id: workspaceId,
         enabled,
         default: defaultModel,
         reasoning_defaults: reasoningDefaults,
       });
-      onNotice(`${runtimeName(runtime)} model policy saved.`);
+      onNotice(`${adapter?.name || "Adapter"} model policy saved.`);
       onClose();
       await onSaved();
     } catch (error) {
@@ -1013,7 +1167,7 @@ function ModelDialog({
     <Dialog open={open} onOpenChange={(value) => !value && onClose()}>
       <DialogContent className="model-dialog">
         <DialogHeader>
-          <DialogTitle>{runtimeName(runtime || "")} models</DialogTitle>
+          <DialogTitle>{adapter?.name || "Adapter"} models</DialogTitle>
           <DialogDescription>
             Enable models, choose the default model, and set an optional
             thinking level for each model.
@@ -1049,6 +1203,13 @@ function ModelDialog({
               />
               <Button
                 variant="outline"
+                onClick={toggleAllVisible}
+                disabled={loading || !visible.length}
+              >
+                {allVisibleEnabled ? "Deselect all" : "Select all"}
+              </Button>
+              <Button
+                variant="outline"
                 onClick={() => void load(workspaceId)}
                 disabled={loading}
               >
@@ -1063,12 +1224,12 @@ function ModelDialog({
                   const options = m.reasoningOptions || [];
                   const selectedEffort = reasoningDefaults[m.selector] || "";
                   const nativeDefault = m.defaultReasoningEffort
-                    ? `Use runtime default (${thinkingEffortLabel(m.defaultReasoningEffort)})`
-                    : "Use runtime default";
+                    ? `Use adapter default (${thinkingEffortLabel(m.defaultReasoningEffort)})`
+                    : "Use adapter default";
                   return (
                     <div
                       className={
-                        runtime === "codex"
+                        adapter?.runtime_type === "codex"
                           ? "model-option model-option-codex"
                           : "model-option"
                       }
@@ -1177,6 +1338,7 @@ export default function App() {
   const [section, setSection] = useState<Section>(initialSection);
   const [mobileNav, setMobileNav] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -1193,11 +1355,22 @@ export default function App() {
   const [workspaceRuns, setWorkspaceRuns] = useState<Run[]>([]);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [addOpen, setAddOpen] = useState(false);
+  const [adapterDialog, setAdapterDialog] = useState<{
+    mode: "create" | "edit";
+    adapter?: AdapterInfo;
+    nodeId?: string;
+  } | null>(null);
+  const [adapterTest, setAdapterTest] = useState("");
+  const [nodeDialog, setNodeDialog] = useState<{
+    mode: "create" | "edit";
+    node?: NodeInfo;
+  } | null>(null);
+  const [nodeTest, setNodeTest] = useState("");
   const [profileFor, setProfileFor] = useState<{
     ws: Workspace;
-    runtime: string;
+    adapterId: string;
   } | null>(null);
-  const [modelRuntime, setModelRuntime] = useState<string | null>(null);
+  const [modelAdapterId, setModelAdapterId] = useState<string | null>(null);
   const [runInspect, setRunInspect] = useState<Run | null>(null);
   const [textDetail, setTextDetail] = useState<TextDetail | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
@@ -1272,6 +1445,7 @@ export default function App() {
         setWorkspaces(workspaceData.workspaces || []);
         setEvents(historyData.events || []);
         setStatus(currentStatus);
+        setNodes(currentStatus.nodes || []);
         try {
           await loadRuns();
         } catch (error) {
@@ -1404,6 +1578,144 @@ export default function App() {
       notify((error as Error).message);
     }
   }
+  async function changeRoute(ws: Workspace, adapterId: string, body: Json) {
+    try {
+      if (body.clear_default) {
+        await api(`/api/workspaces/${ws.id}/routes/default`, "DELETE");
+      } else if (body.is_default) {
+        await api(`/api/workspaces/${ws.id}/routes/default`, "POST", {
+          adapter_id: adapterId,
+        });
+      } else {
+        await api(`/api/workspaces/${ws.id}/routes/${adapterId}`, "POST", body);
+      }
+      notify("Execution target updated.");
+      await refresh();
+    } catch (error) {
+      notify((error as Error).message);
+    }
+  }
+  async function saveAdapter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!adapterDialog) return;
+    const data = new FormData(event.currentTarget);
+    const body =
+      adapterDialog.mode === "create"
+        ? {
+            name: data.get("name"),
+            node_id: data.get("node_id") || adapterDialog.nodeId,
+            runtime_type: data.get("runtime_type"),
+            base_url: data.get("base_url"),
+            token: data.get("token"),
+            enabled: data.get("enabled") === "on",
+          }
+        : {
+            name: data.get("name"),
+            base_url: data.get("base_url"),
+            token: data.get("token"),
+            enabled: data.get("enabled") === "on",
+          };
+    try {
+      if (adapterDialog.mode === "create")
+        await api("/api/adapters", "POST", body);
+      else
+        await api(`/api/adapters/${adapterDialog.adapter?.id}`, "PATCH", body);
+      setAdapterDialog(null);
+      setAdapterTest("");
+      notify(
+        adapterDialog.mode === "create" ? "Adapter added." : "Adapter updated.",
+      );
+      await refresh();
+    } catch (error) {
+      notify((error as Error).message);
+    }
+  }
+  async function saveNode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!nodeDialog) return;
+    const data = new FormData(event.currentTarget);
+    const body = {
+      name: data.get("name"),
+      base_url: data.get("base_url"),
+      token: data.get("token"),
+      enabled: data.get("enabled") === "on",
+    };
+    try {
+      await api(
+        nodeDialog.mode === "create"
+          ? "/api/nodes"
+          : `/api/nodes/${nodeDialog.node?.id}`,
+        nodeDialog.mode === "create" ? "POST" : "PATCH",
+        body,
+      );
+      setNodeDialog(null);
+      setNodeTest("");
+      notify(nodeDialog.mode === "create" ? "Node added." : "Node updated.");
+      await refresh();
+    } catch (error) {
+      notify((error as Error).message);
+    }
+  }
+  async function testNode(form?: HTMLFormElement) {
+    if (!nodeDialog || !form) return;
+    const data = new FormData(form);
+    try {
+      const result = await api<{
+        success: boolean;
+        message?: string;
+        code?: string;
+      }>("/api/nodes/test", "POST", {
+        node_id: nodeDialog.node?.id,
+        name: data.get("name"),
+        base_url: data.get("base_url"),
+        token: data.get("token"),
+        enabled: data.get("enabled") === "on",
+      });
+      setNodeTest(
+        result.success
+          ? "Connected: Node Protocol is ready."
+          : `Connection failed: ${result.message || result.code || "Unavailable"}`,
+      );
+    } catch (error) {
+      setNodeTest(`Connection failed: ${(error as Error).message}`);
+    }
+  }
+  async function testAdapter(form?: HTMLFormElement) {
+    if (!adapterDialog) return;
+    try {
+      let result: {
+        success: boolean;
+        message?: string;
+        code?: string;
+        native_runtime?: string;
+        native_instance?: string;
+        adapter_version?: string;
+        native_version?: string;
+      };
+      const data = new FormData(form);
+      result = await api("/api/adapters/test", "POST", {
+        node_id: data.get("node_id") || adapterDialog.nodeId,
+        name: data.get("name"),
+        runtime_type:
+          adapterDialog.mode === "edit"
+            ? adapterDialog.adapter?.runtime_type
+            : data.get("runtime_type"),
+        base_url: data.get("base_url"),
+        token: data.get("token"),
+        enabled: data.get("enabled") === "on",
+        ...(adapterDialog.mode === "edit"
+          ? { adapter_id: adapterDialog.adapter?.id }
+          : {}),
+      });
+      setAdapterTest(
+        result.success
+          ? `Connected: ${result.native_runtime} · ${result.native_version || result.adapter_version || "version unavailable"}`
+          : `Connection failed: ${result.message || result.code || "Unavailable"}`,
+      );
+    } catch (error) {
+      setAdapterTest(`Connection failed: ${(error as Error).message}`);
+    }
+  }
   function ask(state: ConfirmState) {
     setConfirm(state);
   }
@@ -1430,7 +1742,7 @@ export default function App() {
   }
   async function startPreparedHandoff(handoff: Handoff, route: RunnableRoute) {
     if (startingHandoff) return;
-    const key = `${selectedWorkspace}:${handoff.id}:${route.runtime}`;
+    const key = `${selectedWorkspace}:${handoff.id}:${route.adapter_id}`;
     let requestId = startRequestIds.current.get(key);
     if (!requestId) {
       requestId = crypto.randomUUID();
@@ -1445,7 +1757,7 @@ export default function App() {
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            runtime: route.runtime,
+            adapter_id: route.adapter_id,
             request_id: requestId,
           }),
         },
@@ -1472,7 +1784,7 @@ export default function App() {
       }
       startRequestIds.current.delete(key);
       notify(
-        `Started ${runtimeName(route.runtime)} run${result.model ? ` with ${result.model}` : ""}.`,
+        `Started ${route.adapter_name} run${result.model ? ` with ${result.model}` : ""}.`,
       );
       await Promise.allSettled([
         refresh({ silent: true }),
@@ -1487,8 +1799,8 @@ export default function App() {
       setStartingHandoff(null);
     }
   }
-  function openProfile(ws: Workspace, runtime: string) {
-    setProfileFor({ ws, runtime });
+  function openProfile(ws: Workspace, adapterId: string) {
+    setProfileFor({ ws, adapterId });
   }
   async function addWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1498,6 +1810,7 @@ export default function App() {
       const result = await api<{ note?: string }>("/api/workspaces", "POST", {
         name: data.get("name"),
         root: data.get("root"),
+        node_id: data.get("node_id"),
         excludes: String(data.get("excludes") || "")
           .split("\n")
           .map((x) => x.trim())
@@ -1537,8 +1850,14 @@ export default function App() {
   const filtered = workspaces.filter((w) =>
     `${w.name} ${w.root}`.toLowerCase().includes(workspaceQuery.toLowerCase()),
   );
-  const adapters = status?.runtimes?.runtimes || {};
-  const policies = useMemo(() => status?.runtime_policies || {}, [status]);
+  const adapters = status?.adapters?.adapters || [];
+  const policies = useMemo(
+    () =>
+      Object.fromEntries(
+        adapters.map((adapter) => [adapter.id, adapter.model_policy || {}]),
+      ),
+    [adapters],
+  );
   const attentionRuns = runs.filter(
     (r) => r.active_state === "waiting_interaction",
   );
@@ -1553,14 +1872,25 @@ export default function App() {
   const selectedRoutes = (diagnostics?.runnable_routes || []).filter(
     (route) => route.workspace_id === selectedWorkspace,
   );
+  const selectedWorkspaceRecord = workspaces.find(
+    (workspace) => workspace.id === selectedWorkspace,
+  );
+  const configuredDefaultRoute = selectedRoutes.find(
+    (route) =>
+      route.is_default ||
+      selectedWorkspaceRecord?.routes?.[route.adapter_id]?.is_default,
+  );
+  const readySelectedRoutes = selectedRoutes.filter((route) => route.ready);
   const effectiveSelectedRouteRuntime = selectedRoutes.some(
-    (route) => route.runtime === selectedRouteRuntime,
+    (route) => route.adapter_id === selectedRouteRuntime,
   )
     ? selectedRouteRuntime
-    : (selectedRoutes.find((route) => route.ready) || selectedRoutes[0])
-        ?.runtime || null;
+    : (
+        configuredDefaultRoute ||
+        (readySelectedRoutes.length === 1 ? readySelectedRoutes[0] : null)
+      )?.adapter_id || null;
   const selectedRoute = selectedRoutes.find(
-    (route) => route.runtime === effectiveSelectedRouteRuntime,
+    (route) => route.adapter_id === effectiveSelectedRouteRuntime,
   );
   const setup = useMemo(() => {
     const passed = (code: string) =>
@@ -1580,14 +1910,14 @@ export default function App() {
       {
         title: "Enable the Bridge gateway",
         done: passed("core.gateway_enabled"),
-        target: "runtimes" as Section,
+        target: "adapters" as Section,
         text: "Configure and enable the shared MCP gateway.",
       },
       {
         title: "Prepare a runnable route",
         done: readyRoutes.length > 0,
         target: "workspaces" as Section,
-        text: "Review exact workspace and runtime route readiness.",
+        text: "Review exact workspace and adapter route readiness.",
       },
     ];
   }, [diagnostics, diagnosticsUnavailable, readyRoutes]);
@@ -1852,12 +2182,14 @@ export default function App() {
                       : "not configured"}{" "}
                     · {status?.bridge.enabled ? "enabled" : "disabled"}
                   </p>
-                  {Object.entries(adapters).map(([runtime, info]) => (
-                    <p key={runtime}>
-                      {runtimeName(runtime)} adapter:{" "}
-                      {info.configured && info.healthy
-                        ? "healthy"
-                        : "unavailable"}
+                  {adapters.map((info) => (
+                    <p key={info.id}>
+                      {info.name} · {runtimeName(info.runtime_type)}:{" "}
+                      {!info.enabled
+                        ? "disabled"
+                        : info.healthy
+                          ? "healthy"
+                          : "unavailable"}
                     </p>
                   ))}
                 </div>
@@ -1960,6 +2292,162 @@ export default function App() {
               </div>
             </div>
           )}
+          {section === "nodes" && (
+            <div className="nodes-page">
+              <div className="list-toolbar page-toolbar">
+                <Button
+                  onClick={() => {
+                    setNodeTest("");
+                    setNodeDialog({ mode: "create" });
+                  }}
+                >
+                  <Plus size={16} /> Add Node
+                </Button>
+              </div>
+              {nodes.length ? (
+                <div className="node-list">
+                  {nodes.map((node) => {
+                    const nodeAdapters = adapters.filter(
+                      (adapter) => adapter.node_id === node.id,
+                    );
+                    return (
+                      <section
+                        className="surface-panel node-card"
+                        key={node.id}
+                      >
+                        <div className="node-card-head">
+                          <div className="node-identity">
+                            <span className="node-symbol">
+                              <Server size={20} />
+                            </span>
+                            <div className="node-title">
+                              <div className="adapter-heading">
+                                <h3>{node.name}</h3>
+                                <StateBadge
+                                  value={
+                                    node.health ||
+                                    (node.enabled ? "Unobserved" : "Disabled")
+                                  }
+                                />
+                              </div>
+                              <p className="path-text">{node.base_url}</p>
+                            </div>
+                          </div>
+                          <div className="row-actions">
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                setNodeTest("");
+                                setNodeDialog({ mode: "edit", node });
+                              }}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              onClick={() => {
+                                setAdapterTest("");
+                                setAdapterDialog({
+                                  mode: "create",
+                                  nodeId: node.id,
+                                });
+                              }}
+                            >
+                              <Plus size={14} /> Add adapter
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="node-card-body">
+                          <dl className="node-spec">
+                            <div>
+                              <dt>Endpoint</dt>
+                              <dd>{node.base_url}</dd>
+                            </div>
+                            <div>
+                              <dt>Node Protocol</dt>
+                              <dd>
+                                {node.protocol
+                                  ? `v${node.protocol}`
+                                  : "Not observed"}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Node version</dt>
+                              <dd>{node.node_version || "Not observed"}</dd>
+                            </div>
+                            <div>
+                              <dt>Allowed roots</dt>
+                              <dd>{node.allowed_root_count ?? 0}</dd>
+                            </div>
+                            <div>
+                              <dt>Capabilities</dt>
+                              <dd>
+                                {node.capabilities?.length
+                                  ? node.capabilities.join(", ")
+                                  : "Not observed"}
+                              </dd>
+                            </div>
+                          </dl>
+                          <div className="node-adapters">
+                            <h4>Runtime adapters</h4>
+                            {nodeAdapters.length ? (
+                              nodeAdapters.map((adapter) => (
+                                <div
+                                  className="node-adapter-row"
+                                  key={adapter.id}
+                                >
+                                  <strong>
+                                    {adapter.name} ·{" "}
+                                    {runtimeName(adapter.runtime_type)}
+                                  </strong>
+                                  <span className="node-adapter-fact">
+                                    {adapter.has_token
+                                      ? "Token saved"
+                                      : "Token required"}
+                                  </span>
+                                  <StateBadge
+                                    value={adapter.enabled ? "Enabled" : "Disabled"}
+                                  />
+                                  <Button
+                                    variant="link"
+                                    size="sm"
+                                    className="inline-action"
+                                    onClick={() =>
+                                      setAdapterDialog({
+                                        mode: "edit",
+                                        adapter,
+                                      })
+                                    }
+                                  >
+                                    Edit
+                                  </Button>
+                                </div>
+                              ))
+                            ) : (
+                              <p className="muted-note">
+                                No runtime adapters configured. Add one to make
+                                this Node usable for execution targets.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="node-card-foot">
+                          <small>Node ID: {node.id}</small>
+                          <small>
+                            Node token {node.has_token ? "saved" : "required"}
+                          </small>
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Empty title="No Nodes configured">
+                  Add the local Mac or another private data-plane service before
+                  creating a workspace.
+                </Empty>
+              )}
+            </div>
+          )}
           {section === "workspaces" && (
             <div className="workspaces-page">
               <div className="list-toolbar">
@@ -1988,6 +2476,7 @@ export default function App() {
                       diagnostics={diagnostics}
                       diagnosticsUnavailable={diagnosticsUnavailable}
                       onManage={manage}
+                      onRoute={changeRoute}
                       onProfile={(w, runtime) => void openProfile(w, runtime)}
                       onHandoffs={(w) => void openHandoffs(w)}
                       onNavigate={navigate}
@@ -2011,16 +2500,6 @@ export default function App() {
                 </Empty>
               )}
             </div>
-          )}
-          {section === "profiles" && (
-            <ProfileManager
-              runtimes={Object.entries(adapters)
-                .filter(([, info]) => info.configured)
-                .map(([id]) => id)}
-              workspaces={workspaces}
-              onChanged={refresh}
-              notify={notify}
-            />
           )}
           {section === "handoffs" && (
             <div className="handoffs-page">
@@ -2056,7 +2535,7 @@ export default function App() {
                     />
                     <div className="handoff-route-panel">
                       <div className="handoff-route-picker">
-                        <Label htmlFor="handoff-route">Runtime / Route</Label>
+                        <Label htmlFor="handoff-route">Execution target</Label>
                         <select
                           id="handoff-route"
                           className="native-select"
@@ -2066,16 +2545,23 @@ export default function App() {
                           }
                           disabled={!selectedRoutes.length}
                         >
-                          {!selectedRoutes.length && (
-                            <option value="">
-                              {diagnosticsUnavailable
+                          <option value="">
+                            {!selectedRoutes.length
+                              ? diagnosticsUnavailable
                                 ? "Diagnostics unavailable"
-                                : "No canonical route reported"}
-                            </option>
-                          )}
+                                : "No canonical route reported"
+                              : configuredDefaultRoute &&
+                                  !configuredDefaultRoute.ready
+                                ? "Default route is blocked"
+                                : readySelectedRoutes.length > 1
+                                  ? "Choose a ready route"
+                                  : "Choose an execution target"}
+                          </option>
                           {selectedRoutes.map((route) => (
-                            <option key={route.id} value={route.runtime}>
-                              {runtimeName(route.runtime)} —{" "}
+                            <option key={route.id} value={route.adapter_id}>
+                              {route.adapter_name} ·{" "}
+                              {runtimeName(route.runtime_type)}
+                              {route.is_default ? " · Default" : ""} —{" "}
                               {diagnosticsUnavailable
                                 ? "Diagnostics unavailable"
                                 : route.ready
@@ -2090,9 +2576,10 @@ export default function App() {
                           route={selectedRoute}
                           report={diagnostics}
                           unavailable={diagnosticsUnavailable}
-                          security={securitySource(
-                            selected,
-                            selectedRoute.runtime,
+                          security={securityDetail(
+                            selectedWorkspaceRecord?.routes?.[
+                              selectedRoute.adapter_id
+                            ],
                           )}
                           onNavigate={navigate}
                         />
@@ -2133,7 +2620,7 @@ export default function App() {
                               >
                                 <Play size={14} />
                                 {startingHandoff ===
-                                `${selectedWorkspace}:${h.id}:${selectedRoute?.runtime}`
+                                `${selectedWorkspace}:${h.id}:${selectedRoute?.adapter_id}`
                                   ? "Starting…"
                                   : "Start run"}
                               </Button>
@@ -2255,78 +2742,168 @@ export default function App() {
               )}
             </div>
           )}
-          {section === "runtimes" && (
+          {section === "adapters" && (
             <div className="runtimes-page">
-              <SectionHeading
-                title="Adapters"
-                description="Each runtime owns its native engine. Bridge decides where it may run."
-              />
+              <div className="list-toolbar page-toolbar">
+                <Button
+                  onClick={() => {
+                    setAdapterTest("");
+                    setAdapterDialog({ mode: "create" });
+                  }}
+                >
+                  <Plus size={16} /> Add adapter
+                </Button>
+              </div>
               <div className="adapter-list">
-                {Object.entries(adapters).map(([id, info]) => {
-                  const policy = policies[id];
-                  const healthy = info.configured && info.healthy;
+                {adapters.map((info) => {
+                  const policy = policies[info.id];
+                  const health = !info.enabled
+                    ? "Disabled"
+                    : info.healthy
+                      ? "Healthy"
+                      : info.healthy === false
+                        ? "Unavailable"
+                        : "Not observed";
                   return (
-                    <section className="adapter-row" key={id}>
-                      <div className="adapter-symbol">
-                        <Command size={21} />
-                      </div>
-                      <div className="adapter-info">
-                        <div className="adapter-heading">
-                          <h3>{runtimeName(id)}</h3>
-                          <StateBadge
-                            value={
-                              !info.configured
-                                ? "Adapter not configured"
-                                : info.locked
-                                  ? "Adapter locked"
-                                  : healthy
-                                    ? "Adapter healthy"
-                                    : "Adapter unavailable"
+                    <section
+                      className="surface-panel adapter-card"
+                      key={info.id}
+                    >
+                      <div className="adapter-card-head">
+                        <div className="node-identity">
+                          <span className="node-symbol">
+                            <Command size={20} />
+                          </span>
+                          <div className="node-title">
+                            <div className="adapter-heading">
+                              <h3>
+                                {info.name} · {runtimeName(info.runtime_type)}
+                              </h3>
+                              <StateBadge value={health} />
+                            </div>
+                            <p className="path-text">
+                              {info.base_url ||
+                                "Endpoint is private to the Node"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="adapter-actions">
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              setAdapterTest("");
+                              setAdapterDialog({ mode: "edit", adapter: info });
+                            }}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              ask({
+                                title: `Delete ${info.name}?`,
+                                description:
+                                  "Deletion is available only when no workspace route or execution history references this adapter.",
+                                destructive: true,
+                                action: async () => {
+                                  await api(
+                                    `/api/adapters/${info.id}`,
+                                    "DELETE",
+                                  );
+                                  await refresh();
+                                  notify("Adapter deleted.");
+                                },
+                              })
                             }
-                          />
-                        </div>
-                        <p>
-                          {info.protocol === 1
-                            ? "Runtime Protocol v1 adapter"
-                            : "Native runtime adapter"}
-                          {info.native_version || info.version
-                            ? ` · ${info.native_version || info.version}`
-                            : ""}
-                        </p>
-                        <div className="adapter-policy">
-                          {policy?.configured ? (
-                            <>
-                              <span>Model policy configured</span>
-                              <span>
-                                {policy.enabled_count ??
-                                  policy.enabled?.length ??
-                                  0}{" "}
-                                models enabled
-                              </span>
-                              <span>Default: {policy.default}</span>
-                            </>
-                          ) : (
-                            <span>Model policy not configured</span>
-                          )}
+                          >
+                            Delete
+                          </Button>
                         </div>
                       </div>
-                      <div className="adapter-actions">
-                        <Button
-                          variant="outline"
-                          onClick={() => setModelRuntime(id)}
-                        >
-                          Manage models <ArrowRight size={14} />
-                        </Button>
+                      <div className="node-card-body">
+                        <dl className="node-spec">
+                          <div>
+                            <dt>Node</dt>
+                            <dd>{info.node_name || "Unknown Node"}</dd>
+                          </div>
+                          <div>
+                            <dt>Endpoint</dt>
+                            <dd>
+                              {info.base_url || "Private to the Node"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Adapter version</dt>
+                            <dd>{info.adapter_version || "Unknown"}</dd>
+                          </div>
+                          <div>
+                            <dt>Native version</dt>
+                            <dd>{info.native_version || "Not observed"}</dd>
+                          </div>
+                          <div>
+                            <dt>Node token</dt>
+                            <dd>
+                              {info.has_token ? "Token saved" : "Token required"}
+                            </dd>
+                          </div>
+                        </dl>
+                        <div className="adapter-policy-block">
+                          <h4>Model policy</h4>
+                          {policy?.configured ? (
+                            <p className="adapter-policy-summary">
+                              <strong>
+                                {policy.enabled?.length || 0} model
+                                {(policy.enabled?.length || 0) === 1
+                                  ? ""
+                                  : "s"}{" "}
+                                enabled
+                              </strong>
+                              <span>Default {policy.default || "not set"}</span>
+                            </p>
+                          ) : (
+                            <p className="adapter-policy-empty">
+                              No model policy configured. Enable models before
+                              runs use this adapter.
+                            </p>
+                          )}
+                          <div className="adapter-policy-cta">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setModelAdapterId(info.id)}
+                            >
+                              Models
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="node-card-foot">
+                        <small>Adapter ID: {info.id}</small>
                       </div>
                     </section>
                   );
                 })}
-                {!Object.keys(adapters).length && (
+                {!adapters.length && (
                   <Empty title="No adapters configured">
-                    Configure a runtime adapter to run prepared handoffs.
+                    Add Local Pi, GPU Pi, or Codex as separate execution
+                    targets.
                   </Empty>
                 )}
               </div>
+              {adapters.length > 0 && (
+                <section className="surface-panel adapter-detail-panel">
+                  <SectionHeading
+                    title="Adapter security profiles"
+                    description="Native profiles are discovered separately for each adapter and workspace."
+                  />
+                  <ProfileManager
+                    adapters={adapters}
+                    workspaces={workspaces}
+                    onChanged={refresh}
+                    notify={notify}
+                  />
+                </section>
+              )}
               <div className="connection-panel">
                 <div className="connection-head">
                   <div className="connection-symbol">
@@ -2431,6 +3008,17 @@ export default function App() {
                             ?.name || "Admin"}{" "}
                           <span aria-hidden="true">/</span> {event.outcome}
                         </p>
+                        {(event.node_name ||
+                          event.node_id ||
+                          event.adapter_name) && (
+                          <small className="path-text">
+                            Node:{" "}
+                            {event.node_name || event.node_id || "Unknown"}
+                            {event.adapter_name
+                              ? ` · ${event.adapter_name}${event.runtime_type ? ` · ${runtimeName(event.runtime_type)}` : ""}`
+                              : ""}
+                          </small>
+                        )}
                       </div>
                       <time dateTime={event.at}>{dateTime(event.at)}</time>
                     </div>
@@ -2486,6 +3074,29 @@ export default function App() {
               />
             </div>
             <div className="form-field">
+              <Label htmlFor="add-node">Authoritative Node</Label>
+              <select
+                id="add-node"
+                className="native-select"
+                name="node_id"
+                required
+              >
+                <option value="">Choose the machine that owns this root</option>
+                {nodes.map((node) => (
+                  <option
+                    key={node.id}
+                    value={node.id}
+                    disabled={!node.enabled}
+                  >
+                    {node.name} · {node.health || "unobserved"}
+                  </option>
+                ))}
+              </select>
+              <small>
+                Workspace files, Git, handoffs, and runs use this Node.
+              </small>
+            </div>
+            <div className="form-field">
               <Label htmlFor="add-root">Project directory</Label>
               <Input
                 id="add-root"
@@ -2494,7 +3105,7 @@ export default function App() {
                 required
               />
               <small>
-                Allowed parent: {status?.allowed_parents?.join(", ") || "—"}
+                Enter a canonical absolute path on the selected Node.
               </small>
             </div>
             <div className="form-field">
@@ -2519,26 +3130,264 @@ export default function App() {
           </form>
         </DialogContent>
       </Dialog>
+      {nodeDialog && (
+        <Dialog open onOpenChange={(open) => !open && setNodeDialog(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {nodeDialog.mode === "create"
+                  ? "Add Node"
+                  : `Edit ${nodeDialog.node?.name}`}
+              </DialogTitle>
+              <DialogDescription>
+                Node credentials stay in the private Bridge state and are never
+                returned after save. Allowed roots are configured on the Node
+                host.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="dialog-form" onSubmit={saveNode}>
+              <div className="form-field">
+                <Label htmlFor="node-name">Name</Label>
+                <Input
+                  id="node-name"
+                  name="name"
+                  defaultValue={nodeDialog.node?.name || ""}
+                  required
+                  maxLength={80}
+                  placeholder="Local Mac"
+                />
+              </div>
+              <div className="form-field">
+                <Label htmlFor="node-url">Node URL</Label>
+                <Input
+                  id="node-url"
+                  name="base_url"
+                  defaultValue={nodeDialog.node?.base_url || ""}
+                  required
+                  maxLength={2048}
+                  placeholder="http://127.0.0.1:8770"
+                />
+              </div>
+              <div className="form-field">
+                <Label htmlFor="node-token">Node token</Label>
+                <Input
+                  id="node-token"
+                  name="token"
+                  type="password"
+                  autoComplete="new-password"
+                  defaultValue=""
+                  placeholder={
+                    nodeDialog.mode === "create"
+                      ? "Required"
+                      : "Blank keeps the saved token"
+                  }
+                  required={nodeDialog.mode === "create"}
+                  maxLength={4096}
+                />
+                <small>
+                  Leave blank while editing to preserve the saved token.
+                </small>
+              </div>
+              <label className="adapter-enabled-field">
+                <input
+                  name="enabled"
+                  type="checkbox"
+                  defaultChecked={nodeDialog.node?.enabled ?? true}
+                />{" "}
+                Node enabled
+              </label>
+              {nodeTest && (
+                <p className="adapter-test-result" role="status">
+                  {nodeTest}
+                </p>
+              )}
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={(event) =>
+                    void testNode(event.currentTarget.form || undefined)
+                  }
+                >
+                  Test connection
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setNodeDialog(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit">
+                  {nodeDialog.mode === "create" ? "Add Node" : "Save Node"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
+      {adapterDialog && (
+        <Dialog open onOpenChange={(open) => !open && setAdapterDialog(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {adapterDialog.mode === "create"
+                  ? "Add adapter"
+                  : `Edit ${adapterDialog.adapter?.name}`}
+              </DialogTitle>
+              <DialogDescription>
+                The selected Node stores and tests this runtime adapter. The
+                adapter token is write-only and is never read back.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="dialog-form" onSubmit={saveAdapter}>
+              <div className="form-field">
+                <Label htmlFor="adapter-node">Authoritative Node</Label>
+                {adapterDialog.mode === "create" ? (
+                  <select
+                    id="adapter-node"
+                    className="native-select"
+                    name="node_id"
+                    defaultValue={adapterDialog.nodeId || nodes[0]?.id || ""}
+                    required
+                  >
+                    <option value="">Choose a Node</option>
+                    {nodes.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.name} · {node.health || "unobserved"}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="form-readonly">
+                    {adapterDialog.adapter?.node_name || "Node unknown"} · fixed
+                    for this adapter
+                  </p>
+                )}
+              </div>
+              <div className="form-field">
+                <Label htmlFor="adapter-name">Name</Label>
+                <Input
+                  id="adapter-name"
+                  name="name"
+                  defaultValue={adapterDialog.adapter?.name || ""}
+                  maxLength={80}
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <Label htmlFor="adapter-type">Runtime type</Label>
+                {adapterDialog.mode === "create" ? (
+                  <select
+                    id="adapter-type"
+                    className="native-select"
+                    name="runtime_type"
+                    defaultValue="pi"
+                  >
+                    <option value="pi">Pi</option>
+                    <option value="codex">Codex</option>
+                  </select>
+                ) : (
+                  <p className="form-readonly">
+                    {runtimeName(adapterDialog.adapter?.runtime_type || "pi")} ·
+                    fixed for this adapter
+                  </p>
+                )}
+              </div>
+              <div className="form-field">
+                <Label htmlFor="adapter-url">Base URL</Label>
+                <Input
+                  id="adapter-url"
+                  name="base_url"
+                  defaultValue={adapterDialog.adapter?.base_url || ""}
+                  placeholder="http://127.0.0.1:8767"
+                  maxLength={2048}
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <Label htmlFor="adapter-token">Adapter token</Label>
+                <Input
+                  id="adapter-token"
+                  name="token"
+                  type="password"
+                  autoComplete="new-password"
+                  defaultValue=""
+                  placeholder={
+                    adapterDialog.mode === "create"
+                      ? "Required"
+                      : "Blank keeps the saved token"
+                  }
+                  required={adapterDialog.mode === "create"}
+                  maxLength={4096}
+                />
+                <small>
+                  {adapterDialog.mode === "create"
+                    ? "Stored plaintext in the owning Node's private SQLite state (0600); Manager never reads it back."
+                    : "Leave blank to preserve the saved token. Enter a new value to replace it."}
+                </small>
+              </div>
+              <label className="adapter-enabled-field">
+                <input
+                  name="enabled"
+                  type="checkbox"
+                  defaultChecked={adapterDialog.adapter?.enabled ?? true}
+                />{" "}
+                Adapter enabled
+              </label>
+              {adapterTest && (
+                <p className="adapter-test-result" role="status">
+                  {adapterTest}
+                </p>
+              )}
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={(event) =>
+                    void testAdapter(event.currentTarget.form || undefined)
+                  }
+                >
+                  Test connection
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setAdapterDialog(null)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit">
+                  {adapterDialog.mode === "create"
+                    ? "Add adapter"
+                    : "Save adapter"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
       {profileFor && (
         <ProfileAssignment
           workspace={profileFor.ws}
-          runtime={profileFor.runtime}
+          adapterId={profileFor.adapterId}
           onClose={() => setProfileFor(null)}
           onManage={() => {
             setProfileFor(null);
-            navigate("profiles");
+            navigate("adapters");
           }}
           onChanged={refresh}
           notify={notify}
         />
       )}
-      {modelRuntime && (
+      {modelAdapterId && (
         <ModelDialog
-          runtime={modelRuntime}
+          adapterId={modelAdapterId}
+          adapter={adapters.find((item) => item.id === modelAdapterId)}
           open
-          onClose={() => setModelRuntime(null)}
+          onClose={() => setModelAdapterId(null)}
           workspaces={workspaces}
-          policy={policies[modelRuntime]}
+          policy={policies[modelAdapterId]}
           onSaved={refresh}
           onNotice={notify}
         />
@@ -2888,7 +3737,10 @@ function RunInspector({
         <SheetHeader>
           <div className="inspector-state">
             <StateBadge value={displayState(current)} />{" "}
-            <span>{runtimeName(current.runtime || "unknown")}</span>
+            <span>
+              {current.adapter_name || "Unknown adapter"} ·{" "}
+              {runtimeName(current.runtime_type || "unknown")}
+            </span>
           </div>
           <SheetTitle>
             {current.handoff_title || current.job_id || "Agent run"}
@@ -2945,7 +3797,71 @@ function RunInspector({
                   <span>Run ID</span>
                   <strong>{current.run_id}</strong>
                 </div>
+                <div>
+                  <span>Node</span>
+                  <strong>
+                    {current.node_name || current.node_id || "Unknown"} · rev{" "}
+                    {current.node_revision || "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Adapter</span>
+                  <strong>
+                    {current.adapter_name || current.adapter_id || "Unknown"} ·
+                    rev {current.adapter_revision || "—"}
+                  </strong>
+                </div>
               </div>
+              <section className="request-panel effective-security-panel">
+                <StateBadge
+                  value={
+                    current.effective_security?.source === "runtime-config"
+                      ? "Codex runtime config"
+                      : current.effective_security?.source === "profile"
+                        ? "Bridge profile"
+                        : "Security unavailable"
+                  }
+                />
+                <h3>Security used for this run</h3>
+                {current.effective_security?.source === "profile" ? (
+                  <p>
+                    Profile {current.effective_security.profile_id || "unknown"}{" "}
+                    · bound revision{" "}
+                    {current.effective_security.bound_revision || "unknown"} ·
+                    effective revision{" "}
+                    {current.effective_security.effective_revision || "unknown"}
+                  </p>
+                ) : current.effective_security?.source === "runtime-config" ? (
+                  <>
+                    <p>
+                      Bound revision{" "}
+                      {current.effective_security.bound_revision || "unknown"} ·
+                      effective revision{" "}
+                      {current.effective_security.effective_revision ||
+                        "unknown"}
+                    </p>
+                    <p>
+                      Active permission profile:{" "}
+                      {String(
+                        current.effective_security.resolved_summary
+                          ?.activePermissionProfile || "unknown",
+                      )}{" "}
+                      · approval{" "}
+                      {String(
+                        current.effective_security.resolved_summary
+                          ?.approvalPolicy || "unknown",
+                      )}{" "}
+                      · reviewer{" "}
+                      {String(
+                        current.effective_security.resolved_summary
+                          ?.approvalsReviewer || "unknown",
+                      )}
+                    </p>
+                  </>
+                ) : (
+                  <p>The immutable security snapshot was not available.</p>
+                )}
+              </section>
               {pending.map((item) => (
                 <section className="request-panel" key={item.id}>
                   <StateBadge value="Needs review" />

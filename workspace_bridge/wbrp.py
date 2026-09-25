@@ -6,7 +6,6 @@ inside their adapters. No adapter endpoint accepts an arbitrary command.
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import urllib.error
@@ -15,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported, is_valid_runtime_id
+from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, redact
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -169,18 +168,34 @@ class Descriptor:
 class HttpRuntimeAdapter:
     """One strict HTTP client for any conforming private runtime adapter."""
 
-    def __init__(self, runtime_id: str, base_url: str, token: str, *, timeout: float = 30):
-        if not is_valid_runtime_id(runtime_id):
-            raise BridgeError("Invalid runtime id", "invalid_arguments")
+    def __init__(self, adapter_id: str, runtime_type: str, base_url: str,
+                 token: str, *, timeout: float = 30):
+        if (not isinstance(adapter_id, str)
+                or not re.fullmatch(r"adapter_[0-9a-f]{24}", adapter_id)):
+            raise BridgeError("Invalid adapter id", "invalid_arguments")
+        if runtime_type not in {"pi", "codex"}:
+            raise BridgeError("Invalid runtime type", "invalid_arguments")
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
             raise BridgeError("Invalid runtime adapter URL", "invalid_arguments")
         if not isinstance(token, str) or not token:
             raise BridgeError("Runtime adapter token is required", "invalid_arguments")
-        self.runtime_id = runtime_id
+        self.adapter_id = adapter_id
+        self.runtime_type = runtime_type
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = min(max(float(timeout), 0.5), 60.0)
+
+    def _scrub_secret(self, value: Any) -> Any:
+        """Remove this connection's credential from every remote string value."""
+        if isinstance(value, str):
+            return redact(value.replace(self.token, "[REDACTED_SECRET]"))[0]
+        if isinstance(value, list):
+            return [self._scrub_secret(item) for item in value]
+        if isinstance(value, dict):
+            return {self._scrub_secret(key) if isinstance(key, str) else key:
+                    self._scrub_secret(item) for key, item in value.items()}
+        return value
 
     def _request(self, method: str, path: str, *, body: dict | None = None,
                  query: dict | None = None, timeout: float | None = None) -> dict:
@@ -205,7 +220,7 @@ class HttpRuntimeAdapter:
                 value = json.loads(raw)
                 if not isinstance(value, dict):
                     raise RuntimeUnavailable("Runtime response is invalid")
-                return value
+                return self._scrub_secret(value)
         except urllib.error.HTTPError as exc:
             detail = ""
             code = "runtime_rejected"
@@ -216,7 +231,8 @@ class HttpRuntimeAdapter:
                     code = str(payload.get("code") or code)[:80]
             except (ValueError, UnicodeError):
                 pass
-            detail = redact(detail)[0]
+            detail = redact(detail.replace(self.token, "[REDACTED_SECRET]"))[0]
+            code = code.replace(self.token, "redacted")
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
                 code = "runtime_rejected"
             if exc.code == 501:
@@ -232,7 +248,7 @@ class HttpRuntimeAdapter:
 
     def descriptor(self) -> Descriptor:
         return Descriptor.parse(self._request("GET", "/v1/descriptor", timeout=3),
-                                expected_runtime=self.runtime_id)
+                                expected_runtime=self.runtime_type)
 
     def models(self, workspace_id: str) -> list[dict]:
         value = self._request("GET", "/v1/models", query={"workspaceId": workspace_id})
@@ -435,18 +451,3 @@ class HttpRuntimeAdapter:
         return self._request("GET", "/v1/events",
                              query={"after": max(0, after), "waitMs": min(max(wait_ms, 0), 25000)},
                              timeout=min(self.timeout, wait_ms / 1000 + 5))
-
-
-def adapters_from_environment(environ: dict | None = None) -> dict[str, HttpRuntimeAdapter]:
-    """Trusted host configuration only; project files cannot register runtimes."""
-    env = os.environ if environ is None else environ
-    raw = env.get("WB_RUNTIME_ADAPTERS") or "{}"
-    try:
-        configured = json.loads(raw)
-    except ValueError:
-        raise BridgeError("WB_RUNTIME_ADAPTERS is invalid JSON", "invalid_configuration") from None
-    if not isinstance(configured, dict):
-        raise BridgeError("WB_RUNTIME_ADAPTERS must be an object", "invalid_configuration")
-    token = env.get("WB_RUNTIME_TOKEN") or ""
-    return {runtime_id: HttpRuntimeAdapter(runtime_id, url, token)
-            for runtime_id, url in configured.items()}

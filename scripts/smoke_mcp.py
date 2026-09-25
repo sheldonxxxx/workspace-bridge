@@ -16,6 +16,16 @@ PREFIX = "io.modelcontextprotocol/"
 MODERN = "2026-07-28"
 LEGACY = "2025-11-25"
 
+# Pre-runtime core tools that must always be advertised. The server may expose
+# additional tools (Runtime Protocol agent tools, Git evidence); assert their
+# presence as a subset so this script does not go stale on every addition.
+# Keep in sync with TOOLS in workspace_bridge/api.py and tests/test_api.py.
+CORE_TOOLS = frozenset({
+    "read_project_lead_skill", "list_workspaces", "workspace_info",
+    "list_dir", "read_file", "glob", "grep_files", "prepare_handoff",
+    "write_file", "edit_file", "list_handoffs", "read_handoff",
+})
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -88,13 +98,17 @@ def main() -> int:
             raise ValueError("A nonempty, single-line token is required")
         client = Client(args.url, token)
         initialized = client.call("initialize", {"protocolVersion": LEGACY, "capabilities": {},
-            "clientInfo": {"name": "workspace-bridge-smoke", "version": "0.6.0"}})
+            "clientInfo": {"name": "workspace-bridge-smoke", "version": "0.8.4"}})
         if initialized.get("protocolVersion") != LEGACY:
             raise ValueError("Legacy version negotiation failed")
         client.call("notifications/initialized", notification=True)
         tools = client.call("tools/list")["tools"]
-        if len(tools) != 12:
-            raise ValueError("Unexpected tool count")
+        names = [tool.get("name") for tool in tools]
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate tool names")
+        missing = sorted(CORE_TOOLS - set(names))
+        if missing:
+            raise ValueError(f"Missing core tools: {', '.join(missing)}")
         skill = client.call("tools/call", {"name": "read_project_lead_skill", "arguments": {}})
         skill_value = json.loads(skill["content"][0]["text"])
         if skill_value.get("name") != "project-lead" or not skill_value.get("content"):
@@ -108,7 +122,7 @@ def main() -> int:
         scoped = {"workspace_id": selected}
         client.call("tools/call", {"name": "workspace_info", "arguments": scoped})
         client.call("tools/call", {"name": "list_dir", "arguments": {**scoped, "depth": 1}})
-        print("PASS: legacy initialize, tool discovery (12), workspace discovery, info, directory listing")
+        print(f"PASS: legacy initialize, tool discovery ({len(names)} tools, core {len(CORE_TOOLS)} present), workspace discovery, info, directory listing")
         discovery = client.call("server/discover", modern=True)
         if MODERN not in discovery.get("supportedVersions", []):
             raise ValueError("Modern protocol not advertised")

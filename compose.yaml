@@ -1,8 +1,8 @@
-# Bridge + internal tunnel sidecar + native Pi host adapter on the shared
+# Bridge + internal tunnel sidecar on the shared
 # Compose network. The tunnel sidecar reaches the bridge at http://bridge:8765/mcp;
 # the bridge allowlist trusts those Compose DNS names on the internal MCP port only.
-# The Pi agent itself runs NATIVELY on the host and is managed by the user:
-# this Compose stack never starts, packages or publishes it.
+# Native adapter daemons are managed separately on their hosts; this Compose
+# stack never starts, packages or publishes them.
 # Run scripts/configure_docker.py first, or follow the manual .env.example setup.
 services:
   bridge:
@@ -25,7 +25,6 @@ services:
     stop_grace_period: 30s
     environment:
       WB_STATE_DIR: /state
-      WB_PROJECTS_DIR: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
       WB_MCP_PORT: ${WB_MCP_PORT:-8765}
       WB_ADMIN_PORT: ${WB_ADMIN_PORT:-8766}
       # Opt-in remote admin Host allowlist (bare hostnames/IPs, comma-separated).
@@ -33,13 +32,6 @@ services:
       # listener binds 0.0.0.0 inside the container and allows those Host values.
       # MCP is unaffected. Prefer SSH forwarding/VPN; never tunnel the manager.
       WB_ADMIN_ALLOWED_HOSTS: ${WB_ADMIN_ALLOWED_HOSTS:-}
-      # Client boundary to the native Pi host adapter; the bridge never
-      # reaches the host Pi agent directly and never starts one.
-      # WB_RUNTIME_TOKEN must be set for agent operations; empty locks the adapter.
-      # Runtime Protocol adapters run outside Compose. Provider credentials
-      # stay on those hosts; the Bridge receives private URLs and a shared token.
-      WB_RUNTIME_ADAPTERS: ${WB_RUNTIME_ADAPTERS:-{}}
-      WB_RUNTIME_TOKEN: ${WB_RUNTIME_TOKEN:-}
       WB_DISCORD_WEBHOOK_URL: ${WB_DISCORD_WEBHOOK_URL:-}
       # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.
       # Invalid values fail fast at bridge startup (BridgeError); see docs/DOCKER.md.
@@ -51,14 +43,6 @@ services:
       - type: bind
         source: ${WB_STATE_DIR:?Set a private state directory outside projects}
         target: /state
-        bind:
-          create_host_path: false
-      # Same absolute path inside and outside: handoff copy prompts work on host.
-      # Writable mount permits notes; server policy still defaults to handoff-only.
-      # This is NOT an OS read-only source mount. See docs/DOCKER.md for tradeoffs.
-      - type: bind
-        source: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
-        target: ${WB_PROJECTS_DIR:?Set an absolute dedicated project parent}
         bind:
           create_host_path: false
     tmpfs:

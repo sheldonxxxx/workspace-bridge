@@ -21,10 +21,14 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) == 25
+        assert len(tools) == len(TOOLS) == 26
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces", "read_project_lead_skill"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)
+        schemas = {tool["name"]: tool["inputSchema"] for tool in tools}
+        for name in ("list_agent_models", "start_agent_run", "list_agent_runs"):
+            assert "adapter_id" in schemas[name]["properties"]
+            assert "runtime" not in schemas[name]["properties"]
 
 async def test_http_tool_read(env, mcp):
     async with mcp:
@@ -94,7 +98,8 @@ async def test_admin_auth_policy_and_mapping(env):
         assert (await c.post("/api/diagnostics")).status_code == 405
         assert (await c.get("/api/status", headers={"Origin":"http://evil.local"})).status_code == 403
         other = env["parent"] / "beta"; other.mkdir()
-        r = await c.post("/api/workspaces", json={"name":"Beta", "root":str(other)})
+        r = await c.post("/api/workspaces", json={"name":"Beta", "root":str(other),
+                                                 "node_id": env["node_id"]})
         assert r.status_code == 201 and not r.json()["workspace"]["enabled"]
         assert (await c.get("/mcp")).status_code == 404
 
