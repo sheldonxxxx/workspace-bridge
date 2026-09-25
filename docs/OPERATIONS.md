@@ -11,7 +11,7 @@ from diagnostics, logs, errors and events. Treat both state databases and projec
 handoff folders as sensitive; Bridge holds sanitized adapter references while the
 Node holds adapter secrets and data-plane state.
 
-Fresh state creates schema v3. This architecture cutover does not migrate older
+Fresh state creates schema v4. This architecture cutover does not migrate older
 databases or retain v1 API aliases. If Bridge reports `state_schema_incompatible`,
 use a fresh state path; the existing database is left untouched.
 

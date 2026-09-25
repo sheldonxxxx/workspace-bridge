@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { ADAPTER_VERSION } from "./config.mjs";
 import { isTrustedExtensionUsable, sdkToolLoadout, trustedExtensionPath } from "./config.mjs";
 import { READONLY_TOOLS } from "./config.mjs";
-import { ExecutionJournal, summaryRecord } from "./executions.mjs";
+import { ExecutionJournal, redactExtensionText, summaryRecord } from "./executions.mjs";
 import {
   canonicalizeEnabledOrder,
   defaultExtensionPolicy,
@@ -110,9 +110,12 @@ export function sanitizeMessage(raw, index) {
   const text = textFromContent(raw.content ?? raw.text).slice(0, MAX_MESSAGE_TEXT);
   const tools = toolsFromContent(raw.content);
   const created = typeof raw.timestamp === "number" ? raw.timestamp : null;
-  const error = typeof raw.errorMessage === "string" && raw.errorMessage
+  // Bounded native error text with best-effort credential redaction.
+  // Never carries prompts, reasoning, tool args, env, or raw payloads.
+  const rawError = typeof raw.errorMessage === "string" && raw.errorMessage
     ? raw.errorMessage.slice(0, 300)
     : null;
+  const error = rawError ? redactExtensionText(rawError).slice(0, 300) : null;
   // Completion evidence for assistant messages only, derived from the
   // native stopReason. "stop"/"length" are successful terminal LLM turns;
   // "toolUse" is an intermediate turn; "pending"/"deferred"/"error"/
@@ -123,7 +126,17 @@ export function sanitizeMessage(raw, index) {
     && (stopReason === "stop" || stopReason === "length")
     && created !== null
     && error === null;
-  return {
+  // Safe terminal classification for observability only (allowlisted,
+  // never the raw stopReason): "error" when a sanitized native error
+  // exists, "aborted" for a clean abort, otherwise "incomplete".
+  // Present only on non-successful assistant messages.
+  let failureKind = null;
+  if (role === "assistant" && !terminal) {
+    if (error) failureKind = "error";
+    else if (stopReason === "aborted") failureKind = "aborted";
+    else failureKind = "incomplete";
+  }
+  const message = {
     id: bounded(raw.id, 200) || `msg-${index}`,
     role,
     created,
@@ -132,6 +145,8 @@ export function sanitizeMessage(raw, index) {
     tools,
     error,
   };
+  if (failureKind) message.failureKind = failureKind;
+  return message;
 }
 
 export function sanitizeMessages(raw, limit = 40) {
@@ -185,6 +200,102 @@ export function normalizeModelRef(model) {
     return { provider, id };
   }
   throw new AdapterError("Unsupported model selector", 400, "rejected");
+}
+
+// Native provider token accounting for one Bridge run.
+//
+// The Pi SDK reports provider-native usage on each completed AssistantMessage
+// ({input, output, cacheRead, cacheWrite, reasoning?, totalTokens}). This
+// module normalizes that native shape to the Runtime Protocol run usage
+// snapshot ({inputTokens, cachedInputTokens, cacheWriteInputTokens,
+// outputTokens, reasoningOutputTokens, totalTokens}) and aggregates all
+// usage-final model calls that belong to exactly one Bridge run, including
+// multi-step tool loops and failed/interrupted model calls that still
+// report consumed usage. Successful assistant completion stays narrow
+// (stop/length only, see sanitizeMessage); usage-finality is broader
+// (stop/length/toolUse/error/aborted) so already-consumed tokens remain
+// visible on failed runs. Streaming/pending/deferred/unknown/nonterminal
+// snapshots are never summed. Previous/future runs in the same AgentSession
+// are excluded via the caller's message-count baseline, so a continuation
+// run that reuses the same session starts a fresh accounting boundary.
+// A present-but-malformed recognized counter invalidates the whole native
+// snapshot (never a misleading partial); unknown provider fields are
+// ignored for forward compatibility. Absent provider usage is omitted
+// (never fabricated as zero) and no cost, prompt, or reasoning content is
+// retained.
+export const PI_USAGE_FIELDS = ["inputTokens", "cachedInputTokens",
+  "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens",
+  "totalTokens"];
+const PI_USAGE_ALIASES = {
+  inputTokens: ["input"],
+  cachedInputTokens: ["cacheRead"],
+  cacheWriteInputTokens: ["cacheWrite"],
+  outputTokens: ["output"],
+  reasoningOutputTokens: ["reasoning"],
+  totalTokens: ["totalTokens"],
+};
+const PI_USAGE_FINAL_STOP_REASONS = new Set(["stop", "length", "toolUse",
+  "error", "aborted"]);
+
+export function normalizePiUsage(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const result = {};
+  for (const field of PI_USAGE_FIELDS) {
+    const aliases = PI_USAGE_ALIASES[field] || [];
+    for (const alias of aliases) {
+      if (!(alias in raw)) continue;
+      const candidate = raw[alias];
+      // A present-but-malformed recognized counter invalidates the whole
+      // snapshot; unknown provider fields are ignored elsewhere.
+      if (typeof candidate !== "number" || !Number.isSafeInteger(candidate)
+          || candidate < 0) {
+        return null;
+      }
+      result[field] = candidate;
+      break;
+    }
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+// Usage-final model-call predicate (broader than successful completion).
+// Counts provider-reported usage for terminal provider/model calls
+// (stop/length/toolUse/error/aborted) even when a native error is present,
+// so failed/interrupted runs retain already-consumed tokens. Streaming,
+// pending, deferred, unknown, and nonterminal snapshots never count.
+// Successful assistant completion remains stop/length only (sanitizeMessage).
+export function isUsageFinalModelCall(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  if (raw.role !== "assistant") return false;
+  const stopReason = typeof raw.stopReason === "string" ? raw.stopReason : "";
+  if (!PI_USAGE_FINAL_STOP_REASONS.has(stopReason)) return false;
+  return true;
+}
+
+export function isCompletedModelCall(raw) {
+  return isUsageFinalModelCall(raw);
+}
+
+export function aggregatePiUsage(messages) {
+  if (!Array.isArray(messages) || !messages.length) return null;
+  const totals = {};
+  let seen = false;
+  for (const raw of messages) {
+    if (!isUsageFinalModelCall(raw)) continue;
+    const normalized = normalizePiUsage(raw.usage);
+    if (!normalized) continue;
+    seen = true;
+    for (const [key, value] of Object.entries(normalized)) {
+      const current = totals[key] || 0;
+      const next = current + value;
+      if (!Number.isSafeInteger(next) || next < 0) {
+        delete totals[key];
+        continue;
+      }
+      totals[key] = next;
+    }
+  }
+  return seen && Object.keys(totals).length ? totals : null;
 }
 
 export class PiAdapter {
@@ -654,6 +765,34 @@ export class PiAdapter {
       throw this._asAdapterError(error);
     }
     return sanitizeMessages(raw, limit);
+  }
+
+  // Run-scoped native usage accounting. Returns the raw message count for
+  // baseline capture, and the aggregated normalized usage for messages at
+  // or after the baseline. Both fail closed to null/0 when the session is
+  // unavailable so callers omit usage rather than fabricate counters.
+  sessionMessageCount(directory, sessionId) {
+    try {
+      const entry = this._boundEntry(sessionId, directory);
+      if (!entry) return 0;
+      const raw = entry.session.messages;
+      return Array.isArray(raw) ? raw.length : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  assistantUsageSince(directory, sessionId, afterIndex = 0) {
+    try {
+      const entry = this._boundEntry(sessionId, directory);
+      if (!entry) return null;
+      const raw = entry.session.messages;
+      if (!Array.isArray(raw)) return null;
+      const start = Math.max(0, Number(afterIndex) || 0);
+      return aggregatePiUsage(raw.slice(start));
+    } catch {
+      return null;
+    }
   }
 
   async listModels(directory) {

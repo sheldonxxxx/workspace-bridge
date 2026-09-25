@@ -218,8 +218,8 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             "Local configuration and private state are readable." if config_valid else
             "Local Bridge configuration is unavailable.",
             remediation=None if config_valid else "Check the local Bridge configuration.")
-    out.add("core.state_schema_v3", "core", "pass",
-            "Private Bridge state uses the Node-authority schema.")
+    out.add("core.state_schema_v4", "core", "pass",
+            "Private Bridge state uses the Node-authority schema with per-run token usage.")
     out.add("core.gateway_credential_configured", "core",
             "pass" if gateway and gateway["token_hash"] else "action_required",
             "Shared MCP credential is configured." if gateway and gateway["token_hash"] else

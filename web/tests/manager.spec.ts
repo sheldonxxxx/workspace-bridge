@@ -397,6 +397,14 @@ async function mockApi(
       bound_revision: "profile-run-rev",
       effective_revision: "profile-run-rev",
     },
+    token_usage: {
+      input_tokens: 120,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 1,
+      output_tokens: 30,
+      reasoning_output_tokens: 4,
+      total_tokens: 150,
+    },
   };
   const nodes = [
     {
@@ -850,9 +858,7 @@ test("Nodes show authority status and keep Node and adapter tokens write-only", 
     page.getByRole("heading", { name: "Nodes", level: 1 }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Local Mac" })).toBeVisible();
-  await expect(page.getByText("Node Protocol", { exact: true })).toHaveCount(
-    2,
-  );
+  await expect(page.getByText("Node Protocol", { exact: true })).toHaveCount(2);
   await expect(page.getByText("Local Pi · Pi", { exact: true })).toBeVisible();
 
   await page
@@ -1015,4 +1021,6 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
     page.getByText(/Profile read-only · bound revision profile-run-rev/),
   ).toBeVisible();
   await expect(page.getByText(/Local Mac · rev node-run-rev/)).toBeVisible();
+  await expect(page.getByText("Token usage")).toBeVisible();
+  await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
 });

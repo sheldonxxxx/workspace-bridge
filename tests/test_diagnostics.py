@@ -243,7 +243,7 @@ def test_fresh_state_schema_and_private_mode(tmp_path):
                 "agent_conversations", "agent_runs", "agent_interactions",
                 "agent_activities"} <= tables
         assert service.db.execute(
-            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "3"
+            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "4"
         assert (state / "bridge.sqlite3").stat().st_mode & 0o777 == 0o600
     finally:
         service.close()

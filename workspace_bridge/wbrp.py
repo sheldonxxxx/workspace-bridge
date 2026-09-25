@@ -34,6 +34,10 @@ SECURITY_REPLACEMENT_REASONS = frozenset({
     "legacy-sandbox-transition", "settings-update-already-pending",
     "settings-update-unconfirmed", "settings-update-mismatch",
     "settings-update-failed"})
+MAX_SAFE_INTEGER = 9007199254740991
+RUN_USAGE_FIELDS = frozenset({
+    "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
+    "outputTokens", "reasoningOutputTokens", "totalTokens"})
 
 
 def _identifier(value: Any, label: str) -> str:
@@ -61,7 +65,33 @@ def validate_run_state(value: dict) -> dict:
     if "securityBinding" in value:
         value = {**value, "securityBinding": _validate_security_binding(
             value.get("securityBinding"))}
+    if "usage" in value:
+        value = {**value, "usage": _validate_run_usage(value.get("usage"))}
     return value
+
+
+def _validate_run_usage(value: Any) -> dict:
+    """Validate the optional additive run-scoped native token usage snapshot.
+
+    The field carries normalized native provider counters for exactly one
+    Bridge run, including continuation runs which start a fresh accounting
+    boundary. Counters are run-scoped and may be partial while the run is
+    active. Absent native usage is represented by omitting the field entirely;
+    present counters must be non-negative safe integers. No counter is
+    synthesized, estimated, or derived from cumulative conversation/session
+    totals. Unknown or malformed usage fails closed as an invalid snapshot.
+    """
+    if not isinstance(value, dict) or not value:
+        raise RuntimeUnavailable("Runtime run usage is invalid")
+    if set(value) - RUN_USAGE_FIELDS:
+        raise RuntimeUnavailable("Runtime run usage is invalid")
+    result: dict[str, int] = {}
+    for key, counter in value.items():
+        if (isinstance(counter, bool) or not isinstance(counter, int)
+                or counter < 0 or counter > MAX_SAFE_INTEGER):
+            raise RuntimeUnavailable("Runtime run usage is invalid")
+        result[key] = int(counter)
+    return result
 
 
 def _validate_security_summary(value: Any) -> dict:

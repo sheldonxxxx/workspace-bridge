@@ -85,6 +85,64 @@ def _effective_security(binding: dict, *, node_id: str, node_revision: str,
 EXECUTION_ACTIVITY_KINDS = frozenset({
     "command", "file_change", "tool_call", "search", "subagent",
 })
+MAX_SAFE_INTEGER = 9007199254740991
+RUN_USAGE_TO_BRIDGE = {
+    "inputTokens": "input_tokens",
+    "cachedInputTokens": "cached_input_tokens",
+    "cacheWriteInputTokens": "cache_write_input_tokens",
+    "outputTokens": "output_tokens",
+    "reasoningOutputTokens": "reasoning_output_tokens",
+    "totalTokens": "total_tokens",
+}
+
+
+def _normalize_bridge_usage(native: Any) -> dict | None:
+    """Normalize a validated Runtime Protocol usage snapshot to Bridge storage.
+
+    The snapshot is run-scoped native provider counters for exactly one
+    Bridge run (continuation runs start a fresh boundary) and may be partial
+    while active. Only reported counters are stored; absent counters stay
+    absent and are never synthesized as zero. Malformed input yields None so
+    callers preserve the existing durable snapshot instead of persisting it.
+    """
+    if not isinstance(native, dict) or not native:
+        return None
+    result: dict[str, int] = {}
+    for runtime_key, bridge_key in RUN_USAGE_TO_BRIDGE.items():
+        if runtime_key not in native:
+            continue
+        counter = native[runtime_key]
+        if (isinstance(counter, bool) or not isinstance(counter, int)
+                or counter < 0 or counter > MAX_SAFE_INTEGER):
+            return None
+        result[bridge_key] = int(counter)
+    return result or None
+
+
+def _stored_bridge_usage(stored: Any) -> dict | None:
+    if stored is None:
+        return None
+    if isinstance(stored, dict):
+        candidate = stored
+    elif isinstance(stored, str) and stored:
+        try:
+            candidate = json.loads(stored)
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if not isinstance(candidate, dict) or not candidate:
+        return None
+    allowed = set(RUN_USAGE_TO_BRIDGE.values())
+    if set(candidate) - allowed:
+        return None
+    result: dict[str, int] = {}
+    for key, counter in candidate.items():
+        if (isinstance(counter, bool) or not isinstance(counter, int)
+                or counter < 0 or counter > MAX_SAFE_INTEGER):
+            return None
+        result[key] = int(counter)
+    return result or None
 
 
 class RunCoordinator:
@@ -121,6 +179,7 @@ class RunCoordinator:
             native_id TEXT, model TEXT NOT NULL, reasoning TEXT,
             phase TEXT NOT NULL, active_state TEXT, outcome TEXT,
             result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+            token_usage TEXT,
             effective_security TEXT NOT NULL,
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(workspace,adapter_id,request_id));
@@ -139,6 +198,17 @@ class RunCoordinator:
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
         """)
+            # Bridge schema v4 has no migration framework. Fresh state already
+            # includes agent_runs.token_usage above; a v3 database is rejected
+            # by Service before this point. A v4 database that is
+            # structurally incomplete fails closed here instead of being
+            # silently migrated.
+            columns = {row["name"] for row in service.db.execute(
+                "PRAGMA table_info(agent_runs)")}
+            if "token_usage" not in columns:
+                raise BridgeError(
+                    "Bridge state is incomplete for schema v4; use a fresh state path",
+                    "state_schema_incompatible")
 
     @staticmethod
     def _outcome_event_type(outcome: str | None) -> str | None:
@@ -667,14 +737,14 @@ class RunCoordinator:
         with self.service.lock, self.service.db:
             self.service.db.execute(
                 "INSERT INTO agent_runs(id,conversation,workspace,node_id,node_revision,adapter_id,runtime_type,adapter_revision,handoff,request_id,"
-                "request_hash,continue_from,parent_run,native_id,model,reasoning,phase,active_state,outcome,result,error,"
-                "effective_security,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "request_hash,continue_from,parent_run,native_id,model,reasoning,phase,active_state,outcome,result,error,token_usage,"
+                "effective_security,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bridge_run_id, conversation["id"], ws["id"], node_info["id"],
                  node_info["revision"], adapter_id, adapter_info["runtime_type"],
                  adapter_info["revision"], job_id,
                  request_id, request_hash, continue_from_run_id, parent_run_id,
                  None, selector, reasoning, "starting", None,
-                 None, "", "", json.dumps(effective_security, sort_keys=True), timestamp, timestamp))
+                 None, "", "", None, json.dumps(effective_security, sort_keys=True), timestamp, timestamp))
         try:
             run_payload = {
                 "input": [{"type": "text", "text": self._prompt(ws, job)}],
@@ -795,13 +865,17 @@ class RunCoordinator:
                     "VALUES(?,?,?,?,?,?,?,?)",
                     (activity_id, bridge_run_id, "security-replacement:" + bridge_run_id,
                      "security_conversation_replaced", "completed", payload, _now(), _now()))
+        initial_usage = _normalize_bridge_usage(native_run.get("usage"))
+        initial_usage_json = (json.dumps(initial_usage, sort_keys=True)
+                              if initial_usage is not None else None)
         with self.service.lock, self.service.db:
             self.service.db.execute(
                 "UPDATE agent_runs SET native_id=?,phase=?,active_state=?,outcome=?,"
-                "result=?,error=?,updated=? WHERE id=?",
+                "result=?,error=?,token_usage=?,updated=? WHERE id=?",
                 (native_run["id"], native_run["phase"], native_run.get("activeState"),
                  native_run.get("outcome"), _safe(native_run.get("result")),
-                 _safe(native_run.get("error"), 300), _now(), bridge_run_id))
+                 _safe(native_run.get("error"), 300), initial_usage_json,
+                 _now(), bridge_run_id))
             if native_run["phase"] == "terminal":
                 self._record_outcome_event_locked({
                     "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
@@ -822,6 +896,7 @@ class RunCoordinator:
             node_name = self.service.node_registry.get(run["node_id"])["name"]
         except BridgeError:
             node_name = ""
+        token_usage = _stored_bridge_usage(run.get("token_usage"))
         return {"run_id": run["id"], "conversation_id": run["conversation"],
                 "node_id": run["node_id"], "node_name": node_name[:80],
                 "node_revision": run["node_revision"],
@@ -834,6 +909,7 @@ class RunCoordinator:
                 "reasoning": run["reasoning"],
                 "phase": run["phase"], "active_state": run["active_state"],
                 "outcome": run["outcome"], "result": run["result"],
+                "token_usage": token_usage,
                 "effective_security": effective_security,
                 "error": run["error"], "created": run["created"],
                 "updated": run["updated"]}
@@ -846,18 +922,27 @@ class RunCoordinator:
         if run["phase"] == "terminal" and (native["phase"] != "terminal"
                 or native["outcome"] != run["outcome"]):
             raise RuntimeUnavailable("Runtime terminal run changed state")
+        fresh_usage = _normalize_bridge_usage(native.get("usage"))
         with self.service.lock, self.service.db:
             current = self.service.db.execute(
-                "SELECT phase,outcome FROM agent_runs WHERE id=?", (run["id"],)).fetchone()
+                "SELECT phase,outcome,token_usage FROM agent_runs WHERE id=?", (run["id"],)).fetchone()
             if current is None:
                 raise BridgeError("Runtime run not found", "not_found")
             was_terminal = current["phase"] == "terminal"
-            self.service.db.execute(
-                "UPDATE agent_runs SET phase=?,active_state=?,outcome=?,result=?,error=?,updated=? "
-                "WHERE id=?",
-                (native["phase"], native.get("activeState"), native.get("outcome"),
-                 _safe(native.get("result")), _safe(native.get("error"), 300),
-                 _now(), run["id"]))
+            if fresh_usage is not None:
+                self.service.db.execute(
+                    "UPDATE agent_runs SET phase=?,active_state=?,outcome=?,result=?,error=?,token_usage=?,updated=? "
+                    "WHERE id=?",
+                    (native["phase"], native.get("activeState"), native.get("outcome"),
+                     _safe(native.get("result")), _safe(native.get("error"), 300),
+                     json.dumps(fresh_usage, sort_keys=True), _now(), run["id"]))
+            else:
+                self.service.db.execute(
+                    "UPDATE agent_runs SET phase=?,active_state=?,outcome=?,result=?,error=?,updated=? "
+                    "WHERE id=?",
+                    (native["phase"], native.get("activeState"), native.get("outcome"),
+                     _safe(native.get("result")), _safe(native.get("error"), 300),
+                     _now(), run["id"]))
             live_ids = set()
             for item in interactions[:100]:
                 if item.get("runId") != run["native_id"] or not isinstance(item.get("id"), str):

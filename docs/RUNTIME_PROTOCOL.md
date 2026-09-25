@@ -74,6 +74,21 @@ A run has `phase` (`starting`, `active`, `terminal`), `activeState`
 only in the terminal phase). An interaction is a separate record; waiting is
 not an outcome. Final assistant text is evidence, never proof of file changes.
 
+A run snapshot may carry an optional additive `usage` object with normalized
+native provider counters: `inputTokens`, `cachedInputTokens`,
+`cacheWriteInputTokens`, `outputTokens`, `reasoningOutputTokens`, and
+`totalTokens`. Usage is run-scoped for exactly one Bridge run, including
+continuation runs which start a fresh accounting boundary, and may be partial
+while the run is active. Codex reports the owned turn's `tokenUsage.last`
+snapshot (never cumulative thread totals); Pi aggregates provider-reported
+assistant/model-call usage for that run's tool loop (never streaming snapshots
+or previous conversation turns). The field is omitted when native usage is
+unavailable; present counters must be non-negative safe integers and absent
+counters are never synthesized as zero or estimated. Unknown or malformed
+usage fails closed as an invalid run snapshot. Already-consumed usage remains
+visible on failed, interrupted, and cancelled runs when the native runtime
+reported it.
+
 `POST /conversations/{id}/runs` is **idle-only**. It must either accept exactly
 one new run or return `409 conversation_busy`; it must never queue or steer.
 Steering requires a separate request with the exact expected active run ID.

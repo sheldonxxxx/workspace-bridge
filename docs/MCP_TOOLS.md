@@ -242,7 +242,12 @@ not match. Endpoint/token edits produce `adapter_changed`; renaming an adapter
 does not change its connection revision.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
-sanitized error, notification delivery summary, and pending `interactions`.
+sanitized error, notification delivery summary, pending `interactions`, and
+`token_usage` with run-scoped native counters (`input_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, `total_tokens`) when the native runtime reported
+them, otherwise null. The same canonical run representation is returned by
+admin list/read APIs and MCP run tools; there is no separate usage endpoint.
 It also includes the immutable `node_id`/revision, adapter revision, and
 `effective_security` snapshot used immediately before that run started; this
 snapshot remains historical if workspace settings later change.
@@ -290,8 +295,8 @@ failure.
 
 `list_agent_runs` lists this workspace's runs across AdapterInstances (newest
 first) with phase, active state, outcome, Node and adapter ID/name, runtime type,
-model, security-used snapshot, conversation id, and timestamps; pass `adapter_id`
-to filter to one destination.
+model, security-used snapshot, run-scoped `token_usage` (null when unreported),
+conversation id, and timestamps; pass `adapter_id` to filter to one destination.
 `cancel_agent_run` requests
 cancellation of only the bound conversation and records the result from the
 adapter snapshot. `list_agent_executions` /

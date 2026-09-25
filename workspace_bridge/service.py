@@ -94,7 +94,7 @@ class Service:
                                   "state_schema_incompatible")
             self.db.executescript("""
           CREATE TABLE bridge_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-          INSERT INTO bridge_meta(key,value) VALUES('schema_version','3');
+          INSERT INTO bridge_meta(key,value) VALUES('schema_version','4');
           PRAGMA journal_mode=WAL;
           CREATE TABLE nodes (
             id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -151,18 +151,18 @@ class Service:
         else:
             if "bridge_meta" not in tables:
                 self.db.close()
-                raise BridgeError("Bridge state is not schema v3; use a fresh state path",
+                raise BridgeError("Bridge state is not schema v4; use a fresh state path",
                                   "state_schema_incompatible")
             version = self.db.execute(
                 "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()
-            if version is None or version["value"] != "3":
+            if version is None or version["value"] != "4":
                 self.db.close()
-                raise BridgeError("Bridge state is not schema v3; use a fresh state path",
+                raise BridgeError("Bridge state is not schema v4; use a fresh state path",
                                   "state_schema_incompatible")
             required = {"nodes", "node_adapters", "workspace_routes", "adapter_model_policies"}
             if not required.issubset(tables):
                 self.db.close()
-                raise BridgeError("Bridge state is incomplete for schema v3; use a fresh state path",
+                raise BridgeError("Bridge state is incomplete for schema v4; use a fresh state path",
                                   "state_schema_incompatible")
         if not read_only:
             self.db.execute("PRAGMA journal_mode=WAL")

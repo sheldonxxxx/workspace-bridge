@@ -223,7 +223,7 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
     except BridgeError as exc:
         report = failure_report(mode="offline" if offline else "live",
                                 code=exc.code,
-                                summary=("Bridge state is incompatible with schema v3; use a fresh state path."
+                                summary=("Bridge state is incompatible with schema v4; use a fresh state path."
                                          if exc.code == "state_schema_incompatible"
                                          else "Private Bridge state database could not be opened."))
         _print_doctor(report, as_json)

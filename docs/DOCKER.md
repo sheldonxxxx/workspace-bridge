@@ -74,7 +74,7 @@ SQLite and are never read back by normal APIs. Do not use `/state` or invented
 `/workspace` aliases as workspace roots.
 
 The first startup initializes **only fresh** Docker control-plane state. Bridge state
-schema v3 is the development contract; non-v3 state reports
+schema v4 is the development contract; non-v4 state reports
 `state_schema_incompatible` and is never migrated or altered. Use a separate fresh
 state path for this cutover. Runtime adapter secrets and workspace data remain in
 the private Node service. Container recreation retains Node records, mappings,

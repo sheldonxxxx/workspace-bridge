@@ -206,10 +206,11 @@ The worker neither receives workspace paths nor produces persistent preview file
 
 ## State and compatibility
 
-Fresh v3 Bridge databases contain Nodes, workspace mappings, sanitized adapter
+Fresh v4 Bridge databases contain Nodes, workspace mappings, sanitized adapter
 references, workspace routes/defaults, adapter-scoped model policies, jobs,
 content-free operation events, and the `agent_*` Runtime Protocol execution
-tables. Each Node has its own fresh private state. Existing non-v3 databases fail
+tables including durable per-run native token usage (`agent_runs.token_usage`).
+Each Node has its own fresh private state. Existing non-v4 databases fail
 with `state_schema_incompatible`; the development architecture cutover has no
 migration or API compatibility layer. Use a fresh state path. Job
 publication uses `publishing`, `prepared`, and `failed`; these states say nothing

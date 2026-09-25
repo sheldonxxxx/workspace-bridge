@@ -779,198 +779,196 @@ function WorkspaceCard({
         </div>
       </div>
       <div className="execution-targets">
-          <div className="execution-targets-heading">
-            <div>
-              <strong>Execution targets</strong>
-              <p>Every run uses an adapter owned by this workspace’s Node.</p>
-            </div>
-            <span className="target-count">
-              {Object.keys(ws.routes || {}).length} configured
-            </span>
+        <div className="execution-targets-heading">
+          <div>
+            <strong>Execution targets</strong>
+            <p>Every run uses an adapter owned by this workspace’s Node.</p>
           </div>
-          {Object.keys(ws.routes || {}).length === 0 && (
-            <div className="execution-target-empty">
-              <strong>No execution targets configured</strong>
-              <p>
-                Add a same-Node adapter below, then choose its security and
-                readiness before starting a run.
-              </p>
-            </div>
-          )}
-          {Object.entries(ws.routes || {}).map(([id, grant]) => {
-            const route = diagnostics?.runnable_routes.find(
-              (item) => item.workspace_id === ws.id && item.adapter_id === id,
-            );
-            const blockers = route ? routeChecks(diagnostics, route) : [];
-            const status = diagnosticsUnavailable
-              ? "Diagnostics unavailable"
-              : route
-                ? route.ready
-                  ? "Ready"
-                  : "Blocked"
-                : "Not evaluated";
-            return (
-              <div className="target-row" key={id}>
-                <div className="target-main">
-                  <div className="target-title-line">
-                    <strong>
-                      {grant.name} · {runtimeName(grant.runtime_type)}
-                    </strong>
-                    {grant.is_default && (
-                      <StateBadge value="Workspace default" />
-                    )}
-                  </div>
-                  <p className="effective-security-detail">
-                    {securityDetail(grant)}
-                  </p>
-                  <p className="target-facts">
-                    <span>Node: {grant.node_name || ws.node_name || ws.node_id}</span>
-                    <span>
-                      Default model: {grant.default_model || "Not configured"}
-                    </span>
-                    <span>
-                      Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </p>
-                  {grant.security_binding?.source === "runtime-config" &&
-                    grant.security_binding.status !== "ready" && (
-                      <p className="runtime-security-summary">
-                        Codex security config is currently unavailable
-                      </p>
-                    )}
-                  {!diagnosticsUnavailable && route && !route.ready && (
-                    <div className="runtime-route-blocker">
-                      <p>{blockers[0]?.check?.summary || route.summary}</p>
-                      {blockers[0]?.check?.remediation && (
-                        <small>{blockers[0].check.remediation}</small>
-                      )}
-                      <Button
-                        variant="link"
-                        size="sm"
-                        className="inline-action"
-                        onClick={() =>
-                          onNavigate(
-                            diagnosticDestination(
-                              blockers[0]?.check,
-                              blockers[0]?.code,
-                            ),
-                          )
-                        }
-                      >
-                        View blockers
-                      </Button>
-                    </div>
+          <span className="target-count">
+            {Object.keys(ws.routes || {}).length} configured
+          </span>
+        </div>
+        {Object.keys(ws.routes || {}).length === 0 && (
+          <div className="execution-target-empty">
+            <strong>No execution targets configured</strong>
+            <p>
+              Add a same-Node adapter below, then choose its security and
+              readiness before starting a run.
+            </p>
+          </div>
+        )}
+        {Object.entries(ws.routes || {}).map(([id, grant]) => {
+          const route = diagnostics?.runnable_routes.find(
+            (item) => item.workspace_id === ws.id && item.adapter_id === id,
+          );
+          const blockers = route ? routeChecks(diagnostics, route) : [];
+          const status = diagnosticsUnavailable
+            ? "Diagnostics unavailable"
+            : route
+              ? route.ready
+                ? "Ready"
+                : "Blocked"
+              : "Not evaluated";
+          return (
+            <div className="target-row" key={id}>
+              <div className="target-main">
+                <div className="target-title-line">
+                  <strong>
+                    {grant.name} · {runtimeName(grant.runtime_type)}
+                  </strong>
+                  {grant.is_default && <StateBadge value="Workspace default" />}
+                </div>
+                <p className="effective-security-detail">
+                  {securityDetail(grant)}
+                </p>
+                <p className="target-facts">
+                  <span>
+                    Node: {grant.node_name || ws.node_name || ws.node_id}
+                  </span>
+                  <span>
+                    Default model: {grant.default_model || "Not configured"}
+                  </span>
+                  <span>
+                    Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
+                  </span>
+                </p>
+                {grant.security_binding?.source === "runtime-config" &&
+                  grant.security_binding.status !== "ready" && (
+                    <p className="runtime-security-summary">
+                      Codex security config is currently unavailable
+                    </p>
                   )}
-                  <div className="target-actions">
+                {!diagnosticsUnavailable && route && !route.ready && (
+                  <div className="runtime-route-blocker">
+                    <p>{blockers[0]?.check?.summary || route.summary}</p>
+                    {blockers[0]?.check?.remediation && (
+                      <small>{blockers[0].check.remediation}</small>
+                    )}
                     <Button
                       variant="link"
                       size="sm"
                       className="inline-action"
-                      onClick={() => onProfile(ws, id)}
+                      onClick={() =>
+                        onNavigate(
+                          diagnosticDestination(
+                            blockers[0]?.check,
+                            blockers[0]?.code,
+                          ),
+                        )
+                      }
                     >
-                      Change security
+                      View blockers
                     </Button>
-                    {grant.is_default ? (
-                      <Button
-                        variant="link"
-                        size="sm"
-                        className="inline-action"
-                        onClick={() =>
-                          void onRoute(ws, id, { clear_default: true })
-                        }
-                      >
-                        Clear default
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="link"
-                        size="sm"
-                        className="inline-action"
-                        disabled={!grant.enabled || grant.ready === false}
-                        onClick={() =>
-                          void onRoute(ws, id, { is_default: true })
-                        }
-                      >
-                        Set as default
-                      </Button>
-                    )}
                   </div>
-                </div>
-                <div className="target-side">
-                  <div className="runtime-route-readiness">
-                    <span>Route readiness</span>
-                    <StateBadge value={status} />
-                  </div>
-                  <Switch
-                    aria-label={`${grant.name} route for ${ws.name}`}
-                    checked={grant.enabled}
-                    onCheckedChange={(enabled) =>
-                      change(
-                        enabled
-                          ? `Enable ${grant.name} here?`
-                          : `Disable ${grant.name} here?`,
-                        enabled
-                          ? "The workspace agent switch and model policy must also be enabled."
-                          : "Active runs are not stopped automatically.",
-                        () => onRoute(ws, id, { enabled }),
-                        !enabled,
-                      )
-                    }
-                  />
+                )}
+                <div className="target-actions">
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="inline-action"
+                    onClick={() => onProfile(ws, id)}
+                  >
+                    Change security
+                  </Button>
+                  {grant.is_default ? (
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="inline-action"
+                      onClick={() =>
+                        void onRoute(ws, id, { clear_default: true })
+                      }
+                    >
+                      Clear default
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="inline-action"
+                      disabled={!grant.enabled || grant.ready === false}
+                      onClick={() => void onRoute(ws, id, { is_default: true })}
+                    >
+                      Set as default
+                    </Button>
+                  )}
                 </div>
               </div>
-            );
-          })}
-          {(ws.available_adapters || []).length > 0 ? (
-            <div className="execution-target-add">
-              <select
-                className="native-select"
-                aria-label={`Add execution target for ${ws.name}`}
-                id={`target-add-${ws.id}`}
-                defaultValue=""
-              >
-                <option value="">Choose a same-Node adapter</option>
-                {(ws.available_adapters || []).map((adapter) => (
-                  <option key={adapter.adapter_id} value={adapter.adapter_id}>
-                    {adapter.name} · {runtimeName(adapter.runtime_type)}
-                  </option>
-                ))}
-              </select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const select = document.getElementById(
-                    `target-add-${ws.id}`,
-                  ) as HTMLSelectElement | null;
-                  if (!select?.value) {
-                    onNotice("Choose an adapter owned by this Node first.");
-                    return;
+              <div className="target-side">
+                <div className="runtime-route-readiness">
+                  <span>Route readiness</span>
+                  <StateBadge value={status} />
+                </div>
+                <Switch
+                  aria-label={`${grant.name} route for ${ws.name}`}
+                  checked={grant.enabled}
+                  onCheckedChange={(enabled) =>
+                    change(
+                      enabled
+                        ? `Enable ${grant.name} here?`
+                        : `Disable ${grant.name} here?`,
+                      enabled
+                        ? "The workspace agent switch and model policy must also be enabled."
+                        : "Active runs are not stopped automatically.",
+                      () => onRoute(ws, id, { enabled }),
+                      !enabled,
+                    )
                   }
-                  void onRoute(ws, select.value, { enabled: false });
-                  select.value = "";
-                }}
-              >
-                <Plus size={14} /> Add target
-              </Button>
+                />
+              </div>
             </div>
-          ) : Object.keys(ws.routes || {}).length === 0 ? (
-            <div className="execution-target-empty">
-              <strong>No runtime adapters on this Node</strong>
-              <p>
-                Configure an adapter on the Nodes page before adding a target.
-              </p>
-              <Button
-                variant="link"
-                size="sm"
-                className="inline-action"
-                onClick={() => onNavigate("nodes")}
-              >
-                Configure Node adapters
-              </Button>
-            </div>
-          ) : null}
-        </div>
+          );
+        })}
+        {(ws.available_adapters || []).length > 0 ? (
+          <div className="execution-target-add">
+            <select
+              className="native-select"
+              aria-label={`Add execution target for ${ws.name}`}
+              id={`target-add-${ws.id}`}
+              defaultValue=""
+            >
+              <option value="">Choose a same-Node adapter</option>
+              {(ws.available_adapters || []).map((adapter) => (
+                <option key={adapter.adapter_id} value={adapter.adapter_id}>
+                  {adapter.name} · {runtimeName(adapter.runtime_type)}
+                </option>
+              ))}
+            </select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const select = document.getElementById(
+                  `target-add-${ws.id}`,
+                ) as HTMLSelectElement | null;
+                if (!select?.value) {
+                  onNotice("Choose an adapter owned by this Node first.");
+                  return;
+                }
+                void onRoute(ws, select.value, { enabled: false });
+                select.value = "";
+              }}
+            >
+              <Plus size={14} /> Add target
+            </Button>
+          </div>
+        ) : Object.keys(ws.routes || {}).length === 0 ? (
+          <div className="execution-target-empty">
+            <strong>No runtime adapters on this Node</strong>
+            <p>
+              Configure an adapter on the Nodes page before adding a target.
+            </p>
+            <Button
+              variant="link"
+              size="sm"
+              className="inline-action"
+              onClick={() => onNavigate("nodes")}
+            >
+              Configure Node adapters
+            </Button>
+          </div>
+        ) : null}
+      </div>
       <div className="workspace-footer">
         <span>
           <StateBadge value={ws.enabled ? "Bridge on" : "Bridge off"} />{" "}
@@ -2405,7 +2403,9 @@ export default function App() {
                                       : "Token required"}
                                   </span>
                                   <StateBadge
-                                    value={adapter.enabled ? "Enabled" : "Disabled"}
+                                    value={
+                                      adapter.enabled ? "Enabled" : "Disabled"
+                                    }
                                   />
                                   <Button
                                     variant="link"
@@ -2828,9 +2828,7 @@ export default function App() {
                           </div>
                           <div>
                             <dt>Endpoint</dt>
-                            <dd>
-                              {info.base_url || "Private to the Node"}
-                            </dd>
+                            <dd>{info.base_url || "Private to the Node"}</dd>
                           </div>
                           <div>
                             <dt>Adapter version</dt>
@@ -2843,7 +2841,9 @@ export default function App() {
                           <div>
                             <dt>Node token</dt>
                             <dd>
-                              {info.has_token ? "Token saved" : "Token required"}
+                              {info.has_token
+                                ? "Token saved"
+                                : "Token required"}
                             </dd>
                           </div>
                         </dl>
@@ -3860,6 +3860,54 @@ function RunInspector({
                   </>
                 ) : (
                   <p>The immutable security snapshot was not available.</p>
+                )}
+              </section>
+              <section className="request-panel token-usage-panel">
+                <h3>Token usage</h3>
+                {current.token_usage ? (
+                  <div className="run-facts">
+                    <div>
+                      <span>Total</span>
+                      <strong>
+                        {current.token_usage.total_tokens ?? "Not reported"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Input</span>
+                      <strong>
+                        {current.token_usage.input_tokens ?? "Not reported"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Cached input</span>
+                      <strong>
+                        {current.token_usage.cached_input_tokens ??
+                          "Not reported"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Cache-write input</span>
+                      <strong>
+                        {current.token_usage.cache_write_input_tokens ??
+                          "Not reported"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Output</span>
+                      <strong>
+                        {current.token_usage.output_tokens ?? "Not reported"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Reasoning output</span>
+                      <strong>
+                        {current.token_usage.reasoning_output_tokens ??
+                          "Not reported"}
+                      </strong>
+                    </div>
+                  </div>
+                ) : (
+                  <p>Not reported</p>
                 )}
               </section>
               {pending.map((item) => (

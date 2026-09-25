@@ -176,6 +176,69 @@ def _security_summary(active_profile: Any, approval_policy: Any,
             "provenance": provenance}
 
 
+_MAX_SAFE_INTEGER = 9007199254740991
+_CODEX_USAGE_FIELDS = (
+    "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
+    "outputTokens", "reasoningOutputTokens", "totalTokens")
+_CODEX_USAGE_ALIASES: dict[str, tuple[str, ...]] = {
+    "inputTokens": ("inputTokens", "input_tokens", "input"),
+    "cachedInputTokens": ("cachedInputTokens", "cached_input_tokens",
+                            "cacheRead", "cache_read"),
+    "cacheWriteInputTokens": ("cacheWriteInputTokens",
+                                "cache_write_input_tokens",
+                                "cacheWrite", "cache_write"),
+    "outputTokens": ("outputTokens", "output_tokens", "output"),
+    "reasoningOutputTokens": ("reasoningOutputTokens",
+                                "reasoning_output_tokens", "reasoning",
+                                "reasoning_tokens", "reasoningTokens"),
+    "totalTokens": ("totalTokens", "total_tokens", "total"),
+}
+
+
+def _normalize_codex_usage(raw: Any) -> dict | None:
+    """Normalize a native per-turn usage snapshot to Runtime Protocol counters.
+
+    Only ``tokenUsage.last`` is accepted; cumulative thread totals are never
+    used. Repeated notifications are snapshots and replace prior usage. Only
+    non-negative safe-integer counters are retained; absent counters stay
+    absent (never synthesized as zero). A present-but-malformed recognized
+    counter invalidates the whole snapshot; unknown provider fields are
+    ignored for forward compatibility.
+    """
+    if not isinstance(raw, dict):
+        return None
+    result: dict[str, int] = {}
+    for field in _CODEX_USAGE_FIELDS:
+        for alias in _CODEX_USAGE_ALIASES[field]:
+            if alias not in raw:
+                continue
+            candidate = raw[alias]
+            if (isinstance(candidate, bool) or not isinstance(candidate, int)
+                    or candidate < 0 or candidate > _MAX_SAFE_INTEGER):
+                return None
+            result[field] = int(candidate)
+            break
+    return result or None
+
+
+def _parse_stored_codex_usage(stored: Any) -> dict | None:
+    if not isinstance(stored, str) or not stored:
+        return None
+    try:
+        value = json.loads(stored)
+    except (TypeError, ValueError):
+        return None
+    normalized = _normalize_codex_usage(value) if isinstance(value, dict) else None
+    return normalized
+
+
+def _extract_codex_last(token_usage: Any) -> dict | None:
+    if not isinstance(token_usage, dict):
+        return None
+    last = token_usage.get("last")
+    return _normalize_codex_usage(last)
+
+
 def _codex_cli_version(executable: Any) -> str:
     """Read a fallback version from the same Codex executable as app-server."""
     if not isinstance(executable, str) or not executable:
@@ -236,6 +299,7 @@ class CodexHostAdapter:
             security_binding TEXT,
             turn TEXT UNIQUE, phase TEXT NOT NULL, active_state TEXT,
             outcome TEXT, result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+            usage TEXT,
             created TEXT NOT NULL, updated TEXT NOT NULL);
           CREATE UNIQUE INDEX IF NOT EXISTS ux_active_conversation
             ON runs(conversation) WHERE phase IN ('starting','active');
@@ -253,6 +317,8 @@ class CodexHostAdapter:
             self.db.execute("ALTER TABLE runs ADD COLUMN input_hash TEXT")
         if "security_binding" not in columns:
             self.db.execute("ALTER TABLE runs ADD COLUMN security_binding TEXT")
+        if "usage" not in columns:
+            self.db.execute("ALTER TABLE runs ADD COLUMN usage TEXT")
         conversation_columns = {row["name"] for row in
                                self.db.execute("PRAGMA table_info(conversations)")}
         if "source" not in conversation_columns:
@@ -1070,6 +1136,9 @@ class CodexHostAdapter:
             binding = None
         if isinstance(binding, dict):
             result["securityBinding"] = binding
+        usage = _parse_stored_codex_usage(run.get("usage"))
+        if usage is not None:
+            result["usage"] = usage
         return result
 
     def _input(self, items: Any) -> list[dict]:
@@ -1335,10 +1404,13 @@ class CodexHostAdapter:
                     "UPDATE runs SET turn=?,phase='active',active_state='running',updated=? WHERE id=?",
                     (turn, _now(), run_id))
                 self._emit("run.started", conversation_id, run_id)
+                def _early_turn(params: dict) -> str | None:
+                    raw = params.get("turn")
+                    ident = raw.get("id") if isinstance(raw, dict) else None
+                    return ident or params.get("turnId")
                 early_notifications = [entry for entry in self._early_notifications
                                        if entry[1].get("threadId") == owned["thread"]
-                                       and ((entry[1].get("turn") or {}).get("id")
-                                            or entry[1].get("turnId")) == turn]
+                                       and _early_turn(entry[1]) == turn]
                 self._early_notifications = [entry for entry in self._early_notifications
                                              if entry not in early_notifications]
                 early_requests = [entry for entry in self._early_requests
@@ -1447,6 +1519,58 @@ class CodexHostAdapter:
             raise AdapterFailure(_clean(str(exc), 300), 409, "steer_rejected") from None
         return self._run_public(self._run(run_id))
 
+    def _notification_token_usage(self, params: dict) -> None:
+        """Capture the owned per-turn usage snapshot, replacing prior usage.
+
+        Only ``tokenUsage.last`` for the exact owned thread/turn is stored;
+        cumulative thread totals are never used. Duplicate notifications
+        replace rather than add, wrong thread/turn notifications are ignored,
+        and already-consumed usage survives terminal outcomes because the
+        usage column is never cleared on completion/failure paths.
+        """
+        thread = params.get("threadId")
+        if not isinstance(thread, str):
+            raw_thread = params.get("thread")
+            thread = raw_thread.get("id") if isinstance(raw_thread, dict) else None
+        raw_turn = params.get("turn")
+        turn = (raw_turn.get("id") if isinstance(raw_turn, dict) else None)
+        if not isinstance(turn, str):
+            turn = params.get("turnId")
+        if not isinstance(turn, str):
+            token_block = params.get("tokenUsage")
+            if isinstance(token_block, dict):
+                candidate = token_block.get("turnId")
+                if isinstance(candidate, str):
+                    turn = candidate
+        if not isinstance(thread, str) or not isinstance(turn, str):
+            return
+        token_usage = params.get("tokenUsage")
+        if token_usage is None:
+            token_usage = params.get("token_usage")
+        if token_usage is None:
+            token_usage = params.get("usage")
+        normalized = _extract_codex_last(token_usage)
+        if normalized is None:
+            return
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        with self.lock:
+            row = self.db.execute(
+                "SELECT runs.id FROM runs JOIN conversations "
+                "ON runs.conversation=conversations.id WHERE conversations.thread=? "
+                "AND runs.turn=?", (thread, turn)).fetchone()
+            if row is None:
+                starting = self.db.execute(
+                    "SELECT 1 FROM runs JOIN conversations ON runs.conversation=conversations.id "
+                    "WHERE conversations.thread=? AND runs.phase='starting'",
+                    (thread,)).fetchone()
+                if starting and len(self._early_notifications) < 100:
+                    self._early_notifications.append(("thread/tokenUsage/updated", params))
+                return
+            with self.db:
+                self.db.execute(
+                    "UPDATE runs SET usage=?,updated=? WHERE id=?",
+                    (payload, _now(), row["id"]))
+
     def _notification(self, method: str, params: dict) -> None:
         if not isinstance(params, dict):
             return
@@ -1460,8 +1584,12 @@ class CodexHostAdapter:
                     waiter["notification"] = params
                     waiter["event"].set()
             return
+        if method == "thread/tokenUsage/updated":
+            self._notification_token_usage(params)
+            return
         thread = params.get("threadId")
-        turn = (params.get("turn") or {}).get("id") or params.get("turnId")
+        raw_turn = params.get("turn")
+        turn = (raw_turn.get("id") if isinstance(raw_turn, dict) else None) or params.get("turnId")
         if not isinstance(thread, str) or not isinstance(turn, str):
             return
         with self.lock:

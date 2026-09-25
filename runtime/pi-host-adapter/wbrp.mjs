@@ -15,6 +15,69 @@ const bounded = (value, limit = 200) => String(value ?? "").slice(0, limit);
 
 const PROFILE_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
+const RUN_USAGE_FIELDS = new Set(["inputTokens", "cachedInputTokens",
+  "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens",
+  "totalTokens"]);
+
+function sanitizeRunUsage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const [key, counter] of Object.entries(value)) {
+    if (!RUN_USAGE_FIELDS.has(key)) return null;
+    if (typeof counter !== "number" || !Number.isSafeInteger(counter)
+        || counter < 0) {
+      return null;
+    }
+    result[key] = counter;
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function collectRunUsage(adapter, directory, sessionId, base) {
+  try {
+    if (!adapter || typeof adapter.assistantUsageSince !== "function") return null;
+    const start = Number.isSafeInteger(base) && base >= 0 ? base : 0;
+    return sanitizeRunUsage(adapter.assistantUsageSince(directory, sessionId, start));
+  } catch {
+    return null;
+  }
+}
+
+function runMessageBaseline(adapter, directory, sessionId) {
+  try {
+    if (!adapter || typeof adapter.sessionMessageCount !== "function") return 0;
+    const count = adapter.sessionMessageCount(directory, sessionId);
+    return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Bounded sanitized terminal error for idle runs without a successful
+// assistant completion. Uses only the sanitized assistant message
+// (allowlisted failureKind + credential-redacted bounded error text).
+// Never exposes raw provider payloads, prompts, reasoning, tool args,
+// environment, credentials, or an unrestricted raw stopReason.
+// Falls back to the generic message only when no safe detail exists.
+const TERMINAL_KINDS = new Set(["error", "aborted", "incomplete"]);
+export function terminalFailureError(last) {
+  const fallback = "Pi run ended without a completed assistant message";
+  if (!last || typeof last !== "object") return fallback;
+  const kind = TERMINAL_KINDS.has(last.failureKind) ? last.failureKind : null;
+  const detail = typeof last.error === "string" && last.error
+    ? bounded(last.error, 200)
+    : "";
+  if (!kind && !detail) return fallback;
+  const label = kind || "incomplete";
+  if (detail) {
+    return bounded(
+      `Pi run ended (${label}) without a completed assistant message: ${detail}`,
+      300);
+  }
+  return bounded(
+    `Pi run ended (${label}) without a completed assistant message`, 300);
+}
+
 function bindProfile(policy) {
   const policyRev = policyRevision(policy);
   const revision = createHash("sha256")
@@ -61,6 +124,16 @@ export class PiRuntimeProtocol {
         row.outcome = "interrupted";
         row.error = "adapter_restarted";
         row.updatedAt = now();
+      }
+      // Restart retains already-consumed run-scoped usage; malformed
+      // persisted usage is dropped so reconciliation never serves it.
+      if (row.usage !== undefined) {
+        const sanitized = sanitizeRunUsage(row.usage);
+        if (sanitized) row.usage = sanitized;
+        else delete row.usage;
+      }
+      if (!Number.isSafeInteger(row.usageBase) || row.usageBase < 0) {
+        row.usageBase = 0;
       }
       this.runs.set(row.id, row);
     }
@@ -297,12 +370,21 @@ export class PiRuntimeProtocol {
     if (this.profiles.get(row.profile)?.revision !== row.revision) {
       throw new AdapterError("Security profile changed", 409, "profile_mismatch");
     }
+    // A continuation run starts a fresh accounting boundary even when it
+    // reuses the same AgentSession: only model calls at or after this
+    // baseline belong to the new Bridge run.
+    const usageBase = runMessageBaseline(this.adapter, row.directory, row.sessionId);
+    let executionCursor = 0;
+    try {
+      executionCursor = this.adapter.executionHead(row.directory, row.sessionId);
+    } catch {
+      executionCursor = 0;
+    }
     const run = { id: id("run_"), conversationId, nativeId: row.sessionId,
       clientRunId: clientRunId || null, inputHash,
       phase: "starting", activeState: null, outcome: null, result: "", error: "",
       model: bounded(body.model, 260), reasoning: thinkingLevel,
-      executionCursor:
-        this.adapter.executionHead(row.directory, row.sessionId),
+      executionCursor, usageBase,
       createdAt: now(), updatedAt: now() };
     this.runs.set(run.id, run);
     this._save();
@@ -324,7 +406,11 @@ export class PiRuntimeProtocol {
   }
 
   _publicRun(run) {
-    const { executionCursor, model, inputHash, ...publicRun } = run;
+    const { executionCursor, model, inputHash, usageBase, ...publicRun } = run;
+    if (run.usage !== undefined) {
+      const sanitized = sanitizeRunUsage(run.usage);
+      if (sanitized) publicRun.usage = sanitized;
+    }
     return publicRun;
   }
 
@@ -377,6 +463,12 @@ export class PiRuntimeProtocol {
       if (cursor >= result.head || !result.updates.length) break;
     }
     run.executionCursor = cursor;
+    // Aggregate native provider usage for exactly this Bridge run. The
+    // aggregate replaces the prior snapshot; absent usage preserves the
+    // existing snapshot so already-consumed tokens stay visible.
+    const partial = collectRunUsage(this.adapter, row.directory, row.sessionId,
+      run.usageBase);
+    if (partial) run.usage = partial;
     if (status === "idle" && !pending.length) {
       const messages = await this.adapter.messages(row.directory, row.sessionId, 20);
       const last = [...messages].reverse().find((message) => message.role === "assistant");
@@ -384,7 +476,10 @@ export class PiRuntimeProtocol {
       run.activeState = null;
       run.outcome = last?.completed ? "succeeded" : "failed";
       run.result = bounded(last?.text, 20000);
-      if (!last?.completed) run.error = "Pi run ended without a completed assistant message";
+      if (!last?.completed) run.error = terminalFailureError(last);
+      const terminal = collectRunUsage(this.adapter, row.directory, row.sessionId,
+        run.usageBase);
+      if (terminal) run.usage = terminal;
     }
     run.updatedAt = now();
     this._save();
@@ -401,6 +496,10 @@ export class PiRuntimeProtocol {
     if (run.phase === "terminal") return this._publicRun(run);
     const row = this._conversation(run.conversationId);
     await this.adapter.abortSession(row.directory, row.sessionId);
+    // Preserve already-consumed native usage on cancelled runs.
+    const consumed = collectRunUsage(this.adapter, row.directory, row.sessionId,
+      run.usageBase);
+    if (consumed) run.usage = consumed;
     run.phase = "terminal";
     run.activeState = null;
     run.outcome = "cancelled";

@@ -158,6 +158,14 @@ export interface DiagnosticReport {
   checks: DiagnosticCheck[];
   runnable_routes: RunnableRoute[];
 }
+export interface TokenUsage {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  cache_write_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+  total_tokens?: number;
+}
 export interface Run {
   run_id: string;
   adapter_id?: string;
@@ -178,6 +186,7 @@ export interface Run {
   workspace_name?: string;
   model?: string;
   reasoning?: string | null;
+  token_usage?: TokenUsage | null;
   created?: string;
   started?: string;
   finished?: string;
