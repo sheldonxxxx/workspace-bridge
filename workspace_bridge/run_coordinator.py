@@ -13,9 +13,17 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from .runtime import RuntimeRejected, RuntimeUnavailable
+from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, HANDOFF, digest, redact
 from .wbrp import validate_run_state
+
+_DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
+
+
+def _sanitized_descriptor_code(code: Any, fallback: str = "descriptor_error") -> str:
+    if isinstance(code, str) and _DESCRIPTOR_CODE_RE.fullmatch(code):
+        return code
+    return fallback
 
 
 def _now() -> str:
@@ -236,6 +244,70 @@ class RunCoordinator:
                 ws: dict | None = None):
         return self.service.adapter_registry.client(adapter_id, require_enabled=require_enabled,
                                                     workspace=ws)
+
+    def probe_descriptor(self, adapter) -> dict:
+        """Return a bounded sanitized descriptor capability summary.
+
+        Never raises and never includes secrets, URLs, paths, profiles,
+        prompts, raw remote messages, or provider payloads. Success carries
+        only the feature map plus instance/adapter/native versions; failure
+        carries only a safe status and sanitized code.
+        """
+        try:
+            descriptor = adapter.descriptor()
+        except RuntimeUnsupported:
+            return {"status": "unsupported", "code": "runtime_unsupported"}
+        except RuntimeUnavailable:
+            return {"status": "unavailable", "code": "runtime_unavailable"}
+        except BridgeError as exc:
+            return {"status": "error",
+                    "code": _sanitized_descriptor_code(getattr(exc, "code", ""))}
+        except Exception:  # noqa: BLE001 - unexpected probe failure stays a safe code
+            return {"status": "error", "code": "descriptor_error"}
+        try:
+            features = getattr(descriptor, "features", None)
+            if not isinstance(features, dict):
+                return {"status": "error", "code": "descriptor_error"}
+            safe_features: dict[str, int] = {}
+            for name, version in list(features.items())[:20]:
+                if not isinstance(name, str) or not name or len(name) > 64:
+                    continue
+                if isinstance(version, bool) or not isinstance(version, int):
+                    continue
+                if version < 0 or version > 1000:
+                    continue
+                safe_features[name[:64]] = int(version)
+            return {"status": "ok", "features": safe_features,
+                    "instance_id": _safe(getattr(descriptor, "instance_id", ""), 200),
+                    "adapter_version": _safe(getattr(descriptor, "adapter_version", ""), 80),
+                    "native_version": _safe(getattr(descriptor, "native_version", ""), 80)}
+        except Exception:  # noqa: BLE001 - malformed descriptor stays a safe code
+            return {"status": "error", "code": "descriptor_error"}
+
+    def descriptor_summary(self, adapter_id: str, *, ws: dict | None = None) -> dict:
+        """Registry-aware descriptor probe that never raises.
+
+        Disabled adapters report an unprobed disabled status without a
+        network call. Enabled adapters return the bounded sanitized probe
+        from :meth:`probe_descriptor`.
+        """
+        try:
+            info = self.service.adapter_registry.get(adapter_id)
+        except BridgeError as exc:
+            return {"status": "error",
+                    "code": _sanitized_descriptor_code(getattr(exc, "code", ""))}
+        except Exception:  # noqa: BLE001 - registry failure stays a safe code
+            return {"status": "error", "code": "descriptor_error"}
+        if not info.get("enabled") or not info.get("node_enabled", True):
+            return {"status": "disabled", "code": "adapter_disabled"}
+        try:
+            adapter = self.adapter(adapter_id, ws=ws)
+        except BridgeError as exc:
+            return {"status": "error",
+                    "code": _sanitized_descriptor_code(getattr(exc, "code", ""))}
+        except Exception:  # noqa: BLE001 - client construction stays a safe code
+            return {"status": "error", "code": "descriptor_error"}
+        return self.probe_descriptor(adapter)
 
     def _bound_run_adapter(self, ws: dict, run: dict):
         """Return the adapter only while the run's captured authority still holds.
@@ -709,13 +781,17 @@ class RunCoordinator:
                 stored_id = conversation.get("profile", "")
                 stored_revision = conversation.get("revision", "")
                 if stored_id != desired_id or stored_revision != desired_revision:
-                    try:
-                        supports_rebind = adapter.descriptor().supports("securityRebind")
-                    except Exception:
-                        supports_rebind = False
-                    if not supports_rebind:
-                        raise BridgeError("Workspace security profile changed and the adapter does not support idle security rebind",
-                                          "continuation_security_rebind_unsupported")
+                    probe = self.probe_descriptor(adapter)
+                    if probe.get("status") == "ok":
+                        if probe.get("features", {}).get("securityRebind") != 1:
+                            raise BridgeError("Workspace security profile changed and the adapter does not support idle security rebind",
+                                              "continuation_security_rebind_unsupported")
+                    else:
+                        # Descriptor transport/validation failure is distinct
+                        # from a genuine missing capability. Fail closed before
+                        # any prompt or rebind with a sanitized generic message.
+                        raise BridgeError("Workspace security profile changed and the adapter descriptor is currently unavailable",
+                                          "continuation_descriptor_unavailable")
                     # The owned revision may already be stale, so a direct
                     # conversation read would fail closed with profile_mismatch.
                     # The rebind operation itself proves idle (busy, pending,

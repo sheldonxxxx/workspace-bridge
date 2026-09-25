@@ -1587,3 +1587,170 @@ def test_cross_handoff_continuation_busy_and_owned_drift(modern_env, payload, mo
         == first_run["effective_security"]
     conv = service.run_coordinator._conversation(drifted)
     assert conv["node_revision"] == node_row["revision"] + "-drifted"
+
+
+def test_descriptor_probe_missing_rebind_stays_unsupported(modern_env, payload, monkeypatch):
+    from workspace_bridge.wbrp import Descriptor
+    service, ws_id, token, first_job, native, _ = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "probe-missing-first"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, "probe-missing-second-job")
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append("start"), (_ for _ in ()).throw(AssertionError("native start must not run"))))
+    monkeypatch.setattr(client, "create_conversation",
+                          lambda *a, **k: (calls.append("create"), (_ for _ in ()).throw(AssertionError("native create must not run"))))
+    monkeypatch.setattr(client, "rebind_conversation",
+                          lambda *a, **k: (calls.append("rebind"), (_ for _ in ()).throw(AssertionError("native rebind must not run"))))
+    original_descriptor = client.descriptor
+
+    def _no_rebind():
+        desc = original_descriptor()
+        features = dict(desc.features)
+        features.pop("securityRebind", None)
+        return Descriptor(desc.runtime_id, desc.display_name, desc.adapter_version,
+                          desc.native_version, desc.instance_id, features,
+                          release=desc.release)
+    monkeypatch.setattr(client, "descriptor", _no_rebind)
+    probe = service.run_coordinator.probe_descriptor(client)
+    assert probe["status"] == "ok"
+    assert probe["features"].get("securityRebind") is None
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": "probe-missing-continuation", "continue_from_run_id": first["run_id"]})
+    assert exc.value.code == "continuation_security_rebind_unsupported"
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "unsupported", "bridge", "unexpected"])
+def test_descriptor_failure_maps_to_descriptor_unavailable(modern_env, payload, monkeypatch, failure):
+    from workspace_bridge.runtime import RuntimeUnavailable, RuntimeUnsupported
+    service, ws_id, token, first_job, native, _ = modern_env
+    ws = service.workspace(ws_id)
+    first = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": f"probe-fail-first-{failure}"})
+    _finish_test_run(service, native, ws_id, first["run_id"])
+    second_job = _second_job(service, ws_id, token, payload, f"probe-fail-second-{failure}")
+    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    calls = []
+    monkeypatch.setattr(client, "start_run",
+                          lambda *a, **k: (calls.append("start"), (_ for _ in ()).throw(AssertionError("native start must not run"))))
+    monkeypatch.setattr(client, "create_conversation",
+                          lambda *a, **k: (calls.append("create"), (_ for _ in ()).throw(AssertionError("native create must not run"))))
+    monkeypatch.setattr(client, "rebind_conversation",
+                          lambda *a, **k: (calls.append("rebind"), (_ for _ in ()).throw(AssertionError("native rebind must not run"))))
+    secret = "sk-proj-super-secret-marker-9999"
+    raw_url = "http://evil-descriptor.example:9999/secret-path"
+    if failure == "unavailable":
+        def _fail():
+            raise RuntimeUnavailable(f"boom {secret} {raw_url}")
+    elif failure == "unsupported":
+        def _fail():
+            raise RuntimeUnsupported(f"boom {secret} {raw_url}")
+    elif failure == "bridge":
+        def _fail():
+            raise BridgeError(f"boom {secret} {raw_url}", "binding_mismatch")
+    else:
+        def _fail():
+            raise ValueError(f"boom {secret} {raw_url}")
+    monkeypatch.setattr(client, "descriptor", _fail)
+    probe = service.run_coordinator.probe_descriptor(client)
+    assert probe["status"] in {"unavailable", "unsupported", "error"}
+    assert secret not in json.dumps(probe)
+    assert raw_url not in json.dumps(probe)
+    assert "boom" not in json.dumps(probe)
+    before = _run_counts(service, ws_id)
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "start_agent_run", {
+            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+            "request_id": f"probe-fail-continuation-{failure}",
+            "continue_from_run_id": first["run_id"]})
+    assert exc.value.code == "continuation_descriptor_unavailable"
+    assert secret not in str(exc.value)
+    assert raw_url not in str(exc.value)
+    assert calls == []
+    assert _run_counts(service, ws_id) == before
+
+
+def test_list_agent_adapters_reports_bounded_descriptor_ok(modern_env):
+    service, ws_id, _, _, _, _ = modern_env
+    ws = service.workspace(ws_id)
+    policy = service.workspace_route_policy(ws)["routes"][ADAPTER_ID]
+    listed = {item["adapter_id"]: item for item in service.list_agent_adapters(ws)["adapters"]}
+    entry = listed[ADAPTER_ID]
+    desc = entry["descriptor"]
+    assert desc["status"] == "ok"
+    assert desc["features"].get("securityRebind") == 1
+    assert isinstance(desc["instance_id"], str) and desc["instance_id"]
+    assert isinstance(desc["adapter_version"], str)
+    assert isinstance(desc["native_version"], str)
+    assert set(desc) <= {"status", "features", "instance_id", "adapter_version", "native_version"}
+    blob = json.dumps(entry)
+    assert "codex-test-secret" not in blob
+    assert "unbound-secret" not in blob
+    assert ".workspace-handoff" not in blob
+    assert entry["available"] == bool(policy["ready"])
+    assert entry["readiness"] == policy["readiness"]
+
+
+def test_list_agent_adapters_descriptor_failure_safe_and_readiness_unchanged(modern_env, monkeypatch):
+    from workspace_bridge.runtime import RuntimeUnavailable
+    service, ws_id, _, _, _, _ = modern_env
+    ws = service.workspace(ws_id)
+    policy = service.workspace_route_policy(ws)["routes"][ADAPTER_ID]
+    client = service.run_coordinator.adapter(ADAPTER_ID)
+    secret = "sk-proj-list-secret-marker-4242"
+    raw_url = "http://evil-list.example/secret-path"
+    raw_path = "/tmp/evil-secret-path"
+
+    def _fail():
+        raise RuntimeUnavailable(f"transport boom {secret} {raw_url} {raw_path}")
+    monkeypatch.setattr(client, "descriptor", _fail)
+    listed = {item["adapter_id"]: item for item in service.list_agent_adapters(ws)["adapters"]}
+    entry = listed[ADAPTER_ID]
+    desc = entry["descriptor"]
+    assert desc["status"] == "unavailable"
+    assert desc["code"] == "runtime_unavailable"
+    blob = json.dumps(listed)
+    assert secret not in blob
+    assert raw_url not in blob
+    assert raw_path not in blob
+    assert "transport boom" not in blob
+    assert entry["available"] == bool(policy["ready"])
+    assert entry["readiness"] == policy["readiness"]
+    assert entry["adapter_enabled"] is True
+
+
+def test_list_agent_adapters_disabled_not_probed(modern_env, monkeypatch):
+    service, ws_id, _, _, _, _ = modern_env
+    ws = service.workspace(ws_id)
+    disabled_id = "adapter_000000000000000000000003"
+    create_test_adapter(service, ws["node_id"], {
+        "name": "Disabled Codex", "runtime_type": "codex",
+        "base_url": "http://127.0.0.1:8768", "token": "disabled-secret",
+    }, disabled_id)
+    node_svc = service._node_transport_services[ws["node_id"]]
+    node_svc.save_adapter({"enabled": False}, disabled_id)
+    service.node_registry.refresh_adapters(ws["node_id"])
+    assert service.adapter_registry.get(disabled_id)["enabled"] == 0
+    orig_client = service.adapter_registry.client
+
+    def guarded_client(adapter_id, **kwargs):
+        if adapter_id == disabled_id:
+            raise AssertionError("disabled adapter must not be probed")
+        return orig_client(adapter_id, **kwargs)
+    monkeypatch.setattr(service.adapter_registry, "client", guarded_client)
+    listed = {item["adapter_id"]: item for item in service.list_agent_adapters(ws)["adapters"]}
+    assert listed[disabled_id]["descriptor"]["status"] == "disabled"
+    assert listed[disabled_id]["descriptor"]["code"] == "adapter_disabled"
+    assert listed[disabled_id]["adapter_enabled"] is False
+    assert listed[ADAPTER_ID]["descriptor"]["status"] == "ok"
+    assert listed[ADAPTER_ID]["descriptor"]["features"].get("securityRebind") == 1

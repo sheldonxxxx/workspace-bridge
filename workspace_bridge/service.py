@@ -253,6 +253,14 @@ class Service:
         adapters = []
         for row in rows:
             route = routes.get(row["adapter_id"], {})
+            if not row["enabled"]:
+                descriptor: dict = {"status": "disabled", "code": "adapter_disabled"}
+            else:
+                try:
+                    descriptor = self.run_coordinator.descriptor_summary(
+                        row["adapter_id"], ws=ws)
+                except Exception:  # noqa: BLE001 - observability never fails listing
+                    descriptor = {"status": "error", "code": "descriptor_error"}
             adapters.append({"adapter_id": row["adapter_id"], "name": row["name"],
                 "node_id": ws["node_id"], "node_name": node_name,
                 "runtime_type": row["runtime_type"], "default": bool(route.get("is_default")),
@@ -261,7 +269,8 @@ class Service:
                 "available": bool(route.get("ready")),
                 "bound": bool(route), "default_model": route.get("default_model"),
                 "effective_security": route.get("effective_security"),
-                "readiness": route.get("readiness", "unbound")})
+                "readiness": route.get("readiness", "unbound"),
+                "descriptor": descriptor})
         return {"workspace_id": ws["id"], "node_id": ws["node_id"], "adapters": adapters}
 
     def list_agent_models(self, ws: dict, adapter_id: str, query: str = "", limit: int = 25) -> dict:

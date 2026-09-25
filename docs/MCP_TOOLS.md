@@ -223,7 +223,11 @@ Call `list_agent_adapters` first. It returns only configured AdapterInstances
 owned by the selected workspace's authoritative Node, including sanitized
 `adapter_id`, display name, `node_id`/`node_name`, `runtime_type`, route and
 adapter enablement, default flag, default model, effective security summary,
-and canonical readiness. It does not return endpoints or tokens. `runtime_type`
+canonical readiness, and a bounded `descriptor` summary (`status`, safe `code`
+on failure, `features` plus instance/adapter/native versions on success).
+Descriptor diagnostics are observability only and never change `available`/
+`readiness`. It does not return endpoints, tokens, URLs, paths, profiles,
+prompts, or raw runtime payloads. `runtime_type`
 (`pi` or `codex`) describes protocol behavior; only `adapter_id` selects a
 destination. Do not infer an AdapterInstance from a runtime type. Use a ready
 default when one is reported; if there is no default and exactly one ready target
@@ -254,7 +258,11 @@ foreign, or busy conversations still fail closed before any prompt. The
 handoff ID is not required to match the source run. Endpoint/token edits that
 move the runtime fail closed at the ownership proof instead of silently
 starting a fresh conversation; renaming an adapter
-does not change its connection revision.
+does not change its connection revision. A named-profile ID/revision change
+requires idle security rebind: a valid descriptor without `securityRebind`
+fails with `continuation_security_rebind_unsupported`, while descriptor
+transport/validation failure fails with `continuation_descriptor_unavailable`
+(sanitized, never masquerading as unsupported) before any prompt or rebind.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
 sanitized error, notification delivery summary, pending `interactions`, and
