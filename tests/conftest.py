@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import pytest
 from starlette.testclient import TestClient
 from workspace_bridge.cli import initialize
@@ -6,6 +7,20 @@ from workspace_bridge.node_api import make_node_api
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.security import digest
 from workspace_bridge.service import Service
+
+
+@pytest.fixture(autouse=True)
+def _isolated_bridge_environment(monkeypatch):
+    """Scrub ambient WB_* config so tests never inherit the developer shell.
+
+    Service construction reads os.environ (webhook URL, admin hosts, log
+    level). Without this, e.g. an exported WB_DISCORD_WEBHOOK_URL leaks a
+    Discord channel into test services and breaks channel assertions.
+    Tests that need a variable set it explicitly via monkeypatch.
+    """
+    for name in list(os.environ):
+        if name.startswith("WB_"):
+            monkeypatch.delenv(name, raising=False)
 
 
 def start_test_node(state: Path, parent: Path):
