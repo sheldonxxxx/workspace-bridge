@@ -55,7 +55,7 @@ export interface Workspace {
   name: string;
   root: string;
   enabled: boolean;
-  agent_enabled: boolean;
+  agent_enabled?: boolean;
   write_scope: "none" | "handoff" | "workspace";
   excludes: string;
   node_id: string;

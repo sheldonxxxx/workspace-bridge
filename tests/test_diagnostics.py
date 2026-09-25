@@ -109,6 +109,36 @@ def test_two_same_runtime_adapters_have_independent_ready_routes(diagnostic_env)
         assert secret not in json.dumps(report)
 
 
+def test_write_scope_none_does_not_block_route_readiness(diagnostic_env):
+    """Run admission never checks write_scope, so neither do route blockers.
+
+    The separate workspace.write_scope diagnostic still reports the
+    handoff-publication limitation as action_required.
+    """
+    env = diagnostic_env
+    ws = ready_workspace(env)
+    local_id, gpu_id = env["adapters"]
+    env["service"].manage_workspace(ws["id"], "set_write_scope", write_scope="none")
+    ws = env["service"].workspace(ws["id"])
+    assert ws["write_scope"] == "none"
+
+    report = env["service"].diagnostic_report()
+    routes = [row for row in report["runnable_routes"]
+              if row["workspace_id"] == ws["id"]]
+    assert len(routes) == 2
+    for route in routes:
+        assert route["ready"] is True
+        assert "workspace.write_scope" not in route["blockers"]
+        assert route["blockers"] == []
+    write_checks = [row for row in report["checks"]
+                    if row["code"] == "workspace.write_scope"
+                    and row.get("workspace_id") == ws["id"]]
+    assert write_checks and all(row["status"] == "action_required"
+                                for row in write_checks)
+    assert any("handoff" in row["summary"] or "prepared" in row["summary"]
+               for row in write_checks)
+
+
 def test_route_disable_and_offline_mode_are_exact_to_adapter(diagnostic_env):
     env = diagnostic_env
     ws = ready_workspace(env)

@@ -774,27 +774,6 @@ function WorkspaceCard({
             }
           />
         </div>
-        <div className="access-cell">
-          <div>
-            <strong>Agent runs</strong>
-            <p>Prepared handoffs can start an agent.</p>
-          </div>
-          <Switch
-            aria-label={`Agent runs for ${ws.name}`}
-            checked={ws.agent_enabled}
-            onCheckedChange={(enabled) =>
-              change(
-                enabled ? "Enable agent runs?" : "Disable agent runs?",
-                enabled
-                  ? "An authorized chat can start bounded agent runs here. The native runtime can read and write under its security profile."
-                  : "Existing runs continue until stopped.",
-                () =>
-                  onManage(ws, "set_agent_enabled", { agent_enabled: enabled }),
-                !enabled,
-              )
-            }
-          />
-        </div>
       </div>
       <div className="execution-targets">
         <div className="execution-targets-heading">
@@ -844,7 +823,7 @@ function WorkspaceCard({
                     Node: {grant.node_name || ws.node_name || ws.node_id}
                   </span>
                   <span>
-                    Default model: {grant.default_model || "Not configured"}
+                    Default model: {grant.default_model || "Native default"}
                   </span>
                   <span>
                     Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
@@ -926,7 +905,7 @@ function WorkspaceCard({
                         ? `Enable ${grant.name} here?`
                         : `Disable ${grant.name} here?`,
                       enabled
-                        ? "The workspace agent switch and model policy must also be enabled."
+                        ? "Execution uses this exact enabled workspace route and same-Node adapter."
                         : "Active runs are not stopped automatically.",
                       () => onRoute(ws, id, { enabled }),
                       !enabled,
@@ -2783,7 +2762,7 @@ export default function App() {
                       ))
                     ) : (
                       <Empty title="No runs yet">
-                        Enable agent runs and start a prepared handoff.
+                        Start a prepared handoff to see its progress here.
                       </Empty>
                     )}
                   </div>
@@ -2959,8 +2938,10 @@ export default function App() {
                             </p>
                           ) : (
                             <p className="adapter-policy-empty">
-                              No model policy configured. Enable models before
-                              runs use this adapter.
+                              No model policy configured. Models are
+                              unrestricted by Bridge policy; the runtime picks
+                              its default unless a run requests a specific
+                              model.
                             </p>
                           )}
                           <div className="adapter-policy-cta">

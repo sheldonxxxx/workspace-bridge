@@ -127,7 +127,7 @@ after confirmation. The active turn keeps its captured settings. If the
 change cannot be represented or confirmed safely, the adapter creates a fresh
 native conversation and reports a bounded replacement reason.
 
-Profile-bound conversations record the live observed revision for new runs; the stored workspace-route revision is last-bound evidence (`bound_revision` vs `observed_revision`). An explicit `continue_from_run_id` authorizes carrying the existing conversation across a named-profile ID/revision change: when the adapter advertises the optional `securityRebind` capability, Bridge calls the bounded `rebind_conversation(conversation_id, security_binding)` (`POST /v1/conversations/{id}/security`) before the next prompt, requires the same runtime conversation ID/history to be idle and to report the requested `{source:'profile', profile:{id,revision}}`, updates the Bridge conversation only after proof, and records a bounded `security_binding_rebound` activity with only old/new source/profile IDs/revisions and conversation IDs. Busy, unconfirmed, or mismatched rebinds fail before any prompt with no blank-thread fallback; an ambiguous accepted-but-unproven native update invalidates the runtime conversation (requiring a fresh conversation) rather than continuing with unproven permissions, and adapters without `securityRebind` remain protocol-compatible but cannot transition. A proven rebind is audited with `security_binding_rebound` before the next prompt is sent, so even a rejected run start leaves the transition durably auditable. Adapters persist an in-progress rebind marker before native mutation; a restart encountering an incomplete rebind refuses ownership and requires a fresh conversation. Markers carry no profile config. A workspace binding-source change still requires a conversation created for the new source. Built-in profiles are immutable starting points. Custom definitions
+Profile-bound conversations record the live observed revision for new runs; the stored workspace-route revision is last-bound evidence (`bound_revision` vs `observed_revision`). An explicit `continue_from_run_id` authorizes carrying the existing conversation across a named-profile ID/revision change: when the adapter advertises the optional `securityRebind` capability, Bridge calls the bounded `rebind_conversation(conversation_id, security_binding)` (`POST /v1/conversations/{id}/security`) before the next prompt, requires the same runtime conversation ID/history to be idle and to report the requested `{source:'profile', profile:{id,revision}}`, updates the Bridge conversation only after proof, and records a bounded `security_binding_rebound` activity with only old/new source/profile IDs/revisions and conversation IDs. Busy, unconfirmed, or mismatched rebinds fail before any prompt with no blank-thread fallback; an ambiguous accepted-but-unproven native update invalidates the runtime conversation (requiring a fresh conversation) rather than continuing with unproven permissions, and adapters without `securityRebind` remain protocol-compatible but cannot transition. A proven rebind is audited with `security_binding_rebound` before the next prompt is sent, so even a rejected run start leaves the transition durably auditable. Adapters persist an in-progress rebind marker before native mutation; a restart encountering an incomplete rebind refuses ownership and requires a fresh conversation. Markers carry no profile config. A workspace binding-source change still requires a conversation created for the new source. Continuation itself is proven by current runtime ownership, not by history: any terminal source run (succeeded, failed, cancelled, or interrupted) may continue, the model may change between turns, and stored Node/adapter revision drift alone does not invalidate the conversation — Bridge reads (or rebinds) the stored native conversation on the current same-Node adapter and requires it to exist, belong to this workspace, and be idle before sending a prompt; after that proof it refreshes only the conversation's current Node/adapter metadata and never rewrites historical run evidence. Missing, foreign, mismatched, or busy conversations fail closed before any prompt. Built-in profiles are immutable starting points. Custom definitions
 persist in the adapter's private state; edits require the prior definition
 revision. Deletion requires all workspaces to be reassigned and no active
 native run for that profile.
@@ -140,7 +140,7 @@ definitions, filesystem/network rules, and config layering remain Codex-owned.
 
 Model records may also include `reasoningOptions` (supported effort strings)
 and `defaultReasoningEffort` (the native default when the adapter reports one).
-An admin may save a `reasoning_defaults` map alongside the enabled model policy.
+An admin may save a `reasoning_defaults` map alongside an enabled model policy.
 When a model has an explicit default in that map, Bridge sends it as the
 run's optional `reasoning` value; when omitted, the adapter keeps its native
 per-model behavior. The adapter must reject an effort the selected model does
@@ -150,11 +150,13 @@ For example, Pi exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
 (Extra high), and `max` when supported by that model. Codex efforts come from
 the live app-server model list and are passed to `turn/start` as `effort`.
 
-The Bridge admits a run only when the workspace is enabled, the workspace-wide
-agent switch is enabled, the exact same-Node WorkspaceRoute and AdapterInstance
-are enabled, the handoff is prepared in that workspace, the selected model is
-allowed by that adapter's policy, the Node is reachable, and the conversation
-binding matches. Each accepted run stores a bounded immutable
+The Bridge admits a run only when the workspace is enabled, the exact same-Node
+WorkspaceRoute and AdapterInstance are enabled, the handoff is prepared in that
+workspace (or the run was published as one from a bounded direct instruction),
+the requested model is allowed by the adapter's configured policy (or, with no
+Bridge policy, is simply present in the live catalog when explicitly requested),
+the Node is reachable, and the conversation binding matches. Each accepted run
+stores a bounded immutable
 `effective_security` snapshot alongside the Node and adapter revisions.
 Installing an AdapterInstance never grants access to any existing workspace.
 

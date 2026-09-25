@@ -1,3 +1,47 @@
+# Unreleased — Runtime admission security simplification
+
+- Continuation is proven by current runtime ownership instead of history:
+  any terminal source run (succeeded, failed, cancelled, or interrupted) may
+  continue, the model may change between turns, and stored Node/adapter
+  revision drift alone no longer invalidates an owned idle conversation. The
+  Bridge proves ownership by reading or rebinding the stored native
+  conversation on the current same-Node adapter, which must exist, belong to
+  the workspace, and be idle; missing, foreign, mismatched, or busy
+  conversations still fail closed before any prompt. After proof only the
+  conversation's current Node/adapter metadata is refreshed; historical run
+  `effective_security` and revision evidence stay immutable.
+- Adapter model policy is optional governance: a configured policy keeps its
+  exact allowlist/default semantics, while with no policy the adapter can be
+  ready and the workspace default, an omitted model sends no selector (the
+  runtime's native default, shown as `model: null`), and an explicit model
+  only has to be in the live catalog. `list_agent_models` marks the
+  unrestricted case (`policy_restricted: false`) instead of showing every
+  model as admin-disabled.
+- The workspace-wide `agent_enabled` column no longer gates run admission
+  (legacy `set_agent_enabled` API remains accepted and inert); the exact
+  enabled same-Node WorkspaceRoute, enabled adapter, Node reachability,
+  security binding/rebind proof, and live interaction approval remain the
+  trust boundaries. The Manager no longer shows a workspace-wide "Agent runs"
+  toggle or route-copy requiring it.
+- `start_agent_run` accepts exactly one of `job_id` or a bounded direct
+  `instruction`. A direct instruction is published as a minimal auditable
+  prepared handoff through the existing Node write policy with a
+  deterministic handoff request ID keyed by the run idempotency domain
+  (`adapter_id` + `request_id`); exact retries
+  reuse the same audit handoff and never replay an accepted prompt, a changed
+  instruction under the same adapter + request_id fails the handoff content
+  conflict without creating a duplicate, and different adapters may reuse one
+  `request_id` without colliding. No
+  arbitrary prompt endpoint or shell capability was added.
+- Project-lead skill 3.0.0 and MCP/docs describe the exact workspace route +
+  adapter authority as the execution gate.
+- Audit-gap fixes: route-readiness diagnostics no longer count handoff write
+  scope as a run prerequisite (write scope stays its own action-required
+  diagnostic governing new handoff publication, so a read-only workspace may
+  still run an existing prepared handoff), and the direct-audit handoff
+  identity is keyed by `adapter_id` + `request_id` so a conflicting retry
+  fails before any duplicate handoff row or artifact is created.
+
 # Unreleased — Pi adapter in-process AgentSession SDK (0.4.0)
 
 - `runtime/pi-host-adapter` 0.4.0 replaces owned `pi --mode rpc`

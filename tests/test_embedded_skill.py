@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "2.6.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "3.0.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")

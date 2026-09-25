@@ -678,12 +678,18 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
             "request_id": "node-adapter-race-fresh"})
         assert fresh["effective_security"]["adapter_revision"] == updated["revision"]
         assert "start_run" in replacement_calls
+        replacement_calls.clear()
+        before = _run_counts(service, ws_id)
+        # Continuation is proven live now: the stored native conversation is
+        # missing on the replacement adapter, so the ownership proof fails
+        # closed before any prompt and no native start runs.
         with pytest.raises(BridgeError) as continuation_error:
             service.call(ws_id, token, "start_agent_run", {
                 "adapter_id": ADAPTER_ID, "job_id": job["id"],
                 "request_id": "node-adapter-race-continuation",
                 "continue_from_run_id": started["run_id"]})
-        assert continuation_error.value.code == "adapter_changed"
+        assert "start_run" not in replacement_calls
+        assert _run_counts(service, ws_id) == before
     finally:
         service.close()
         node["stop"]()
@@ -691,12 +697,16 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         replacement_native.close()
 
 
-def test_adapter_revision_blocks_explicit_continuation_but_rename_does_not(modern_env):
+def test_continuation_ignores_benign_revision_churn_and_rename_keeps_conversation(modern_env):
     service, ws_id, token, job, native, _ = modern_env
+    ws = service.workspace(ws_id)
     first = service.call(ws_id, token, "start_agent_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     original = service.adapter_registry.get(ADAPTER_ID)
+    first_run = service.run_coordinator._run_row(ws, first["run_id"])
+    first_effective = first_run["effective_security"]
+    # A display rename rotates no revision and never invalidates anything.
     renamed = service.adapter_registry.update(ADAPTER_ID, {"name": "Renamed Codex"})
     assert renamed["revision"] == original["revision"]
 
@@ -705,14 +715,33 @@ def test_adapter_revision_blocks_explicit_continuation_but_rename_does_not(moder
         "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
     _finish_test_run(service, native, ws_id, second["run_id"])
-    changed = service.adapter_registry.update(ADAPTER_ID, {
-        "base_url": "http://127.0.0.1:9877", "token": "replacement-codex-secret"})
-    assert changed["revision"] != original["revision"]
-    with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
-            "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-reject",
-            "continue_from_run_id": second["run_id"]})
-    assert exc.value.code == "adapter_changed"
+    # Benign revision churn alone (Node and adapter revisions rotate while
+    # the same live adapter still owns the idle conversation) no longer
+    # invalidates the conversation. The conversation metadata is refreshed;
+    # historical run evidence stays immutable.
+    node_row = service.node_registry.get(ws["node_id"])
+    service._node_transport_services[ws["node_id"]].save_adapter({
+        "name": "Renamed Codex", "runtime_type": "codex",
+        "base_url": original["base_url"], "token": "rotated-codex-secret",
+    }, ADAPTER_ID)
+    with service.lock, service.db:
+        service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
+                           (node_row["revision"] + "-drifted", ws["node_id"]))
+    service.node_registry.refresh_adapters(ws["node_id"])
+    node_info = service.node_registry.get(ws["node_id"])
+    assert node_info["revision"] != first_run["node_revision"]
+    drifted_adapter = service.adapter_registry.get(ADAPTER_ID)
+    assert drifted_adapter["revision"] != original["revision"]
+    third = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-drift-continuation",
+        "continue_from_run_id": second["run_id"]})
+    assert third["conversation_id"] == first["conversation_id"]
+    drifted_row = service.run_coordinator._run_row(service.workspace(ws_id), second["run_id"])
+    assert drifted_row["effective_security"] == first_run["effective_security"]
+    conv = service.run_coordinator._conversation(drifted_row)
+    assert conv["node_revision"] == node_info["revision"]
+    assert conv["adapter_revision"] == drifted_adapter["revision"]
+    assert json.loads(first_effective)["adapter_revision"] == original["revision"]
 
 
 def test_wrong_node_route_and_start_fail_before_native_call(modern_env, tmp_path):
@@ -1097,7 +1126,9 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     # Prepare sources without leaving concurrent native actives: finish each
     # run (global native idle), then tamper the Bridge phase/outcome to
     # simulate nonterminal/failed while the native conversation stays idle.
-    # The Bridge must reject before any native start/create.
+    # The Bridge must reject nonterminal sources before any native
+    # start/create, while a failed terminal source may continue when the
+    # live adapter still owns and proves the idle conversation.
     active = service.call(ws_id, token, "start_agent_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-active"})
     _finish_test_run(service, native, ws_id, active["run_id"])
@@ -1139,23 +1170,23 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     assert exc.value.code == "continuation_unavailable"
     assert calls == []
     assert _run_counts(service, ws_id) == before
-    # Failed source stays ineligible even after the conversation is idle.
-    with pytest.raises(BridgeError) as failed_exc:
-        service.call(ws_id, token, "start_agent_run", {
-            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
-            "request_id": "fail-failed-continuation",
-            "continue_from_run_id": finished["run_id"]})
-    assert failed_exc.value.code == "continuation_unavailable"
-    assert calls == []
-    assert _run_counts(service, ws_id) == before
+    # A failed terminal source with an owned idle conversation may now
+    # continue: the historical outcome does not gate a proven conversation.
+    monkeypatch.undo()
+    resumed = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "fail-failed-continuation",
+        "continue_from_run_id": finished["run_id"]})
+    assert resumed["conversation_id"] == service.run_coordinator._conversation(
+        service.run_coordinator._run_row(ws, finished["run_id"]))["id"]
+    _finish_test_run(service, native, ws_id, resumed["run_id"])
     # Explicit model that cannot resolve stays a safe model error with no run.
     with pytest.raises(BridgeError) as model_exc:
         service.call(ws_id, token, "start_agent_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "fail-model-continuation",
             "continue_from_run_id": good["run_id"], "model": "missing-model"})
-    assert model_exc.value.code in {"model_not_enabled", "model_unavailable", "continuation_unavailable"}
-    assert calls == []
+    assert model_exc.value.code in {"model_not_enabled", "model_unavailable"}
 
 
 def test_continuation_security_drift_fails_closed_and_fresh_allowed(modern_env, payload, monkeypatch):
@@ -1504,7 +1535,7 @@ def test_wbrp_rebind_validation_and_backward_compat():
 
 
 
-def test_cross_handoff_continuation_busy_and_revision_drift(modern_env, payload, monkeypatch):
+def test_cross_handoff_continuation_busy_and_owned_drift(modern_env, payload, monkeypatch):
     service, ws_id, token, first_job, native, rpc = modern_env
     ws = service.workspace(ws_id)
     first = service.call(ws_id, token, "start_agent_run", {
@@ -1534,33 +1565,25 @@ def test_cross_handoff_continuation_busy_and_revision_drift(modern_env, payload,
     assert busy_exc.value.code == "conversation_busy"
     assert calls == []
     assert _run_counts(service, ws_id) == before
+    monkeypatch.undo()
     rpc.status = "idle"
-    # Node connection revision drift still blocks cross-handoff continuation.
-    # Tamper the revision directly so the Node stays reachable; a public
-    # base_url/token rotation would fail closed earlier at Node auth.
+    # Revision churn alone is proven benign: the same live adapter still
+    # owns the idle conversation, so continuation proceeds, refreshes the
+    # conversation's current Node metadata, and leaves run evidence intact.
     node_row = service.node_registry.get(ws["node_id"])
+    first_run = service.run_coordinator._run_row(ws, first["run_id"])
     with service.lock, service.db:
         service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
                            (node_row["revision"] + "-drifted", ws["node_id"]))
-    with pytest.raises(BridgeError) as node_exc:
-        service.call(ws_id, token, "start_agent_run", {
-            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
-            "request_id": "drift-node", "continue_from_run_id": first["run_id"]})
-    assert node_exc.value.code == "node_changed"
-    assert calls == []
-    assert _run_counts(service, ws_id) == before
-    with service.lock, service.db:
-        service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
-                           (node_row["revision"], ws["node_id"]))
-    # Adapter connection revision drift still blocks cross-handoff continuation.
-    original = service.adapter_registry.get(ADAPTER_ID)
-    changed = service.adapter_registry.update(ADAPTER_ID, {
-        "base_url": "http://127.0.0.1:9877", "token": "replacement-codex-secret"})
-    assert changed["revision"] != original["revision"]
-    with pytest.raises(BridgeError) as adapter_exc:
-        service.call(ws_id, token, "start_agent_run", {
-            "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
-            "request_id": "drift-adapter", "continue_from_run_id": first["run_id"]})
-    assert adapter_exc.value.code == "adapter_changed"
-    assert calls == []
-    assert _run_counts(service, ws_id) == before
+    second = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
+        "request_id": "drift-node", "continue_from_run_id": first["run_id"]})
+    assert second["conversation_id"] == first["conversation_id"]
+    drifted = service.run_coordinator._run_row(service.workspace(ws_id), second["run_id"])
+    assert drifted["node_revision"] == node_row["revision"] + "-drifted"
+    # The historical run keeps its original revision evidence.
+    assert service.run_coordinator._run_row(
+        service.workspace(ws_id), first["run_id"])["effective_security"] \
+        == first_run["effective_security"]
+    conv = service.run_coordinator._conversation(drifted)
+    assert conv["node_revision"] == node_row["revision"] + "-drifted"

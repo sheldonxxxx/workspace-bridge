@@ -224,8 +224,9 @@ Node or adapter token in its plist; state/config/token files remain private.
 
 ## Adapter instances (optional)
 
-Agent execution is disabled until you enable it for a workspace and exact
-WorkspaceRoute. Start the native Pi or Codex daemon on its host and configure its
+Agent execution requires enabling the exact WorkspaceRoute for a workspace;
+there is no separate workspace-wide agent switch. Start the native Pi or Codex
+daemon on its host and configure its
 own listen address, bootstrap token and process lifecycle there. The Bridge
 container does not start or publish those daemons.
 
@@ -241,7 +242,8 @@ the token back. `.env` does not contain `WB_RUNTIME_ADAPTERS` or a Bridge-wide
 its separate host process environment.
 
 The Manager's **Adapters** area shows each instance's health and allows a
-sanitized connection test. Configure model policy and profiles per adapter, then
+sanitized connection test. Optionally configure model policy, and profiles per
+adapter, then
 enable exact targets on each workspace. Two Pi instances can be configured
 independently. Bridge changes apply without container recreation or service
 restart. For daemon setup, see the [Pi LaunchAgent guide](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd)

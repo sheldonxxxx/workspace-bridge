@@ -134,10 +134,11 @@ Open `http://127.0.0.1:<admin-port>/` with the admin token, or use the API
 
 1. **Node**: add `http://host.docker.internal:8770` with the Node token.
 2. **Workspaces**: one mapping per canonical Node-local root (no invented
-   aliases), then enable it, set write scope (`handoff` default), and enable
-   agent execution.
+   aliases), then enable it and set write scope (`handoff` default).
    API: `POST /api/workspaces {name, root, node_id}` →
-   `POST /api/workspaces/{id} {operation: enable|set_write_scope|set_agent_enabled}`.
+   `POST /api/workspaces/{id} {operation: enable|set_write_scope}`.
+   (`set_agent_enabled` remains accepted for compatibility but is inert:
+   execution is gated by the exact workspace route, not a workspace switch.)
 3. **Adapter instances** (Bridge-side `base_url` is resolved by the Node host,
    so loopback works): Pi → `http://127.0.0.1:8780`, Codex →
    `http://127.0.0.1:8772`, each with its `WB_RUNTIME_TOKEN`.

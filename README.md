@@ -54,9 +54,11 @@ Diagnostic statuses are `pass`, `warning`, `action_required`, `failed`, and
 `unknown`. Overall severity is deterministic: failed, action required, unknown,
 warning, then pass. Doctor exits nonzero for failed/action-required reports and
 zero for pass, warning, or unknown-only reports. A runnable route is one exact
-workspace/adapter pair whose mapping, handoff write scope, agent switch, shared
-MCP gateway, exact WorkspaceRoute, current security profile, and current
-adapter-scoped default model all satisfy run-start prerequisites. Listener
+workspace/adapter pair whose mapping, shared
+MCP gateway, exact WorkspaceRoute, current security profile, and — when a model
+policy is configured — its current adapter-scoped default model satisfy
+run-start prerequisites. Write scope governs new handoff publication, not run
+admission. Listener
 health, gateway enablement, and adapter health do not establish that such a
 route exists.
 Git Evidence reports review capability and never blocks an execution route.

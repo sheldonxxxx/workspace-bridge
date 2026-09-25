@@ -230,18 +230,30 @@ default when one is reported; if there is no default and exactly one ready targe
 exists it may be used, otherwise ask which destination to use. Never fail over
 from an unavailable default.
 
-`start_agent_run` accepts only a prepared handoff and exact `adapter_id` in the
-selected workspace. It does not accept a free-form prompt or path. That
-AdapterInstance and exact WorkspaceRoute must be enabled, agent execution must be
-enabled for the workspace, and the model must be enabled by local admin policy.
+`start_agent_run` accepts exactly one of a prepared handoff (`job_id`) or a
+bounded direct `instruction` in the selected workspace. It does not accept a
+free-form prompt path. A direct instruction is published as a minimal
+auditable prepared handoff through the normal Node write policy with a
+deterministic handoff request ID derived from the run idempotency domain
+(`adapter_id` + `request_id`); exact retries reuse the same audit handoff,
+and a changed instruction under the same adapter + request_id is rejected by
+the handoff content conflict before any duplicate row or artifact is created.
+That
+AdapterInstance and exact WorkspaceRoute must be enabled; a configured model
+policy is enforced, and with no Bridge policy the runtime chooses its default
+unless a live catalog model is requested.
 An exact retry with the same request ID returns the existing run; reusing that
 ID for a different request or adapter is rejected. A continuation creates a new
-Bridge run in a succeeded run's conversation for a NEW prepared handoff in the
-same workspace; the new handoff's prompt and acceptance path are sent. It fails
-closed if the adapter ID, Node/adapter connection revision, exact model,
-compatible security, or idle conversation state does not match. The handoff ID
-is not required to match the source run. Endpoint/token edits produce
-`adapter_changed`; renaming an adapter
+Bridge run in a terminal run's conversation for a NEW prepared handoff in the
+same workspace; the new handoff's prompt and acceptance path are sent.
+Ownership is proven live against the stored native conversation on the current
+same-Node adapter: it must exist, belong to the workspace, and be idle.
+Historical outcome (failed/cancelled/interrupted), model changes, and
+Node/adapter revision drift do not block a proven continuation; missing,
+foreign, or busy conversations still fail closed before any prompt. The
+handoff ID is not required to match the source run. Endpoint/token edits that
+move the runtime fail closed at the ownership proof instead of silently
+starting a fresh conversation; renaming an adapter
 does not change its connection revision.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
@@ -271,29 +283,51 @@ evidence only and never establishes run success.
 
 `list_agent_models` reads one AdapterInstance's model list for its explicit
 `adapter_id` and returns exact canonical selectors annotated with that adapter's
-policy status (`enabled`, `policy_default`), runtime type, discovery scope, and
-policy scope. A `query` filters or ranks candidates; it never selects one.
+policy status. A configured Bridge policy annotates each model as
+admin-enabled (`enabled`) or not, plus the `policy_default`; with no Bridge
+policy the response is marked unrestricted (`policy_restricted: false`), every
+listed model is usable, and the runtime chooses its own default. A `query`
+filters or ranks candidates; it never selects one.
 `start_agent_run` is handoff-bound on the explicitly selected adapter: it
-requires a prepared handoff in the same workspace, fails closed when
-`agent_execution=disabled`, fails closed with `model_policy_unconfigured` until
-the local administrator saves that adapter's policy, and resolves the model
-against the adapter-enabled allowlist plus default: omitting `model` uses the
-selected adapter's configured default, while an explicit `model` is allowed only
-when its exact selector is enabled and currently available
-(`model_not_enabled`/`model_unavailable` otherwise; MCP cannot change the
-policy). The local administrator may save an optional thinking or reasoning
-default for each model; runs use that effort when configured and otherwise
-retain the runtime's own default. MCP cannot override it. It is idempotent per
+requires a prepared handoff in the same workspace, or a bounded direct
+instruction, exactly one of the two; a direct instruction is published as a
+minimal auditable prepared handoff through the normal Node write policy with a
+deterministic handoff request ID derived from the `adapter_id` + `request_id`
+idempotency domain, so exact retries
+reuse the same audit handoff and never replay an accepted prompt, a changed
+instruction under the same adapter + request_id fails the handoff content
+conflict before any duplicate is created, different adapters may reuse one
+request_id without colliding, and no
+arbitrary prompt channel or shell capability is added. A configured adapter
+policy is enforced exactly as before (omitting `model` uses its configured
+default; an explicit `model` is allowed only when its exact selector is enabled
+and currently available, `model_not_enabled`/`model_unavailable` otherwise;
+MCP cannot change the policy). With no Bridge model policy the models are
+unrestricted by Bridge governance: omitting `model` sends no selector so the
+runtime chooses its own default, and an explicit `model` only has to be in the
+live catalog. The local administrator may save an optional thinking or reasoning
+default per model; runs use that effort only when it is configured for the
+selected model and otherwise retain the runtime's own default. MCP cannot
+override it. It is idempotent per
 `request_id` within the exact `(workspace_id, adapter_id)` and never replays a
-run from a different AdapterInstance. It accepts
-no free-form prompt or path and returns `run_id`, `conversation_id`, `adapter_id`,
-adapter name, runtime type, and exact model. For a small corrective follow-up
-in the same workspace with unchanged adapter ID, exact model, and compatible
-security, `continue_from_run_id` reuses a succeeded run's conversation as a new
+run from a different AdapterInstance. It accepts no free-form prompt path and
+returns `run_id`, `conversation_id`, `adapter_id`,
+adapter name, runtime type, and exact model (null for a native default). For a
+small corrective follow-up
+in the same workspace with unchanged adapter ID and compatible security,
+`continue_from_run_id` reuses a terminal run's conversation as a new
 Bridge run for a NEW prepared handoff ID (the new handoff's prompt is sent).
 Continuation implies `parent_run_id`: when it is omitted the parent is
 canonicalized to the continuation source, and a different explicit parent is
-rejected with `continuation_parent_mismatch`. A named-profile ID/revision change may continue the same Bridge/runtime conversation via an idle security rebind when the adapter advertises `securityRebind`; the next prompt is sent only after the target binding is proven, prior runs keep their immutable `effective_security`, and a bounded `security_binding_rebound` activity records only old/new source/profile IDs/revisions and conversation IDs. Adapters without `securityRebind` fail such a transition with `continuation_security_rebind_unsupported` before any prompt. An ambiguous failed rebind may invalidate the runtime conversation, requiring a fresh conversation; a proven rebind is recorded before the next start, so even a failed start retains the rebound activity. Adapters persist an in-progress rebind marker before native mutation; an incomplete marker after restart refuses ownership. Security-source changes fail explicit continuation with `continuation_security_source_changed` instead of silently starting a fresh conversation; an ordinary fresh run without `continue_from_run_id` remains allowed under the new binding. Fresh named-profile runs use the live observed adapter profile revision. Same-source `runtime-config` drift may still refresh via the adapter (thread update or explicit runtime-owned replacement). Continuation fails closed without silently starting a fresh conversation and never sends into a busy conversation (`conversation_busy`). Each run owns only
+rejected with `continuation_parent_mismatch`. The source run may be failed,
+cancelled, or interrupted (only a nonterminal run cannot continue), the model
+may change, and stored Node/adapter revision drift alone does not invalidate an
+owned idle conversation: Bridge proves current runtime ownership by reading the
+stored native conversation on the current same-Node adapter and requires it to
+exist, belong to this workspace, and be idle before sending any prompt; after
+that proof it refreshes only the conversation's current Node/adapter metadata
+and never rewrites historical run evidence. Missing, foreign, mismatched, or
+busy conversations fail closed before any prompt (`conversation_busy`). A named-profile ID/revision change may continue the same Bridge/runtime conversation via an idle security rebind when the adapter advertises `securityRebind`; the next prompt is sent only after the target binding is proven, prior runs keep their immutable `effective_security`, and a bounded `security_binding_rebound` activity records only old/new source/profile IDs/revisions and conversation IDs. Adapters without `securityRebind` fail such a transition with `continuation_security_rebind_unsupported` before any prompt. An ambiguous failed rebind may invalidate the runtime conversation, requiring a fresh conversation; a proven rebind is recorded before the next start, so even a failed start retains the rebound activity. Adapters persist an in-progress rebind marker before native mutation; an incomplete marker after restart refuses ownership. Security-source changes fail explicit continuation with `continuation_security_source_changed` instead of silently starting a fresh conversation; an ordinary fresh run without `continue_from_run_id` remains allowed under the new binding. Fresh named-profile runs use the live observed adapter profile revision. Same-source `runtime-config` drift may still refresh via the adapter (thread update or explicit runtime-owned replacement). Continuation fails closed without silently starting a fresh conversation. Each run owns only
 the activities and results recorded for that iteration. The caller must select
 the exact adapter explicitly; Bridge does not silently switch destinations after
 failure.

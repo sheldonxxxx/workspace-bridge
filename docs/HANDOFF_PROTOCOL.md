@@ -72,11 +72,14 @@ state is not a completion signal.
 
 ## Optional automated run
 
-When a workspace has agent execution enabled, `start_agent_run` requires a
-prepared handoff in the same workspace and accepts no free-form prompt or path. A
+When an exact same-Node workspace route is enabled, `start_agent_run` requires a
+prepared handoff in the same workspace — or a bounded direct `instruction`,
+which the Bridge publishes as a minimal auditable prepared handoff — and accepts
+no free-form prompt path. A
 run is bound to one Runtime Protocol conversation and stores its exact model
-selector (the configured default when `model` is omitted, or an explicit
-admin-enabled selector per the project-lead skill model-choice rule; MCP cannot
+selector (the configured default when `model` is omitted, the runtime's native
+default when no Bridge policy exists, or an explicitly requested live catalog
+selector per the project-lead skill model-choice rule; MCP cannot
 change policy), lifecycle state, timestamps, and notification status. A run may be
 `starting`, `active`, or `terminal`; `waiting_interaction` is an active state, not
 an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
@@ -85,6 +88,7 @@ an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
 `respond_agent_interaction` resolves only a live request with its exact
 adapter-provided choice or validated form answers. The manager can request
 cancellation of a run bound to that conversation. A corrective iteration creates
-a new Bridge run and can reuse a completed conversation only after profile, model,
-workspace, handoff, and state checks pass. See `MCP_TOOLS.md` and
+a new Bridge run and can reuse a terminal conversation only after live ownership
+of the stored native conversation (same adapter, same workspace, idle) and
+compatible security are proven. See `MCP_TOOLS.md` and
 `RUNTIME_PROTOCOL.md`.

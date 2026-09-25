@@ -377,7 +377,7 @@ def test_image_read_never_changes_migration_or_writing(env, payload):
 
 def test_skill_and_capabilities_describe_image_boundary(env):
     skill = read_project_lead_skill()
-    assert skill["version"] == "2.6.0"
+    assert skill["version"] == "3.0.0"
     for fragment in ("native image", "visible secrets", "first frame", "text-only", "actually"):
         assert fragment in skill["content"]
     info = env["service"].info(env["service"].workspace(env["id"]))

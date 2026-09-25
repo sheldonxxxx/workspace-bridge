@@ -67,9 +67,13 @@ severity is failed, action required, unknown, warning, then pass. Doctor exits
 1 when overall is failed/action-required; it exits 0 for pass, warning, and
 unknown-only reports. Unknown adapter/profile/model freshness is not success.
 A route is ready only when the exact workspace/adapter mapping, accessible root,
-handoff-capable write scope, agent switch, shared MCP gateway, WorkspaceRoute,
-current adapter-scoped profile revision, and current default model/reasoning
-setting all pass.
+shared MCP gateway, enabled WorkspaceRoute and
+adapter, and the adapter's current security profile all pass. A configured
+model policy is validated, but an unconfigured policy is optional governance:
+models are then unrestricted by Bridge policy and the runtime chooses its own
+default. Write scope is not a run prerequisite — it governs only new handoff
+publication and is reported as its own diagnostic — so a read-only workspace
+may still have a runnable prepared handoff.
 Git Evidence is review-only and never blocks a route.
 
 Listener health, gateway enabled, runtime healthy, and runnable route are distinct.
@@ -206,9 +210,10 @@ The optional `scripts/run_tunnel.py` helper only launches the official client wh
 
 ## Runtime Protocol runs and restart recovery
 
-Agent execution is disabled per workspace until a local administrator enables the
-workspace, enables an exact same-Node WorkspaceRoute, assigns its adapter-specific
-security binding, and saves that AdapterInstance's model policy. Run and
+Agent execution requires a local administrator to enable the
+workspace, enable an exact same-Node WorkspaceRoute, and assign its
+adapter-specific security binding; a model policy is optional governance per
+adapter. Run and
 conversation views are local-admin-only; MCP cannot change routes, profiles, or
 model policy. The Manager shows the owning Node and adapter name and ID, runtime
 type, Bridge run and conversation IDs, handoff, model, immutable security-used

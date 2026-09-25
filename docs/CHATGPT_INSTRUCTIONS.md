@@ -24,8 +24,8 @@ verdicts. Use explicit handoff paths when searching notes; root-source scans omi
 Two loops are available. **Manual (always supported):** inspect and resolve design,
 publish a small handoff, return the actual path/copy prompt, then let the user
 manually dispatch the local agent; after the user pastes its reply, audit real current
-source/callers/tests. **Automated (only when the local admin enabled agent execution
-for the workspace):** after `prepare_handoff`, call
+source/callers/tests. **Automated (when an exact workspace route is enabled):**
+after `prepare_handoff`, call
 `list_agent_adapters(workspace_id)` to discover exact AdapterInstance IDs and
 route availability. `runtime_type` describes behavior; only `adapter_id` selects
 a destination. Never map Pi/Codex to an arbitrary instance. If no adapter is
@@ -38,9 +38,10 @@ job_id, request_id)` without a model to use that adapter's default. An explicit
 enabled model may be chosen only per the
 project-lead skill model-choice rule (the user requested it or a matching
 category; a self-initiated change needs prior user approval; never silently
-switch after failure). Never invent or broaden a selector, never pass a
-free-form prompt/path, and treat `agent_execution=disabled` or
-`model_policy_unconfigured` as fail
+switch after failure). With no Bridge model policy the models are unrestricted:
+omitting `model` uses the runtime's native default and an explicit model only
+has to be in the live catalog. Never invent or broaden a selector, never pass a
+free-form prompt/path, and treat a disabled or unavailable route as fail
 closed. After dispatch, report the handoff path/copy prompt and, for an
 automated run, its run ID and initial status directly to the user. Do not poll or
 watch implementation; resume when the user asks to continue/review or shares the

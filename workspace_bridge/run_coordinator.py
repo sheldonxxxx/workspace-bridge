@@ -497,10 +497,14 @@ class RunCoordinator:
             if query and query.casefold() not in (selector + " " +
                     str(model.get("displayName") or "")).casefold():
                 continue
-            selected.append({**model, "enabled": selector in policy["enabled"],
+            selected.append({**model, "enabled": (selector in policy["enabled"]
+                                 if policy["configured"] else True),
+                             "policy_enabled": (selector in policy["enabled"]
+                                                if policy["configured"] else None),
                              "policy_default": selector == policy["default"]})
         return {"adapter_id": adapter_id, "workspace_id": ws["id"],
                 "models": selected[:max(1, min(limit, 100))], "policy": policy,
+                "policy_restricted": bool(policy["configured"]),
                 "count": len(selected)}
 
     def set_model_policy(self, adapter_id: str, enabled: list[str], default: str,
@@ -543,10 +547,24 @@ class RunCoordinator:
         return self.model_policy(adapter_id)
 
     def _select_model(self, ws: dict, adapter_id: str, requested: str | None) -> str:
+        """Resolve the run model selector.
+
+        A configured adapter policy keeps its exact allowlist/default
+        semantics. With no Bridge policy the models are unrestricted by
+        Bridge governance: an omitted request sends no selector so the
+        adapter/native runtime chooses its own default (represented durably
+        by an empty selector), and an explicit request only has to name a
+        model in the live adapter catalog.
+        """
         policy = self.model_policy(adapter_id)
         if not policy["configured"]:
-            raise BridgeError("Adapter model policy is not configured",
-                              "model_policy_unconfigured")
+            if requested is None:
+                return ""
+            available = {item["selector"] for item in self.adapter(
+                adapter_id, ws=ws).models(ws["id"]) if isinstance(item.get("selector"), str)}
+            if requested not in available:
+                raise BridgeError("Model is unavailable", "model_unavailable")
+            return requested
         selector = requested if requested is not None else policy["default"]
         if selector not in policy["enabled"]:
             raise BridgeError("Model is not enabled", "model_not_enabled")
@@ -558,7 +576,9 @@ class RunCoordinator:
     def _select_reasoning(self, ws: dict, adapter_id: str, selector: str) -> str | None:
         policy = self.model_policy(adapter_id)
         effort = policy["reasoning_defaults"].get(selector)
-        if effort is None:
+        # Reasoning defaults are configured-policy features only; a native
+        # default selector (empty) never applies a Bridge reasoning default.
+        if effort is None or not selector:
             return None
         row = next((item for item in self.adapter(adapter_id, ws=ws).models(ws["id"])
                     if item.get("selector") == selector), None)
@@ -660,19 +680,19 @@ class RunCoordinator:
         rebind_conversation_id = None
         if continue_from_run_id:
             source = self._run_row(ws, continue_from_run_id)
-            if (source["adapter_id"] != adapter_id or source["phase"] != "terminal"
-                    or source["outcome"] != "succeeded"
-                    or source["model"] != selector):
+            if source["adapter_id"] != adapter_id or source["phase"] != "terminal":
                 raise BridgeError("Continuation source is unavailable",
                                   "continuation_unavailable")
+            # Any terminal outcome may continue (succeeded, failed,
+            # cancelled, interrupted): ownership is proven below against the
+            # live adapter, not by the historical outcome, model, or
+            # recorded Node/adapter revisions.
             conversation = self._conversation(source)
-            if (conversation["node_id"] != node_info["id"]
-                    or conversation["node_revision"] != node_info["revision"]):
-                raise BridgeError("Node connection changed since this conversation was created",
+            if conversation["node_id"] != node_info["id"]:
+                raise BridgeError("The conversation belongs to another Node",
                                   "node_changed")
             if (conversation["adapter_id"] != adapter_id
-                    or conversation["runtime_type"] != adapter_info["runtime_type"]
-                    or conversation["adapter_revision"] != adapter_info["revision"]):
+                    or conversation["runtime_type"] != adapter_info["runtime_type"]):
                 raise BridgeError("Adapter connection changed since this conversation was created",
                                   "adapter_changed")
             stored_source = conversation.get("source", "profile")
@@ -746,14 +766,74 @@ class RunCoordinator:
                     # Validated `rebound` already proves same conversation ID,
                     # idle status, and exact requested binding. Do not issue a
                     # redundant post-rebind read that would widen an unaudited
-                    # successful-transition window.
+                    # successful-transition window. The rebind itself proves
+                    # current runtime ownership, so only the conversation's
+                    # current Node/adapter metadata is refreshed; historical
+                    # run evidence stays immutable.
+                    _refresh_metadata = {}
+                    if conversation["node_revision"] != node_info["revision"]:
+                        _refresh_metadata["node_revision"] = node_info["revision"]
+                    if conversation["adapter_revision"] != adapter_info["revision"]:
+                        _refresh_metadata["adapter_revision"] = adapter_info["revision"]
+                    try:
+                        _instance_id = adapter.descriptor().instance_id
+                    except Exception:
+                        _instance_id = None
+                    if _instance_id and conversation["instance_id"] != _instance_id:
+                        _refresh_metadata["instance_id"] = _instance_id
+                    if _refresh_metadata:
+                        assignments = ",".join(
+                            f"{key}=?" for key in _refresh_metadata)
+                        with self.service.lock, self.service.db:
+                            self.service.db.execute(
+                                f"UPDATE agent_conversations SET {assignments} WHERE id=?",
+                                (*_refresh_metadata.values(), conversation["id"]))
+                        conversation = {**conversation, **_refresh_metadata}
             # Both runtime-config here: opaque native revision drift is
             # resolved by the adapter below (thread refresh or explicit
             # runtime-owned replacement), not by a Bridge revision check.
             if rebind_old is None:
-                native_conversation = adapter.conversation(conversation["native_id"])
+                # Current-runtime ownership proof: the stored native
+                # conversation must exist on the live same-Node adapter,
+                # belong to this workspace, and be idle before any prompt.
+                # Missing, foreign, mismatched, or busy conversations fail
+                # closed here and no prompt is sent.
+                try:
+                    native_conversation = adapter.conversation(
+                        conversation["native_id"])
+                except Exception as exc:
+                    code = getattr(exc, "code", "")
+                    if code in {"not_found", "binding_mismatch", "profile_mismatch",
+                                "profile_unavailable", "conversation_unavailable"}:
+                        raise BridgeError(
+                            "The runtime conversation is no longer owned by this adapter",
+                            "conversation_unavailable") from None
+                    raise
+                if native_conversation.get("workspaceId") != ws["id"]:
+                    raise BridgeError(
+                        "The runtime conversation is not owned by this workspace",
+                        "conversation_unavailable")
                 if native_conversation.get("status") != "idle":
                     raise BridgeError("Conversation is not idle", "conversation_busy")
+                # Benign Node/adapter revision drift is proven safe: the live
+                # adapter still owns the idle conversation. Refresh only the
+                # conversation's current Node/adapter metadata; historical run
+                # effective_security and revision evidence stay immutable.
+                metadata: dict[str, str] = {}
+                if conversation["node_revision"] != node_info["revision"]:
+                    metadata["node_revision"] = node_info["revision"]
+                if conversation["adapter_revision"] != adapter_info["revision"]:
+                    metadata["adapter_revision"] = adapter_info["revision"]
+                continuation_descriptor = adapter.descriptor()
+                if conversation["instance_id"] != continuation_descriptor.instance_id:
+                    metadata["instance_id"] = continuation_descriptor.instance_id
+                if metadata:
+                    assignments = ",".join(f"{key}=?" for key in metadata)
+                    with self.service.lock, self.service.db:
+                        self.service.db.execute(
+                            f"UPDATE agent_conversations SET {assignments} WHERE id=?",
+                            (*metadata.values(), conversation["id"]))
+                    conversation = {**conversation, **metadata}
         if conversation is None:
             descriptor = adapter.descriptor()
             native_conversation = adapter.create_conversation({
@@ -857,9 +937,13 @@ class RunCoordinator:
         try:
             run_payload = {
                 "input": [{"type": "text", "text": self._prompt(ws, job)}],
-                "model": selector,
                 "clientRunId": bridge_run_id,
             }
+            # An empty selector means no Bridge model policy and no explicit
+            # request: send no selector so the adapter/native runtime chooses
+            # its own default.
+            if selector:
+                run_payload["model"] = selector
             if reasoning is not None:
                 run_payload["reasoning"] = reasoning
             native_run = validate_run_state(adapter.start_run(
@@ -1014,7 +1098,9 @@ class RunCoordinator:
                 "runtime_type": run["runtime_type"], "job_id": run["handoff"],
                 "parent_run_id": run["parent_run"],
                 "continue_from_run_id": run["continue_from"],
-                "request_id": run["request_id"], "model": run["model"],
+                "request_id": run["request_id"],
+                # Empty stored selector = native runtime default model.
+                "model": run["model"] or None,
                 "reasoning": run["reasoning"],
                 "phase": run["phase"], "active_state": run["active_state"],
                 "outcome": run["outcome"], "result": run["result"],

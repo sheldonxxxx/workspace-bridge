@@ -372,9 +372,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                 "pass" if ws["enabled"] else "action_required",
                 "Workspace mapping is enabled." if ws["enabled"] else "Workspace mapping is disabled.",
                 workspace_id=wid)
-        out.add("workspace.agent_enabled", "workspaces",
-                "pass" if ws["agent_enabled"] else "action_required",
-                "Agent execution is enabled." if ws["agent_enabled"] else "Agent execution is disabled.",
+        out.add("workspace.agent_execution", "workspaces", "pass",
+                "Agent execution is governed by the exact enabled workspace route; "
+                "the legacy workspace-wide agent switch is no longer a run gate.",
                 workspace_id=wid)
         write_ok = ws["write_scope"] in {"handoff", "workspace"}
         out.add("workspace.write_scope", "workspaces",
@@ -476,11 +476,13 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     adapter_id=aid, runtime_type=runtime_type)
     health_by_id = {row["id"]: adapter_health.get(row["id"], (None, None))
                     for row in adapters}
+    # write_scope is deliberately absent from run prerequisites: run
+    # admission does not check it. A read-only workspace may still have an
+    # existing prepared handoff/conversation that is runnable. Handoff
+    # publication capability stays its own separate diagnostic below.
     prerequisites = {ws["id"]: [
         code for code, okay in (("workspace.root_accessible", bool(ws.get("enabled") and ws["root"])),
-                                ("workspace.enabled", bool(ws["enabled"])),
-                                ("workspace.agent_enabled", bool(ws["agent_enabled"])),
-                                ("workspace.write_scope", ws["write_scope"] in {"handoff", "workspace"}))
+                                ("workspace.enabled", bool(ws["enabled"])))
         if not okay] for ws in workspaces}
     for ws in workspaces:
         codes = prerequisites[ws["id"]]
@@ -535,16 +537,15 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             blockers.append("node.unavailable")
         if route["adapter_enabled"] and not descriptor:
             blockers.append("adapter.reachable")
-        if not policy["configured"]:
-            blockers.append("model.policy")
+        # An unconfigured model policy is optional governance: models are
+        # unrestricted by Bridge policy and the runtime chooses its default.
         out.add("workspace_route.enabled", "workspaces",
                 "pass" if route["enabled"] else "action_required",
                 "Workspace route is enabled." if route["enabled"] else "Workspace route is disabled.",
                 workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
-        out.add("model.policy", "models_profiles",
-                "pass" if policy["configured"] else "action_required",
-                "Adapter model policy has an enabled default." if policy["configured"] else
-                "Adapter model policy or default is not configured.",
+        out.add("model.policy", "models_profiles", "pass",
+                "Adapter model policy restricts model selection." if policy["configured"] else
+                "No Bridge model policy; models are unrestricted and the runtime chooses its default.",
                 workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
 
         source = route["security_source"]
