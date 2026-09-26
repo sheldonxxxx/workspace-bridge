@@ -93,8 +93,20 @@ def make_node_api(service, token_hash: str):
                 if len(pieces) == 4 and pieces[3] == "test" and request.method == "POST":
                     # Saved-adapter probes are explicit configuration checks;
                     # runtime calls use the revision-pinned envelope below.
+                    # Honor supplied form values so edits test the new input:
+                    # blank token reuses the saved token (handled by service).
                     try:
-                        return _json(service.test_adapter({"adapter_id": adapter_id}))
+                        try:
+                            body = await _body(request)
+                        except BridgeError:
+                            body = {}
+                        if not isinstance(body, dict):
+                            body = {}
+                        payload = {key: body[key] for key in
+                                   ("name", "runtime_type", "base_url", "token", "enabled")
+                                   if key in body}
+                        payload["adapter_id"] = adapter_id
+                        return _json(service.test_adapter(payload))
                     except BridgeError as exc:
                         return _json({"success": False, "code": exc.code,
                                       "message": "Connection could not be verified."})

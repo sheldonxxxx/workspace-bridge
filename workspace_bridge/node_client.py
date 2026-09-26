@@ -169,8 +169,13 @@ class NodeClient:
     def test_adapter_config(self, payload: dict) -> dict:
         return self._request("POST", "/v1/adapters/test", payload)
 
-    def test_adapter(self, adapter_id: str) -> dict:
-        return self._request("POST", "/v1/adapters/" + adapter_id + "/test", {})
+    def test_adapter(self, adapter_id: str, config: dict | None = None) -> dict:
+        body: dict = {"adapter_id": adapter_id}
+        if isinstance(config, dict):
+            for key in ("name", "runtime_type", "base_url", "token", "enabled"):
+                if key in config:
+                    body[key] = config[key]
+        return self._request("POST", "/v1/adapters/" + adapter_id + "/test", body)
 
     def runtime(self, adapter_id: str, operation: str, arguments: dict,
                 workspace: dict | None = None, *, expected_revision: str):

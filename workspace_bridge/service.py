@@ -223,8 +223,9 @@ class Service:
         request = {key: value for key, value in payload.items()
                    if key in {"adapter_id", "name", "runtime_type", "base_url", "token", "enabled"}}
         client = self.node_registry.client(node_id, timeout=5)
-        if adapter_id is not None:
-            return client.test_adapter(adapter_id)
+        # Always test the supplied form values. For an existing adapter,
+        # adapter_id is included so the Node reuses the saved token when the
+        # form token is blank, while base_url/name overrides are honored.
         return client.test_adapter_config(request)
 
     def diagnostic_report(self, *, offline: bool = False,
