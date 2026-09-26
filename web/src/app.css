@@ -1235,6 +1235,43 @@ a {
   border-top: 1px solid var(--line);
   padding: 19px;
 }
+.updates-page {
+  padding-bottom: 22px;
+}
+.updates-page > p {
+  margin-top: 15px;
+  padding-inline: 26px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.updates-page > p.path-text {
+  color: var(--quiet);
+  font-size: 11px;
+}
+.updates-page > h3 {
+  margin-top: 24px;
+  padding-inline: 26px;
+  color: var(--quiet);
+  font-size: 11px;
+  font-weight: 700;
+}
+.updates-page > div {
+  margin-top: 17px;
+  padding-inline: 26px;
+}
+.updates-page h4 {
+  margin: 0;
+  font-size: 13px;
+}
+.updates-page > div > p {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.updates-page > div > .path-text {
+  margin-top: 5px;
+  color: var(--quiet);
+  font-size: 11px;
+}
 .adapter-detail-panel {
   margin-top: 18px;
 }

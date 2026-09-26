@@ -1,5 +1,7 @@
 # Workspace Bridge
 
+![Workspace Bridge connects ChatGPT Web to local agent runtimes](docs/assets/workspace-bridge-banner.png)
+
 **Connect ChatGPT Web to your local workspace and agent runtime.**
 
 Workspace Bridge is a local MCP control plane that lets ChatGPT Web work with
@@ -23,12 +25,6 @@ Local workspace, Git, handoffs, and agent adapters
        ├── Codex
        └── future runtimes
 ```
-
-The code stays on your machine. The authoritative Node owns workspace files,
-Git, handoffs, and adapter secrets; Workspace Bridge exposes bounded typed APIs
-instead of a remote shell. You can keep implementation manual by pasting a
-prepared handoff into a local agent, or explicitly enable an exact
-workspace/adapter route for an automated run.
 
 ## Why this project exists
 
