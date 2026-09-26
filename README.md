@@ -1,4 +1,4 @@
-# Workspace Bridge — v0.8.4
+# Workspace Bridge — v0.1.0
 
 **One private tunnel. Protected workspaces. Plain handoffs. Optional agent runs. Review in ChatGPT.**
 
@@ -194,8 +194,25 @@ See [Docker guide](docs/DOCKER.md).
 
 Python 3.11+; macOS, Linux or WSL2. Native Windows is not supported. This release was
 validated in Linux; your host and actual tunnel/client still need validation.
-Keep this package, virtual environment, private state and tunnel profile outside
-mapped projects.
+Keep private state and tunnel profile outside mapped projects.
+
+The supported installation is a persistent `uv tool` environment:
+
+```sh
+uv tool install workspace-bridge
+workspace-bridge --version
+
+workspace-bridge init
+# Host-only Node (safe loopback default):
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
+  --allow-root "$HOME/Projects"
+# For Docker Desktop, run the init command instead with --host 0.0.0.0.
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge serve
+```
+
+Contributors working from a checkout can use a development venv instead:
 
 ```sh
 cd workspace-bridge
@@ -203,24 +220,46 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[test]'
 python -m pytest -q
-
-workspace-bridge init
-# Host-only Node (safe loopback default):
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects"
-# For Docker Desktop, run the init command instead with --host 0.0.0.0.
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
-workspace-bridge serve
 ```
 
+## Manual updates
+
+There is no automatic or remote updater. Update the installed tool locally
+on each host, then explicitly restart the affected persistent services:
+
+```sh
+uv tool upgrade workspace-bridge
+workspace-bridge --version
+# Restart the Node service if it is persistently installed, e.g.:
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
+```
+
+A package upgrade never restarts anything by itself. The Pi adapter
+(`workspace-bridge-pi-host-adapter`) is a separate local npm-managed
+component updated with npm on its host. The Manager System / Versions view
+shows component versions and compatibility as information only.
+
 On macOS, `service install` creates the per-user
-`~/Library/LaunchAgents/com.workspace-bridge.node.plist` and keeps the native
-Node running outside Compose. It does not print or store the Node token in the
-plist. `service status` is read-only and reports the plist, `gui/<uid>` launchd
-state, configured listen address, and a bounded authenticated `/v1/status`
-result. `service uninstall` removes only that managed plist; Node state, tokens,
-adapters, allowed roots, and private logs remain.
+`~/Library/LaunchAgents/com.workspace-bridge.node.plist` (launchd) and keeps
+the native Node running outside Compose. On Linux, the same plain nested
+command installs the system unit
+`/etc/systemd/system/workspace-bridge-node.service` and keeps the native Node
+running outside Compose; it starts at boot and survives logout automatically
+while `User=`/`Group=` keep the Node itself non-root with the same workspace
+permissions as the installing user. Run the command normally without leading
+sudo; the backend requests sudo only for the narrow systemd administration
+steps. An intentional advanced root mode exists (root-owned state managed as
+root, `User=root`/`Group=root`, root-controlled executable required); a root
+invocation against a user-owned state is rejected, never converted. Neither
+backend prints or stores the Node token in the unit. `service
+status` is read-only and reports the managed unit, enabled/running state,
+configured listen address, and a bounded authenticated `/v1/status` result.
+`service uninstall` removes only that managed unit; Node state, tokens,
+adapters, allowed roots, and private logs remain. On Linux, check the journal
+manually with `journalctl -u workspace-bridge-node.service`; the program never
+scrapes journal contents. Manual package updates remain
+`uv tool upgrade workspace-bridge`, then
+`workspace-bridge node ... service restart`.
 
 When the Bridge runs in Docker Desktop, a Node initialized with `--host
 0.0.0.0` is registered in Manager as `http://host.docker.internal:8770` (use
@@ -228,8 +267,8 @@ the configured port). A Node bound only to `127.0.0.1` is intentionally not
 assumed to be reachable from the Bridge container. Non-loopback binding exposes
 the authenticated Node on host interfaces, so use a host firewall/private
 network and never put it behind the MCP tunnel. Compose still contains only
-Bridge and the MCP tunnel; native Node and Pi/Codex adapter daemons stay on the
-macOS host with identical absolute workspace paths.
+Bridge and the MCP tunnel; native Node and Pi/Codex adapter daemons stay on
+their host with identical absolute workspace paths.
 
 Add the Node URL and one-time Node token in the Manager, then register only
 canonical child roots on that Node. The Node `allowed_roots` ceiling is configured

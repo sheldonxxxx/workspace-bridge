@@ -38,7 +38,7 @@ def value(response):
 
 def test_skill_is_complete_versioned_and_bounded():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "3.0.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "3.1.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -51,6 +51,8 @@ def test_skill_is_complete_versioned_and_bounded():
     "context_hashes", "copy_prompt", "user will paste", "corrective handoff",
     "agent-reported tests", "higher-priority instructions", "untrusted",
     "list_agent_adapters", "adapter_id", "runtime_type",
+    "Review the execution log for every automated run", "list_agent_executions",
+    "execution-quality", "propose a concrete bounded improvement plan",
 ])
 def test_skill_covers_project_lead_contract(text):
     assert text in read_project_lead_skill()["content"]

@@ -19,7 +19,7 @@ class ReleaseAdapter:
         self.features = dict.fromkeys(CORE_FEATURES, 1)
 
     def descriptor(self):
-        return Descriptor(self.runtime_type, self.runtime_type, "1.0.0", "test",
+        return Descriptor(self.runtime_type, self.runtime_type, "0.1.0", "test",
                           f"native-{self.runtime_type}", self.features,
                           release=self._release)
 
@@ -81,7 +81,7 @@ def test_matching_release_is_pass_and_never_blocks(release_env):
     codex_release = {"contract": 1, "product": "workspace-bridge",
                      "product_version": bridge["product_version"],
                      "component": "codex-host-adapter",
-                     "component_version": "1.0.0", "build_id": bridge["build_id"]}
+                     "component_version": "0.1.0", "build_id": bridge["build_id"]}
     adapter_id, _, _ = _install_adapter(env, "codex", codex_release)
     ws = _ready_workspace(env, adapter_id)
     report = env["service"].diagnostic_report()
@@ -115,7 +115,7 @@ def test_codex_build_skew_is_warning_not_blocker(release_env):
     bridge = bridge_release()
     skewed = {"contract": 1, "product": "workspace-bridge",
               "product_version": bridge["product_version"],
-              "component": "codex-host-adapter", "component_version": "1.0.0",
+              "component": "codex-host-adapter", "component_version": "0.1.0",
               "build_id": "sha256:" + "c" * 64}
     assert skewed["build_id"] != bridge["build_id"]
     adapter_id, _, _ = _install_adapter(env, "codex", skewed)
@@ -134,7 +134,7 @@ def test_pi_build_id_is_not_compared_to_python_core(release_env):
     bridge = bridge_release()
     pi_release = {"contract": 1, "product": "workspace-bridge",
                   "product_version": bridge["product_version"],
-                  "component": "pi-host-adapter", "component_version": "0.4.0",
+                  "component": "pi-host-adapter", "component_version": "0.1.0",
                   "build_id": "sha256:" + "d" * 64}
     assert pi_release["build_id"] != bridge["build_id"]
     adapter_id, _, _ = _install_adapter(env, "pi", pi_release)
@@ -152,7 +152,7 @@ def test_product_skew_is_warning_not_blocker(release_env):
     bridge = bridge_release()
     skewed = {"contract": 1, "product": "workspace-bridge",
               "product_version": "0.0.0", "component": "codex-host-adapter",
-              "component_version": "1.0.0", "build_id": bridge["build_id"]}
+              "component_version": "0.1.0", "build_id": bridge["build_id"]}
     adapter_id, _, _ = _install_adapter(env, "codex", skewed)
     _ready_workspace(env, adapter_id)
     report = env["service"].diagnostic_report()
@@ -161,6 +161,90 @@ def test_product_skew_is_warning_not_blocker(release_env):
     assert check["status"] == "warning"
     route = next(r for r in report["runnable_routes"] if r["adapter_id"] == adapter_id)
     assert route["ready"] is True
+
+
+_OMIT_NODE_RELEASE = object()
+
+
+def _patch_node_release(env, monkeypatch, release=_OMIT_NODE_RELEASE):
+    """Return real Node status with release overridden (or omitted)."""
+    node_service = env["node"]["service"]
+    real_status = node_service.status()
+    assert real_status["status"] == "ok" and real_status["protocol"] == 1
+    def _fake_status():
+        status = dict(real_status)
+        if release is _OMIT_NODE_RELEASE:
+            status.pop("release", None)
+        else:
+            status["release"] = release
+        return status
+    monkeypatch.setattr(node_service, "status", _fake_status)
+
+
+def test_healthy_node_missing_release_is_warning_not_blocker(release_env, monkeypatch):
+    env = release_env
+    bridge = bridge_release()
+    codex_release = {"contract": 1, "product": "workspace-bridge",
+                     "product_version": bridge["product_version"],
+                     "component": "codex-host-adapter",
+                     "component_version": "0.1.0", "build_id": bridge["build_id"]}
+    adapter_id, _, _ = _install_adapter(env, "codex", codex_release)
+    _ready_workspace(env, adapter_id)
+    _patch_node_release(env, monkeypatch)
+    report = env["service"].diagnostic_report()
+    check = next(c for c in report["checks"] if c["code"] == "release.node_identity")
+    assert check["status"] == "warning"
+    assert "unsupported development build" in check["summary"]
+    assert report["overall"]["status"] not in ("action_required", "failed")
+    route = next(r for r in report["runnable_routes"] if r["adapter_id"] == adapter_id)
+    assert route["ready"] is True
+    assert not any(c.startswith("release.") for c in route["blockers"])
+
+
+def test_healthy_node_invalid_release_is_warning_not_blocker(release_env, monkeypatch):
+    env = release_env
+    bridge = bridge_release()
+    codex_release = {"contract": 1, "product": "workspace-bridge",
+                     "product_version": bridge["product_version"],
+                     "component": "codex-host-adapter",
+                     "component_version": "0.1.0", "build_id": bridge["build_id"]}
+    adapter_id, _, _ = _install_adapter(env, "codex", codex_release)
+    _ready_workspace(env, adapter_id)
+    _patch_node_release(env, monkeypatch, {"contract": 1, "product": "workspace-bridge",
+        "product_version": bridge["product_version"], "component": "node",
+        "component_version": bridge["product_version"], "build_id": "bad"})
+    report = env["service"].diagnostic_report()
+    check = next(c for c in report["checks"] if c["code"] == "release.node_identity")
+    assert check["status"] == "warning"
+    assert "unsupported development build" in check["summary"]
+    assert report["overall"]["status"] not in ("action_required", "failed")
+    route = next(r for r in report["runnable_routes"] if r["adapter_id"] == adapter_id)
+    assert route["ready"] is True
+    assert not any(c.startswith("release.") for c in route["blockers"])
+
+
+def test_healthy_node_unsupported_contract_is_warning_not_incompatible(release_env, monkeypatch):
+    env = release_env
+    bridge = bridge_release()
+    codex_release = {"contract": 1, "product": "workspace-bridge",
+                     "product_version": bridge["product_version"],
+                     "component": "codex-host-adapter",
+                     "component_version": "0.1.0", "build_id": bridge["build_id"]}
+    adapter_id, _, _ = _install_adapter(env, "codex", codex_release)
+    _ready_workspace(env, adapter_id)
+    _patch_node_release(env, monkeypatch, {"contract": 999, "product": "workspace-bridge",
+        "product_version": bridge["product_version"], "component": "node",
+        "component_version": bridge["product_version"],
+        "build_id": "sha256:" + "b" * 64})
+    report = env["service"].diagnostic_report()
+    check = next(c for c in report["checks"] if c["code"] == "release.node_identity")
+    assert check["status"] == "warning"
+    assert "unsupported development build" in check["summary"]
+    assert "incompatible" not in check["summary"].lower()
+    assert report["overall"]["status"] not in ("action_required", "failed")
+    route = next(r for r in report["runnable_routes"] if r["adapter_id"] == adapter_id)
+    assert route["ready"] is True
+    assert not any(c.startswith("release.") for c in route["blockers"])
 
 
 def test_offline_release_is_unknown(release_env):

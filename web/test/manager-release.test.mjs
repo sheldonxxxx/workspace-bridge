@@ -27,9 +27,9 @@ function validIdentity(overrides = {}) {
   return {
     contract: 1,
     product: "workspace-bridge",
-    product_version: "0.8.4",
+    product_version: "0.1.0",
     component: "manager",
-    component_version: "0.8.4",
+    component_version: "0.1.0",
     build_id: `sha256:${"a".repeat(64)}`,
     ...overrides,
   };
@@ -40,8 +40,8 @@ test("product-version-only change changes Manager build ID", () => {
     { rel: "src/a.ts", data: Buffer.from("console.log(1)\n") },
     { rel: "package.json", data: Buffer.from("{}\n") },
   ];
-  const first = computeManagerBuildId("0.8.4", entries);
-  const second = computeManagerBuildId("0.8.5", entries);
+  const first = computeManagerBuildId("0.1.0", entries);
+  const second = computeManagerBuildId("0.1.1", entries);
   assert.match(first, BUILD_ID_RE);
   assert.match(second, BUILD_ID_RE);
   assert.notEqual(first, second);
@@ -102,8 +102,8 @@ test("test-only Playwright config does not affect Manager build ID", () => {
       data: fs.readFileSync(path.join(tmp, rel)),
     }));
     assert.equal(
-      computeManagerBuildId("0.8.4", entries),
-      computeManagerBuildId("0.8.4", entries),
+      computeManagerBuildId("0.1.0", entries),
+      computeManagerBuildId("0.1.0", entries),
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -164,12 +164,12 @@ test("missing canonical product metadata fails instead of falling back", () => {
     path.join(WEB_ROOT, "vite.config.ts"),
     "utf8",
   );
-  assert.ok(!viteConfig.includes("0.8.4"));
+  assert.ok(!viteConfig.includes("0.1.0"));
   const helper = fs.readFileSync(
     path.join(WEB_ROOT, "manager-release.mjs"),
     "utf8",
   );
-  assert.ok(!helper.includes("0.8.4"));
+  assert.ok(!helper.includes("0.1.0"));
   assert.equal(
     parseProductVersionFromPyprojectText('version = "1.2.3"\n'),
     "1.2.3",
@@ -188,7 +188,7 @@ test("missing canonical product metadata fails instead of falling back", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
   // The checked-in canonical metadata resolves and validates.
-  assert.equal(readProductVersion(WEB_ROOT), "0.8.4");
+  assert.equal(readProductVersion(WEB_ROOT), "0.1.0");
   assert.deepEqual(
     validateManagerRelease(computeManagerRelease(WEB_ROOT)),
     computeManagerRelease(WEB_ROOT),
@@ -245,15 +245,15 @@ test("full-identity mismatch warns on version skew with equal build ID", () => {
   assert.equal(
     describeManagerIdentity(compiled, {
       ...compiled,
-      product_version: "0.8.5",
-      component_version: "0.8.5",
+      product_version: "0.1.1",
+      component_version: "0.1.1",
     }),
     "mismatch",
   );
   assert.equal(
     describeManagerIdentity(compiled, {
       ...compiled,
-      component_version: "0.8.5",
+      component_version: "0.1.1",
     }),
     "mismatch",
   );

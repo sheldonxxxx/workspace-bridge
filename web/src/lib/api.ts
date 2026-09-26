@@ -260,6 +260,42 @@ export interface Model {
   defaultReasoningEffort?: string | null;
 }
 
+export interface VersionComponentState {
+  component: string;
+  instance: string;
+  runtime_type?: string | null;
+  instance_id?: string | null;
+  state:
+    | "current"
+    | "update_available"
+    | "unsupported_build"
+    | "target_mismatch"
+    | "incompatible"
+    | "unavailable";
+  execution_compatible: boolean;
+  reason: string;
+  current_product_version?: string | null;
+  current_build_id?: string | null;
+  target_product_version?: string | null;
+  target_build_id?: string | null;
+  target_precision: "exact" | "product-version-only";
+  current?: ReleaseIdentity | null;
+}
+export interface VersionStatus {
+  schema_version: number;
+  status: "ok" | "failed";
+  target: {
+    product_version?: string | null;
+    build_id?: string | null;
+    manager?: ReleaseIdentity | null;
+    note?: string;
+  };
+  bridge?: VersionComponentState | null;
+  manager?: VersionComponentState | null;
+  nodes?: VersionComponentState[];
+  adapters?: VersionComponentState[];
+  error?: { code: string; summary: string };
+}
 export async function api<T>(
   path: string,
   method = "GET",

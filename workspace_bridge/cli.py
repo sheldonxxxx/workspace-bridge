@@ -250,6 +250,118 @@ def _print_doctor(report: dict, as_json: bool) -> None:
         _print_doctor_human(report)
 
 
+def _print_release_bundle_human(result: dict) -> None:
+    bundle = result.get("bundle", result)
+    product_version = bundle.get("product_version", "unknown")
+    bundle_id = bundle.get("bundle_id", "unknown")
+    manifest_id = bundle.get("manifest_id", "unknown")
+    short_bundle = (bundle_id[7:19] if isinstance(bundle_id, str)
+                    and bundle_id.startswith("sha256:") and len(bundle_id) == 71 else "unknown")
+    short_manifest = (manifest_id[7:19] if isinstance(manifest_id, str)
+                      and manifest_id.startswith("sha256:") and len(manifest_id) == 71 else "unknown")
+    print(f"Release bundle: COMPLETE — product {product_version} "
+          f"bundle sha256:{short_bundle} manifest sha256:{short_manifest}")
+    artifacts = bundle.get("artifacts", [])
+    print(f"Artifacts: {len(artifacts)}")
+    for entry in sorted(artifacts, key=lambda e: e.get("logical", "")):
+        kind = entry.get("kind", "unknown")
+        sha = entry.get("sha256", "unknown")
+        short = (sha[7:19] if isinstance(sha, str)
+                 and sha.startswith("sha256:") and len(sha) == 71 else "unknown")
+        comps = ",".join(entry.get("components", []))
+        print(f"  [{kind}] sha256:{short} components={comps}")
+
+
+def _print_release_bundle_failure_human(code: str, summary: str) -> None:
+    print(f"Release bundle: FAILED [{code}]: {summary}")
+
+
+def _release_build(*, output: Path, as_json: bool) -> int:
+    from .release_bundle import BundleError, build_bundle
+    try:
+        result = build_bundle(output=output)
+    except BundleError as exc:
+        code = getattr(exc, "code", "bundle_failed") or "bundle_failed"
+        summaries = {
+            "bundle-exists": "Bundle output already exists.",
+            "bundle-unsafe-path": "Bundle output location is unsafe.",
+            "bundle-unavailable": "Bundle output is unavailable.",
+            "bundle-build-failed": "Release bundle build failed.",
+            "bundle-identity-mismatch": "Embedded release identity mismatch.",
+            "bundle-integrity-failed": "Bundle integrity check failed.",
+            "bundle-helper-failed": "Release helper is unavailable.",
+            "bundle-node-unavailable": "Node is required for release helpers.",
+            "bundle-npm-unavailable": "npm is required for the Manager build.",
+            "bundle-uv-unavailable": "uv is required for the wheel build.",
+        }
+        summary = summaries.get(code, "Release bundle build failed.")
+        if as_json:
+            print(json.dumps({"status": "failed", "code": code,
+                              "summary": summary},
+                             sort_keys=True, ensure_ascii=False, indent=2))
+        else:
+            _print_release_bundle_failure_human(code, summary)
+        return 1
+    except Exception:  # noqa: BLE001 - fail closed without paths
+        if as_json:
+            print(json.dumps({"status": "failed", "code": "bundle_failed",
+                              "summary": "Release bundle build failed."},
+                             sort_keys=True, ensure_ascii=False, indent=2))
+        else:
+            _print_release_bundle_failure_human("bundle_failed",
+                                               "Release bundle build failed.")
+        return 1
+    bundle = result.get("bundle", {})
+    if as_json:
+        print(json.dumps(bundle, sort_keys=True, ensure_ascii=False, indent=2))
+    else:
+        _print_release_bundle_human(result)
+    return 0
+
+
+def _release_validate(*, bundle: Path, as_json: bool) -> int:
+    from .release_bundle import BundleError, validate_release_bundle
+    try:
+        result = validate_release_bundle(bundle)
+    except BundleError as exc:
+        code = getattr(exc, "code", "bundle_failed") or "bundle_failed"
+        summaries = {
+            "bundle-traversal": "Bundle contains an unsafe path.",
+            "bundle-integrity-failed": "Bundle integrity check failed.",
+            "bundle-identity-mismatch": "Embedded release identity mismatch.",
+            "bundle-manifest-invalid": "Bundle metadata is invalid.",
+            "bundle-coverage-invalid": "Bundle component coverage is invalid.",
+            "bundle-unsafe-metadata": "Bundle metadata is unsafe.",
+            "bundle-unavailable": "Bundle path is unavailable.",
+        }
+        summary = summaries.get(code, "Release bundle is invalid.")
+        if as_json:
+            print(json.dumps({"status": "failed", "code": code,
+                              "summary": summary},
+                             sort_keys=True, ensure_ascii=False, indent=2))
+        else:
+            _print_release_bundle_failure_human(code, summary)
+        return 1
+    except Exception:  # noqa: BLE001 - fail closed without paths
+        if as_json:
+            print(json.dumps({"status": "failed", "code": "bundle_failed",
+                              "summary": "Release bundle is invalid."},
+                             sort_keys=True, ensure_ascii=False, indent=2))
+        else:
+            _print_release_bundle_failure_human("bundle_failed",
+                                               "Release bundle is invalid.")
+        return 1
+    data = result.get("bundle", {})
+    if as_json:
+        print(json.dumps(data, sort_keys=True, ensure_ascii=False, indent=2))
+    else:
+        _print_release_bundle_human(result)
+    return 0
+
+
+
+
+
 async def serve(service: Service, config: dict, *, container_mode: bool = False,
                 mcp_public_port: int | None = None, admin_public_port: int | None = None,
                 extra_admin_hosts: tuple[str, ...] | None = None):
@@ -315,7 +427,9 @@ def _emit_serve_startup_error(exc: BaseException) -> None:
 
 
 def main(argv: list[str] | None = None):
+    from .node_launchd import default_node_state
     parser = argparse.ArgumentParser(description="Local, workspace-scoped MCP planning and review bridge")
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Initialize private Bridge control-plane state")
@@ -334,6 +448,19 @@ def main(argv: list[str] | None = None):
     doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
     doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
     sub.add_parser("show-admin-token", help="Print the local UI token to this terminal; never paste it into ChatGPT")
+    release = sub.add_parser("release", help="Deterministic release bundle build and validation (release engineering)")
+    release_sub = release.add_subparsers(dest="release_command", required=True)
+    release_build = release_sub.add_parser("build", help="Build deterministic release bundle")
+    release_build.add_argument("--output", type=Path, required=True, help="New/empty output directory for the bundle")
+    release_build.add_argument("--json", action="store_true", help="Emit canonical bundle JSON")
+    release_validate = release_sub.add_parser("validate", help="Validate a release bundle")
+    release_validate.add_argument("--bundle", type=Path, required=True, help="Release bundle directory")
+    release_validate.add_argument("--json", action="store_true", help="Emit canonical bundle JSON")
+    node = sub.add_parser("node", help="Administer the host-local Node data-plane service")
+    node.add_argument("--state", dest="node_state", type=Path, default=default_node_state(),
+                      help="Node state directory (separate from Bridge --state)")
+    node.add_argument("node_argv", nargs=argparse.REMAINDER,
+                      help="Node command: init | serve | show-token | service ...")
     args = parser.parse_args(argv)
     if args.command == "serve":
         public_ports = (args.mcp_public_port, args.admin_public_port)
@@ -370,6 +497,26 @@ def main(argv: list[str] | None = None):
             if exit_code:
                 raise SystemExit(exit_code)
             return
+        if args.command == "node":
+            # Nested Node administration reuses the Node CLI grammar with a
+            # Node-local --state (separate from Bridge --state).
+            from .node_cli import main as node_main
+            node_main(["--state", str(args.node_state), *args.node_argv])
+            return
+        if args.command == "release":
+            if args.release_command == "build":
+                # Release-bundle build never touches Bridge state, admin
+                # credentials, or live Nodes/adapters.
+                exit_code = _release_build(output=args.output, as_json=args.json)
+                if exit_code:
+                    raise SystemExit(exit_code)
+                return
+            if args.release_command == "validate":
+                exit_code = _release_validate(bundle=args.bundle, as_json=args.json)
+                if exit_code:
+                    raise SystemExit(exit_code)
+                return
+            parser.error("Unknown release subcommand")
         config = load_config(state)
         if args.command == "show-admin-token":
             token_path = state / "admin-token"

@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 import { AdapterError, sanitizeModels } from "./adapter.mjs";
+import { ADAPTER_VERSION } from "./config.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "./policy.mjs";
 import { piRelease } from "./release.mjs";
@@ -187,7 +188,7 @@ export class PiRuntimeProtocol {
       throw new AdapterError("Pi runtime is unavailable", 503, "unavailable");
     }
     const value = { protocol: { major: 1, minor: 0 }, runtime: {
-      id: "pi", displayName: "Pi", adapterVersion: "1.0.0",
+      id: "pi", displayName: "Pi", adapterVersion: ADAPTER_VERSION,
       nativeVersion: bounded(this.adapter.piVersion, 80), instanceId: this.instanceId,
     }, features: { models: 1, conversations: 1, runs: 1,
       activities: 1, interactions: 1, securityRebind: 1 } };

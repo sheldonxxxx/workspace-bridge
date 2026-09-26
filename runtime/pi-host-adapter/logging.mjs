@@ -58,6 +58,10 @@ export const ALLOWED_FIELDS = new Set([
   "pi_usable",
   "pi_version",
   "projects_configured",
+  "login_path_resolved",
+  "login_shell",
+  "login_path_entries",
+  "login_path_code",
   // sdk_tool_event_trace correlation fields (bounded identifiers/counts).
   "stage",
   "event_type",

@@ -121,7 +121,7 @@ def verify_service(mcp: int, admin: int, parent: Path, admin_token: str):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--no-build',action='store_true',help='Use an already locally built v0.8.4 image')
+    parser.add_argument('--no-build',action='store_true',help='Use an already locally built v0.1.0 image')
     args=parser.parse_args()
     if os.name!='posix' or os.getuid()==0 or not shutil.which('docker'):
         raise SystemExit('Requires a non-root POSIX host user, Docker CLI/engine and Compose v2. Runtime was NOT tested.')

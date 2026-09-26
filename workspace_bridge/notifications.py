@@ -44,7 +44,7 @@ STATE_EVENTS = {
 }
 SAFE_KINDS = frozenset({"permission", "question", "choice", "approval",
                         "form", "interaction"})
-BRIDGE_USER_AGENT = "Workspace-Bridge/0.8.4 (+local-admin; notification channel)"
+BRIDGE_USER_AGENT = "Workspace-Bridge/0.1.0 (+local-admin; notification channel)"
 
 
 def _safe_label(value: object, fallback: str, limit: int) -> str:

@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: "3.11"
+          - os: ubuntu-24.04
+            python: "3.13"
+          - os: ubuntu-24.04-arm
+            python: "3.13"
+          - os: macos-14
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Sync test environment
+        run: uv sync --locked --extra test --python ${{ matrix.python }}
+      - name: Run Python suite
+        run: uv run --python ${{ matrix.python }} pytest -q
+
+  manager:
+    name: Manager / Ubuntu x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Manager dependencies
+        run: npm --prefix web ci
+      - name: Lint
+        run: npm --prefix web run lint
+      - name: Format check
+        run: npm --prefix web run format:check
+      - name: Manager release unit tests
+        run: node --test web/test/manager-release.test.mjs
+      - name: Build Manager
+        run: npm --prefix web run build
+
+  pi:
+    name: Pi runtime / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: runtime/pi-host-adapter/package-lock.json
+      - name: Materialize locked production dependencies
+        run: npm --prefix runtime/pi-host-adapter ci --omit=dev
+      - name: Run Pi tests
+        run: npm --prefix runtime/pi-host-adapter test
+
+  docker:
+    name: Docker Bridge / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build Bridge image (native ${{ matrix.arch }})
+        run: docker build --tag workspace-bridge:ci .
+      - name: Inspect image architecture
+        run: |
+          set -euo pipefail
+          got="$(docker image inspect --format '{{.Architecture}}' workspace-bridge:ci)"
+          test "$got" = "${{ matrix.arch }}" || { echo "arch $got != ${{ matrix.arch }}" >&2; exit 1; }
+      - name: Bounded container release-identity smoke
+        run: |
+          set -euo pipefail
+          docker run --rm workspace-bridge:ci python -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b['build_id'], 'manager': m['build_id']}))"

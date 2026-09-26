@@ -5,7 +5,7 @@ from hashlib import sha256
 from importlib.resources import files
 
 SKILL_NAME = "project-lead"
-SKILL_VERSION = "3.0.0"
+SKILL_VERSION = "3.1.0"
 SKILL_TOOL = "read_project_lead_skill"
 
 

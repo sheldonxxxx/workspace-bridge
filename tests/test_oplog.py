@@ -63,10 +63,10 @@ def test_log_level_invalid_fails_fast(raw):
 
 def test_build_record_keeps_allowed_scalars():
     record = oplog.build_record("bridge", "bridge_ready", "INFO",
-                                version="0.8.4", runtime_configured=True,
+                                version="0.1.0", runtime_configured=True,
                                 workspace_count=3, enabled_count=2)
     assert record["component"] == "bridge" and record["event"] == "bridge_ready"
-    assert record["version"] == "0.8.4" and record["workspace_count"] == 3
+    assert record["version"] == "0.1.0" and record["workspace_count"] == 3
     assert "timestamp" in record and record["level"] == "INFO"
 
 
@@ -119,7 +119,7 @@ def test_emit_never_raises(captured):
     broken = Broken()
     OPS_LOGGER.addHandler(broken)
     try:
-        oplog.emit(OPS_LOGGER, "INFO", "bridge", "bridge_ready", version="0.8.4")
+        oplog.emit(OPS_LOGGER, "INFO", "bridge", "bridge_ready", version="0.1.0")
     finally:
         OPS_LOGGER.removeHandler(broken)
     # The capture handler still received the record; nothing propagated.
@@ -127,10 +127,10 @@ def test_emit_never_raises(captured):
 
 
 def test_one_line_json_records(captured):
-    oplog.emit(OPS_LOGGER, "INFO", "bridge", "bridge_ready", version="0.8.4")
+    oplog.emit(OPS_LOGGER, "INFO", "bridge", "bridge_ready", version="0.1.0")
     assert len(captured.lines) == 1
     assert captured.lines[0].endswith("}") and "\n" not in captured.lines[0].strip()
-    assert json.loads(captured.lines[0])["version"] == "0.8.4"
+    assert json.loads(captured.lines[0])["version"] == "0.1.0"
 
 
 # ------------------------------------------------------------------ config

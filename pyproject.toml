@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workspace-bridge"
-version = "0.8.4"
+version = "0.1.0"
 description = "Private workspace-scoped MCP browsing and manual planning handoffs"
 requires-python = ">=3.11"
 dependencies = ["starlette>=0.50,<1", "uvicorn>=0.35,<1", "pydantic>=2.12,<3", "regex>=2025.7.34,<2027", "Pillow>=12.3,<13"]

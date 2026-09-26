@@ -783,6 +783,17 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                     "agent_execution": {"control": "local manager only", "default": "disabled",
                                         "note": "Independent from write_scope; MCP cannot enable it."},
                     "tunnel_status": "Not observed by this service; check tunnel-client doctor /ui", "state_path": str(service.state)})
+            if path == "/api/system/versions":
+                if request.method != "GET":
+                    return JSONResponse({"error": "Method not allowed"}, 405)
+                # Read-only version/compatibility status: bounded live
+                # Node/adapter release observations only. No catalog
+                # refresh, no DB/state mutation, no backups, no artifact
+                # downloads, no locks, and no update/install/restart
+                # affordance. Failures are per-component; topology failure
+                # fails safely.
+                from .staged_rollout import rollout_live
+                return JSONResponse(await run_in_threadpool(rollout_live, service))
             if path == "/api/nodes":
                 if request.method == "GET":
                     return JSONResponse({"nodes": await run_in_threadpool(
@@ -1074,6 +1085,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/login", login, methods=["POST"]),
         Route("/api/logout", logout, methods=["POST"]),
         Route("/api/status", api), Route("/api/diagnostics", api), Route("/api/events", api),
+        Route("/api/system/versions", api),
         Route("/api/runs", api),
         Route("/api/nodes", api, methods=["GET", "POST"]),
         Route("/api/nodes/test", api, methods=["POST"]),

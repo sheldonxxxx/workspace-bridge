@@ -46,6 +46,55 @@ def _public_adapter(row: dict) -> dict:
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
 
 
+def _node_host_info(config: dict | None = None) -> dict:
+    """Bounded Node host identity (platform/arch only, no subprocess).
+
+    ``status()`` carries host identity only: this helper never executes
+    subprocesses, never probes installers, and never resolves a login
+    shell or PATH. Runtime ``platform``/``arch`` stay bounded and never
+    expose service paths, tokens, or environment values. Config overrides
+    are explicit test doubles only (``host_platform``/``host_arch``).
+    """
+    cfg = config if isinstance(config, dict) else {}
+    raw_platform = cfg.get("host_platform")
+    raw_arch = cfg.get("host_arch")
+    if isinstance(raw_platform, str) and raw_platform in ("linux", "darwin"):
+        platform_name: str | None = raw_platform
+    else:
+        try:
+            import sys as _sys
+            if _sys.platform.startswith("linux"):
+                platform_name = "linux"
+            elif _sys.platform == "darwin":
+                platform_name = "darwin"
+            else:
+                platform_name = "unknown"
+        except Exception:
+            platform_name = "unknown"
+        if isinstance(raw_platform, str) and raw_platform:
+            # Explicit unknown override stays fail-closed, never a path.
+            if raw_platform not in ("linux", "darwin"):
+                platform_name = "unknown"
+    if isinstance(raw_arch, str) and raw_arch in ("x64", "arm64"):
+        arch_name: str | None = raw_arch
+    else:
+        try:
+            import platform as _platform
+            machine = str(_platform.machine() or "").lower()
+            if machine in ("x86_64", "x64", "amd64"):
+                arch_name = "x64"
+            elif machine in ("arm64", "aarch64"):
+                arch_name = "arm64"
+            else:
+                arch_name = "unknown"
+        except Exception:
+            arch_name = "unknown"
+        if isinstance(raw_arch, str) and raw_arch:
+            if raw_arch not in ("x64", "arm64"):
+                arch_name = "unknown"
+    return {"platform": platform_name, "arch": arch_name}
+
+
 class NodeService:
     """Node-owned safe workspace operations and runtime adapter registry."""
 
@@ -205,9 +254,13 @@ class NodeService:
         for root in self.allowed_roots:
             roots.append({"available": root.is_dir() and not root.is_symlink(),
                           "root_label": root.name[:80] or "root"})
+        # ``status()`` is a plain health/identity read: platform/arch
+        # only, no installer probing, no login-shell PATH resolution,
+        # no package-manager commands.
         return {"status": "ok", "protocol": 1, "node_version": __version__,
                 "release": node_release(), "capabilities": [
             "files", "search", "git", "handoff-artifacts", "runtime-adapters"],
+            "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 

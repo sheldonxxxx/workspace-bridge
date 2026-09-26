@@ -1,3 +1,44 @@
+# Unreleased — Manual/local updates, single CLI
+
+- Updates are manual and local; the remote/automatic updater is removed.
+  Install persistently with `uv tool install workspace-bridge`, update with
+  `uv tool upgrade workspace-bridge`, then explicitly restart affected
+  services.
+- Removed: C2B selective-update planning (`/api/deployment/plan`, CLI
+  `deploy select-plan`), Node deployment installer probing
+  (`/v1/deployment/status`), remote deployment backup (`/v1/deployment/backup`,
+  CLI `deploy backup`, `backup.py`), deployment-admission locking
+  (`deployment_admission.py`; ordinary run admission uses only
+  runtime/security gates), and live deploy-plan/preflight code
+  (`deployment.py`, CLI `deploy plan`).
+- Release engineering keeps deterministic verification under release-oriented
+  names: `workspace_bridge.release_manifest` (target-manifest helpers),
+  `workspace-bridge release build`, and `workspace-bridge release validate`.
+- Read-only version/compatibility status moved to `/api/system/versions`;
+  the Manager System / Versions view shows release skew with manual-update
+  guidance only (no installer readiness, no update buttons).
+- Single CLI: `workspace-bridge --version` and nested
+  `workspace-bridge node --state <node-state> init|serve|show-token|service ...`.
+  The `workspace-bridge-node` entry point is retained for existing service
+  internals; user documentation prefers the nested form.
+
+# v0.1.0 — M4.2A release preflight and version reset
+
+- Reset every active Workspace Bridge-owned release/component/package version to
+  exactly `0.1.0` (Python product/package, Bridge/Node components, Codex
+  component/descriptor, Pi package/`ADAPTER_VERSION`/`workspaceBridgeRelease` +
+  lockfiles, Manager/web package + lockfiles, Docker image tags/install pin,
+  README/docs display versions, served `release.json`). Old `0.x` headings below
+  are pre-reset development history and are preserved as-is, not rewritten.
+- Compatibility/schema/protocol counters and upstream dependencies are unchanged:
+  Runtime Protocol major/minor, release contract 1, DB/config/state schemas, API
+  versions, Pi native 0.87.0, Codex native version, tunnel-client/dependency
+  versions.
+- M4.2A adds a deterministic deployment-target manifest plus a read-only live
+  `workspace-bridge deploy plan --target <manifest.json> [--json]` preflight.
+  Backup/apply/rollback mutation, service restarts, and migrations are NOT part
+  of this slice and remain future M4.2B work.
+
 # Unreleased — Runtime admission security simplification
 
 - Continuation is proven by current runtime ownership instead of history:

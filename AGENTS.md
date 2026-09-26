@@ -9,7 +9,15 @@
 - `uv sync --extra test` creates the project environment and installs the service with Python test dependencies from `uv.lock`.
 - `uv run pytest -q` runs the Python suite. `uv run workspace-bridge serve` starts the local service after `uv run workspace-bridge init --allow-parent <projects-dir>`.
 - In `web/`, run `npm ci`, `npm run dev` for the Vite manager, and `npm run build` to refresh packaged assets. Run `npm run lint` and `npm run format:check` for frontend checks.
-- In `runtime/pi-host-adapter/`, run `npm ci` and `npm test` for the Node test suite. Run `npm run test:e2e` from `web/` for Playwright browser tests; installed Chrome is required.
+- In `runtime/pi-host-adapter/`, run `npm ci` and `npm test` for the Node test suite. Run `npm run test:e2e` from `web/` for Playwright browser tests.
+
+## Toolchain & Test Environment
+
+- Treat `uv` as the canonical Python project runner. Prefer `uv run python ...`, `uv run pytest ...`, and `uv run workspace-bridge ...`. Do not assume a bare `python`, `pip`, or `.venv/bin/pip` exists. Use `python3` only when deliberately testing the system interpreter or bootstrapping outside the project environment.
+- Do not install or update project dependencies, browsers, or other test assets implicitly during implementation or audit unless the task explicitly permits environment mutation. If a required asset is missing, report the check as environment-blocked instead of silently downloading it.
+- Playwright browser binaries are versioned test assets. Before a long browser-test run, verify the browser expected by the installed Playwright version can actually launch. If Playwright reports a missing executable or cache-version mismatch, stop that test track early and report it; do not run `npx playwright install` without explicit authorization.
+- Preserve real command failure status. Do not append unrelated successful commands or unconditional `echo`/diagnostic steps after a test in a way that turns a failing compound shell command into exit 0. Run acceptance-relevant checks as separate commands when practical.
+- Prefer focused checks first, then the full relevant suite once. Avoid repeated greps/builds/test reruns unless a failure or source change makes them necessary.
 
 ## Coding Style & Naming Conventions
 

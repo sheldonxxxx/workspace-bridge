@@ -15,6 +15,29 @@ from .wbrp import Descriptor
 
 MAX_RESPONSE = 20 * 1024 * 1024
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
+NODE_PROTOCOL_MAJOR = 1
+
+
+def validate_node_status(value: object) -> dict:
+    """Require a bounded valid Node status object for healthy Bridge use.
+
+    A healthy Node must return a dict with ``status == \"ok\"`` and Node
+    Protocol exactly v1 (``protocol == 1``). Product/build/release metadata
+    skew never affects reachability: malformed or missing optional release
+    metadata is ignored here (diagnostics/staged rollout observe it
+    separately). A protocol mismatch raises ``node_protocol_error`` so
+    affected routes become unavailable/incompatible without masking skew
+    as a generic outage.
+    """
+    if not isinstance(value, dict):
+        raise BridgeError("Node protocol is incompatible", "node_protocol_error")
+    if value.get("status") != "ok":
+        raise BridgeError("Node protocol is incompatible", "node_protocol_error")
+    protocol = value.get("protocol")
+    if isinstance(protocol, bool) or protocol != NODE_PROTOCOL_MAJOR:
+        raise BridgeError("Node protocol is incompatible", "node_protocol_error")
+    return value
+
 
 def _node_http_error(status: int, raw: bytes, node_token: str) -> BridgeError:
     try:
@@ -94,7 +117,11 @@ class NodeClient:
         return value
 
     def status(self) -> dict:
-        return self._request("GET", "/v1/status", timeout=min(self.timeout, 5))
+        # Central Node Protocol gate: status==ok and protocol==1 are
+        # required for Bridge operations that treat the Node as healthy.
+        # Release/product/build skew never affects reachability here.
+        return validate_node_status(
+            self._request("GET", "/v1/status", timeout=min(self.timeout, 5)))
 
     def validate_root(self, root: str, excludes: list[str] | None = None) -> dict:
         return self._request("POST", "/v1/workspaces/validate",
@@ -196,22 +223,26 @@ class NodeRuntimeAdapterProxy:
 
     def descriptor(self) -> Descriptor:
         from .release import ReleaseError, validate_release
-        from .runtime import RuntimeUnavailable, RuntimeUnsupported
         value = self._call("descriptor")
+        # Staged rollout: release metadata is decoupled from Runtime
+        # Protocol compatibility. A present malformed/unsupported release
+        # degrades update metadata only; the descriptor stays usable.
         release = None
+        release_status = "missing"
         if isinstance(value, dict) and "release" in value:
             try:
                 release = validate_release(value.get("release"))
+                release_status = "valid"
             except ReleaseError as exc:
+                release = None
                 if getattr(exc, "kind", "invalid") == "unsupported":
-                    raise RuntimeUnsupported(
-                        "Runtime release contract is unsupported") from None
-                raise RuntimeUnavailable(
-                    "Runtime release identity is invalid") from None
+                    release_status = "unsupported"
+                else:
+                    release_status = "invalid"
         return Descriptor(value["runtime_id"], value["display_name"],
                           value["adapter_version"], value["native_version"],
                           value["instance_id"], value["features"],
-                          release=release)
+                          release=release, release_status=release_status)
 
     def models(self, workspace_id: str) -> list[dict]:
         return self._call("models", workspace_id=workspace_id)

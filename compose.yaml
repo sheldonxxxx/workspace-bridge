@@ -12,7 +12,7 @@ services:
         PYTHON_IMAGE: ${WB_PYTHON_IMAGE:-python:3.13-slim-bookworm}
         NODE_IMAGE: ${WB_NODE_IMAGE:-node:24-bookworm-slim}
     container_name: workspace-bridge
-    image: workspace-bridge:0.8.4
+    image: workspace-bridge:0.1.0
     user: "${WB_UID:?Set WB_UID in .env}:${WB_GID:?Set WB_GID in .env}"
     init: true
     restart: unless-stopped

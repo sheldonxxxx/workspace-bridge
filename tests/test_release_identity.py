@@ -85,7 +85,7 @@ def test_bridge_node_codex_share_python_core_build_id():
     assert node["component"] == "node"
     assert codex["component"] == "codex-host-adapter"
     # Codex keeps its adapter contract version separate from adapterVersion fields.
-    assert codex["component_version"] == "1.0.0"
+    assert codex["component_version"] == "0.1.0"
 
 
 def _legacy_descriptor_payload(runtime="pi"):
@@ -96,26 +96,37 @@ def _legacy_descriptor_payload(runtime="pi"):
 
 
 def test_descriptor_release_is_optional_but_malformed_fails():
+    # M4.2C2A staged rollout: release metadata is decoupled from Runtime
+    # Protocol compatibility. Missing/invalid/unsupported release stays
+    # usable with degraded update metadata; only protocol/core/identity
+    # failures raise.
     legacy = Descriptor.parse(_legacy_descriptor_payload(), expected_runtime="pi")
     assert legacy.release is None
+    assert legacy.release_status == "missing"
     valid = _legacy_descriptor_payload()
     valid["release"] = bridge_release()
     parsed = Descriptor.parse(valid, expected_runtime="pi")
     assert parsed.release is not None
     assert parsed.release["component"] == "bridge"
+    assert parsed.release_status == "valid"
     malformed = _legacy_descriptor_payload()
     malformed["release"] = {"contract": 1, "product": "workspace-bridge",
                             "product_version": __version__, "component": "bridge",
                             "component_version": __version__, "build_id": "bad"}
-    with pytest.raises(RuntimeUnavailable):
-        Descriptor.parse(malformed, expected_runtime="pi")
+    degraded = Descriptor.parse(malformed, expected_runtime="pi")
+    assert degraded.release is None
+    assert degraded.release_status == "invalid"
+    # Core/protocol gates still hold: descriptor stays usable for runs.
+    assert degraded.supports("models")
     unsupported = _legacy_descriptor_payload()
     unsupported["release"] = {"contract": 99, "product": "workspace-bridge",
                               "product_version": __version__, "component": "bridge",
                               "component_version": __version__,
                               "build_id": "sha256:" + "b" * 64}
-    with pytest.raises(RuntimeUnsupported):
-        Descriptor.parse(unsupported, expected_runtime="pi")
+    future = Descriptor.parse(unsupported, expected_runtime="pi")
+    assert future.release is None
+    assert future.release_status == "unsupported"
+    assert future.supports("models")
 
 
 def test_node_status_and_codex_descriptor_expose_release():
@@ -144,12 +155,12 @@ def test_node_status_and_codex_descriptor_expose_release():
     native = CodexHostAdapter(tmp / "codex-adapter", projects, rpc=FakeCodexRpc())
     try:
         descriptor = native.descriptor()
-        assert descriptor["runtime"]["adapterVersion"] == "1.0.0"
+        assert descriptor["runtime"]["adapterVersion"] == "0.1.0"
         assert "adapterVersion" in descriptor["runtime"]
         assert "nativeVersion" in descriptor["runtime"]
         release = validate_release(descriptor["release"])
         assert release["component"] == "codex-host-adapter"
-        assert release["component_version"] == "1.0.0"
+        assert release["component_version"] == "0.1.0"
         assert release["product_version"] == __version__
         assert release["build_id"] == bridge_release()["build_id"]
     finally:

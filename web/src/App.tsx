@@ -70,6 +70,8 @@ import {
   displayState,
   jsonText,
   runtimeName,
+  type VersionComponentState,
+  type VersionStatus,
   type DiagnosticCheck,
   type DiagnosticReport,
   type AdapterInfo,
@@ -106,6 +108,36 @@ function shortBuildId(buildId?: string | null): string {
   return "unknown";
 }
 
+function versionStateLabel(state: VersionComponentState["state"]): string {
+  if (state === "current") return "Current";
+  if (state === "update_available") return "Update available · Compatible";
+  if (state === "unsupported_build") return "Unsupported development build";
+  if (state === "target_mismatch") return "Newer than target · No action";
+  if (state === "incompatible") return "Incompatible · Affected routes only";
+  return "Unavailable · Affected routes only";
+}
+
+function versionStateDetail(entry: VersionComponentState): string {
+  const current = entry.current_product_version || "unknown";
+  const target = entry.target_product_version || "unknown";
+  if (entry.state === "current")
+    return `Running ${current}; matches target ${target}. No action needed.`;
+  if (entry.state === "update_available")
+    return `Running ${current}; target ${target}. Compatible — existing routes stay runnable. Update manually on the host when convenient.`;
+  if (entry.state === "unsupported_build") {
+    if (entry.reason === "release-invalid")
+      return `Unsupported development build with an invalid release identity; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
+    if (entry.reason === "release-unsupported")
+      return `Unsupported development build with an unsupported release contract; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
+    return `Unsupported development build without release identity; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
+  }
+  if (entry.state === "target_mismatch")
+    return `Running ${current} is newer than target ${target}. No downgrade is offered; compatible routes stay runnable.`;
+  if (entry.state === "incompatible")
+    return `Incompatible with the Bridge protocol. Only routes using this component are affected; other routes stay runnable.`;
+  return `Unavailable or disabled. Only routes using this component are affected; other routes stay runnable.`;
+}
+
 type Section =
   | "overview"
   | "nodes"
@@ -113,6 +145,7 @@ type Section =
   | "adapters"
   | "handoffs"
   | "runs"
+  | "versions"
   | "audit";
 type ConfirmState = {
   title: string;
@@ -164,6 +197,13 @@ const sections: Array<{
     title: "Runs",
     icon: Play,
     description: "Agent progress and live requests",
+  },
+  {
+    id: "versions",
+    title: "System / Versions",
+    icon: RefreshCw,
+    description:
+      "Component versions and compatibility; updates are manual and local",
   },
   {
     id: "audit",
@@ -1336,6 +1376,8 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [versions, setVersions] = useState<VersionStatus | null>(null);
+  const [versionsError, setVersionsError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -1431,11 +1473,25 @@ export default function App() {
             );
           },
         );
+        const versionsResult = api<VersionStatus>("/api/system/versions").then(
+          (value) => {
+            setVersions(value);
+            setVersionsError(null);
+          },
+          (error: unknown) => {
+            setVersionsError(
+              error instanceof Error
+                ? error.message
+                : "Versions status could not be refreshed.",
+            );
+          },
+        );
         const [workspaceData, historyData, currentStatus] = await Promise.all([
           api<{ workspaces: Workspace[] }>("/api/workspaces"),
           api<{ events: Event[] }>("/api/events"),
           api<Status>("/api/status"),
           diagnosticsResult,
+          versionsResult,
         ]);
         setWorkspaces(workspaceData.workspaces || []);
         setEvents(historyData.events || []);
@@ -2220,6 +2276,20 @@ export default function App() {
                       status?.version ||
                       "unknown"}{" "}
                     · {shortBuildId(status?.release?.build_id)}
+                    {versions?.target?.product_version && (
+                      <>
+                        {" "}
+                        · target {versions.target.product_version}{" "}
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="inline-action"
+                          onClick={() => navigate("versions")}
+                        >
+                          Open System / Versions
+                        </Button>
+                      </>
+                    )}
                   </p>
                   <p
                     title={
@@ -3066,6 +3136,168 @@ export default function App() {
                   </Button>
                 </div>
               </div>
+            </div>
+          )}
+          {section === "versions" && (
+            <div className="surface-panel updates-page">
+              <SectionHeading
+                title="System / Versions"
+                description="Component versions and compatibility. Informational only; updates are manual local operations."
+                action={
+                  versions?.target?.product_version ? (
+                    <StateBadge
+                      value={`Target Bridge ${versions.target.product_version}`}
+                    />
+                  ) : undefined
+                }
+              />
+              {versionsError ? (
+                <div className="diagnostic-unavailable" role="status">
+                  <strong>Versions status is unavailable.</strong>
+                  <p>{versionsError}</p>
+                </div>
+              ) : !versions ? (
+                <p>Loading versions status…</p>
+              ) : versions.status === "failed" ? (
+                <div className="diagnostic-unavailable" role="status">
+                  <strong>Versions status is unavailable.</strong>
+                  <p>
+                    {versions.error?.summary ||
+                      "Topology could not be observed. Existing routes stay usable where their Node and adapter remain reachable."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p>
+                    Target Bridge version{" "}
+                    <strong>
+                      {versions.target.product_version || "unknown"}
+                    </strong>{" "}
+                    {versions.target.build_id && (
+                      <span title={versions.target.build_id}>
+                        · {shortBuildId(versions.target.build_id)}
+                      </span>
+                    )}{" "}
+                    — Bridge and Manager update first; compatible Nodes and
+                    adapters may lag until a convenient maintenance window.
+                    Release skew is informational and never blocks an otherwise
+                    protocol-compatible route.
+                  </p>
+                  <p className="path-text">
+                    This view never installs, restarts, or rolls back anything.
+                    Python components (Bridge, Node, Codex adapter) update
+                    locally on the host with `uv tool upgrade workspace-bridge`,
+                    followed by an explicit restart of the affected service. The
+                    Pi adapter (`workspace-bridge-pi-host-adapter`) is a local
+                    npm-managed component updated with npm on its host.
+                  </p>
+                  {[versions.bridge, versions.manager]
+                    .filter(Boolean)
+                    .map((entry) => (
+                      <div key={`${entry!.component}:${entry!.instance}`}>
+                        <h3>
+                          {entry!.component === "bridge" ? "Bridge" : "Manager"}{" "}
+                          <StateBadge value={versionStateLabel(entry!.state)} />
+                        </h3>
+                        <p>{versionStateDetail(entry!)}</p>
+                        <p className="path-text">
+                          Current {entry!.current_product_version || "unknown"}{" "}
+                          · {shortBuildId(entry!.current_build_id)} · target{" "}
+                          {entry!.target_product_version || "unknown"} ·{" "}
+                          {shortBuildId(entry!.target_build_id)}
+                        </p>
+                      </div>
+                    ))}
+                  <h3>Nodes</h3>
+                  {(versions.nodes || []).length ? (
+                    (versions.nodes || []).map((entry) => {
+                      return (
+                        <div key={entry.instance}>
+                          <h4>
+                            {entry.instance}{" "}
+                            <StateBadge
+                              value={versionStateLabel(entry.state)}
+                            />
+                          </h4>
+                          <p>{versionStateDetail(entry)}</p>
+                          <p className="path-text">
+                            Source: PyPI package `workspace-bridge` (uv tool)
+                          </p>
+                          {entry.state === "update_available" ? (
+                            <p>
+                              Update available · Compatible — update manually on
+                              the host: `uv tool upgrade workspace-bridge`, then
+                              restart the service.
+                            </p>
+                          ) : entry.state === "unsupported_build" ? (
+                            <p>
+                              Unsupported development build / reinstall
+                              manually.
+                            </p>
+                          ) : null}
+                          <p className="path-text">
+                            Current {entry.current_product_version || "unknown"}{" "}
+                            · {shortBuildId(entry.current_build_id)} · target{" "}
+                            {entry.target_product_version || "unknown"} ·{" "}
+                            {shortBuildId(entry.target_build_id)}
+                          </p>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <p>No Nodes configured.</p>
+                  )}
+                  <h3>Adapters</h3>
+                  {(versions.adapters || []).length ? (
+                    (versions.adapters || []).map((entry) => {
+                      return (
+                        <div key={entry.instance}>
+                          <h4>
+                            {entry.instance}
+                            {entry.runtime_type
+                              ? ` · ${runtimeName(entry.runtime_type)}`
+                              : ""}{" "}
+                            <StateBadge
+                              value={versionStateLabel(entry.state)}
+                            />
+                          </h4>
+                          <p>{versionStateDetail(entry)}</p>
+                          <p className="path-text">
+                            Source:{" "}
+                            {entry.runtime_type === "pi"
+                              ? "npm package `workspace-bridge-pi-host-adapter` (local npm operation)"
+                              : "PyPI package `workspace-bridge` (uv tool)"}
+                          </p>
+                          {entry.state === "update_available" ? (
+                            <p>
+                              Update available · Compatible — update manually on
+                              the host.
+                            </p>
+                          ) : entry.state === "unsupported_build" ? (
+                            <p>
+                              Unsupported development build / reinstall
+                              manually.
+                            </p>
+                          ) : null}
+                          <p className="path-text">
+                            Current {entry.current_product_version || "unknown"}{" "}
+                            · {shortBuildId(entry.current_build_id)} · target{" "}
+                            {entry.target_product_version || "unknown"}
+                            {entry.target_precision ===
+                            "product-version-only" ? (
+                              " · build: product-version-only"
+                            ) : (
+                              <> · {shortBuildId(entry.target_build_id)}</>
+                            )}
+                          </p>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <p>No adapters configured.</p>
+                  )}
+                </>
+              )}
             </div>
           )}
           {section === "audit" && (

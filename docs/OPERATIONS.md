@@ -98,9 +98,9 @@ Git state, paths, timestamps, hostnames, tokens, mutable instance IDs, or
 environment-only values, and no paths or file inventories are exposed.
 
 Product vs component versions stay distinct: the product version is the
-Workspace Bridge release (`0.8.4`); the component version is the component's
-own version (Bridge/Node `0.8.4`, Codex `1.0.0`, Pi package `0.4.0`, Manager
-`0.8.4`). Adapter/native semantic versions (`adapterVersion`,
+Workspace Bridge release (`0.1.0`); the component version is the component's
+own version (Bridge/Node `0.1.0`, Codex `0.1.0`, Pi package `0.1.0`, Manager
+`0.1.0`). Adapter/native semantic versions (`adapterVersion`,
 `nativeVersion`, protocol/features, Node/adapter revisions) remain separate
 fields and are never overloaded by release identity.
 
@@ -108,8 +108,13 @@ Bridge `/api/status` returns both `release` (Bridge core) and
 `manager_release` (validated `static/dist/release.json`, or `null` when
 missing/invalid rather than a fabricated match). Node `/v1/status` returns
 `release` with component `node`; Codex and Pi Runtime Protocol descriptors
-carry an additive optional `release` (legacy descriptors without it stay
-protocol-compatible; malformed present metadata fails descriptor validation).
+carry an additive optional `release`. Descriptors without it stay
+protocol-usable at the generic protocol layer (first-party release support
+still begins at 0.1.0). A present malformed or unsupported `release` object is
+observed as degraded update metadata (`invalid`/`unsupported`) while the
+descriptor stays usable for normal runtime operations; it never makes an
+otherwise valid Runtime Protocol v1 descriptor unavailable. Protocol-major,
+core-feature, and runtime-identity validation stay strict.
 
 The Manager compares its full compile-time Manager identity with
 `/api/status.manager_release` (`contract`, `product`, `product_version`,
@@ -128,16 +133,117 @@ product-version match, and exact Python-core build-ID match (Bridge+Node use
 the same Python core); live adapter checks cover identity present/valid and
 product-version match, plus Python-core build-ID match for Codex only (Pi uses
 an independent artifact build ID and is never compared to the Python core).
-Missing identity from an otherwise protocol-compatible Node/adapter is
-`warning` (staged rollout); product/build skew is `warning`; an explicitly
-incompatible release contract is `action_required`; offline/unobserved remote
-identity is `unknown`. Release warnings never enter `RunnableRoute.blockers`;
+Missing/invalid/unsupported first-party identity from an otherwise
+protocol-compatible Node/adapter is `warning` (unsupported development
+build; 0.1.0 is the first supported baseline); product/build skew
+is `warning`; offline/unobserved remote identity is `unknown`. Release warnings never enter `RunnableRoute.blockers`;
 Runtime Protocol compatibility, security, model, and workspace readiness
 remain the execution authority.
 
 This is source/package identity, not a container image digest or
 code-signing provenance; image/artifact provenance belongs to later
-release/deployment work.
+release work.
+
+## Release target manifest and 0.1.0 reset
+
+M4.2A resets every active Workspace Bridge-owned release/component/package
+version to exactly `0.1.0` (Python product/package, Bridge/Node components,
+Codex component/descriptor, Pi package/`ADAPTER_VERSION`/
+`workspaceBridgeRelease` plus lockfiles, Manager/web package plus lockfiles,
+Docker image tags/install pin, README/docs display versions, served
+`release.json`). Compatibility/schema/protocol counters and upstream
+dependencies are unchanged: Runtime Protocol major/minor, release contract 1,
+DB/config/state schemas, API versions, Pi native 0.87.0, Codex native version,
+tunnel-client/dependency versions. Old `0.x` CHANGELOG headings are pre-reset
+development history and are preserved as-is; the new top `v0.1.0` entry
+explains the reset.
+
+A deterministic release target manifest pins exact M4.1 release identities
+for all five deployed components (`bridge`, `manager`, `node`,
+`codex-host-adapter`, `pi-host-adapter`) with `schema_version: 1`, product
+`workspace-bridge`, `product_version`, and a content-addressed
+`manifest_id: sha256:<64 hex>` over canonical content excluding the ID
+itself. Every target `product_version` must equal the manifest
+`product_version`; Bridge/Node/Codex Python-core build IDs must match each
+other (Pi/Manager use independent artifact build IDs). Generate it with:
+
+```sh
+uv run python scripts/build_release_manifest.py [--output manifest.json]
+```
+
+The helper uses fixed, bounded local `node` subprocesses to call the existing
+Manager (`web/manager-release.mjs`) and Pi (`runtime/pi-host-adapter/release.mjs`)
+release helpers; it accepts no arbitrary commands and emits no filesystem
+paths, hosts, tokens, or timestamps. It fails clearly when Node or release
+metadata is unavailable or invalid.
+
+## Deterministic release bundle (M4.2C1)
+
+`workspace-bridge release build --output <new-dir> [--json]` is the
+deterministic release-artifact boundary used by release CI.
+It builds a content-addressed bundle from the current checkout, proves every
+artifact's embedded release identity matches a freshly generated target manifest,
+and exposes it through a typed local CLI. It never installs, restarts, deploys,
+contacts live Nodes/adapters, requires Bridge state or admin credentials, creates
+Docker images, touches launchctl, or mutates service state. Release verification
+consumes a validated artifact bundle rather than the live checkout.
+
+Why a bundle, not the live checkout: the checkout is mutable (edits, untracked
+files, timestamps, host paths) while release verification must be reproducible. The bundle pins exact deployable bytes (wheel SHA-256/size, Pi
+archive SHA-256/size) to exact M4.1 release identities in a fresh target
+manifest, with a content-addressed `bundle_id`/`receipt_id` over canonical safe
+metadata. `validate_release_bundle(path)` recomputes hashes, `bundle_id`, strict
+manifest validity, component coverage, and embedded identities; corrupt/tampered
+bundles fail before any future mutation. This closes the "built from what?"
+gap: the bundle proves exactly which bytes a release contains.
+
+Manual updates vs release evidence: routine component updates do NOT transfer
+C1 bundles or Pi runtime archives. Host owners install immutable published
+versions locally — Node and Codex from PyPI package
+`workspace-bridge==<product_version>` via `uv`, Pi from npm package
+`workspace-bridge-pi-host-adapter@<product_version>` via `npm`. C1/C1.1
+artifacts remain release verification/audit and optional
+offline/disaster-recovery material, not update transport.
+
+Source/package identity vs deployable-byte identity: the current Python release
+`build_id` is source/package identity — deterministic over production Python and
+embedded-skill inputs only (it excludes Manager dist, bytecode, and runtime
+noise) and identical for Bridge, Node, and Codex on the same source. The bundle
+artifact `sha256` is deployable-byte identity — deterministic over the exact
+normalized wheel/archive bytes (sorted entries, fixed modes/timestamps,
+repacked wheel, `tar.gz` with `mtime=0`). A source-only change moves `build_id`
+without changing Manager bytes; a build-metadata normalization moves artifact
+bytes without changing `build_id`. Both are recorded: `bundle.json` lists
+component `build_id` values (validated against the target) alongside artifact
+`sha256`/`size` values (validated against bytes on disk).
+
+Layout is fixed and bundle-relative: `<output>/target-manifest.json`,
+`<output>/artifacts/python-wheel.whl`, `<output>/artifacts/pi-host-adapter.tar.gz`,
+`<output>/bundle.json`. `bundle.json` (schema v1) carries `product`,
+`product_version`, exact `manifest_id`, deterministic artifact entries (logical
+name, `sha256`, `size`, sorted covered components, validated release identities),
+and content-addressed `bundle_id`/`receipt_id` (SHA-256 over canonical metadata
+excluding itself). No timestamps, absolute paths, hostnames, tokens, environment
+values, Git state, or command strings appear in public metadata. The output
+directory must be new/empty (non-symlink); existing complete bundles are never
+overwritten; temporary work is private and cleaned on failure.
+
+Build order is fixed: Manager `npm run build` from `web/` first (so packaged
+`workspace_bridge/static/dist/release.json` is current), then the target manifest
+is regenerated AFTER the build to bind final source/generated state, then the
+Python wheel (`uv build --wheel`, deterministically repacked with sorted entries
+and fixed ZIP metadata) and the Pi archive (exactly the `release.mjs` production
+inventory, deterministic `tar.gz` order/modes/`mtime=0`) are built and
+independently validated. Wheel validation unpacks to an isolated temp dir and
+recomputes the Python-core `build_id` with the package's own enumeration logic
+plus the embedded Manager `release.json`, requiring exact equality to target
+bridge, node, codex-host-adapter, AND manager identities. Pi validation extracts
+to temp and runs the trusted `release.mjs` helper against the extracted data
+(never importing untrusted code), requiring exact equality to target
+pi-host-adapter identity and exact inventory match. All subprocesses use fixed
+typed argv (`uv`, `npm`, `node`) with no `shell=True` and no caller-supplied
+command text; archive extraction rejects traversal/symlinks. `deploy
+validate --bundle <dir> [--json]` re-runs the same pure validation.
 
 Diagnostics do not prove account authorization, model tool behavior, test
 execution, or ChatGPT's handling of a response. `scripts/smoke_mcp.py --url
@@ -148,35 +254,222 @@ argument. Run `tunnel-client doctor` for the tunnel itself, then validate
 discovery and source-write denial and allowed handoff-write behavior in a real
 ChatGPT conversation with a nonsensitive sample project.
 
+## Trusted distribution: CI and GitHub releases (M4.2C1.1)
+
+Registry publication is distribution only; accepted bundle/runtime artifact
+hashes remain the deployment truth. CI never deploys to live Bridge/Node/
+adapters. The private repository is `sheldonxxxx/workspace-bridge`.
+
+Operator flow: update versions (`pyproject.toml`, `workspace_bridge/__init__.py`,
+Pi `package.json` `version` + `workspaceBridgeRelease`, web `package.json` as
+applicable) so all equal `X.Y.Z`, merge to `main`, then create and publish a
+GitHub Release with tag exactly `vX.Y.Z`. Publishing happens only on
+`release: published`; branch pushes and pull requests never publish.
+`release.yml` is the ONLY registry publishing workflow. It first validates the
+tag is exactly `v<project-version>` and that pyproject, Pi package version, and
+Pi `workspaceBridgeRelease` all match before any publish job runs.
+
+CI baseline (`.github/workflows/ci.yml`, `contents: read`, no OIDC/write):
+Python `3.11`/`3.13` on Ubuntu x64, `3.13` on Ubuntu arm64 (`ubuntu-24.04-arm`,
+supported for private repos) and macOS arm64 (`macos-14`), locked installs
+(`uv sync --locked --extra test`, `npm ci`); Manager build/unit/lint/format on
+Linux x64; Pi `npm ci --omit=dev` + `npm test` on Linux x64/arm64 and macOS
+arm64; Docker Bridge natively on `linux/amd64` (`ubuntu-24.04`) + `linux/arm64`
+(`ubuntu-24.04-arm`) with image-architecture inspection and bounded container
+release-identity smoke. No Playwright browsers in baseline. Current majors:
+`checkout@v7`, `setup-node@v7`, `setup-uv@v10`, `upload-artifact@v7`,
+`download-artifact@v8`.
+
+Python distribution: `release.yml` runs the accepted C1 build on Linux x64
+(`release build` + `release validate`), uploads the exact validated source
+bundle as an Actions artifact, then `prepare-pypi-dist` (no OIDC) revalidates
+the bundle, verifies wheel SHA-256/size against `bundle.json`, stages the exact
+wheel bytes under the standard distribution filename (bytes unchanged), and
+uploads only `pypi-dist`. The minimal `pypi` environment job (`id-token: write`,
+`contents: read`, needs `release-ready` + `prepare-pypi-dist`) contains only an
+artifact download plus `pypa/gh-action-pypi-publish` (no checkout, no `uv sync`,
+no project code). No `PYPI_TOKEN`, no rebuild. A `release-ready` barrier
+(`contents: read`, no OIDC/write) needs validate + source + all Pi runtimes +
+npm-pack + both Docker arches + prepared PyPI dist; no publish or assets start
+before it succeeds.
+
+Pi npm package (`runtime/pi-host-adapter`): publishable (no `private:true`),
+`repository` exactly `https://github.com/sheldonxxxx/workspace-bridge` with
+`directory: runtime/pi-host-adapter`, `publishConfig.access: public`
+(`provenance: false` by default because private repos cannot satisfy
+provenance), and a strict `files` allowlist of the 16 top-level production
+`.mjs` files (plus auto-included `package.json`; `npm pack` proves no `test/`./
+`launchd/`/`node_modules`/secrets). No `bin` entry. Release CI always
+builds/tests/packs (`npm ci`, `npm test`, `npm pack` → single exact `.tgz`
+uploaded as `npm-package` with no OIDC), but the OIDC publish job (environment
+`npm`, `contents: read` + `id-token: write`, needs `release-ready` + `npm-pack`)
+has no checkout/build/test/pack, disables package-manager caching, keeps
+`setup-node` `registry-url` for Trusted Publishing, verifies `npm >=11.5.1`
+with a bounded version check (fails instead of installing/upgrading npm), and
+publishes the exact `.tgz` with no rebuild: staged by default
+(`npm stage publish <tgz> --access public`, deferring 2FA), direct only when
+`NPM_PUBLISH_MODE == 'direct'` (`npm publish <tgz> --access public
+--provenance=false`). Gated by `NPM_TRUSTED_PUBLISHING_ENABLED == 'true'`.
+Never requires `NPM_TOKEN`.
+
+Pi runtime artifacts: C1 `pi-host-adapter.tar.gz` stays the platform-independent
+source artifact. Every `build-pi-runtime` leg downloads the source bundle,
+validates it with `release validate` BEFORE `tar -xzf`, and only then
+extracts/materializes. Release CI derives self-contained per-platform archives
+(`linux-x64`, `linux-arm64`, `darwin-arm64`): copy/extract the accepted Pi
+production source into a private staging dir, run `npm ci --omit=dev` from the
+committed lockfile, run a minimal `piRelease` smoke, then pack production
+source + materialized `node_modules` deterministically (sorted walk, `mtime=0`,
+`uid/gid=0`, dirs `0755`, files `0755` iff executable else `0644`, relative
+in-root symlinks only). Each sidecar binds C1 source Pi SHA-256, Pi release
+identity, `package-lock` SHA-256, platform/arch, Node major, runtime SHA/size,
+and a content-addressed runtime-artifact ID. Hashes differ across platforms by
+design (e.g. `esbuild` binaries). Validation re-hashes, safely inspects/
+extracts, checks top-level allowlist (`*.mjs`, `package.json`,
+`package-lock.json`, `node_modules`), rejects absolute/out-of-root symlinks,
+devices/FIFOs/sockets/traversal, and verifies extracted Pi identity + lock SHA.
+
+Release Docker: `build-docker` natively on `linux/amd64` (`ubuntu-24.04`) +
+`linux/arm64` (`ubuntu-24.04-arm`), needs validate + source bundle, validates
+the exact source bundle before build, builds the same Dockerfile, requires
+Docker-reported architecture to equal the matrix arch, and runs the built
+container requiring embedded Bridge + Manager identities to equal the C1 target
+manifest. No GHCR push; build/identity validation only, but a required gate.
+
+Release assets: after `release-ready` plus all producers validate, the
+`release-assets` job (the ONLY job with `contents: write`, no OIDC) uploads
+persistent versioned assets to the ALREADY-published GitHub Release via
+`gh release upload <tag> --clobber` with short-lived `GITHUB_TOKEN`: source
+`bundle.json`, target manifest, Python wheel, Pi source artifact, plus three
+runtime `.tar.gz` + `.json` sidecars (names include version + platform/arch).
+Docker success is a gate; no image tarballs are uploaded and no GHCR push
+occurs. It never creates a second release or moves tags.
+
+## Release/version compatibility (read-only)
+
+Bridge-first upgrades are an explicit supported state. Bridge and Manager
+may update first; compatible Nodes and adapters may lag indefinitely until
+the operator chooses a maintenance window. Release skew is informational
+update state, not an execution gate.
+
+- Runtime release metadata is decoupled from Runtime Protocol
+  compatibility. Protocol-major, core-feature, and runtime-identity checks
+  stay strict, but a present malformed or unsupported `release` object
+  never makes an otherwise valid descriptor unavailable. It is observed as
+  degraded update metadata while normal operations continue.
+- Node Protocol compatibility is explicit: Bridge treats a Node as healthy
+  only for a bounded `{status: "ok", protocol: 1}` object. Product/build/
+  release skew never affects reachability. A Node protocol mismatch
+  surfaces as `node_protocol_error`/incompatible and makes affected routes
+  unavailable; malformed optional release metadata does not.
+- Optional capabilities gate only the capability that needs them. Absence
+  of `securityRebind`, steering, events, imageInput, or future optional
+  features never disables otherwise supported runs.
+- The running Bridge is the active target: target product version is the
+  Bridge product version, target Python-core build for Node/Codex is the
+  Bridge build ID, Manager target is the Bridge-served Manager identity, Pi
+  target is the Bridge product version with product-version-only precision
+  (no fabricated Pi build ID).
+- `GET /api/system/versions` is read-only and schema-versioned
+  (`schema_version: 1`). It performs bounded live Node/adapter observations
+  only and never refreshes catalogs, mutates DB/state, creates backups,
+  downloads artifacts, or touches locks. Failures are
+  per-component; topology enumeration failure fails the whole response
+  safely. States are `current`, `update_available`,
+  `unsupported_build`, `target_mismatch`, `incompatible`,
+  `unavailable`, each with `execution_compatible`, current/target product
+  versions, current/target build IDs where known, target precision,
+  runtime type/instance ID where relevant, and a bounded reason code.
+  Strict numeric `X.Y.Z` lower-than-target is `update_available`, higher
+  is `target_mismatch` (never an implicit downgrade); non-comparable
+  differences are `target_mismatch`. Same-version Node/Codex build skew is
+  `update_available`. Pi on the same product version is `current` when no
+  exact target build is known. A reachable Node or successfully parsed
+  adapter descriptor with missing/invalid/unsupported first-party release
+  identity is `unsupported_build`: 0.1.0 is the first supported
+  baseline, while ordinary
+  protocol-supported execution remains compatible when protocol proof was
+  obtained. Descriptor-fetch failures are classified only from structured
+  RuntimeUnsupported/RuntimeUnavailable semantics, never from
+  exception-message text. True protocol/core incompatibility is
+  `incompatible` (execution false); unreachable/disabled is `unavailable`.
+- Manager System/Versions shows the target Bridge version prominently and
+  per-component state as routine staged rollout (for example
+  `Update available · Compatible`), never a generic system-error banner.
+  `unsupported_build` explains the component is operational only where
+  protocol-compatible but must be installed onto 0.1.0+ manually;
+  it is not presented as supported update-available rollout.
+  `target_mismatch` offers no downgrade. Only affected
+  routes/features are described as impacted for `incompatible`/`unavailable`.
+  No update/apply action exists; the view is read-only and
+  existing operations stay usable while version states display.
+
 ## Service persistence
 
 On macOS, the native Node is persistent through the per-user LaunchAgent
-`com.workspace-bridge.node`; it is not a Compose service and does not run as a
-root LaunchDaemon. The managed plist is
-`~/Library/LaunchAgents/com.workspace-bridge.node.plist`, Node state defaults to
-`~/.local/state/workspace-bridge-node`, and stdout/stderr stay in its private
-`logs/` directory. The Node and native Pi/Codex adapters therefore run as the
-same user and see the same absolute host workspace paths.
+`com.workspace-bridge.node`; on Linux, through the system unit
+`workspace-bridge-node.service`. Neither is a Compose service. The managed
+macOS plist is `~/Library/LaunchAgents/com.workspace-bridge.node.plist`, Node
+state defaults to `~/.local/state/workspace-bridge-node`, and macOS
+stdout/stderr stay in its private `logs/` directory. The managed Linux unit is
+`/etc/systemd/system/workspace-bridge-node.service` with output in the system
+journal; `User=`/`Group=` keep the Node process non-root as the installing
+user. The Node and native Pi/Codex adapters therefore run as the same user
+and see the same absolute host workspace paths. This is simpler than a
+per-user unit: the system unit starts at boot and survives logout
+automatically with no extra boot step.
 
-Use the host-admin CLI; Manager does not control launchd:
+Use the host-admin CLI without leading sudo; Manager does not control launchd
+or systemd:
 
 ```sh
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service start
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service stop
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service restart
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service start
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service stop
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
 ```
 
 `install` requires initialized state with mode 0700 and private config/token
-files, refuses an unmanaged or modified plist, and uses launchd's user-domain
-`bootstrap`, `print`, and `kickstart`/`bootout` operations. `status` is read-only
-and distinguishes the managed plist, loaded/running/failed state, configured
+files, refuses an unmanaged or modified unit, and is idempotent for exact
+managed content, including a retry-safe partial path when only the
+state-local manifest exists. On macOS it uses launchd's user-domain
+`bootstrap`, `print`, and `kickstart`/`bootout` operations; on Linux the plain
+`service install` command runs unprivileged and the backend uses only fixed
+`sudo` operations for privileged mutation (private temp plus
+`sudo install -o root -g root -m 0644`, `sudo systemctl daemon-reload`, and
+`sudo systemctl enable --now` for install; `sudo systemctl start/stop/restart`
+and `sudo systemctl disable --now` for lifecycle) with no shell and no
+arbitrary sudo argv. Run the command as the Node owner and authorize the
+narrow sudo prompts. `status` is
+read-only and unprivileged (fixed `systemctl show ... --no-pager`, no sudo)
+and distinguishes the managed unit, enabled/running/failed state, configured
 host/port, bounded authenticated Node health, and the availability of each
 configured root by a bounded label/count summary. A reachable Node with an
-unavailable root is transport-healthy but root-degraded; verify root availability
-before testing a Manager or Bridge workspace.
+unavailable root is transport-healthy but root-degraded; verify root
+availability before testing a Manager or Bridge workspace. Linux `status`
+never exposes the Node token, unit ExecStart path, sudo command, HOME paths,
+raw environment, journal text, or raw systemctl output. Inspect the journal
+manually with `journalctl -u workspace-bridge-node.service` when needed.
+Linux without systemd/systemctl/sudo privilege fails service management
+clearly (`node_service_systemd_unavailable` or
+`node_service_privilege_unavailable`) while foreground
+`workspace-bridge node --state <state> serve` remains available.
+
+Advanced root mode (intentional only): running the Node as root is supported
+when the operator deliberately chooses it. Initialize and manage a separate
+root-owned Node state as root; the unit then carries `User=root`/`Group=root`
+and the backend executes the same fixed helper argv directly without sudo.
+The executable (including any shim and its target) plus both parent chains
+must be root-owned and non-writable, otherwise install fails closed. Root
+mode grants the Node and its agents full root filesystem authority. Ownership
+is strictly isolated with no takeover: `sudo workspace-bridge ...` (or any
+root invocation) against an existing user-owned Node state is rejected rather
+than converted, a non-root invocation against root-owned state is rejected,
+and switching an installed service between root and non-root requires
+`service uninstall` first (or a fresh state). There are no `--user`/`--group`
+flags and `SUDO_USER` is never consulted.
 
 On macOS, privacy controls can allow the LaunchAgent to start while still
 blocking access to a workspace under locations such as `/Volumes/data2`.
@@ -187,10 +480,15 @@ not mandatory when a narrower permission is sufficient. `status` root
 availability followed by a Manager/Bridge workspace check is the verification
 path; do not automate or assume the prompt.
 
-`uninstall` removes only the exact managed plist and preserves Node state,
-adapters, workspace bindings, allowed roots, tokens, and logs. Unsupported
-operating systems fail explicitly; this milestone does not add systemd or a
-Node container.
+`uninstall` removes only the exact managed unit (macOS plist or Linux system
+unit plus its Node-state manifest) and preserves Node state, adapters,
+workspace bindings, allowed roots, tokens, and logs. On Linux it runs a fixed
+`sudo systemctl disable --now`, removes only
+`/etc/systemd/system/workspace-bridge-node.service` via the fixed sudo
+remove helper, runs daemon-reload, then removes the state-local manifest.
+Unsupported operating systems fail explicitly with
+`node_service_unsupported_platform`; a Node container is not part of this
+milestone.
 
 The safe default Node listen host remains `127.0.0.1` for host-only use. If the
 Bridge is in Docker Desktop, initialize the Node with an explicit non-loopback

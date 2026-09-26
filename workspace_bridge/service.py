@@ -287,13 +287,26 @@ class Service:
         instruction is published as a minimal auditable handoff through the
         normal Node write policy (deterministic derived handoff request ID
         keyed by the adapter_id + run request_id idempotency domain), then
-        started like any prepared handoff.
+        started like any prepared handoff. Ordinary run admission uses
+        only the normal runtime/security gates (route policy, handoff
+        publication, coordinator admission); no deployment or backup
+        locking is involved.
         """
         if bool(job_id) == bool(instruction):
             raise BridgeError("Supply exactly one of job_id or instruction",
                               "invalid_arguments")
         if not isinstance(request_id, str) or not request_id:
             raise BridgeError("A run request_id is required", "invalid_arguments")
+        return self._start_agent_run_body(
+            ws, adapter_id, job_id, request_id, model, parent_run_id,
+            continue_from_run_id, instruction)
+
+    def _start_agent_run_body(self, ws: dict, adapter_id: str, job_id: str | None,
+                              request_id: str, model: str | None,
+                              parent_run_id: str | None,
+                              continue_from_run_id: str | None,
+                              instruction: str | None) -> dict:
+        """Run-admission body (normal runtime/security gates only)."""
         self.require_workspace_route(ws, adapter_id)
         if instruction:
             job_id = self._direct_instruction_handoff(

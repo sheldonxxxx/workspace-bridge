@@ -2,7 +2,7 @@
 //
 // Loaded explicitly for EVERY managed v3 session -- including read-only
 // sessions, so read/grep/find/ls policy, protected patterns, and external
-// rules are enforced in both modes. Since adapter 0.4.0 it loads as an
+// rules are enforced in both modes. Since the AgentSession migration it loads as an
 // inline extension factory built by createTrustedPermissionExtension()
 // with the immutable per-session policy snapshot and canonical session
 // cwd closed over (previously via `-e <this file>` plus a
@@ -70,8 +70,7 @@ function markerTitle(toolCallId) {
   return `${MARKER_PREFIX}${id}`;
 }
 
-// Parameterized factory for in-process AgentSession loading (adapter
-// 0.4.0+). The Bridge adapter loads this package-owned extension as an
+// Parameterized factory for in-process AgentSession loading. The Bridge adapter loads this package-owned extension as an
 // inline extension factory with the immutable per-session policy snapshot
 // and canonical session cwd closed over -- no environment variable, so
 // concurrent sessions with different policies never collide, and the

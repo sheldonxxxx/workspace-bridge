@@ -98,7 +98,7 @@ def main() -> int:
             raise ValueError("A nonempty, single-line token is required")
         client = Client(args.url, token)
         initialized = client.call("initialize", {"protocolVersion": LEGACY, "capabilities": {},
-            "clientInfo": {"name": "workspace-bridge-smoke", "version": "0.8.4"}})
+            "clientInfo": {"name": "workspace-bridge-smoke", "version": "0.1.0"}})
         if initialized.get("protocolVersion") != LEGACY:
             raise ValueError("Legacy version negotiation failed")
         client.call("notifications/initialized", notification=True)

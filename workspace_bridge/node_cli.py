@@ -12,9 +12,7 @@ import sys
 import uvicorn
 
 from .node_api import make_node_api
-from .node_launchd import (LaunchdManager, default_node_state, install_service,
-                           restart_service, service_status, start_service,
-                           stop_service, uninstall_service)
+from .node_launchd import default_node_state as _default_node_state
 from .node_service import NodeService
 from .security import BridgeError, digest, open_absolute_dir
 
@@ -80,6 +78,26 @@ async def serve_node(state: Path, config: dict):
         service.close()
 
 
+def default_node_state() -> Path:
+    return _default_node_state()
+
+
+def select_service_backend(platform_name: str | None = None) -> str:
+    """Return ``launchd`` on macOS, ``systemd`` on Linux, else raise."""
+    import platform as _platform
+
+    name = platform_name if platform_name is not None else _platform.system()
+    if name == "Darwin":
+        return "launchd"
+    if name == "Linux":
+        return "systemd"
+    raise BridgeError(
+        "workspace-bridge node service commands require macOS launchd or "
+        "Linux systemd on this host",
+        "node_service_unsupported_platform",
+    )
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Private workspace-bridge Node data-plane service")
     parser.add_argument("--state", type=Path, default=default_node_state())
@@ -90,14 +108,14 @@ def main(argv: list[str] | None = None):
     init.add_argument("--port", type=int, default=8770)
     sub.add_parser("serve", help="Run the private Node API")
     sub.add_parser("show-token", help="Print the Node token once for Bridge configuration")
-    service = sub.add_parser("service", help="Manage the macOS per-user Node LaunchAgent")
+    service = sub.add_parser("service", help="Manage the Node service (macOS launchd or Linux systemd system service)")
     service_sub = service.add_subparsers(dest="service_command", required=True)
-    service_sub.add_parser("install", help="Install and bootstrap the managed LaunchAgent")
-    service_sub.add_parser("status", help="Show LaunchAgent, listen and Node health status")
-    service_sub.add_parser("start", help="Start the managed LaunchAgent")
-    service_sub.add_parser("stop", help="Stop the managed LaunchAgent")
-    service_sub.add_parser("restart", help="Restart the managed LaunchAgent")
-    service_sub.add_parser("uninstall", help="Remove only the managed LaunchAgent plist")
+    service_sub.add_parser("install", help="Install and start the managed system service")
+    service_sub.add_parser("status", help="Show system service, listen and Node health status")
+    service_sub.add_parser("start", help="Start the managed system service")
+    service_sub.add_parser("stop", help="Stop the managed system service")
+    service_sub.add_parser("restart", help="Restart the managed system service")
+    service_sub.add_parser("uninstall", help="Remove only the managed system unit")
     args = parser.parse_args(argv)
     state = args.state.expanduser().absolute()
     os.umask(0o077)
@@ -105,19 +123,44 @@ def main(argv: list[str] | None = None):
         if args.command == "init":
             config = initialize_node(state, args.allow_root, args.host, args.port)
             print(f"Initialized Node at {state}; API: http://{args.host}:{config['port']}")
-            print("Run workspace-bridge-node serve for foreground use, or on macOS install the persistent LaunchAgent with service install.")
+            print(f"Run workspace-bridge node --state {state} serve for foreground use, or install the persistent service (macOS launchd or Linux systemd system service) with service install.")
             print("Use show-token once to add this Node in Bridge.")
             return
         if args.command == "service":
-            manager = LaunchdManager()
-            actions = {
-                "install": lambda: install_service(state, manager=manager),
-                "status": lambda: service_status(state, manager=manager),
-                "start": lambda: start_service(state, manager=manager),
-                "stop": lambda: stop_service(state, manager=manager),
-                "restart": lambda: restart_service(state, manager=manager),
-                "uninstall": lambda: uninstall_service(state, manager=manager),
-            }
+            backend = select_service_backend()
+            if backend == "launchd":
+                from .node_launchd import (LaunchdManager, install_service,
+                                           restart_service, service_status,
+                                           start_service, stop_service,
+                                           uninstall_service)
+
+                manager = LaunchdManager()
+                actions = {
+                    "install": lambda: install_service(state, manager=manager),
+                    "status": lambda: service_status(state, manager=manager),
+                    "start": lambda: start_service(state, manager=manager),
+                    "stop": lambda: stop_service(state, manager=manager),
+                    "restart": lambda: restart_service(state, manager=manager),
+                    "uninstall": lambda: uninstall_service(state, manager=manager),
+                }
+            else:
+                from .node_systemd import (SystemdManager,
+                                           install_service as systemd_install,
+                                           restart_service as systemd_restart,
+                                           service_status as systemd_status,
+                                           start_service as systemd_start,
+                                           stop_service as systemd_stop,
+                                           uninstall_service as systemd_uninstall)
+
+                manager = SystemdManager()
+                actions = {
+                    "install": lambda: systemd_install(state, manager=manager),
+                    "status": lambda: systemd_status(state, manager=manager),
+                    "start": lambda: systemd_start(state, manager=manager),
+                    "stop": lambda: systemd_stop(state, manager=manager),
+                    "restart": lambda: systemd_restart(state, manager=manager),
+                    "uninstall": lambda: systemd_uninstall(state, manager=manager),
+                }
             result = actions[args.service_command]()
             print(json.dumps(result, indent=2, sort_keys=True))
             return

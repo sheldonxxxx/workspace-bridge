@@ -1,10 +1,36 @@
 {
   "name": "workspace-bridge-pi-host-adapter",
-  "version": "0.4.0",
-  "workspaceBridgeRelease": "0.8.4",
-  "private": true,
+  "version": "0.1.0",
+  "workspaceBridgeRelease": "0.1.0",
   "type": "module",
   "description": "Native macOS host adapter that owns in-process Pi AgentSession instances for Workspace Bridge. Not a Compose service.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sheldonxxxx/workspace-bridge",
+    "directory": "runtime/pi-host-adapter"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "files": [
+    "adapter.mjs",
+    "config.mjs",
+    "executions.mjs",
+    "extensions.mjs",
+    "fingerprint.mjs",
+    "logging.mjs",
+    "login-path.mjs",
+    "main.mjs",
+    "paths.mjs",
+    "policy.mjs",
+    "release.mjs",
+    "sdk-events.mjs",
+    "sdk-transport.mjs",
+    "server.mjs",
+    "trusted-permission-extension.mjs",
+    "wbrp.mjs"
+  ],
   "engines": {
     "node": ">=20"
   },

@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && mkdir -p /state /opt/workspace-bridge \
     && chown 10001:10001 /state
 COPY --link --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels workspace-bridge==0.8.4 \
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels workspace-bridge==0.1.0 \
     && rm -rf /wheels
 WORKDIR /opt/workspace-bridge
 USER 10001:10001

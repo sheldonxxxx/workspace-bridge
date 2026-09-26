@@ -5,11 +5,12 @@ source checkout. No migration or backup-restore is covered here; every state
 store starts empty. Follow the steps in order — each one depends on the
 previous.
 
-Topology (local Mac + Docker):
+Topology (local host + Docker):
 
 ```text
 Docker:       workspace-bridge Bridge + mcp-tunnel sidecar
-macOS host:   workspace-bridge-node LaunchAgent + native Pi/Codex adapters
+Host native:  workspace-bridge-node service + native Pi/Codex adapters
+              (macOS launchd LaunchAgent or Linux systemd system unit)
 ```
 
 References: [Docker](DOCKER.md) for container detail,
@@ -50,20 +51,27 @@ The Node owns workspace files and adapter secrets. Keep it native — never add
 it to Compose — so absolute workspace paths match the adapters.
 
 ```sh
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" init \
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
   --allow-root "<projects-parent>" --host 0.0.0.0 --port 8770
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
 ```
 
 Expected: `service status` reports `healthy` with `available: 1` roots.
+The same plain nested `service install|status|start|stop|restart|uninstall`
+verbs work on macOS (launchd) and Linux (system unit); installation remains
+`uv tool install workspace-bridge`. On Linux, run `service install` without
+leading sudo and inspect the journal manually with
+`journalctl -u workspace-bridge-node.service` when needed. The default is a
+non-root Node; an intentional root mode (root-owned state, root-controlled
+executable) is documented under Service persistence in OPERATIONS.md.
 Loopback-only (`127.0.0.1`) Nodes are not reachable from the Bridge
 container; use `0.0.0.0` with a host firewall review, or
 `http://host.docker.internal:<port>` as the Bridge-side URL (see DOCKER.md).
 Save the Node token:
 
 ```sh
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" show-token
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
 ```
 
 ## 3. Runtime adapters (native, per host)
@@ -186,9 +194,10 @@ report.
 - Bridge state auto-initializes **only** into an empty directory (plus
   `bootstrap.lock`). A half-deleted state dir fails closed — restore or wipe
   fully.
-- Node `service start` refuses an `unmanaged` plist. The
-  `launchagent-manifest.json` in Node state tracks the managed plist by SHA;
-  if state was wiped but the plist kept, restore the manifest (or
+- Node `service start` refuses an `unmanaged` unit. The
+  `launchagent-manifest.json` (macOS) or `systemd-system-manifest.json`
+  (Linux) in Node state tracks the managed unit by SHA;
+  if state was wiped but the unit kept, restore the manifest (or
   `uninstall` + `install`).
 - The adapter-sync helper (`sync_adapters_local.sh`, untracked) requires the
   Bridge up and both LaunchAgent plists present; its final diagnostics check

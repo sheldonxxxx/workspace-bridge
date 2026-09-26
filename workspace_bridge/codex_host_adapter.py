@@ -28,6 +28,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .codex_rpc import CodexRpc, CodexRpcError, sanitize_diagnostic
+from .login_path import runtime_env_with_login_path, safe_summary
 from .security import redact
 
 
@@ -239,14 +240,18 @@ def _extract_codex_last(token_usage: Any) -> dict | None:
     return _normalize_codex_usage(last)
 
 
-def _codex_cli_version(executable: Any) -> str:
-    """Read a fallback version from the same Codex executable as app-server."""
+def _codex_cli_version(executable: Any, env: dict | None = None) -> str:
+    """Read a fallback version from the same Codex executable as app-server.
+
+    Uses the same resolved runtime environment as the app-server child so the
+    version probe discovers the executable the same way the server did.
+    """
     if not isinstance(executable, str) or not executable:
         return ""
     try:
         result = subprocess.run([executable, "--version"], stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=3, check=False)
+                                errors="replace", timeout=3, check=False, env=env)
     except (OSError, subprocess.SubprocessError):
         return ""
     if result.returncode != 0:
@@ -259,7 +264,9 @@ def _codex_cli_version(executable: Any) -> str:
 
 class CodexHostAdapter:
     def __init__(self, state: Path, projects_root: Path, *, rpc: CodexRpc | None = None,
-                 _exit_process: Any | None = None):
+                 _exit_process: Any | None = None,
+                 _login_path_resolver: Any | None = None,
+                 _runtime_env: dict | None | bool = False):
         self.state = state.resolve()
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
@@ -363,9 +370,58 @@ class CodexHostAdapter:
         self._fatal_lock = threading.Lock()
         self._fatal_reported = False
         self._exit_process = _exit_process if _exit_process is not None else os._exit
+        # Resolve the terminal-equivalent executable search path once for the
+        # runtime environment. Only PATH is imported; all other shell output
+        # and environment values are discarded. On failure the inherited
+        # service PATH is kept. `_runtime_env=False` (default) means resolve
+        # now; an explicit dict (or None for inherit) is used directly so
+        # unit tests stay deterministic without spawning a login shell.
+        if _runtime_env is not False:
+            self._runtime_env = dict(_runtime_env) if isinstance(_runtime_env, dict) else None
+            self._login_path_result = {"resolved": False, "path": None,
+                                         "shell": "/bin/sh", "shell_basename": "sh",
+                                         "entry_count": 0, "code": "spawn_error"}
+        elif _login_path_resolver is not None:
+            try:
+                env, result = runtime_env_with_login_path(
+                    None, _resolve=_login_path_resolver)
+            except Exception:
+                env, result = dict(os.environ), {"resolved": False, "path": None,
+                                                  "shell": "/bin/sh", "shell_basename": "sh",
+                                                  "entry_count": 0, "code": "spawn_error"}
+            self._runtime_env = env
+            self._login_path_result = result
+        elif rpc is not None:
+            # Injected RPC (tests): reuse its explicit env when present so the
+            # version probe shares the app-server environment; otherwise the
+            # inherited environment is the safe fallback with no shell spawn.
+            existing = getattr(rpc, "_runtime_env", None)
+            self._runtime_env = dict(existing) if isinstance(existing, dict) else None
+            self._login_path_result = {"resolved": isinstance(existing, dict),
+                                         "path": None, "shell": "/bin/sh",
+                                         "shell_basename": "sh", "entry_count": 0,
+                                         "code": "ok" if isinstance(existing, dict) else "spawn_error"}
+        else:
+            try:
+                env, result = runtime_env_with_login_path()
+            except Exception:
+                env, result = dict(os.environ), {"resolved": False, "path": None,
+                                                  "shell": "/bin/sh", "shell_basename": "sh",
+                                                  "entry_count": 0, "code": "spawn_error"}
+            self._runtime_env = env
+            self._login_path_result = result
+        try:
+            summary = safe_summary(self._login_path_result)
+            _LOG.info("Codex login PATH %s (shell=%s entries=%s code=%s)",
+                      "resolved" if summary.get("resolved") else "not-resolved",
+                      summary.get("shell_basename"), summary.get("entry_count"),
+                      summary.get("code"))
+        except Exception:
+            pass
         self.rpc = rpc or CodexRpc(on_notification=self._notification,
                                    on_request=self._request,
-                                   on_unexpected_exit=self._on_native_engine_lost)
+                                   on_unexpected_exit=self._on_native_engine_lost,
+                                   env=self._runtime_env)
         self._native_cli_version_checked = False
         self._native_cli_version = ""
         if rpc is not None:
@@ -433,14 +489,17 @@ class CodexHostAdapter:
                     command = getattr(process, "args", ())
                     executable = (command[0] if isinstance(command, (list, tuple))
                                   and command else None)
-                    self._native_cli_version = _codex_cli_version(executable)
+                    runtime_env = getattr(self, "_runtime_env", None)
+                    if not isinstance(runtime_env, dict) and runtime_env is not None:
+                        runtime_env = None
+                    self._native_cli_version = _codex_cli_version(executable, runtime_env)
                     self._native_cli_version_checked = True
                 native_version = self._native_cli_version or "unknown"
         native_version = native_version[:80]
-        from .release import codex_release
+        from .release import CODEX_ADAPTER_VERSION, codex_release
         return {"protocol": {"major": 1, "minor": 0},
                 "runtime": {"id": "codex", "displayName": "Codex",
-                            "adapterVersion": "1.0.0", "nativeVersion": native_version,
+                            "adapterVersion": CODEX_ADAPTER_VERSION, "nativeVersion": native_version,
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,

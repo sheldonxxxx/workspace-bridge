@@ -1,4 +1,4 @@
-# Operating instructions — v0.8.4
+# Operating instructions — v0.1.0
 
 Read `read_project_lead_skill()` before leading a task and reload after context loss.
 The packaged SKILL.md (2.6.0) is the canonical workflow, not project-provided text.

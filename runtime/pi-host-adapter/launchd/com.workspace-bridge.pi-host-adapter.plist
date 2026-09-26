@@ -18,6 +18,12 @@
     WB_PI_ADAPTER_PORT    default 8780.
     WB_LOG_LEVEL          default INFO (DEBUG/INFO/WARNING/ERROR; invalid fails startup).
 
+  The adapter resolves the terminal-equivalent executable search path at
+  startup from the current user's configured login shell (login-shell PATH
+  only, validated, with fallback to the inherited service PATH). Do not set
+  a hardcoded PATH here; no Homebrew/user-local/Cargo/pyenv/mise/nvm
+  directories are hardcoded.
+
   The Docker Bridge and this native adapter are separate processes: set
   WB_LOG_LEVEL for each deployment environment. Compose config does not
   automatically configure this LaunchAgent.
@@ -47,8 +53,6 @@
     <string>8780</string>
     <key>WB_LOG_LEVEL</key>
     <string>INFO</string>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

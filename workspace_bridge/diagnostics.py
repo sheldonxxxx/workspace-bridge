@@ -329,16 +329,16 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     "Node release identity is unobserved while unreachable.")
         elif release_error == "missing":
             out.add("release.node_identity", "release", "warning",
-                    "Node release identity is missing; staged rollout.",
-                    remediation="Update the Node to a release-identity build.")
+                    "Node release identity is missing; unsupported development build.",
+                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
         elif release_error == "unsupported":
-            out.add("release.node_identity", "release", "action_required",
-                    "Node release contract is incompatible.",
-                    remediation="Align the Node release contract with the Bridge.")
+            out.add("release.node_identity", "release", "warning",
+                    "Node release contract is unsupported; unsupported development build.",
+                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
         elif release_error is not None:
             out.add("release.node_identity", "release", "warning",
-                    "Node release identity is invalid.",
-                    remediation="Update the Node to a release-identity build.")
+                    "Node release identity is invalid; unsupported development build.",
+                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
         elif observed is not None and _bridge_product is not None and observed.get("product_version") != _bridge_product:
             out.add("release.node_product_skew", "release", "warning",
                     "Node product version differs from the Bridge.",
@@ -444,21 +444,30 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     "Adapter release identity is unobserved while disabled.",
                     adapter_id=aid, runtime_type=runtime_type)
         elif descriptor is None:
-            message = (error or {}).get("message", "") if isinstance(error, dict) else ""
-            if "release contract" in str(message).lower():
-                out.add("release.adapter_identity", "release", "action_required",
-                        "Adapter release contract is incompatible.",
-                        remediation="Align the adapter release contract with the Bridge.",
+            out.add("release.adapter_identity", "release", "unknown",
+                    "Adapter release identity is unobserved while unreachable.",
+                    adapter_id=aid, runtime_type=runtime_type)
+        elif observed is None:
+            # Release metadata is optional for generic protocol execution.
+            # A missing/invalid/unsupported first-party identity means an
+            # unsupported development build, while compatible routes stay
+            # runnable. This never blocks execution.
+            release_status = getattr(descriptor, "release_status", "missing")
+            if release_status == "unsupported":
+                out.add("release.adapter_identity", "release", "warning",
+                        "Adapter release contract is unsupported; unsupported development build. Compatible routes remain usable.",
+                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
+                        adapter_id=aid, runtime_type=runtime_type)
+            elif release_status == "invalid":
+                out.add("release.adapter_identity", "release", "warning",
+                        "Adapter release identity is invalid; unsupported development build. Compatible routes remain usable.",
+                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
                         adapter_id=aid, runtime_type=runtime_type)
             else:
-                out.add("release.adapter_identity", "release", "unknown",
-                        "Adapter release identity is unobserved while unreachable.",
+                out.add("release.adapter_identity", "release", "warning",
+                        "Adapter release identity is missing; unsupported development build.",
+                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
                         adapter_id=aid, runtime_type=runtime_type)
-        elif observed is None:
-            out.add("release.adapter_identity", "release", "warning",
-                    "Adapter release identity is missing; staged rollout.",
-                    remediation="Update the adapter to a release-identity build.",
-                    adapter_id=aid, runtime_type=runtime_type)
         elif _bridge_product is not None and observed.get("product_version") != _bridge_product:
             out.add("release.adapter_product_skew", "release", "warning",
                     "Adapter product version differs from the Bridge.",

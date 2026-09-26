@@ -18,14 +18,14 @@ test("Pi build ID is deterministic and bounded", () => {
 
 test("Pi release carries WB product version without conflating adapter version", () => {
   const meta = readPackageMeta(ROOT);
-  assert.equal(meta.workspaceBridgeRelease, "0.8.4");
-  assert.equal(meta.version, "0.4.0");
+  assert.equal(meta.workspaceBridgeRelease, "0.1.0");
+  assert.equal(meta.version, "0.1.0");
   const release = piRelease(ROOT);
   assert.equal(release.contract, 1);
   assert.equal(release.product, "workspace-bridge");
-  assert.equal(release.product_version, "0.8.4");
+  assert.equal(release.product_version, "0.1.0");
   assert.equal(release.component, "pi-host-adapter");
-  assert.equal(release.component_version, "0.4.0");
+  assert.equal(release.component_version, "0.1.0");
   assert.match(release.build_id, /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(validateRelease(release), release);
   // No paths, hostnames, tokens, or instance IDs in the public identity.
@@ -46,10 +46,10 @@ test("Pi descriptor publishes the release identity additively", () => {
     const protocol = new PiRuntimeProtocol(adapter);
     const descriptor = protocol.descriptor();
     assert.equal(descriptor.runtime.id, "pi");
-    assert.equal(descriptor.runtime.adapterVersion, "1.0.0");
+    assert.equal(descriptor.runtime.adapterVersion, "0.1.0");
     assert.ok(descriptor.release);
     assert.equal(descriptor.release.component, "pi-host-adapter");
-    assert.equal(descriptor.release.product_version, "0.8.4");
+    assert.equal(descriptor.release.product_version, "0.1.0");
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }

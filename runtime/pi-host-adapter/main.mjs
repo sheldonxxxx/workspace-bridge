@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { PiAdapter } from "./adapter.mjs";
 import { checkPiBinary, isAgentDirAllowed, loadConfig } from "./config.mjs";
 import { createLogger, sanitizedErrorCode } from "./logging.mjs";
+import { applyLoginPathResult, resolveLoginPathSync } from "./login-path.mjs";
 import { canonicalizeProjectsDir } from "./paths.mjs";
 import { createPiAdapterServer } from "./server.mjs";
 
@@ -27,10 +28,38 @@ export function createLog(env = process.env) {
   return createLogger({ level });
 }
 
-export function buildMain(env = process.env) {
+export function buildMain(env = process.env, options = {}) {
   const config = loadConfig(env);
   const log = createLogger({ level: config.logLevel });
-  const piCheck = checkPiBinary(config.piBinary);
+  // Resolve the terminal-equivalent executable search path once, before Pi
+  // binary probing, so `pi --version` and every AgentSession bash tool
+  // inherit the same PATH a normal terminal would see. Only PATH is
+  // imported; all other shell output/environment is discarded. On failure
+  // the inherited service PATH is kept. Resolver and target are injectable
+  // so unit tests stay deterministic without spawning a real login shell.
+  const resolveFn = typeof options.resolveLoginPathFn === "function"
+    ? options.resolveLoginPathFn
+    : resolveLoginPathSync;
+  const targetEnv = options.loginPathTargetEnv || process.env;
+  let loginPath = {
+    resolved: false, path: null, shell: "/bin/sh",
+    shellBasename: "sh", entryCount: 0, code: "spawn_error",
+  };
+  try {
+    const result = resolveFn();
+    if (result && typeof result === "object") loginPath = result;
+  } catch {
+    // Keep the inherited service PATH on resolver failure.
+  }
+  try {
+    applyLoginPathResult(loginPath, targetEnv);
+  } catch {
+    // Applying must never break startup; fallback is the inherited PATH.
+  }
+  const checkFn = typeof options.checkPiBinaryFn === "function"
+    ? options.checkPiBinaryFn
+    : checkPiBinary;
+  const piCheck = checkFn(config.piBinary);
   let projectsRoot = null;
   let projectsError = null;
   try {
@@ -40,7 +69,7 @@ export function buildMain(env = process.env) {
   }
   const agentDirOk = isAgentDirAllowed(config.agentDir);
   const usable = piCheck.usable && projectsRoot !== null && agentDirOk;
-  return { config, piCheck, projectsRoot, projectsError, agentDirOk, usable, log };
+  return { config, piCheck, projectsRoot, projectsError, agentDirOk, usable, log, loginPath };
 }
 
 // Fatal HTTP server/listen error: one sanitized structured ERROR record,
@@ -108,8 +137,9 @@ if (isEntry) {
   const log = built.log;
   attachServerErrorHandler(server, log);
   server.listen(config.port, config.host, () => {
-    // Structured startup record: booleans/version only, never tokens,
-    // roots, or full paths.
+    // Structured startup record: booleans/version/login-path summary only,
+    // never tokens, roots, full paths, or the actual PATH value.
+    const loginSummary = built.loginPath || {};
     log("INFO", "pi-adapter", "pi_adapter_ready", {
       adapter_version: config.adapterVersion,
       instance,
@@ -119,6 +149,12 @@ if (isEntry) {
       projects_configured: built.projectsRoot !== null,
       agent_dir_explicit: config.agentDirExplicit,
       agent_dir_allowed: built.agentDirOk,
+      login_path_resolved: Boolean(loginSummary.resolved),
+      login_shell: String(loginSummary.shellBasename || "sh").slice(0, 64),
+      login_path_entries: Number.isFinite(Number(loginSummary.entryCount))
+        ? Math.max(0, Math.min(Math.trunc(Number(loginSummary.entryCount)), 257))
+        : 0,
+      login_path_code: String(loginSummary.code || "spawn_error").slice(0, 32),
     });
     if (built.projectsError) {
       log("WARNING", "pi-adapter", "projects_parent_unavailable", {

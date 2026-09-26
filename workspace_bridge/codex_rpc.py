@@ -54,11 +54,16 @@ class CodexRpc:
     def __init__(self, *, command: tuple[str, ...] = ("codex", "app-server", "--stdio"),
                  on_notification: Callable[[str, dict], None] | None = None,
                  on_request: Callable[[int | str, str, dict], None] | None = None,
-                 on_unexpected_exit: Callable[[], None] | None = None):
+                 on_unexpected_exit: Callable[[], None] | None = None,
+                 env: dict | None = None):
+        # ``env`` is the explicit runtime environment for the app-server
+        # child (resolved once by the host adapter to the terminal-equivalent
+        # PATH). ``None`` inherits the service environment (safe fallback).
+        self._runtime_env = dict(env) if env is not None else None
         self._process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            bufsize=1)
+            bufsize=1, env=self._runtime_env)
         self._write_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._stderr_lock = threading.Lock()
@@ -82,8 +87,9 @@ class CodexRpc:
         self._reader = threading.Thread(target=self._read_loop, name="codex-app-server-rpc",
                                         daemon=True)
         self._reader.start()
+        from .release import CODEX_ADAPTER_VERSION
         self.initialize_result = self.call("initialize", {
-            "clientInfo": {"name": "workspace-bridge-codex-adapter", "version": "1.0.0"},
+            "clientInfo": {"name": "workspace-bridge-codex-adapter", "version": CODEX_ADAPTER_VERSION},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self.notify("initialized")

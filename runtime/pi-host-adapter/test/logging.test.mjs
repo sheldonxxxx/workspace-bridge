@@ -53,7 +53,7 @@ test("log level parsing supports four levels with INFO default", () => {
 test("DEBUG suppressed at INFO but emitted at DEBUG; WARNING/ERROR retained", () => {
   const atInfo = capturingLogger("INFO");
   atInfo.log("DEBUG", "pi-adapter", "sdk_tool_event_trace", { stage: "adapter_received" });
-  atInfo.log("INFO", "pi-adapter", "pi_adapter_ready", { adapter_version: "0.4.0" });
+  atInfo.log("INFO", "pi-adapter", "pi_adapter_ready", { adapter_version: "0.1.0" });
   atInfo.log("WARNING", "pi-adapter", "request_rejected", { code: "rejected" });
   atInfo.log("ERROR", "pi-adapter", "agent_dir_rejected", {});
   assert.equal(atInfo.stdout.length, 1);
@@ -113,7 +113,7 @@ test("long strings are bounded and logging failures never throw", () => {
     writeStdout: () => { throw new Error("stdout blew up"); },
     writeStderr: () => { throw new Error("stderr blew up"); },
   });
-  log("INFO", "pi-adapter", "pi_adapter_ready", { adapter_version: "0.4.0" });
+  log("INFO", "pi-adapter", "pi_adapter_ready", { adapter_version: "0.1.0" });
   log("ERROR", "pi-adapter", "agent_dir_rejected", {});
 });
 

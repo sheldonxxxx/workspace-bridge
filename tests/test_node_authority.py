@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -8,6 +9,7 @@ from workspace_bridge.node_service import NodeService
 from workspace_bridge.security import BridgeError, digest
 
 from conftest import create_test_adapter, start_test_node
+
 
 
 def test_read_only_node_service_does_not_create_or_mutate_state(tmp_path):
@@ -203,3 +205,25 @@ def test_runtime_rebind_conversation_validates_and_forwards(tmp_path, monkeypatc
                                                     "revision": "rev-1"}}
     finally:
         node.close()
+def test_status_carries_no_update_or_installer_surface(tmp_path):
+    """Node status is health/identity only: no updater affordance."""
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    node = start_test_node(tmp_path / "node-state", parent)
+    try:
+        status = node["service"].status()
+        assert status["status"] == "ok"
+        assert status["protocol"] == 1
+        assert "installers" not in status
+        assert "deployment-v1" not in status["capabilities"]
+        assert set(status["host"]) == {"platform", "arch"}
+        assert "node_major" not in status["host"]
+        live = node["transport"].get("/v1/status",
+            headers={"X-Node-Token": node["token"]}).json()
+        assert live["status"] == "ok"
+        assert "installers" not in live
+        assert "deployment-v1" not in live["capabilities"]
+        text = json.dumps(live)
+        assert "token" not in text.lower()
+    finally:
+        node["stop"]()

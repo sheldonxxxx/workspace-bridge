@@ -1,4 +1,4 @@
-# Docker Compose — v0.8.4
+# Docker Compose — v0.1.0
 
 Runs the **Workspace Bridge** control plane with an internal tunnel sidecar on the
 shared Compose network. The authoritative `workspace-bridge-node` service is a
@@ -177,31 +177,36 @@ tunnel using the existing setup guide. They are not image build arguments or
 Compose environment variables. The container's admin token is available with the
 explicit `exec ... show-admin-token` command, never printed in startup logs.
 
-## Native Node on macOS
+## Native Node (macOS launchd / Linux systemd system service)
 
 The local Compose topology has two container services — Bridge and the MCP
-tunnel — plus host-native processes on macOS:
+tunnel — plus host-native processes:
 
 ```text
 Docker:       workspace-bridge Bridge + mcp-tunnel
-macOS host:   workspace-bridge-node LaunchAgent + native Pi/Codex adapters
+Host native:  workspace-bridge-node service + native Pi/Codex adapters
+              (macOS LaunchAgent or Linux system unit)
               |-- identical absolute workspace paths and host-owned allowed_roots
 ```
 
 Do not add the Node to `compose.yaml`: keeping it native preserves the same
 host filesystem/data-plane boundary and absolute paths used by the local
-runtime adapters. Remote Linux/systemd or a Node container is a future/alternate
-deployment, not this local-Mac flow.
+runtime adapters. A Node container is a future/alternate deployment, not this
+local flow. On Linux the same plain nested `service install|status|...` verbs
+manage `/etc/systemd/system/workspace-bridge-node.service` as a system unit
+that starts at boot and survives logout automatically, while `User=`/`Group=`
+keep the Node itself non-root; installation remains
+`uv tool install workspace-bridge`.
 
 For Docker Desktop, initialize the Node with an explicit non-loopback listen
 host, then use the host alias from Bridge:
 
 ```sh
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" init \
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
   --allow-root "/Volumes/data2" --host 0.0.0.0 --port 8770
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" service status
-workspace-bridge-node --state "$HOME/.local/state/workspace-bridge-node" show-token
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
 ```
 
 On macOS, a successful LaunchAgent start does not prove that the native process
@@ -219,8 +224,13 @@ container itself, and a Node bound only to `127.0.0.1` is not assumed to be
 reachable from Docker Desktop. Binding `0.0.0.0` makes the authenticated Node
 listen on host interfaces; restrict access with the macOS firewall/private
 network and do not expose the Node through the MCP tunnel or a public reverse
-proxy. Node token authentication remains mandatory. The LaunchAgent stores no
-Node or adapter token in its plist; state/config/token files remain private.
+proxy. Node token authentication remains mandatory. The system unit stores no
+Node or adapter token; state/config/token files remain private. On Linux,
+inspect the journal manually with
+`journalctl -u workspace-bridge-node.service`; the program never scrapes
+journal contents. Run the Linux service command without leading sudo; sudo is
+requested only for the narrow systemd administration steps (an intentional
+root mode with a root-owned state is documented in OPERATIONS.md).
 
 ## Adapter instances (optional)
 

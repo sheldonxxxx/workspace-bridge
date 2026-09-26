@@ -1,4 +1,4 @@
-# MCP tool reference — v0.8.4
+# MCP tool reference — v0.1.0
 
 One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twenty-seven tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 

@@ -462,7 +462,7 @@ async function mockApi(
 
     if (path === "/api/status") {
       await respond(route, {
-        version: "0.8.4",
+        version: "0.1.0",
         listen_mode: "loopback",
         mcp_port: 8765,
         bridge: { configured: true, enabled: true },
