@@ -261,6 +261,14 @@ def test_spawn_uses_fixed_argv_no_shell_and_devnull_stdio(tmp_path):
 def test_adapter_serve_preserves_exec_argv_env(tmp_path, monkeypatch):
     from workspace_bridge.adapter_service import initialize_adapter, serve_argv, build_adapter_env, validate_adapter_state
     from workspace_bridge import adapter_cli
+    monkeypatch.setattr(
+        adapter_cli, "runtime_env_with_login_path",
+        lambda: (
+            dict(os.environ),
+            {"resolved": False, "path": None, "shell": "/bin/sh",
+             "shell_basename": "sh", "entry_count": 0, "code": "unsupported"},
+        ),
+    )
     projects = tmp_path / "projects"
     projects.mkdir(parents=True)
     exe = tmp_path / "bin" / "workspace-bridge-pi-adapter"
@@ -291,7 +299,8 @@ def test_adapter_serve_preserves_exec_argv_env(tmp_path, monkeypatch):
         adapter_cli._serve(native_logs._absolute_state(state))
     config, token = validate_adapter_state(state)
     assert captured["argv"] == serve_argv(config)
-    assert captured["env"] == build_adapter_env(config, token, state)
+    assert captured["env"] == build_adapter_env(
+        config, token, state, base_env=dict(os.environ))
     # With the marker on Darwin, spawn is attempted but exec argv/env unchanged.
     monkeypatch.setenv("WB_NATIVE_LOG_GUARD", "1")
     monkeypatch.setattr("workspace_bridge.native_logs.platform", "platform")
@@ -302,7 +311,8 @@ def test_adapter_serve_preserves_exec_argv_env(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         adapter_cli._serve(native_logs._absolute_state(state))
     assert captured["argv"] == serve_argv(config)
-    assert captured["env"] == build_adapter_env(config, token, state)
+    assert captured["env"] == build_adapter_env(
+        config, token, state, base_env=dict(os.environ))
 
 
 def test_node_and_adapter_systemd_units_declare_journal(tmp_path):

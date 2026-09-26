@@ -9,6 +9,7 @@ uses a shell.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
@@ -591,12 +592,19 @@ def validate_adapter_state(state: str | os.PathLike[str], *,
     return config, token
 
 
-def build_adapter_env(config: dict, token: str, state: str | os.PathLike[str]) -> dict:
+def build_adapter_env(
+    config: dict,
+    token: str,
+    state: str | os.PathLike[str],
+    *,
+    base_env: Mapping[str, str] | None = None,
+) -> dict:
     """Build the allowlisted runtime environment for ``execve``.
 
-    Starts from the current process environment (preserving HOME/PATH and
-    native login/auth context) and overrides only the fixed allowlisted
-    names for the configured runtime. Config never injects arbitrary names.
+    Starts from ``base_env`` when supplied, otherwise the current process
+    environment, preserving HOME/PATH and native login/auth context. Only the
+    fixed allowlisted runtime names are overridden; config never injects
+    arbitrary environment names.
     """
     runtime_type = validate_runtime_type(config.get("runtime_type"))
     port = validate_port(config.get("port"))
@@ -607,7 +615,7 @@ def build_adapter_env(config: dict, token: str, state: str | os.PathLike[str]) -
     if not token or len(token) > 512:
         raise _state_error("Adapter token is invalid",
                            "adapter_config_invalid")
-    env = dict(os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     if runtime_type == "pi":
         env["WB_RUNTIME_TOKEN"] = token
         env["WB_PI_PROJECTS_DIR"] = projects_root

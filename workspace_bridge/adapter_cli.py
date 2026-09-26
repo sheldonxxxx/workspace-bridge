@@ -23,6 +23,7 @@ from .adapter_service import (
     serve_argv,
     validate_adapter_state,
 )
+from .login_path import runtime_env_with_login_path
 from .security import BridgeError
 
 
@@ -64,7 +65,13 @@ def _serve(state: Path) -> None:
     except OSError:
         raise BridgeError("Adapter runtime state is unavailable",
                           "adapter_state_unsafe") from None
-    env = build_adapter_env(config, token, state)
+    # launchd/systemd start with a reduced PATH. Resolve only the current
+    # user's validated login PATH before exec so env-shebang runtime shims
+    # (for example ``#!/usr/bin/env node`` from npm) can find their interpreter.
+    # On probe failure, runtime_env_with_login_path safely keeps the inherited
+    # service environment; no shell output or arbitrary environment is imported.
+    base_env, _login_path = runtime_env_with_login_path()
+    env = build_adapter_env(config, token, state, base_env=base_env)
     argv = serve_argv(config)
     try:
         os.execve(argv[0], argv, env)

@@ -267,6 +267,55 @@ def test_serve_execves_directly_with_no_shell_and_no_secret_on_failure(tmp_path,
         assert "os.system(" not in src
 
 
+def test_serve_uses_resolved_login_path_for_env_shebang_runtime(tmp_path, monkeypatch):
+    projects = _projects(tmp_path)
+    runtime_bin = tmp_path / "runtime-bin"
+    runtime_bin.mkdir()
+    node = runtime_bin / "node"
+    node.write_text("#!/bin/sh\nexit 0\n")
+    node.chmod(0o700)
+    exe = tmp_path / "bin" / "workspace-bridge-pi-adapter"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/usr/bin/env node\n")
+    exe.chmod(0o700)
+    state = tmp_path / "serve-login-path"
+    initialize_adapter(
+        state, runtime_type="pi", projects_root=str(projects),
+        port=18993, executable=str(exe),
+    )
+
+    inherited_path = "/usr/bin:/bin"
+    resolved_path = f"{runtime_bin}:{inherited_path}"
+    monkeypatch.setenv("PATH", inherited_path)
+    monkeypatch.setattr(
+        "workspace_bridge.adapter_cli.runtime_env_with_login_path",
+        lambda: (
+            {"PATH": resolved_path, "HOME": str(tmp_path)},
+            {"resolved": True, "path": resolved_path, "shell": "/bin/zsh",
+             "shell_basename": "zsh", "entry_count": 3, "code": "ok"},
+        ),
+    )
+    captured: dict = {}
+
+    def _fake_execve(path, argv, env):
+        captured["path"] = path
+        captured["argv"] = list(argv)
+        captured["env"] = dict(env)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(os, "execve", _fake_execve)
+    from workspace_bridge.adapter_cli import _serve
+
+    with pytest.raises(RuntimeError):
+        _serve(state)
+
+    assert captured["path"] == str(exe)
+    assert captured["argv"] == [str(exe)]
+    assert captured["env"]["PATH"] == resolved_path
+    assert (Path(captured["env"]["PATH"].split(":")[0]) / "node") == node
+    assert captured["env"]["WB_PI_PROJECTS_DIR"] == str(projects)
+
+
 def test_probe_validates_descriptor_shape(monkeypatch):
     config = {"runtime_type": "pi", "port": 18992}
 
