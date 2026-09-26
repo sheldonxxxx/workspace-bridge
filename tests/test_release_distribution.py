@@ -17,9 +17,9 @@ PI_LOCK = REPO / "runtime" / "pi-host-adapter" / "package-lock.json"
 EXPECTED_MJS = [
     "adapter.mjs", "config.mjs", "executions.mjs", "extensions.mjs",
     "fingerprint.mjs", "logging.mjs", "login-path.mjs", "main.mjs",
-    "paths.mjs", "policy.mjs", "release.mjs", "sdk-events.mjs",
-    "sdk-transport.mjs", "server.mjs", "trusted-permission-extension.mjs",
-    "wbrp.mjs",
+    "paths.mjs", "pi-adapter.mjs", "policy.mjs", "release.mjs",
+    "sdk-events.mjs", "sdk-transport.mjs", "server.mjs",
+    "trusted-permission-extension.mjs", "wbrp.mjs",
 ]
 
 
@@ -385,6 +385,13 @@ def test_pi_package_publish_inventory():
     assert repo.get("directory") == "runtime/pi-host-adapter"
     pub = pkg.get("publishConfig", {})
     assert pub.get("access") == "public"
+    # Stable package-manager-provided executable for the adapter lifecycle.
+    assert pkg.get("bin") == {"workspace-bridge-pi-adapter": "pi-adapter.mjs"}
+    entry = REPO / "runtime" / "pi-host-adapter" / "pi-adapter.mjs"
+    assert entry.is_file()
+    assert entry.read_text().startswith("#!/usr/bin/env node")
+    import os as _os
+    assert _os.access(entry, _os.X_OK)
     files = pkg.get("files", [])
     assert sorted(files) == sorted(EXPECTED_MJS)
     for name in EXPECTED_MJS:
@@ -437,6 +444,36 @@ def test_release_assets_use_gh_upload_no_new_tag():
     assert ".tar\"" not in text or "pi-runtime" in text
 
 
+def test_pi_bin_is_packaged():
+    result = subprocess.run(
+        ["npm", "pack", "--dry-run", "--json"],
+        cwd=str(REPO / "runtime" / "pi-host-adapter"),
+        capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert isinstance(data, list) and len(data) == 1
+    paths = sorted(f["path"] for f in data[0]["files"])
+    assert "pi-adapter.mjs" in paths
+    assert "package.json" in paths
+
+
+def test_python_wheel_exposes_adapter_commands():
+    import configparser
+    import zipfile
+    from workspace_bridge.adapter_cli import main as adapter_main
+    from workspace_bridge.adapter_service import adapter_label, adapter_unit
+    # The top-level CLI exposes the runtime-neutral adapter namespace.
+    assert callable(adapter_main)
+    assert adapter_label("pi", "0123456789ab") == \
+        "com.workspace-bridge.adapter.pi.0123456789ab"
+    assert adapter_unit("codex", "0123456789ab") == \
+        "workspace-bridge-adapter-codex-0123456789ab.service"
+    # Codex keeps its packaged console script alongside Bridge/Node.
+    text = (REPO / "pyproject.toml").read_text()
+    assert "workspace-bridge-codex-adapter" in text
+    assert "workspace_bridge.codex_host_adapter:main" in text
+
+
 def test_release_workflow_uses_release_cli_and_packaging_smoke():
     text = RELEASE_YML.read_text()
     # Old deploy CLI names are gone from release automation.
@@ -448,9 +485,11 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert "workspace-bridge release build" in text
     assert "workspace-bridge release validate" in text
     # Packaging smoke: wheel console entry metadata plus version and
-    # nested node help, with no network install step.
+    # nested node/adapter help, with no network install step.
     assert "entry_points.txt" in text
     assert "workspace_bridge.cli:main" in text
     assert "workspace_bridge.node_cli:main" in text
+    assert "workspace_bridge.codex_host_adapter:main" in text
     assert "workspace-bridge --version" in text
     assert "workspace-bridge node --help" in text
+    assert "workspace-bridge adapter --help" in text

@@ -1,4 +1,4 @@
-# General file tools and write policy — v0.6.0
+# General file tools and write policy
 
 ## Stable interface, independent permissions
 

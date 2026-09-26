@@ -461,6 +461,22 @@ def main(argv: list[str] | None = None):
                       help="Node state directory (separate from Bridge --state)")
     node.add_argument("node_argv", nargs=argparse.REMAINDER,
                       help="Node command: init | serve | show-token | service ...")
+    adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex adapter instance")
+    adapter.add_argument("--state", dest="adapter_state", type=Path, required=True,
+                         help="Adapter instance state directory (separate from Bridge --state and Node state)")
+    adapter.add_argument("adapter_argv", nargs=argparse.REMAINDER,
+                         help="Adapter command: init | serve | show-token | service ...")
+    support = sub.add_parser("support", help="Local support diagnostics (no upload)")
+    support_sub = support.add_subparsers(dest="support_command", required=True)
+    bundle = support_sub.add_parser("bundle", help="Create a sanitized support bundle ZIP (no upload)")
+    bundle.add_argument("--output", type=Path, required=True,
+                        help="New output ZIP file (parent must already exist; never overwritten)")
+    bundle.add_argument("--offline", action="store_true",
+                        help="Skip network probes (same bounded probes as doctor --offline)")
+    bundle.add_argument("--node-state", type=Path, default=None,
+                        help="Explicit local Node state directory (default state only when valid)")
+    bundle.add_argument("--adapter-state", action="append", default=[], dest="adapter_states",
+                        help="Explicit local adapter state directory (repeatable, max 16, deterministic order)")
     args = parser.parse_args(argv)
     if args.command == "serve":
         public_ports = (args.mcp_public_port, args.admin_public_port)
@@ -503,6 +519,37 @@ def main(argv: list[str] | None = None):
             from .node_cli import main as node_main
             node_main(["--state", str(args.node_state), *args.node_argv])
             return
+        if args.command == "adapter":
+            # Nested adapter administration reuses the adapter CLI grammar
+            # with an instance-local --state (separate from Bridge/Node).
+            from .adapter_cli import main as adapter_main
+            adapter_main(["--state", str(args.adapter_state), *args.adapter_argv])
+            return
+        if args.command == "support":
+            if args.support_command == "bundle":
+                # Local-admin read/export only: no service/package mutation,
+                # no upload, no network beyond doctor probes unless --offline.
+                from .support_bundle import SupportBundleError, build_support_bundle
+                try:
+                    result = build_support_bundle(
+                        output=args.output, offline=bool(args.offline),
+                        node_state=args.node_state,
+                        adapter_states=list(args.adapter_states or []),
+                        bridge_state=state)
+                except SupportBundleError as exc:
+                    code = getattr(exc, "code", "bundle_failed") or "bundle_failed"
+                    print(f"workspace-bridge: support bundle failed [{code}]", file=sys.stderr)
+                    raise SystemExit(1)
+                except (BridgeError, OSError, ValueError) as exc:
+                    print(f"workspace-bridge: {exc}", file=sys.stderr)
+                    raise SystemExit(1)
+                print(f"Support bundle: {result['path']}")
+                print(f"Entries: {', '.join(result['entries'])}")
+                if result.get("omitted"):
+                    print(f"Omitted: {', '.join(result['omitted'])}")
+                print("Review the bundle before any external upload; no upload occurred automatically.")
+                return
+            parser.error("Unknown support subcommand")
         if args.command == "release":
             if args.release_command == "build":
                 # Release-bundle build never touches Bridge state, admin

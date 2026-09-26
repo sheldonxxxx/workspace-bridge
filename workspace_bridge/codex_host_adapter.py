@@ -2377,6 +2377,23 @@ def make_app(adapter: CodexHostAdapter, token: str) -> Starlette:
 
 
 def main() -> None:
+    # WB_LOG_LEVEL selects adapter operational verbosity (DEBUG/INFO/WARNING/
+    # ERROR, default INFO) with the same semantics as the Bridge and Pi
+    # adapter. An invalid nonblank value fails startup safely without
+    # echoing the value, paths, or tokens. This is the minimal launcher
+    # support needed for `workspace-bridge adapter serve`; all Runtime
+    # Protocol, security, storage, and supervision behavior is unchanged.
+    _raw_level = os.environ.get("WB_LOG_LEVEL", "")
+    if _raw_level is None or (isinstance(_raw_level, str) and not _raw_level.strip()):
+        _level_name = "INFO"
+    else:
+        _level_name = str(_raw_level).strip().upper()
+        if _level_name not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise SystemExit("WB_LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR (default INFO)")
+    try:
+        logging.getLogger("uvicorn.error").setLevel(getattr(logging, _level_name))
+    except Exception:
+        pass
     state = os.environ.get("WB_CODEX_ADAPTER_STATE")
     root = os.environ.get("WB_CODEX_PROJECTS_ROOT")
     token = os.environ.get("WB_RUNTIME_TOKEN")

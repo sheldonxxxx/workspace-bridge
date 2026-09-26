@@ -254,7 +254,7 @@ jobs:
         with:
           name: source-bundle
           path: dist/source-bundle
-      - name: Packaging smoke (console entry points, version, node help)
+      - name: Packaging smoke (console entry points, version, node and adapter help)
         run: |
           set -euo pipefail
           uv sync --locked --extra test
@@ -269,10 +269,12 @@ jobs:
               text = z.read(eps[0]).decode()
           assert "workspace-bridge = workspace_bridge.cli:main" in text, text
           assert "workspace-bridge-node = workspace_bridge.node_cli:main" in text, text
+          assert "workspace-bridge-codex-adapter = workspace_bridge.codex_host_adapter:main" in text, text
           print("wheel console_scripts ok")
           PY
           uv run workspace-bridge --version
           uv run workspace-bridge node --help
+          uv run workspace-bridge adapter --help
       - name: Strict bundle validation and stage exact wheel bytes
         run: |
           set -euo pipefail

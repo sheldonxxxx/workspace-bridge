@@ -1,4 +1,4 @@
-# Handoff protocol — v0.8
+# Handoff protocol
 
 ## Responsibilities
 

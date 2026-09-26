@@ -1,4 +1,4 @@
-# Docker Compose — v0.1.0
+# Docker Compose
 
 Runs the **Workspace Bridge** control plane with an internal tunnel sidecar on the
 shared Compose network. The authoritative `workspace-bridge-node` service is a
@@ -27,7 +27,7 @@ with `WB_PYTHON_IMAGE`; this release does not claim a locked/reproducible image.
 service smoke. `docker compose config` and the in-process Docker contract tests
 cover only the Bridge control-plane shape. The existing
 `scripts/test_docker.py` and `scripts/validate_container_transport.py` fixtures
-still encode the pre-Node local-bind flow, so they are not v3 end-to-end evidence.
+still encode an older local-bind flow, so they are not evidence for the current architecture.
 Before deployment, exercise the Bridge, the selected Node, and the tunnel together
 on a Docker-equipped host; do not treat an image build or YAML parse as a proof of
 the authority boundary.
@@ -203,7 +203,7 @@ host, then use the host alias from Bridge:
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "/Volumes/data2" --host 0.0.0.0 --port 8770
+  --allow-root "$HOME/Projects" --host 0.0.0.0 --port 8770
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
@@ -212,7 +212,7 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-to
 On macOS, a successful LaunchAgent start does not prove that the native process
 can read a workspace. Privacy controls such as Files & Folders and external or
 removable-storage access can gate the executable/interpreter or a root under
-`/Volumes/data2`. Check `service status` for the bounded allowed-root
+an external volume. Check `service status` for the bounded allowed-root
 availability summary, then verify the selected workspace through Manager and
 Bridge. Grant only the required access to the actual executable/interpreter if
 prompted; Full Disk Access is not mandatory when a narrower permission is
@@ -227,8 +227,9 @@ network and do not expose the Node through the MCP tunnel or a public reverse
 proxy. Node token authentication remains mandatory. The system unit stores no
 Node or adapter token; state/config/token files remain private. On Linux,
 inspect the journal manually with
-`journalctl -u workspace-bridge-node.service`; the program never scrapes
-journal contents. Run the Linux service command without leading sudo; sudo is
+`journalctl -u workspace-bridge-node.service` for normal troubleshooting;
+routine service status does not read journal text (only the sanitized support
+bundle collector does, via a fixed bounded invocation). Run the Linux service command without leading sudo; sudo is
 requested only for the narrow systemd administration steps (an intentional
 root mode with a root-owned state is documented in OPERATIONS.md).
 
@@ -256,8 +257,8 @@ sanitized connection test. Optionally configure model policy, and profiles per
 adapter, then
 enable exact targets on each workspace. Two Pi instances can be configured
 independently. Bridge changes apply without container recreation or service
-restart. For daemon setup, see the [Pi LaunchAgent guide](../runtime/pi-host-adapter/README.md#start-after-login-with-launchd)
-or the Codex adapter setup instructions.
+restart. For daemon setup, see the [Pi adapter](../runtime/pi-host-adapter/README.md)
+and [Runtimes](RUNTIMES.md).
 
 After restart, Bridge reconciles runs against Runtime Protocol adapter snapshots.
 It does not replay prompts or adopt unowned Pi TUI or Codex Desktop/TUI sessions.
@@ -325,12 +326,10 @@ Shared level semantics (Bridge and host adapters):
 
 Retention: Docker bridge AND tunnel-sidecar logs are rotated 10m x3 by Compose
 (`max-size: 10m` / `max-file: 3` on both services in tracked `compose.yaml`,
-the canonical Compose contract). A local deployment-specific `compose-prod.yaml`
-may mirror it — the current local copy has been validated separately — but it is
-ignored and not portable because it contains host-specific paths. The native
-launchd adapter writes plain host files
-via `StandardOutPath`/`StandardErrorPath`; project-managed rotation is NOT currently
-provided — rotation of those files is an explicit operator/next-milestone concern.
+the canonical Compose contract). Native log bounds are described under
+[Operations](OPERATIONS.md#native-logging-policy): macOS managed services bound
+each stream to a 10 MiB active file plus two 10 MiB archives, while Linux units
+log to the host journal with retention owned by the host policy.
 
 Logs never contain prompts, message/final-response text, file contents,
 absolute paths, permission resources/patterns/metadata, tool arguments,
@@ -422,12 +421,12 @@ manager before connecting ChatGPT.
 
 ## Validation on your host
 
-The v3 authority boundary requires a live Bridge plus an explicitly configured
+The current authority boundary requires a live Bridge plus an explicitly configured
 Node, with the tunnel and any native adapter daemon checked separately. This
 checkout did not run that Docker/Node integration smoke. The older
 `scripts/test_docker.py` and `scripts/validate_container_transport.py` scripts
-still construct local project fixtures for the pre-Node service and must be
-migrated before being used as v3 validation. Use the Manager and Node diagnostics
+still construct local project fixtures for an older service shape and are not
+validation for the current architecture. Use the Manager and Node diagnostics
 to verify the selected Node root, adapter, route readiness and handoff path.
 
 ## Primary references

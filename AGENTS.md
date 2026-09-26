@@ -1,36 +1,80 @@
-# Repository Guidelines
+# AGENTS.md
 
-## Project Structure & Module Organization
+Instructions for AI/coding agents contributing to this repository. For
+installing or configuring Workspace Bridge on behalf of a user, follow
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md). For human contributor detail,
+see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`workspace_bridge/` contains the Python MCP service, management API, security policy, CLI, and runtime coordination. `web/` is the React/TypeScript manager; its Vite build goes to `workspace_bridge/static/dist/` for packaging. `runtime/pi-host-adapter/` contains the native Node.js Pi adapter. Python tests live in `tests/test_*.py`, adapter tests in `runtime/pi-host-adapter/test/*.test.mjs`, and browser tests in `web/tests/*.spec.ts`. See `docs/` for architecture, operations, and security details; `scripts/` holds setup and smoke utilities.
+## Source map
 
-## Build, Test, and Development Commands
+- `workspace_bridge/` — MCP service, Manager API, CLI, Node service,
+  adapter lifecycle, run coordination, diagnostics, notifications.
+- `web/` — Manager UI (build output packaged under
+  `workspace_bridge/static/dist/`).
+- `runtime/pi-host-adapter/` — Pi adapter (npm package).
+- `tests/test_*.py`, `runtime/pi-host-adapter/test/*.test.mjs`,
+  `web/tests/*.spec.ts` — test suites.
+- `docs/` — public docs indexed by [docs/README.md](docs/README.md).
+- `.workspace-handoff/` is internal ignored audit state: never rewrite,
+  delete, or scan it in tests. Never touch vendored `.agents/skills`
+  content.
 
-- `uv sync --extra test` creates the project environment and installs the service with Python test dependencies from `uv.lock`.
-- `uv run pytest -q` runs the Python suite. `uv run workspace-bridge serve` starts the local service after `uv run workspace-bridge init --allow-parent <projects-dir>`.
-- In `web/`, run `npm ci`, `npm run dev` for the Vite manager, and `npm run build` to refresh packaged assets. Run `npm run lint` and `npm run format:check` for frontend checks.
-- In `runtime/pi-host-adapter/`, run `npm ci` and `npm test` for the Node test suite. Run `npm run test:e2e` from `web/` for Playwright browser tests.
+## Mandatory architecture invariants
 
-## Toolchain & Test Environment
+- The Bridge never opens workspace roots directly and never falls back to a
+  local checkout; the authoritative Node owns files, Git, handoffs, and
+  adapter secrets under its host `allowed_roots` ceiling.
+- A runtime type never selects a destination; only an exact same-Node
+  `(workspace_id, adapter_id)` route with its security binding admits a run.
+- Write scope governs publication and mutation; route enablement governs
+  runs. One never implies the other.
+- Bridge never replays prompts or approvals. Recovery rebinds only what the
+  adapter positively identifies; everything else becomes interrupted or
+  orphaned with stale interactions.
+- Tokens stay out of APIs, diagnostics, logs, errors, events, docs, and
+  chat. One-time token output stays local.
+- No shell, Git mutation, per-chat ACL, automatic updater, or automatic
+  support upload. The Manager stays loopback-only and is never tunnelled.
 
-- Treat `uv` as the canonical Python project runner. Prefer `uv run python ...`, `uv run pytest ...`, and `uv run workspace-bridge ...`. Do not assume a bare `python`, `pip`, or `.venv/bin/pip` exists. Use `python3` only when deliberately testing the system interpreter or bootstrapping outside the project environment.
-- Do not install or update project dependencies, browsers, or other test assets implicitly during implementation or audit unless the task explicitly permits environment mutation. If a required asset is missing, report the check as environment-blocked instead of silently downloading it.
-- Playwright browser binaries are versioned test assets. Before a long browser-test run, verify the browser expected by the installed Playwright version can actually launch. If Playwright reports a missing executable or cache-version mismatch, stop that test track early and report it; do not run `npx playwright install` without explicit authorization.
-- Preserve real command failure status. Do not append unrelated successful commands or unconditional `echo`/diagnostic steps after a test in a way that turns a failing compound shell command into exit 0. Run acceptance-relevant checks as separate commands when practical.
-- Prefer focused checks first, then the full relevant suite once. Avoid repeated greps/builds/test reruns unless a failure or source change makes them necessary.
+## Inspect before edits
 
-## Coding Style & Naming Conventions
+Read the relevant source, callers, and tests with the normal file tools
+before changing behavior. Check current `--help` output and package `bin`
+entries before documenting a command. Cross-check claimed tool names,
+counts, scopes, route admission, continuation rules, service paths, logging
+bounds, and image limits against `workspace_bridge/` and tests. If docs
+expose a real source inconsistency, report it instead of changing
+architecture outside the task scope.
 
-Use four spaces and `snake_case` for Python functions and modules. Follow existing TypeScript/React patterns: two-space indentation, `PascalCase` components, and `camelCase` functions. Node adapter files use ES modules (`.mjs`). Keep API inputs explicitly validated and security decisions in service or adapter code. Format frontend files with Prettier and check them with Oxlint using the scripts above; follow nearby Python and adapter formatting where no formatter is configured.
+## Test commands
 
-## Testing Guidelines
+Prefer focused checks first, then the full suite once. Preserve real failure
+status; do not mask exits. Do not install dependencies or browsers
+implicitly; report environment-blocked checks instead.
 
-Use pytest and `pytest-asyncio` for Python, `node:test` for the adapter, and Playwright for manager flows. Name new tests `test_*.py`, `*.test.mjs`, or `*.spec.ts` in their respective directories. Add focused coverage for changed behavior, especially path boundaries, credentials, runtime permissions, and API responses. No coverage percentage is configured.
+```sh
+uv run pytest -q
+```
 
-## Commits & Pull Requests
+```sh
+cd runtime/pi-host-adapter && npm test
+```
 
-Recent commits favor concise subjects such as `feat(pi): ...`, `refactor: ...`, and `feat!: ...` for breaking changes. Keep commits scoped. In pull requests, explain the behavior change, affected boundaries, and checks run; link the relevant issue when one exists and include screenshots for manager UI changes. Preserve unrelated worktree changes.
+```sh
+cd web && npm run lint && npm run format:check && npm run build
+```
 
-## Security & Configuration
+CLI smoke that mutates nothing:
 
-Keep `.env`, tokens, private state, and tunnel profiles out of commits. Start from `.env.example`; read `docs/SECURITY.md` before changing access, write scopes, or runtime policy. Keep the management listener local and expose only the intended MCP endpoint through a tunnel.
+```sh
+uv run workspace-bridge --help
+uv run workspace-bridge doctor --offline
+```
+
+## Documentation consistency
+
+Keep the public information architecture (see [docs/README.md](docs/README.md)
+and [CONTRIBUTING.md](CONTRIBUTING.md)): no internal milestone labels,
+diary prose, obsolete paths, personal data, or secrets in tracked docs.
+After renames or removals, grep Markdown for old filenames and fix every
+inbound link. Use generic paths and valid shell in code blocks.

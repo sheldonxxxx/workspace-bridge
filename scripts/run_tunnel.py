@@ -33,7 +33,7 @@ def main() -> int:
         parser.error("Configuration file does not exist")
     binary = shutil.which("tunnel-client")
     if binary is None:
-        parser.error("Install the official OpenAI tunnel-client first; see docs/TUNNEL_SETUP.md")
+        parser.error("Install the official OpenAI tunnel-client first; see docs/SETUP.md")
     env = os.environ.copy()
     try:
         for key, label in (

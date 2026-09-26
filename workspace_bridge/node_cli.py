@@ -171,6 +171,17 @@ def main(argv: list[str] | None = None):
                 raise BridgeError("Unsafe Node token file")
             print(path.read_text().strip())
             return
+        if args.command == "serve":
+            # Managed LaunchAgents carry WB_NATIVE_LOG_GUARD=1 on Darwin;
+            # spawn one package-owned log-guard child (stdio to DEVNULL,
+            # fixed argv, no shell) then serve normally. Foreground use
+            # without the marker never spawns the guard. The guard never
+            # supervises or restarts the service.
+            try:
+                from .native_logs import spawn_log_guard as _spawn_guard
+                _spawn_guard(state)
+            except Exception:
+                pass
         asyncio.run(serve_node(state, config))
     except (BridgeError, OSError, ValueError) as exc:
         print(f"workspace-bridge-node: {exc}", file=sys.stderr)

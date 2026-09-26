@@ -1,6 +1,6 @@
-# MCP tool reference — v0.1.0
+# MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. Twenty-seven tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 26 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
@@ -40,7 +40,7 @@ Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_sco
 workspace_info(workspace_id)
 ```
 
-Returns the selected Node ID/name, node-local root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), the separate `agent_execution` (`enabled`/`disabled`) policy, writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+Returns the selected Node ID/name, node-local root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), an informational `agent_execution` marker (`per-route`: execution is admitted per exact enabled workspace route, and any legacy workspace-wide switch is inert), writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
 
 ## list_dir
 
@@ -207,7 +207,7 @@ current-source reads and runtime activity evidence.
 ```text
 list_agent_adapters(workspace_id)
 list_agent_models(workspace_id, adapter_id, query="", limit=25)
-start_agent_run(workspace_id, adapter_id, job_id, request_id, model=null, parent_run_id=null, continue_from_run_id=null)
+start_agent_run(workspace_id, adapter_id, request_id, job_id=null, instruction=null, model=null, parent_run_id=null, continue_from_run_id=null)
 list_agent_runs(workspace_id, adapter_id=null, offset=0, limit=20)
 read_agent_run(workspace_id, run_id)
 cancel_agent_run(workspace_id, run_id)
@@ -235,7 +235,7 @@ exists it may be used, otherwise ask which destination to use. Never fail over
 from an unavailable default.
 
 `start_agent_run` accepts exactly one of a prepared handoff (`job_id`) or a
-bounded direct `instruction` in the selected workspace. It does not accept a
+bounded direct `instruction` (at most 8000 characters) in the selected workspace. It does not accept a
 free-form prompt path. A direct instruction is published as a minimal
 auditable prepared handoff through the normal Node write policy with a
 deterministic handoff request ID derived from the run idempotency domain
@@ -249,7 +249,8 @@ unless a live catalog model is requested.
 An exact retry with the same request ID returns the existing run; reusing that
 ID for a different request or adapter is rejected. A continuation creates a new
 Bridge run in a terminal run's conversation for a NEW prepared handoff in the
-same workspace; the new handoff's prompt and acceptance path are sent.
+same workspace (or a bounded direct instruction, which is first published as
+one); the new handoff's prompt and acceptance path are sent.
 Ownership is proven live against the stored native conversation on the current
 same-Node adapter: it must exist, belong to the workspace, and be idle.
 Historical outcome (failed/cancelled/interrupted), model changes, and

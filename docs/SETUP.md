@@ -1,209 +1,375 @@
-# End-to-end setup — new environment (greenfield)
+# Setup
 
-This is the ordered runbook for bringing up a fresh deployment from this
-source checkout. No migration or backup-restore is covered here; every state
-store starts empty. Follow the steps in order — each one depends on the
-previous.
+Single canonical human installation and configuration guide for Workspace
+Bridge `0.1.0`. Follow it top to bottom. For container detail see
+[Docker](DOCKER.md); for daily operation see [Operations](OPERATIONS.md);
+for Pi/Codex specifics see [Runtimes](RUNTIMES.md).
 
-Topology (local host + Docker):
+If an AI/coding agent is performing this work for you, it follows
+[Agent setup](AGENT_SETUP.md) instead. That runbook states what the agent
+can run itself and where it must stop and ask you.
+
+## 0. What you are building
 
 ```text
-Docker:       workspace-bridge Bridge + mcp-tunnel sidecar
-Host native:  workspace-bridge-node service + native Pi/Codex adapters
-              (macOS launchd LaunchAgent or Linux systemd system unit)
+ChatGPT / MCP client -- one connection
+  |
+Private MCP tunnel -- one channel, shared gateway credential
+  |
+Bridge control plane -- /mcp plus a loopback-only Manager (never tunnel it)
+  |
+Authoritative Node (native, per host) -- files, Git, handoffs, adapter secrets
+  |
+Pi and/or Codex adapter instances (native, per host)
 ```
 
-References: [Docker](DOCKER.md) for container detail,
-[Operations](OPERATIONS.md) for Node service management and state rules,
-[Pi adapter](../runtime/pi-host-adapter/README.md) for Pi specifics,
-[Tunnel](TUNNEL_SETUP.md) for the ChatGPT side.
+The Bridge never inspects workspace files directly; the Node owns the data
+plane under its host `allowed_roots` ceiling. Each adapter state owns exactly
+one Pi or Codex instance. Keep package installs, state, and tunnel profiles
+outside mapped projects.
 
-## 0. Prerequisites
+## 1. Prerequisites
 
-- Docker Engine/Desktop with Compose v2, host Python 3, `uv`, Node/npm.
-- Decide: `<projects-parent>` (e.g. `/Volumes/data2`), host ports
-  (`WB_MCP_PORT`, `WB_ADMIN_PORT`, distinct, 1024–65535), Node port (default
-  `8770`), Pi port (`8780`), Codex port (`8772`).
-- Generate two secrets now (never commit them, never pass as CLI args):
-  a Pi `WB_RUNTIME_TOKEN` and a Codex `WB_RUNTIME_TOKEN`
-  (e.g. `python3 -c "import secrets;print(secrets.token_hex(32))"` each).
+- macOS or Linux (native Windows is unsupported; use WSL2).
+- Python 3.11+ and `uv` are always needed for Workspace Bridge itself.
+  Node 20+ with npm is needed only for the Pi adapter (and for
+  contributor/web work), not for a Codex-only deployment. Docker
+  Engine/Desktop with Compose v2 is needed only if you run the Bridge in a
+  container.
+- Decide: a projects parent that already exists (for example
+  `$HOME/Projects`), a Bridge state directory, a Node state directory, one
+  adapter state directory per instance, and distinct host ports in
+  1024–65535 for MCP and Manager.
+- Default paths used below (generic examples; substitute your own):
+  Bridge `$HOME/.local/state/workspace-bridge`, Node
+  `$HOME/.local/state/workspace-bridge-node`, Pi adapter
+  `$HOME/.local/state/workspace-bridge-adapter-pi`, Codex adapter
+  `$HOME/.local/state/workspace-bridge-adapter-codex`.
 
-## 1. Bridge control plane (Docker)
+Do not invent repository URLs or support channels. The image is built locally
+from this source; no public Workspace Bridge image is published.
+
+## 2. Install packages
+
+Install the Python product persistently (provides `workspace-bridge`, the
+nested `node` and `adapter` surfaces, and the `workspace-bridge-codex-adapter`
+executable):
 
 ```sh
+uv tool install workspace-bridge
+workspace-bridge --version
+```
+
+Install the Pi adapter package on each host that will run Pi:
+
+```sh
+npm install -g workspace-bridge-pi-host-adapter
+```
+
+The global `--state` option selects a state directory and comes before the
+subcommand:
+
+```sh
+workspace-bridge --state "$HOME/.local/state/workspace-bridge" doctor --offline
+```
+
+## 3. Tokens you will handle
+
+Four credentials appear in this guide. Creation, storage, and local reveal
+are distinct steps: reveal commands only read back a stored secret, they do
+not create it. Treat initial creation output as sensitive and local, and
+never paste tokens into chat, project files, or handoffs.
+
+| Token | Created / stored | How to reveal / enter locally |
+|---|---|---|
+| Bridge admin token | Created during `workspace-bridge init`, stored privately in Bridge state (`admin-token`) | Reveal locally with `workspace-bridge show-admin-token` (or inside the Bridge container with `--state /state`); enter at the browser login for the local Manager at `http://127.0.0.1:8766/`, exchanged for an HttpOnly session cookie |
+| Node token | Created during `workspace-bridge node --state <node-state> init`, stored privately in Node state (`node-token`) | Reveal locally with `workspace-bridge node --state <node-state> show-token`; enter in the Manager Node form (or `POST /api/nodes`); stored in private Bridge SQLite (mode `0600`) |
+| Adapter runtime token | Created during `workspace-bridge adapter --state <adapter-state> init`, printed by `init` and stored privately in adapter state (`runtime-token`) | May be revealed locally again later with `workspace-bridge adapter --state <adapter-state> show-token`; enter in the Manager adapter form for the owning Node; stored in private Node SQLite (mode `0600`) |
+| Shared MCP gateway token | Created or rotated by the Manager or `POST /api/bridge {"operation":"rotate_token"}` while serving, or by `workspace-bridge rotate-bridge-token` while stopped; stored in Bridge state | Copy the displayed value locally into the tunnel environment file (mode `0600`) as the `X-Bridge-Token` header; never tunnel the Manager |
+
+Normal list and status APIs report only whether a token exists, never its
+value. Blank token fields on edit preserve the stored value. Rotation of the
+shared gateway credential also enables the gateway; update the one tunnel
+environment and restart the tunnel process.
+
+## 4. Path A — evaluation (native Bridge on loopback)
+
+Run everything natively on one host. Safe loopback defaults apply.
+
+```sh
+workspace-bridge init
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
+  --allow-root "$HOME/Projects"
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge serve
+```
+
+In another terminal in the same environment:
+
+```sh
+workspace-bridge show-admin-token
+```
+
+Open `http://127.0.0.1:8766/`, enter the admin token, and continue with
+section 6. Keep this terminal attached; stopping it stops the Bridge unless
+you install the Bridge as a persistent service per your OS policy (see
+[Operations](OPERATIONS.md)).
+
+## 5. Path B — persistent deployment (container Bridge, native Node and adapters)
+
+Run the Bridge control plane in Compose and keep the Node plus Pi/Codex
+adapters native on each data-plane host so absolute workspace paths match.
+Do not add the Node or adapters to Compose. See [Docker](DOCKER.md) for the
+full container reference; this section is the minimal supported flow.
+
+```sh
+cd /path/to/workspace-bridge
 python3 scripts/configure_docker.py --mcp-port 8875 --admin-port 8766
 docker compose config --quiet
 docker compose up -d --build
+docker compose exec bridge workspace-bridge --state /state show-admin-token
 docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
-Expected: fresh state auto-initializes on first start; offline doctor shows
-only `core.gateway_credential_configured` / `core.gateway_enabled` as
-`action_required`. Save the admin token for step 5:
+Fresh state initializes only into an empty directory. A half-deleted state
+directory fails closed; restore or wipe it fully.
 
-```sh
-docker compose exec bridge workspace-bridge --state /state show-admin-token
-```
-
-## 2. Node data plane (native, per host)
-
-The Node owns workspace files and adapter secrets. Keep it native — never add
-it to Compose — so absolute workspace paths match the adapters.
+Initialize the native Node on its host. Host-only use keeps the loopback
+default; Docker Desktop reachability needs an explicit non-loopback listen
+host plus a host firewall review:
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "<projects-parent>" --host 0.0.0.0 --port 8770
+  --allow-root "$HOME/Projects" --port 8770
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
 ```
 
-Expected: `service status` reports `healthy` with `available: 1` roots.
-The same plain nested `service install|status|start|stop|restart|uninstall`
-verbs work on macOS (launchd) and Linux (system unit); installation remains
-`uv tool install workspace-bridge`. On Linux, run `service install` without
-leading sudo and inspect the journal manually with
-`journalctl -u workspace-bridge-node.service` when needed. The default is a
-non-root Node; an intentional root mode (root-owned state, root-controlled
-executable) is documented under Service persistence in OPERATIONS.md.
-Loopback-only (`127.0.0.1`) Nodes are not reachable from the Bridge
-container; use `0.0.0.0` with a host firewall review, or
-`http://host.docker.internal:<port>` as the Bridge-side URL (see DOCKER.md).
+For Docker Desktop, run the `init` above with `--host 0.0.0.0` instead and
+register the Node in the Manager as `http://host.docker.internal:8770`
+(using your configured port). A Node bound only to `127.0.0.1` is not
+assumed reachable from the Bridge container. Non-loopback binding exposes
+the authenticated Node on host interfaces: use a host firewall or private
+network and never put the Node behind the MCP tunnel.
+
 Save the Node token:
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
 ```
 
-## 3. Runtime adapters (native, per host)
+## 6. Runtime adapters (native, per host)
 
-### 3a. Pi adapter
-
-```sh
-mkdir -p "$HOME/Library/Application Support/workspace-bridge/pi-host-adapter"
-rsync -a --exclude '/test/' --exclude '/launchd/' --exclude '/README.md' \
-  runtime/pi-host-adapter/ \
-  "$HOME/Library/Application Support/workspace-bridge/pi-host-adapter/"
-```
-
-Copy `runtime/pi-host-adapter/launchd/com.workspace-bridge.pi-host-adapter.plist`
-to `~/Library/LaunchAgents/`, replacing every placeholder (home paths,
-`<projects-parent>` as `WB_PI_PROJECTS_DIR`, Pi port, Pi `WB_RUNTIME_TOKEN`).
-`chmod 600` the plist, then:
+The supported path is package installation followed by the runtime-neutral
+`workspace-bridge adapter` lifecycle. Each adapter state owns exactly one Pi
+or Codex instance; use a separate `--state` directory per instance. Service
+artifacts never contain the runtime token or the projects root.
 
 ```sh
-launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/com.workspace-bridge.pi-host-adapter.plist"
-curl -s http://127.0.0.1:8780/health
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" init \
+  --runtime pi --projects-root "$HOME/Projects" --port 8780
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
+  --runtime codex --projects-root "$HOME/Projects" --port 8772
 ```
 
-Expected: `{"ok":true,...,"pi_usable":true,"protocol":1}`. `/health` needs no
-token; every other endpoint takes `X-Runtime-Token:`.
+Save each printed token immediately: it lives only in that state's private
+storage (mode `0600`). Reprint locally only with `show-token` on the same
+host; never paste it into chat.
 
-### 3b. Codex adapter
-
-Build the wheel from this checkout and install it into a dedicated venv:
+Install the persistent service with the same plain verbs as the Node:
 
 ```sh
-uv build --wheel --out-dir /tmp/wb-wheels .
-/usr/bin/python3 -m venv "$HOME/Library/Application Support/workspace-bridge/codex-host-adapter/venv"
-uv pip install --python "$HOME/Library/Application Support/workspace-bridge/codex-host-adapter/venv/bin/python" \
-  --no-deps --reinstall /tmp/wb-wheels/workspace_bridge-*.whl
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service install
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service status
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service install
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service status
 ```
 
-Create `~/Library/LaunchAgents/com.workspace-bridge.codex-host-adapter.plist`
-with `ProgramArguments` pointing at
-`.../codex-host-adapter/venv/bin/workspace-bridge-codex-adapter` and
-environment `WB_CODEX_ADAPTER_STATE` (private dir, mode 0700),
-`WB_CODEX_PROJECTS_ROOT=<projects-parent>`,
-`WB_CODEX_ADAPTER_PORT=8772`, `WB_RUNTIME_TOKEN=<codex-token>`.
-`chmod 600`, bootstrap it, and confirm it serves (authenticated endpoints
-return 401 without the token — that is the healthy signal):
+Expected: `service status` reports the per-instance unit with installed state
+plus bounded descriptor health. `GET /health` needs no token; every `/v1/*`
+endpoint requires the runtime token header. The Codex instance state is
+created under that instance's private runtime area on first start.
+
+Platform notes:
+
+- macOS: `service install` creates a per-user LaunchAgent under
+  `~/Library/LaunchAgents/` (starts after user login, restarts on unexpected
+  exit). Privacy controls (Files & Folders, external-storage access) can
+  still block a workspace path: grant only the required access to the actual
+  executable or interpreter when prompted. Full Disk Access is not mandatory
+  when a narrower permission suffices.
+- Linux: the same command installs a system unit under
+  `/etc/systemd/system/` that starts at boot and survives logout, while
+  `User=`/`Group=` keep the process non-root as the installing user. Run the
+  command without leading `sudo`; the backend requests `sudo` only for the
+  narrow systemd administration steps. For normal troubleshooting, check the
+  journal manually with `journalctl -u <unit-name>`; routine service status
+  does not read journal text. The sanitized support bundle collector is the
+  only programmatic reader: it invokes a fixed
+  `journalctl -u <validated exact unit> --no-pager --output=cat -n 200`
+  with bounded line/byte limits and strict sanitization (see
+  [Operations](OPERATIONS.md)). Host journald retention policy is untouched.
+
+Root mode is advanced only and intentional, per component: a root-owned Node
+state managed as root runs the Node as root with full Node filesystem
+authority, while a root-owned adapter state managed as root runs that
+adapter and its native agent as root. Running the Node as root does not by
+itself make separately non-root adapter services root. A root invocation
+against a user-owned state is rejected, never converted. See
+[Operations](OPERATIONS.md).
+
+## 7. Register Node, workspaces, adapters, routes
+
+Open the Manager with the admin token, or use the local admin API with
+`Authorization: Bearer <admin-token>`. Order matters:
+
+1. **Node:** add the Node URL with its token. Native evaluation uses the
+   loopback Node URL; container Bridge uses the host-reachable Node URL from
+   section 5.
+2. **Workspaces:** add one mapping per canonical Node-local root, then enable
+   it and set write scope (`handoff` default; `none` denies all writes
+   including handoff publication; `workspace` allows permitted source text).
+3. **Adapter instances:** on the owning Node, add each destination with the
+   name, runtime type (`pi` or `codex`), the base URL as seen by the Node
+   host (loopback such as `http://127.0.0.1:8780` is correct there), and its
+   one-time runtime token.
+4. **Model policy** per adapter: list the live catalog first, then save the
+   enabled selectors plus default. Every selector must currently exist or the
+   save is rejected. With no policy the adapter is unrestricted by Bridge
+   governance and the runtime chooses its own default.
+5. **Routes** per workspace: enable the exact `(workspace_id, adapter_id)`
+   pair and set its security binding. Pi uses a Bridge profile; Codex uses
+   either a Bridge profile or its native configuration source. Discovery and
+   binding use the exact workspace context.
+
+Endpoint and token edits take effect on the next request without restarting
+the Bridge. The Node `allowed_roots` ceiling is configured on the Node host
+and is not editable from the Bridge.
+
+## 8. MCP tunnel and client connection
+
+Only `/mcp` is tunnelled; the Manager stays local. The generated tunnel
+profile contains no credentials and points at the configured MCP port.
+
+1. In the Manager, rotate or create the shared gateway credential once and
+   put it in the local tunnel environment (mode `0600`) as the
+   `X-Bridge-Token` header value. Recreate or restart the tunnel process.
+2. Install and authorize the official tunnel client per its own repository
+   and the secure-tunnel guide; create or select a tunnel and a scoped
+   runtime key. Confirm the Platform tunnel permissions the guide requires
+   and that the ChatGPT account has developer-mode access. Do not paste
+   account keys into chat.
+3. Copy the example profile to a private directory (or use the Manager
+   profile), replace the tunnel ID placeholder with the real authorized ID,
+   and keep the actual configured local MCP port:
+
+```yaml
+config_version: 1
+control_plane:
+  tunnel_id: tunnel_REPLACE_WITH_YOUR_32_HEX_ID
+  api_key: env:CONTROL_PLANE_API_KEY
+mcp:
+  server_urls:
+    - channel: main
+      url: http://127.0.0.1:8875/mcp
+  extra_headers:
+    X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN
+  discovery_extra_headers:
+    X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN
+```
+
+4. Run the tunnel with the official client (the bundled helper only prompts
+   for secrets and launches that client when you invoke it; it is not an MCP
+   tool and the server cannot invoke it).
+5. Connect ChatGPT to the authorized tunnel. The current OpenAI documented
+   flow (product UI may evolve; see [References](REFERENCES.md) and the
+   official Secure MCP Tunnel guide) is: in ChatGPT Plugins, use the
+   plus/create developer-mode app flow, choose `Tunnel` as the Connection,
+   and select the associated tunnel or enter its `tunnel_id`. Never expose
+   runtime API keys or tunnel secrets in this step.
+6. Refresh tool discovery after MCP schema changes. Start with
+   `list_workspaces`, then `workspace_info` and a small `read_file` with
+   the selected ID.
+
+## 9. Verify
 
 ```sh
-launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/com.workspace-bridge.codex-host-adapter.plist"
-curl -s http://127.0.0.1:8772/health   # expect {"error":"Unauthorized",...}
+workspace-bridge doctor
+workspace-bridge doctor --json
+workspace-bridge doctor --offline
 ```
 
-The Codex SQLite state file is created automatically on first start.
-
-The Codex LaunchAgent must set `RunAtLoad=true` and `KeepAlive=true`.
-The Codex adapter and its owned `codex app-server --stdio` form one
-supervised failure domain: unexpected native app-server loss intentionally
-terminates the host adapter non-zero so launchd restarts the whole unit.
-Without supervisor restart the HTTP adapter would stay alive but
-permanently degraded. Active runs are marked `interrupted` on restart and
-are never replayed; idle persisted conversations remain resumable.
-
-## 4. Register Node, workspaces, adapters (Manager or admin API)
-
-Open `http://127.0.0.1:<admin-port>/` with the admin token, or use the API
-(`Authorization: Bearer <admin-token>`). Order matters:
-
-1. **Node**: add `http://host.docker.internal:8770` with the Node token.
-2. **Workspaces**: one mapping per canonical Node-local root (no invented
-   aliases), then enable it and set write scope (`handoff` default).
-   API: `POST /api/workspaces {name, root, node_id}` →
-   `POST /api/workspaces/{id} {operation: enable|set_write_scope}`.
-   (`set_agent_enabled` remains accepted for compatibility but is inert:
-   execution is gated by the exact workspace route, not a workspace switch.)
-3. **Adapter instances** (Bridge-side `base_url` is resolved by the Node host,
-   so loopback works): Pi → `http://127.0.0.1:8780`, Codex →
-   `http://127.0.0.1:8772`, each with its `WB_RUNTIME_TOKEN`.
-   API: `POST /api/nodes/{node_id}/adapters {name, runtime_type, base_url, token}`.
-4. **Model policy** per adapter — first list what exists, then save:
-   `GET /api/adapters/{id}/models?workspace_id={ws}` →
-   `POST /api/adapters/{id}/model-policy {enabled[], default, reasoning_defaults{}}`.
-   Every selector must currently exist or the save is rejected.
-5. **Routes** per workspace: `POST /api/workspaces/{ws}/routes/{adapter}
-   {enabled, profile_id, security_source, is_default}`. Pi profiles are
-   built in; Codex custom profiles (e.g. `coding`) live in Codex adapter
-   state — if the profile is missing, recreate it first via
-   `POST /api/adapters/{codex}/profiles {id, config}`.
-
-## 5. Gateway credential and tunnel sidecar
-
-```sh
-# POST /api/bridge {"operation":"rotate_token"} — token is shown ONCE.
-```
-
-Put it in `tunnel.env` as `WORKSPACE_BRIDGE_TOKEN` (mode 0600; the sidecar
-reads `X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN` from
-`tunnel-client.yaml`), then recreate the sidecar:
-
-```sh
-chmod 600 tunnel.env
-docker compose up -d mcp-tunnel
-```
-
-Rotation also enables the gateway. Never tunnel the manager listener.
-
-## 6. Verify
+For container Bridge, run Doctor inside the Bridge container so it reads the
+same `/state` and container network context:
 
 ```sh
 docker exec workspace-bridge workspace-bridge --state /state doctor
+docker exec workspace-bridge workspace-bridge --state /state doctor --json
+docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
-Expected: `Overall: PASS`, every workspace/adapter route listed under
-`Runnable routes` as `[ready]` with its default model. `doctor --offline`
-skips adapter/network checks; the Manager's route-readiness view is the same
-report.
+Expected: overall `pass`, and every intended workspace/adapter route listed
+as ready with its default model. Offline mode skips adapter and network
+calls; readiness that depends on live freshness is then reported unknown and
+never ready. The Manager uses the same server-side report: only a ready
+exact route enables a prepared-handoff start. If diagnostics cannot refresh,
+the Manager marks readiness unavailable and disables starts while leaving
+other data visible.
 
-## Gotchas
+Also validate in a real client conversation with a nonsensitive sample
+project: discovery lists only enabled mappings, wrong-workspace IDs fail,
+disabled mappings disappear, pause denies requests, and rotation revokes the
+old credential.
 
-- Bridge state auto-initializes **only** into an empty directory (plus
-  `bootstrap.lock`). A half-deleted state dir fails closed — restore or wipe
-  fully.
-- Node `service start` refuses an `unmanaged` unit. The
-  `launchagent-manifest.json` (macOS) or `systemd-system-manifest.json`
-  (Linux) in Node state tracks the managed unit by SHA;
-  if state was wiped but the unit kept, restore the manifest (or
-  `uninstall` + `install`).
-- The adapter-sync helper (`sync_adapters_local.sh`, untracked) requires the
-  Bridge up and both LaunchAgent plists present; its final diagnostics check
-  only passes once Node + adapters are registered (step 4).
-- Adapter `base_url` values are host-relative as seen by the Node, not the
-  container — `127.0.0.1` is correct there, while the Node URL itself must be
-  `host.docker.internal` from the container.
-- Old model selectors and custom profiles are **not** validated until save
-  time; always read the live catalog first.
+## 10. Updates
+
+There is no automatic or remote updater. Update each host locally, then
+explicitly restart the affected persistent services. A package upgrade never
+restarts anything by itself.
+
+```sh
+uv tool upgrade workspace-bridge
+workspace-bridge --version
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
+```
+
+Update the Pi package with npm on its host, then restart that adapter
+service. The Manager System / Versions view shows component versions and
+compatibility as information only; it performs no installs.
+
+## 11. Uninstall
+
+Stop and remove services before deleting state. Service removal preserves
+state, tokens, bindings, and logs; deleting state is the destructive step.
+
+```sh
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service uninstall
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service uninstall
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
+docker compose down
+```
+
+Then, only if you intend to lose local data, remove the state directories
+and the tunnel environment. Back up stopped private state and workspace
+handoff folders together first, preserving permissions and SQLite files.
+Removing containers or units never deletes host bind directories by itself.
+
+## 12. Troubleshooting first aid
+
+- Doctor reports `action_required` on a fresh Bridge for gateway credential
+  and gateway enabled: create the shared credential in the Manager.
+- `service start` refuses an unmanaged unit: reinstall the managed unit
+  (`uninstall` then `install`) so the state-local manifest matches again.
+- Container Bridge cannot reach the Node: the Node URL must be reachable
+  from inside the container (`host.docker.internal` on Docker Desktop, a
+  real host address on Linux Engine). Loopback inside the container is the
+  container itself.
+- Adapter base URLs are host-relative as seen by the Node, not the
+  container: loopback there is correct while the Node URL itself must be
+  container-reachable.
+- Model saves fail: read the live catalog first; stale selectors are
+  rejected at save time.
+- No live service restart, publish, or credential rotation is performed by
+  reading this guide. See [Operations](OPERATIONS.md) for recovery detail.

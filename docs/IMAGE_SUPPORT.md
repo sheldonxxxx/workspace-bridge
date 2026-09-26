@@ -1,4 +1,4 @@
-# Image support — v0.6.0
+# Image support
 
 ## Use the general reader
 
@@ -85,7 +85,7 @@ protocol versions. **They do not establish model visibility through your actual
 ChatGPT/private-tunnel connection.** No real tunnel login or live ChatGPT visual
 recognition has been performed in the build environment.
 
-1. Install/restart v0.6 with dependencies, keep existing state, and refresh discovery.
+1. Install or restart the current release with dependencies, keep existing state, and refresh discovery.
 2. On your host create a fresh probe in an allowed project:
    `python scripts/create_image_probe.py --output /your/project/probe.png`.
    The marker is printed only for your local comparison; do not paste it into chat.
@@ -112,4 +112,4 @@ and never prints the image bytes. Do not paste tokens into ChatGPT.
 - EXIF orientation: https://pillow.readthedocs.io/en/stable/reference/ImageOps.html
 - Formats: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
 
-Consulted 2026-09-18. Protocol support is not proof of a specific client integration.
+Protocol support is not proof of a specific client integration.

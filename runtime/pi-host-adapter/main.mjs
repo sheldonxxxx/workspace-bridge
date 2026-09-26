@@ -117,7 +117,11 @@ export function startServer({ config, projectsRoot, piCheck, agentDirOk, usable,
   return { adapter, server, instance };
 }
 
-const isEntry = typeof process.argv[1] === "string" && process.argv[1].endsWith("main.mjs");
+const isEntry = typeof process.argv[1] === "string" && (
+  process.argv[1].endsWith("main.mjs")
+  || process.argv[1].endsWith("pi-adapter.mjs")
+  || process.argv[1].endsWith("workspace-bridge-pi-adapter")
+);
 
 if (isEntry) {
   let built;
