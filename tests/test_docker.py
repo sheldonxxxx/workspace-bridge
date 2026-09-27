@@ -244,9 +244,11 @@ def test_compose_security_and_same_host_path():
     assert all('WB_STATE_DIR' not in str(m) and 'WB_PROJECTS_DIR' not in str(m)
                for m in tunnel.get('volumes', []))
     assert tunnel['depends_on']['bridge']['condition']=='service_healthy'
-    profile=yaml.safe_load((ROOT/'tunnel-client.yaml').read_text())
-    urls=[row['url'] for row in profile['mcp']['server_urls']]
-    assert urls==['http://bridge:8765/mcp']
+    # The profile is ignored local configuration and cannot be required by CI.
+    assert tunnel['volumes']==[
+        './tunnel-client.yaml:/etc/tunnel-client/tunnel-client.yaml:ro']
+    assert tunnel['command']==[
+        '--profile-file', '/etc/tunnel-client/tunnel-client.yaml']
 
 
 def test_tunnel_sidecar_logging_level_format_rotation():
@@ -287,12 +289,12 @@ def test_dockerfile_dependency_layer_before_source():
     builder = text.split('FROM ${PYTHON_IMAGE} AS builder')[1].split('FROM ${PYTHON_IMAGE} AS runtime')[0]
     assert 'PIP_NO_CACHE_DIR' not in builder
     assert '--mount=type=cache,target=/root/.cache/pip' in builder
-    dep_wheel = builder.index('pip wheel --wheel-dir /wheels -r')
+    dep_wheel = builder.index('pip wheel --require-hashes --only-binary=:all: --wheel-dir /wheels -r runtime-requirements.txt')
     toml_copy = builder.index('pyproject.toml')
     source_copy = builder.index('workspace_bridge/ ./workspace_bridge/')
     local_wheel = builder.index('pip wheel --no-deps --no-build-isolation')
     assert toml_copy < dep_wheel < source_copy < local_wheel
-    assert 'tomllib' in builder, "Dependencies must be extracted from pyproject with stdlib tomllib"
+    assert 'docker/runtime-requirements.txt' in builder
     # A source/static/test-only change touches none of the dependency-layer inputs.
     assert builder.count('COPY') == 4  # source wheel also receives the built web assets
     runtime = text.split('FROM ${PYTHON_IMAGE} AS runtime')[1]
@@ -300,10 +302,13 @@ def test_dockerfile_dependency_layer_before_source():
     assert 'apt-get install -y --no-install-recommends git' in runtime
     assert 'rm -rf /var/lib/apt/lists/*' in runtime
     assert runtime.index('apt-get update') < runtime.index('apt-get install') < runtime.index('rm -rf /var/lib/apt/lists/*')
-    assert '--no-cache-dir --no-index --find-links=/wheels' in runtime
+    assert '--no-cache-dir --no-index --find-links=/wheels --require-hashes' in runtime
+    assert '--no-deps /wheels/workspace_bridge-*.whl' in runtime
+    assert 'workspace-bridge==0.1.0' not in runtime
     assert 'USER 10001:10001' in runtime
     ignore = (ROOT/'.dockerignore').read_text()
     assert '\n**\n' in ignore and '!workspace_bridge/' in ignore and '!README.md' in ignore
+    assert '!docker/runtime-requirements.txt' in ignore
     assert '!scripts/' not in ignore and '!.env' not in ignore
 
 

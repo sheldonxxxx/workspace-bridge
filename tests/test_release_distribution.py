@@ -49,12 +49,12 @@ def test_ci_baseline_current_and_least_privilege():
     import re as _re
     assert _re.search(r"setup-uv@v10(?!\.[0-9])", text) is None, "unresolved setup-uv@v10"
     assert "actions/setup-node@v6" not in text
-    # Locked installs, no Playwright browsers.
+    # Locked installs and a browser gate.
     assert "--locked" in text
     assert "npm " in text and " ci" in text
     lowered = text.lower()
-    assert "playwright" not in lowered
-    assert "playwright install" not in lowered
+    assert "playwright install --with-deps --only-shell chromium" in lowered
+    assert "test:e2e" in lowered
     # Matrix covers Linux x64/arm64 + macOS arm64.
     assert "ubuntu-24.04" in text
     assert "ubuntu-24.04-arm" in text
@@ -64,12 +64,15 @@ def test_ci_baseline_current_and_least_privilege():
     # Pi uses locked production deps + tests on all three OS.
     jobs = data.get("jobs", {})
     assert "python" in jobs and "manager" in jobs
+    assert "manager-browser" in jobs
     assert "pi" in jobs and "docker" in jobs
     pi_text = yaml.safe_dump(jobs["pi"])
     assert "ubuntu-24.04" in pi_text
     assert "ubuntu-24.04-arm" in pi_text
     assert "macos-14" in pi_text
     assert "--omit=dev" in text
+    assert "node --test web/test/*.test.mjs" in text
+    assert "uv export --locked --no-dev --no-emit-project" in text
 
 
 def test_ci_artifact_action_majors():
@@ -188,11 +191,22 @@ def test_release_ready_barrier():
     data = _load_yml(RELEASE_YML)
     jobs = data.get("jobs", {})
     assert "release-ready" in jobs
+    quality = jobs["quality"]
+    assert quality.get("needs") == ["validate-release"]
+    assert quality.get("uses") == "./.github/workflows/ci.yml"
+    assert "github.event.release.tag_name || inputs.tag" in quality.get("with", {}).get("ref", "")
+    ci = _load_yml(CI_YML)
+    assert "ref" in _workflow_on(ci)["workflow_call"]["inputs"]
+    for job in ci["jobs"].values():
+        checkouts = [step for step in job["steps"]
+                     if str(step.get("uses", "")).startswith("actions/checkout@")]
+        assert len(checkouts) == 1
+        assert checkouts[0]["with"]["ref"] == "${{ inputs.ref || github.ref }}"
     ready = jobs["release-ready"]
     needs = ready.get("needs", [])
     if isinstance(needs, str):
         needs = [needs]
-    for required in ("validate-release", "build-source-bundle",
+    for required in ("validate-release", "quality", "build-source-bundle",
                      "build-pi-runtime", "npm-pack", "build-docker",
                      "prepare-pypi-dist"):
         assert required in needs, required
@@ -321,9 +335,9 @@ def test_npm_oidc_isolation_and_version_gate():
     assert len(setup) == 1
     assert "registry-url" in yaml.safe_dump(setup[0])
     assert "cache:" not in yaml.safe_dump(setup[0])
-    # Bounded npm version check >=11.5.1, no install/upgrade.
+    # Staged publishing needs npm >=11.15.0, with no install/upgrade.
     runs = "\n".join(str(s.get("run", "")) for s in steps)
-    assert "11.5.1" in runs
+    assert "11.15.0" in runs
     assert "npm --version" in runs
     assert "npm install -g" not in runs
     assert "npm i -g" not in runs
@@ -431,6 +445,8 @@ def test_release_assets_use_gh_upload_no_new_tag():
     jobs = _load_yml(RELEASE_YML).get("jobs", {})
     assets = jobs["release-assets"]
     assert "gh release upload" in text
+    assert "workspace_bridge-${VERSION}-py3-none-any.whl" in text
+    assert "workspace-bridge-${VERSION}-py3-none-any.whl" not in text
     assert "GITHUB_TOKEN" in text or "github.token" in text
     assert "gh release create" not in text
     assert "--clobber" in text or "clobber" in text
@@ -489,15 +505,17 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     # Release-engineering names are used for bundle build/validation.
     assert "workspace-bridge release build" in text
     assert "workspace-bridge release validate" in text
-    # Packaging smoke: wheel console entry metadata plus version and
-    # nested node/adapter help, with no network install step.
+    # Packaging smoke checks the exact staged wheel in a clean environment.
     assert "entry_points.txt" in text
     assert "workspace_bridge.cli:main" in text
     assert "workspace_bridge.node_cli:main" in text
     assert "workspace_bridge.codex_host_adapter:main" in text
-    assert "workspace-bridge --version" in text
-    assert "workspace-bridge node --help" in text
-    assert "workspace-bridge adapter --help" in text
+    assert "uv pip install --python" in text
+    assert '"$VENV/bin/workspace-bridge" --version' in text
+    assert '"$VENV/bin/workspace-bridge" node --help' in text
+    assert '"$VENV/bin/workspace-bridge" adapter --help' in text
+    assert '"$VENV/bin/workspace-bridge-node" --help' in text
+    assert '"$VENV/bin/workspace-bridge-codex-adapter" --help' in text
 
 
 def test_setup_uv_pinned_exact_in_ci_and_release():

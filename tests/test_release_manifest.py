@@ -108,7 +108,9 @@ def test_all_version_sources_aligned_at_0_1_0():
     assert pi_meta["workspaceBridgeRelease"] == "0.1.0"
     web_meta = json.loads((repo / "web" / "package.json").read_text())
     assert web_meta["version"] == "0.1.0"
-    assert "0.1.0" in (repo / "Dockerfile").read_text()
+    docker = (repo / "Dockerfile").read_text()
+    assert "/wheels/workspace_bridge-*.whl" in docker
+    assert "workspace-bridge==0.1.0" not in docker
     assert "0.1.0" in (repo / "compose.yaml").read_text()
     assert "0.1.0" in (repo / "README.md").read_text()
     # Served Manager identity is 0.1.0 after rebuild.
@@ -181,5 +183,4 @@ def test_build_release_manifest_integration_if_node_available():
     assert pi["component"] == "pi-host-adapter"
     assert manager["product_version"] == __version__
     assert pi["product_version"] == __version__
-
 

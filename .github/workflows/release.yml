@@ -42,6 +42,7 @@ jobs:
           echo "Release $TAG exists and is not a draft"
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           enable-cache: true
       - name: Tag must be exactly v<project-version>
         run: |
@@ -67,6 +68,15 @@ jobs:
           test "$WB_VERSION" = "$VERSION" || { echo "product $WB_VERSION != tag $VERSION" >&2; exit 1; }
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
+  quality:
+    name: Full CI on release tag
+    needs: [validate-release]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event.release.tag_name || inputs.tag }}
+
   build-source-bundle:
     name: Source bundle / Linux x64
     needs: [validate-release]
@@ -82,6 +92,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           enable-cache: true
       - name: Install Manager dependencies (locked)
         run: npm --prefix web ci
@@ -129,6 +140,7 @@ jobs:
           cache-dependency-path: runtime/pi-host-adapter/package-lock.json
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           enable-cache: true
       - uses: actions/download-artifact@v8
         with:
@@ -215,6 +227,7 @@ jobs:
           path: dist/source-bundle
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           enable-cache: true
       - name: Validate source bundle before Docker build
         run: |
@@ -282,12 +295,13 @@ jobs:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           enable-cache: true
       - uses: actions/download-artifact@v8
         with:
           name: source-bundle
           path: dist/source-bundle
-      - name: Packaging smoke (console entry points, version, node and adapter help)
+      - name: Inspect wheel console entry points
         run: |
           set -euo pipefail
           uv sync --locked --extra test
@@ -305,9 +319,6 @@ jobs:
           assert "workspace-bridge-codex-adapter = workspace_bridge.codex_host_adapter:main" in text, text
           print("wheel console_scripts ok")
           PY
-          uv run workspace-bridge --version
-          uv run workspace-bridge node --help
-          uv run workspace-bridge adapter --help
       - name: Strict bundle validation and stage exact wheel bytes
         run: |
           set -euo pipefail
@@ -332,6 +343,17 @@ jobs:
           print("staged for PyPI:", std_name)
           PY
           ls -lh dist/pypi
+      - name: Smoke exact staged wheel in a clean environment
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/bridge-wheel-smoke"
+          uv venv "$VENV"
+          uv pip install --python "$VENV/bin/python" dist/pypi/*.whl
+          "$VENV/bin/workspace-bridge" --version
+          "$VENV/bin/workspace-bridge" node --help
+          "$VENV/bin/workspace-bridge" adapter --help
+          "$VENV/bin/workspace-bridge-node" --help
+          "$VENV/bin/workspace-bridge-codex-adapter" --help
       - name: Upload prepared PyPI dist
         uses: actions/upload-artifact@v7
         with:
@@ -342,7 +364,7 @@ jobs:
 
   release-ready:
     name: Release ready barrier
-    needs: [validate-release, build-source-bundle, build-pi-runtime, npm-pack, build-docker, prepare-pypi-dist]
+    needs: [validate-release, quality, build-source-bundle, build-pi-runtime, npm-pack, build-docker, prepare-pypi-dist]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -381,17 +403,17 @@ jobs:
     steps:
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26"
           registry-url: "https://registry.npmjs.org"
       - uses: actions/download-artifact@v8
         with:
           name: npm-package
           path: dist/npm
-      - name: Require npm >=11.5.1 (no install or upgrade)
+      - name: Require npm >=11.15.0 for staged publishing
         run: |
           set -euo pipefail
           npm --version
-          node -p "const v=require('child_process').execSync('npm --version').toString().trim(); const p=v.split('.').map(Number); if (p[0]<11 || (p[0]===11 && (p[1]<5 || (p[1]===5 && p[2]<1)))) { console.error('npm >=11.5.1 required, got '+v); process.exit(1); } else { console.log('npm OIDC-ready: '+v); }"
+          node -p "const v=require('child_process').execSync('npm --version').toString().trim(); const p=v.split('.').map(Number); if (p[0]<11 || (p[0]===11 && p[1]<15)) { console.error('npm >=11.15.0 required, got '+v); process.exit(1); } else { console.log('npm staged-publish-ready: '+v); }"
       - name: Publish exact tarball (staged by default)
         run: |
           set -euo pipefail
@@ -448,7 +470,7 @@ jobs:
           # Source bundle truth (exact bytes, versioned names where relevant).
           cp dist/source-bundle/bundle.json "dist/release-assets/workspace-bridge-bundle-${VERSION}.json"
           cp dist/source-bundle/target-manifest.json "dist/release-assets/workspace-bridge-target-manifest-${VERSION}.json"
-          cp dist/source-bundle/artifacts/python-wheel.whl "dist/release-assets/workspace-bridge-${VERSION}-py3-none-any.whl"
+          cp dist/source-bundle/artifacts/python-wheel.whl "dist/release-assets/workspace_bridge-${VERSION}-py3-none-any.whl"
           cp dist/source-bundle/artifacts/pi-host-adapter.tar.gz "dist/release-assets/workspace-bridge-pi-source-${VERSION}.tar.gz"
           # Pi runtime archives + metadata (already versioned by builder).
           cp dist/pi-runtime-linux-x64/*.tar.gz dist/release-assets/
