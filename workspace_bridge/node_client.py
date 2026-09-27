@@ -213,7 +213,12 @@ class NodeRuntimeAdapterProxy:
             if exc.code in {"node_unavailable", "node_auth_failed", "node_protocol_error"}:
                 raise RuntimeUnavailable("Runtime Node is unavailable") from None
             if exc.code == "runtime_unavailable":
-                raise RuntimeUnavailable("Runtime adapter is unavailable") from None
+                # Preserve the already bounded/redacted Node detail so the
+                # sanitized native cause survives the Node boundary. Node
+                # auth/protocol failures stay generic above.
+                preserved, _ = redact(str(exc)[:500])
+                raise RuntimeUnavailable(
+                    preserved.strip() or "Runtime adapter is unavailable") from None
             if exc.code == "runtime_unsupported":
                 raise RuntimeUnsupported("Runtime feature is unsupported") from None
             if exc.code == "runtime_rejected":

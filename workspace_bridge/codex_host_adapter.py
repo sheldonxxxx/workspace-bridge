@@ -13,6 +13,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -32,7 +33,31 @@ from .login_path import runtime_env_with_login_path, safe_summary
 from .security import redact
 
 
-_LOG = logging.getLogger("uvicorn.error")
+_LOG = logging.getLogger(__name__)
+
+
+def _ensure_operational_stderr_handler() -> None:
+    """Attach a minimal stderr handler surviving Uvicorn reconfiguration.
+
+    Managed LaunchAgents persist process stderr to ``stderr.log``; Uvicorn's
+    own ``log_config`` only manages ``uvicorn.*`` loggers, so a dedicated
+    module logger with its own ``StreamHandler(sys.stderr)`` is not cleared
+    by ``uvicorn.run``. Idempotent: never adds a duplicate stderr handler.
+    Only already-sanitized bounded summaries are ever emitted via ``_LOG``.
+    """
+    try:
+        for existing in _LOG.handlers:
+            if isinstance(existing, logging.StreamHandler):
+                try:
+                    if existing.stream is sys.stderr:
+                        return
+                except Exception:
+                    return
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        _LOG.addHandler(handler)
+    except Exception:
+        pass
 
 
 def _now() -> str:
@@ -1080,8 +1105,13 @@ class CodexHostAdapter:
         summary = f"Codex thread/start failed: {detail}"
         if stderr:
             summary += f"; app-server stderr: {stderr}"
-        _LOG.warning("%s", summary[:2600])
-        return AdapterFailure("Codex thread/start failed", 502, "runtime_unavailable")
+        summary = summary[:2600]
+        _ensure_operational_stderr_handler()
+        _LOG.warning("%s", summary)
+        # HTTP-visible message carries only the concise sanitized native
+        # detail; the fuller stderr tail stays operational-log-only.
+        return AdapterFailure(f"Codex thread/start failed: {detail}", 502,
+                              "runtime_unavailable")
 
     def _runtime_thread_summary(self, native: dict, context: dict, cwd: str) -> dict:
         thread = (native.get("thread") or {}).get("id")
@@ -1089,7 +1119,8 @@ class CodexHostAdapter:
             raise AdapterFailure("Codex thread binding was not confirmed", 502,
                                  "binding_mismatch")
         active_profile = native.get("activePermissionProfile")
-        if "activePermissionProfile" in native and not isinstance(active_profile, dict):
+        if ("activePermissionProfile" in native and active_profile is not None
+                and not isinstance(active_profile, dict)):
             raise AdapterFailure("Codex returned invalid active security state", 502,
                                  "binding_mismatch")
         active_id = active_profile.get("id") if isinstance(active_profile, dict) else None
@@ -2366,6 +2397,23 @@ def make_app(adapter: CodexHostAdapter, token: str) -> Starlette:
                 raise AdapterFailure("Unknown route", 404, "not_found")
             return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except AdapterFailure as exc:
+            if path == "/v1/conversations" and request.method == "POST":
+                try:
+                    _status = exc.status
+                except Exception:
+                    _status = 0
+                if isinstance(_status, bool) or not isinstance(_status, int):
+                    _status = 0
+                if _status >= 500:
+                    _raw_code = getattr(exc, "code", "")
+                    _code = _raw_code if isinstance(_raw_code, str) else ""
+                    if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", _code):
+                        _code = "adapter_failure"
+                    _detail = sanitize_diagnostic(str(exc), limit=500)
+                    _ensure_operational_stderr_handler()
+                    _LOG.warning(
+                        "Codex conversation creation failed: status=%s code=%s detail=%s",
+                        _status, _code, _detail)
             return JSONResponse({"error": str(exc), "code": exc.code}, exc.status)
         except (ValueError, TypeError):
             return JSONResponse({"error": "Invalid request", "code": "invalid_arguments"}, 400)
@@ -2394,6 +2442,11 @@ def main() -> None:
         logging.getLogger("uvicorn.error").setLevel(getattr(logging, _level_name))
     except Exception:
         pass
+    try:
+        _LOG.setLevel(getattr(logging, _level_name))
+    except Exception:
+        pass
+    _ensure_operational_stderr_handler()
     state = os.environ.get("WB_CODEX_ADAPTER_STATE")
     root = os.environ.get("WB_CODEX_PROJECTS_ROOT")
     token = os.environ.get("WB_RUNTIME_TOKEN")

@@ -268,6 +268,10 @@ def test_non_owned_and_outside_workspace_refused(codex_adapter, tmp_path):
 
 
 def test_thread_start_failure_has_safe_host_diagnostics(codex_adapter, caplog):
+    import logging as _logging
+
+    from workspace_bridge import codex_host_adapter as _host_module
+
     adapter, workspace, rpc = codex_adapter
     rpc.thread_start_error = (
         "denied at /Users/private/project; WB_RUNTIME_TOKEN=super-secret-token")
@@ -278,13 +282,27 @@ def test_thread_start_failure_has_safe_host_diagnostics(codex_adapter, caplog):
             new_conversation(adapter, workspace)
 
     assert exc.value.code == "runtime_unavailable"
-    assert str(exc.value) == "Codex thread/start failed"
+    assert exc.value.status == 502
+    visible = str(exc.value)
+    assert visible.startswith("Codex thread/start failed: ")
+    assert "denied" in visible
+    assert "[PATH]" in visible and "[REDACTED_SECRET]" in visible
+    assert "/Users/" not in visible and "/Volumes/" not in visible
+    assert "super-secret-token" not in visible and "sk-proj-" not in visible
+    # Fuller stderr tail stays operational-log-only, not HTTP-visible.
+    assert "launch failed" not in visible
+    assert len(visible) <= 400
     message = caplog.records[-1].getMessage()
+    assert caplog.records[-1].name == "workspace_bridge.codex_host_adapter"
+    assert _host_module._LOG.name == "workspace_bridge.codex_host_adapter"
     assert "thread/start" in message and "denied" in message
+    assert "launch failed" in message
     assert "[PATH]" in message and "[REDACTED_SECRET]" in message
     assert "/Users/" not in message and "/Volumes/" not in message
     assert "super-secret-token" not in message and "sk-proj-" not in message
     assert len(message) <= 2600
+    assert any(isinstance(h, _logging.StreamHandler)
+               for h in _host_module._LOG.handlers)
 
 
 def test_read_only_profile_denies_native_escalation(codex_adapter):
@@ -616,6 +634,82 @@ def test_active_native_permission_profile_mismatch_fails_binding(codex_adapter):
     assert not adapter.db.execute("SELECT 1 FROM conversations").fetchone()
 
 
+def test_runtime_config_accepts_null_active_profile(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    real_call = rpc.call
+
+    def _null_active(method, params, timeout=30):
+        if method == "thread/start":
+            return {"thread": {"id": "native-thread-null"},
+                    "cwd": params["cwd"],
+                    "activePermissionProfile": None,
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "auto_review",
+                    "sandbox": {"type": "workspaceWrite"}}
+        return real_call(method, params, timeout=timeout)
+
+    rpc.call = _null_active
+    try:
+        conversation = new_runtime_config_conversation(adapter, workspace, rpc)
+    finally:
+        rpc.call = real_call
+    assert conversation["securityBinding"]["source"] == "runtime-config"
+    resolved = conversation["securityBinding"]["resolvedSummary"]
+    assert resolved["activePermissionProfile"] is None
+    assert resolved["approvalPolicy"] == "on-request"
+    assert resolved["approvalsReviewer"] == "auto_review"
+    assert resolved["provenance"] in {"implicit/default", "legacy-sandbox"}
+
+
+def test_runtime_config_rejects_non_null_invalid_active_profile(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    real_call = rpc.call
+
+    def _bad_active(method, params, timeout=30):
+        if method == "thread/start":
+            return {"thread": {"id": "native-thread-bad"},
+                    "cwd": params["cwd"],
+                    "activePermissionProfile": ":workspace",
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "user",
+                    "sandbox": {"type": "workspaceWrite"}}
+        return real_call(method, params, timeout=timeout)
+
+    rpc.call = _bad_active
+    try:
+        with pytest.raises(AdapterFailure) as invalid:
+            new_runtime_config_conversation(adapter, workspace, rpc)
+    finally:
+        rpc.call = real_call
+    assert invalid.value.code == "binding_mismatch"
+    assert "invalid active security state" in str(invalid.value)
+    assert not adapter.db.execute("SELECT 1 FROM conversations").fetchone()
+
+
+def test_named_profile_null_active_profile_still_fails(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    real_call = rpc.call
+
+    def _null_active(method, params, timeout=30):
+        if method == "thread/start":
+            return {"thread": {"id": "native-thread-null"},
+                    "cwd": params["cwd"],
+                    "activePermissionProfile": None,
+                    "approvalPolicy": params.get("approvalPolicy", "on-request"),
+                    "approvalsReviewer": params.get("approvalsReviewer", "user"),
+                    "sandbox": {"type": "workspaceWrite"}}
+        return real_call(method, params, timeout=timeout)
+
+    rpc.call = _null_active
+    try:
+        with pytest.raises(AdapterFailure) as mismatch:
+            new_conversation(adapter, workspace)
+    finally:
+        rpc.call = real_call
+    assert mismatch.value.code == "binding_mismatch"
+    assert not adapter.db.execute("SELECT 1 FROM conversations").fetchone()
+
+
 def test_new_profile_saves_reject_legacy_schema(codex_adapter):
     adapter, _, _ = codex_adapter
     with pytest.raises(AdapterFailure, match="permissions"):
@@ -690,7 +784,7 @@ def test_native_engine_loss_terminates_once_with_static_diagnostic(tmp_path, cap
     try:
         assert callable(rpc.on_unexpected_exit)
         assert getattr(rpc.on_unexpected_exit, "__self__", None) is adapter
-        with caplog.at_level("CRITICAL", logger="uvicorn.error"):
+        with caplog.at_level("CRITICAL", logger="workspace_bridge.codex_host_adapter"):
             rpc.on_unexpected_exit()
             rpc.on_unexpected_exit()
         assert exits == [1]
@@ -1087,6 +1181,63 @@ def test_rebind_waiter_conflict_restores_exact_old_state(codex_adapter):
         assert current["securityBinding"]["profile"]["revision"] == old_rev
     finally:
         adapter._settings_updates.pop(thread_id, None)
+
+
+async def test_conversation_5xx_boundary_logs_sanitized(codex_adapter, caplog):
+    adapter, _, _ = codex_adapter
+
+    class _FailingConversations:
+        def create_conversation(self, body):
+            raise AdapterFailure(
+                "boom at /Users/private/project for /Volumes/private/data; "
+                "WB_RUNTIME_TOKEN=super-secret-token", 502, "runtime_unavailable")
+
+    app = make_app(_FailingConversations(), "boundary-token")
+    with caplog.at_level("WARNING", logger="workspace_bridge.codex_host_adapter"):
+        caplog.clear()
+        async with AsyncClient(transport=ASGITransport(app=app),
+                                base_url="http://127.0.0.1:8772") as client:
+            response = await client.post(
+                "/v1/conversations", json={"workspaceId": "ws-one"},
+                headers={"X-Runtime-Token": "boundary-token"})
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["code"] == "runtime_unavailable"
+    assert payload["error"] == (
+        "boom at /Users/private/project for /Volumes/private/data; "
+        "WB_RUNTIME_TOKEN=super-secret-token")
+    boundary = [record for record in caplog.records
+                if "conversation creation failed" in record.getMessage()]
+    assert len(boundary) == 1
+    message = boundary[0].getMessage()
+    assert "status=502" in message and "code=runtime_unavailable" in message
+    assert "[PATH]" in message and "[REDACTED_SECRET]" in message
+    assert "/Users/" not in message and "/Volumes/" not in message
+    assert "super-secret-token" not in message
+    assert "ws-one" not in message and "boundary-token" not in message
+    assert len(message) <= 800
+
+
+async def test_conversation_4xx_not_logged_as_5xx(codex_adapter, caplog):
+    adapter, _, _ = codex_adapter
+
+    class _RejectingConversations:
+        def create_conversation(self, body):
+            raise AdapterFailure("Unknown or changed security profile", 409,
+                                 "profile_mismatch")
+
+    app = make_app(_RejectingConversations(), "boundary-token")
+    with caplog.at_level("WARNING", logger="workspace_bridge.codex_host_adapter"):
+        caplog.clear()
+        async with AsyncClient(transport=ASGITransport(app=app),
+                                base_url="http://127.0.0.1:8772") as client:
+            response = await client.post(
+                "/v1/conversations", json={"workspaceId": "ws-one"},
+                headers={"X-Runtime-Token": "boundary-token"})
+    assert response.status_code == 409
+    assert response.json()["code"] == "profile_mismatch"
+    assert not [record for record in caplog.records
+                if "conversation creation failed" in record.getMessage()]
 
 
 def test_rebind_confirmed_success_finalization_failure_stays_pending(

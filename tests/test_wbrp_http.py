@@ -1,11 +1,17 @@
 """The Bridge client speaks the private protocol over a real HTTP listener."""
+import json
 import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
 import uvicorn
 
 from workspace_bridge.codex_host_adapter import CodexHostAdapter, make_app
+from workspace_bridge.node_client import NodeRuntimeAdapterProxy
+from workspace_bridge.runtime import RuntimeUnavailable
+from workspace_bridge.security import BridgeError
 from workspace_bridge.wbrp import Descriptor, HttpRuntimeAdapter
 from test_codex_host_adapter import FakeCodexRpc
 
@@ -126,3 +132,128 @@ def test_codex_http_adapter_contract(tmp_path):
         server.should_exit = True
         thread.join(timeout=5)
         native.close()
+
+
+def _serve_502_once(payload: dict):
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.dumps(payload).encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_http_502_preserves_sanitized_native_detail():
+    token = "adapter-token-should-not-escape"
+    # Adapter already applies sanitize_diagnostic (paths -> [PATH]); WBRP must
+    # preserve that bounded detail while scrubbing its own token.
+    native_detail = (
+        "Codex thread/start failed: denied at [PATH]; "
+        f"echo:{token}")
+    server, thread = _serve_502_once({
+        "error": native_detail, "code": "runtime_unavailable"})
+    try:
+        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
+                                    f"http://127.0.0.1:{server.server_port}", token)
+        with pytest.raises(RuntimeUnavailable) as exc:
+            client.create_conversation({"workspaceId": "ws-one"})
+        assert exc.value.code == "runtime_unavailable"
+        message = str(exc.value)
+        assert "denied" in message
+        assert "[PATH]" in message and "[REDACTED_SECRET]" in message
+        assert "/Users/" not in message
+        assert token not in message
+        assert len(message) <= 500
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_http_502_empty_detail_stays_generic():
+    server, thread = _serve_502_once({"error": "", "code": "runtime_unavailable"})
+    try:
+        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
+                                    f"http://127.0.0.1:{server.server_port}", "secret")
+        with pytest.raises(RuntimeUnavailable) as exc:
+            client.create_conversation({"workspaceId": "ws-one"})
+        assert exc.value.code == "runtime_unavailable"
+        assert str(exc.value) == "Runtime adapter returned an error"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_http_network_unavailable_stays_generic():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        unused_port = sock.getsockname()[1]
+    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
+                                f"http://127.0.0.1:{unused_port}", "secret")
+    with pytest.raises(RuntimeUnavailable) as exc:
+        client.create_conversation({"workspaceId": "ws-one"})
+    assert exc.value.code == "runtime_unavailable"
+    assert str(exc.value) == "Runtime adapter is unavailable"
+
+
+def test_node_proxy_preserves_safe_runtime_unavailable():
+    safe_detail = "Codex thread/start failed: denied at [PATH]"
+
+    class _Node:
+        def runtime(self, *args, **kwargs):
+            raise BridgeError(safe_detail, "runtime_unavailable")
+
+    proxy = NodeRuntimeAdapterProxy(
+        _Node(),  # type: ignore[arg-type]
+        {"id": "adapter_1", "runtime_type": "codex", "revision": "rev_" + "0" * 32})
+    with pytest.raises(RuntimeUnavailable) as exc:
+        proxy.create_conversation({"workspaceId": "ws-one"})
+    assert exc.value.code == "runtime_unavailable"
+    assert "denied" in str(exc.value)
+    assert "[PATH]" in str(exc.value)
+
+
+def test_node_proxy_redacts_unsafe_runtime_unavailable():
+    secret = "sk-proj-" + "x" * 32
+
+    class _Node:
+        def runtime(self, *args, **kwargs):
+            raise BridgeError(
+                f"denied at [PATH]; api_key={secret}",
+                "runtime_unavailable")
+
+    proxy = NodeRuntimeAdapterProxy(
+        _Node(),  # type: ignore[arg-type]
+        {"id": "adapter_1", "runtime_type": "codex", "revision": "rev_" + "0" * 32})
+    with pytest.raises(RuntimeUnavailable) as exc:
+        proxy.create_conversation({"workspaceId": "ws-one"})
+    assert exc.value.code == "runtime_unavailable"
+    message = str(exc.value)
+    assert "[PATH]" in message
+    assert "[REDACTED_SECRET]" in message
+    assert secret not in message
+
+
+def test_node_proxy_keeps_node_failures_generic():
+    class _Node:
+        def runtime(self, *args, **kwargs):
+            raise BridgeError("node down", "node_unavailable")
+
+    proxy = NodeRuntimeAdapterProxy(
+        _Node(),  # type: ignore[arg-type]
+        {"id": "adapter_1", "runtime_type": "codex", "revision": "rev_" + "0" * 32})
+    with pytest.raises(RuntimeUnavailable) as exc:
+        proxy.create_conversation({"workspaceId": "ws-one"})
+    assert exc.value.code == "runtime_unavailable"
+    assert str(exc.value) == "Runtime Node is unavailable"

@@ -313,7 +313,7 @@ class HttpRuntimeAdapter:
             if exc.code in (400, 404, 409, 412, 422):
                 raise RuntimeRejected(detail or "Runtime rejected the request",
                                       code=code, status=exc.code) from None
-            raise RuntimeUnavailable("Runtime adapter returned an error") from None
+            raise RuntimeUnavailable(detail or "Runtime adapter returned an error") from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
             raise RuntimeUnavailable("Runtime adapter is unavailable") from None
         except (ValueError, UnicodeError):

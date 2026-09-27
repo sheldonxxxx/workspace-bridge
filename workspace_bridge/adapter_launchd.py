@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable, Sequence
 
 from .adapter_service import (
@@ -503,6 +504,83 @@ def _print_state(result: LaunchctlResult) -> dict:
             "pid": pid, "state": lifecycle_state}
 
 
+_LAUNCHD_TRANSITION_ATTEMPTS = 50
+_LAUNCHD_TRANSITION_INTERVAL = 0.1
+
+
+def _is_running_state(info: dict) -> bool:
+    """Exact-target proof that the service is loaded and running."""
+    return bool(info.get("available") and info.get("loaded") and info.get("running"))
+
+
+def _is_unloaded_state(info: dict) -> bool:
+    """Exact-target proof that the service is not loaded.
+
+    ``available`` must be true so a ``launchctl`` outage (``unavailable``)
+    is never mistaken for a successful unload.
+    """
+    return bool(info.get("available") and not info.get("loaded"))
+
+
+def _await_launchd_state(manager, state, predicate, *,
+                         attempts: int = _LAUNCHD_TRANSITION_ATTEMPTS,
+                         interval: float = _LAUNCHD_TRANSITION_INTERVAL):
+    """Poll exact-target ``launchctl print`` until ``predicate`` holds.
+
+    Returns the satisfying state dict, or ``None`` when the bounded budget
+    expires. Uses module ``time.sleep`` so tests can monkeypatch it.
+    """
+    for index in range(attempts):
+        current = _print_state(manager.print_service(state))
+        if predicate(current):
+            return current
+        if index + 1 < attempts:
+            time.sleep(interval)
+    return None
+
+
+def _launchctl_transition(manager, state, action: str, desired: str, *,
+                          attempts: int = _LAUNCHD_TRANSITION_ATTEMPTS,
+                          interval: float = _LAUNCHD_TRANSITION_INTERVAL):
+    """Execute one launchctl mutation then verify the exact target state.
+
+    A transient/nonzero/OSError ``BridgeError`` from the single mutation is
+    accepted only when bounded ``launchctl print`` polling proves the exact
+    target reached ``desired`` (``"running"`` or ``"not_loaded"``). When the
+    desired state is not reached, the original command error is re-raised if
+    one exists; otherwise a bounded ``adapter_service_launchctl_failed``
+    error is raised. Success is never inferred from plist existence alone.
+    """
+    if desired == "running":
+        predicate = _is_running_state
+    elif desired == "not_loaded":
+        predicate = _is_unloaded_state
+    else:
+        raise ValueError(f"Unknown launchd desired state: {desired}")
+    command_error = None
+    try:
+        if action == "bootout":
+            manager.bootout(state)
+        elif action == "bootstrap":
+            manager.bootstrap(state)
+        elif action == "kickstart":
+            manager.kickstart(state)
+        else:
+            raise ValueError(f"Unknown launchctl action: {action}")
+    except BridgeError as exc:
+        command_error = exc
+    observed = _await_launchd_state(manager, state, predicate,
+                                    attempts=attempts, interval=interval)
+    if observed is not None:
+        return observed
+    if command_error is not None:
+        raise command_error
+    raise BridgeError(
+        f"launchctl {action} did not reach {desired} within the bounded wait",
+        "adapter_service_launchctl_failed",
+    )
+
+
 def _config_status(state: Path) -> tuple[dict | None, str | None, str | None]:
     try:
         config = load_adapter_config(state, require_roots=False)
@@ -733,10 +811,11 @@ def start_service(state: str | os.PathLike[str], *,
     _require_managed(paths)
     launchd = _print_state(manager.print_service(paths.state))
     if not launchd["loaded"]:
-        manager.bootstrap(paths.state)
-        manager.kickstart(paths.state)
+        # Plist already has RunAtLoad=True: one bootstrap + bounded
+        # verification only; no redundant kickstart after bootstrap.
+        _launchctl_transition(manager, paths.state, "bootstrap", "running")
     elif not launchd["running"]:
-        manager.kickstart(paths.state)
+        _launchctl_transition(manager, paths.state, "kickstart", "running")
     return _record_action("start", paths.state, manager)
 
 
@@ -750,7 +829,9 @@ def stop_service(state: str | os.PathLike[str], *,
     _require_managed(paths)
     launchd = _print_state(manager.print_service(paths.state))
     if launchd["loaded"]:
-        manager.bootout(paths.state)
+        # Wait until the exact target is truly not_loaded before returning
+        # so a subsequent start cannot race the unload.
+        _launchctl_transition(manager, paths.state, "bootout", "not_loaded")
     return _record_action("stop", paths.state, manager)
 
 
@@ -763,9 +844,9 @@ def restart_service(state: str | os.PathLike[str], *,
     _require_managed(paths)
     launchd = _print_state(manager.print_service(paths.state))
     if launchd["loaded"]:
-        manager.bootout(paths.state)
-    manager.bootstrap(paths.state)
-    manager.kickstart(paths.state)
+        _launchctl_transition(manager, paths.state, "bootout", "not_loaded")
+    # One bootstrap + bounded verification only; no kickstart after bootstrap.
+    _launchctl_transition(manager, paths.state, "bootstrap", "running")
     return _record_action("restart", paths.state, manager)
 
 
