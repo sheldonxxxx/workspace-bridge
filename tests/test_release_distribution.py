@@ -527,7 +527,9 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert '"$VENV/bin/workspace-bridge" node --help' in text
     assert '"$VENV/bin/workspace-bridge" adapter --help' in text
     assert '"$VENV/bin/workspace-bridge-node" --help' in text
-    assert '"$VENV/bin/workspace-bridge-codex-adapter" --help' in text
+    # The Codex executable needs runtime settings even for --help; import
+    # its packaged entry point without starting a live adapter.
+    assert 'from workspace_bridge.codex_host_adapter import main; assert callable(main)' in text
 
 
 def test_setup_uv_pinned_exact_in_ci_and_release():
