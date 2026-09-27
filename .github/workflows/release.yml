@@ -102,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf dist/source-bundle
+          mkdir -p dist
           uv run workspace-bridge release build --output dist/source-bundle --json > dist/source-bundle.json
           uv run workspace-bridge release validate --bundle dist/source-bundle --json > dist/source-validated.json
       - name: Upload source bundle artifact
