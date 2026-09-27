@@ -147,6 +147,24 @@ def test_bounded_fd3_run_discards_stdout_noise_and_caps_probe():
     assert result["path"] is None or isinstance(result["path"], str)
 
 
+def test_bounded_fd3_run_captures_probe_with_high_fd():
+    # A busy process may allocate the capture pipe above fd 9. This must
+    # still work with /bin/sh, including dash on Linux.
+    holders = [open(os.devnull, "rb") for _ in range(16)]
+    try:
+        assert holders[-1].fileno() > 9
+        noisy = ["/bin/sh", "-c",
+                 "printf ignored; "
+                 f"printf '{login_path._MARK_BEGIN}%s{login_path._MARK_END}' "
+                 '"/usr/bin:/bin" >&3']
+        box = login_path._bounded_fd3_run(noisy, timeout=5)
+        assert box.returncode == 0
+        assert box.stdout == f"{login_path._MARK_BEGIN}/usr/bin:/bin{login_path._MARK_END}"
+    finally:
+        for handle in holders:
+            handle.close()
+
+
 def test_timeout_falls_back_to_inherited_path():
     def _run(cmd, *, timeout):
         raise subprocess.TimeoutExpired(cmd, timeout)
