@@ -798,7 +798,8 @@ def install_service(
                         overwrite=True)
     launchd = _print_state(manager.print_service(paths.state))
     if not launchd["loaded"]:
-        manager.bootstrap(paths.state)
+        # RunAtLoad agent: one verified bootstrap only, no kickstart.
+        _launchctl_transition(manager, paths.state, "bootstrap", "running")
     return _record_action("install", paths.state, manager)
 
 

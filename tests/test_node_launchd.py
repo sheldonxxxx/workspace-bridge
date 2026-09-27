@@ -147,8 +147,10 @@ def test_install_bootstrap_and_service_actions_use_gui_domain_and_preserve_state
     assert any(call[1:3] == ["bootstrap", "gui/501"] for call in fake.calls)
     assert any(call[1:2] == ["bootout"] and call[2] == "gui/501/com.workspace-bridge.node"
                for call in fake.calls)
-    assert any(call[1:4] == ["kickstart", "-k", "gui/501/com.workspace-bridge.node"]
-               for call in fake.calls)
+    # Deterministic lifecycle: bootstrap already runs the RunAtLoad agent,
+    # so start-from-unloaded and restart must not issue a redundant kickstart.
+    assert not any(call[1:4] == ["kickstart", "-k", "gui/501/com.workspace-bridge.node"]
+                   for call in fake.calls)
 
     uninstall_service(state, manager=manager)
     assert not paths.plist.exists()
@@ -355,3 +357,362 @@ def test_launchctl_failure_detail_is_bounded_and_redacted():
         )
     assert "super-secret-value" not in str(exc.value)
     assert len(str(exc.value)) < 300
+
+
+def test_transition_budget_is_bounded():
+    from workspace_bridge import node_launchd as _mod
+    assert _mod._LAUNCHD_TRANSITION_ATTEMPTS == 50
+    assert abs(_mod._LAUNCHD_TRANSITION_INTERVAL - 0.1) < 1e-9
+    total = _mod._LAUNCHD_TRANSITION_ATTEMPTS * _mod._LAUNCHD_TRANSITION_INTERVAL
+    assert 4.0 <= total <= 6.0
+    src = Path("workspace_bridge/node_launchd.py").read_text()
+    # Polling must be read-only launchctl print; no retry loops that re-issue mutations.
+    assert src.count('_launchctl_transition(manager, paths.state, "bootout"') >= 2
+    assert src.count('_launchctl_transition(manager, paths.state, "bootstrap"') >= 2
+    # Lifecycle entrypoints must verify via the transition helper: no direct
+    # un-verified bootstrap/kickstart on the managed path. Direct bootout
+    # remains only in uninstall (out of scope for this correction).
+    assert "manager.bootstrap(paths.state)" not in src
+    assert "manager.kickstart(paths.state)" not in src
+    assert src.count("manager.bootout(paths.state)") == 1
+
+
+def test_stop_waits_for_delayed_bootout_visibility(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _DelayedBootoutFake(FakeLaunchctl):
+        def __init__(self):
+            super().__init__()
+            self.delay = 0
+            self._pending = 0
+            self._unloading = False
+
+        def __call__(self, command, **kwargs):
+            action = command[1]
+            if action == "bootout":
+                self.calls.append(list(command))
+                if self.delay > 0:
+                    self._pending = self.delay
+                    self._unloading = True
+                    self.loaded = True
+                    self.running = True
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                self.loaded = False
+                self.running = False
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if action == "print":
+                self.calls.append(list(command))
+                if self._pending > 0:
+                    self._pending -= 1
+                    return subprocess.CompletedProcess(
+                        command, 0, "state = running\npid = 4321\n", "")
+                if self._unloading:
+                    self._unloading = False
+                    self._pending = 0
+                    self.loaded = False
+                    self.running = False
+                    return subprocess.CompletedProcess(command, 3, "", "service not found")
+                if not self.loaded:
+                    return subprocess.CompletedProcess(command, 3, "", "service not found")
+                st = "running" if self.running else "waiting"
+                return subprocess.CompletedProcess(
+                    command, 0, f"state = {st}\npid = 4321\n", "")
+            return super().__call__(command, **kwargs)
+
+    fake = _DelayedBootoutFake()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    # Require unload to be visible: keep exact target reporting loaded twice after bootout.
+    fake.delay = 2
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = stop_service(state, manager=manager)
+    assert result["action"] == "stop"
+    assert result["state"] == "not_loaded"
+    bootouts = [c for c in fake.calls if c[1] == "bootout"]
+    assert len(bootouts) == 1, "stop must issue exactly one bootout"
+    assert len(sleeps) >= 2, "stop must poll until delayed unload becomes visible"
+    assert len(sleeps) <= 50
+    assert all(s == 0.1 for s in sleeps)
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload
+
+
+def test_start_bootstrap_exit5_recovers_when_running(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _FlakyBootstrapFake(FakeLaunchctl):
+        def __init__(self):
+            super().__init__()
+            self.mode = "normal"
+
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap" and self.mode != "normal":
+                self.calls.append(list(command))
+                if self.mode == "recover":
+                    self.loaded = True
+                    self.running = True
+                    return subprocess.CompletedProcess(
+                        command, 5, "", "Bootstrap failed: 5: Input/output error")
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _FlakyBootstrapFake()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    stop_service(state, manager=manager)
+    fake.calls.clear()
+    fake.mode = "recover"
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = start_service(state, manager=manager)
+    assert result["state"] in {"running", "loaded"}
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    kickstarts = [c for c in fake.calls if c[1] == "kickstart"]
+    assert len(bootstraps) == 1, "start-from-unloaded must bootstrap exactly once"
+    assert kickstarts == [], "no redundant kickstart after verified bootstrap"
+    assert len(sleeps) <= 50
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload
+
+
+def test_start_kickstart_return_failure_recovers_when_running(tmp_path, monkeypatch):
+    """Live false-negative: kickstart fails but the exact target is running."""
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _FlakyKickstartFake(FakeLaunchctl):
+        def __init__(self):
+            super().__init__()
+            self.flaky = False
+
+        def __call__(self, command, **kwargs):
+            if command[1] == "kickstart" and self.flaky:
+                self.calls.append(list(command))
+                self.loaded = True
+                self.running = True
+                return subprocess.CompletedProcess(
+                    command, 1, "", "kickstart failed: unavailable")
+            return super().__call__(command, **kwargs)
+
+    fake = _FlakyKickstartFake()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    # Simulate already-loaded but not running (waiting, not running).
+    fake.loaded = True
+    fake.running = False
+    fake.calls.clear()
+    fake.flaky = True
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = start_service(state, manager=manager)
+    assert result["state"] in {"running", "loaded"}
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    kickstarts = [c for c in fake.calls if c[1] == "kickstart"]
+    assert bootstraps == [], "already-loaded start must not bootstrap"
+    assert len(kickstarts) == 1, "already-loaded/non-running must kickstart exactly once"
+    assert len(sleeps) <= 50
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload
+
+
+def test_start_kickstart_oserror_recovers_when_running(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _OSErrorKickstartFake(FakeLaunchctl):
+        def __init__(self):
+            super().__init__()
+            self.flaky = False
+
+        def __call__(self, command, **kwargs):
+            if command[1] == "kickstart" and self.flaky:
+                self.calls.append(list(command))
+                self.loaded = True
+                self.running = True
+                raise OSError("injected transient kickstart unavailable")
+            return super().__call__(command, **kwargs)
+
+    fake = _OSErrorKickstartFake()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    fake.loaded = True
+    fake.running = False
+    fake.calls.clear()
+    fake.flaky = True
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = start_service(state, manager=manager)
+    assert result["state"] in {"running", "loaded"}
+    assert len([c for c in fake.calls if c[1] == "kickstart"]) == 1
+    assert [c for c in fake.calls if c[1] == "bootstrap"] == []
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload
+
+
+def test_bootstrap_genuine_failure_raises_original_error(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _GenuineFailFake(FakeLaunchctl):
+        def __init__(self):
+            super().__init__()
+            self.fail = False
+
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap" and self.fail:
+                self.calls.append(list(command))
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _GenuineFailFake()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    stop_service(state, manager=manager)
+    fake.calls.clear()
+    fake.fail = True
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    with pytest.raises(BridgeError) as exc:
+        start_service(state, manager=manager)
+    assert exc.value.code == "node_service_launchctl_failed"
+    # Original launchctl detail must propagate (exit 5), not be swallowed.
+    assert "5" in str(exc.value)
+    assert token not in str(exc.value)
+    assert str(state) not in str(exc.value)
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    kickstarts = [c for c in fake.calls if c[1] == "kickstart"]
+    assert len(bootstraps) == 1
+    assert kickstarts == []
+    # Bounded wait: polling is finite and read-only.
+    assert 1 <= len(sleeps) <= 50
+    assert all(s == 0.1 for s in sleeps)
+
+
+def test_start_and_restart_have_no_redundant_kickstart(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+    fake = FakeLaunchctl()
+    manager = _manager(fake, home)
+    install_service(state, manager=manager, executable=executable)
+    stop_service(state, manager=manager)
+    fake.calls.clear()
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    started = start_service(state, manager=manager)
+    assert started["state"] in {"running", "loaded"}
+    assert len([c for c in fake.calls if c[1] == "bootstrap"]) == 1
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    fake.calls.clear()
+    restarted = restart_service(state, manager=manager)
+    assert restarted["state"] in {"running", "loaded"}
+    assert len([c for c in fake.calls if c[1] == "bootout"]) == 1
+    assert len([c for c in fake.calls if c[1] == "bootstrap"]) == 1
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    for result in (started, restarted):
+        payload = json.dumps(result, sort_keys=True)
+        assert token not in payload
+        assert "node-token" not in payload
+
+
+def test_install_bootstrap_exit5_recovers_when_running(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _InstallFlakyFake(FakeLaunchctl):
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap":
+                self.calls.append(list(command))
+                self.loaded = True
+                self.running = True
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _InstallFlakyFake()
+    manager = _manager(fake, home)
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = install_service(state, manager=manager, executable=executable)
+    assert result["installed"] is True
+    assert result["state"] in {"running", "loaded"}
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    assert len(bootstraps) == 1, "fresh install must bootstrap exactly once"
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    assert len(sleeps) <= 50
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload
+
+
+def test_install_bootstrap_genuine_failure_raises_original(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+
+    class _InstallGenuineFailFake(FakeLaunchctl):
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap":
+                self.calls.append(list(command))
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _InstallGenuineFailFake()
+    manager = _manager(fake, home)
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    with pytest.raises(BridgeError) as exc:
+        install_service(state, manager=manager, executable=executable)
+    assert exc.value.code == "node_service_launchctl_failed"
+    assert "5" in str(exc.value)
+    assert token not in str(exc.value)
+    assert str(state) not in str(exc.value)
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    assert len(bootstraps) == 1
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    assert 1 <= len(sleeps) <= 50
+    assert all(s == 0.1 for s in sleeps)
+    # Polling is read-only: only print calls besides the single bootstrap.
+    others = [c for c in fake.calls if c[1] not in ("bootstrap", "print")]
+    assert others == []
+
+
+def test_install_idempotent_when_loaded_non_running_performs_no_mutation(tmp_path, monkeypatch):
+    state, _root, token, home = _initialized_node(tmp_path)
+    executable = _fake_executable(tmp_path)
+    fake = FakeLaunchctl()
+    manager = _manager(fake, home)
+    first = install_service(state, manager=manager, executable=executable)
+    assert first["installed"] is True
+    # Simulate already-loaded but non-running; install must not mutate.
+    fake.loaded = True
+    fake.running = False
+    fake.calls.clear()
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.node_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    again = install_service(state, manager=manager, executable=executable)
+    assert again["installed"] is True
+    assert again["action"] == "install"
+    assert fake.calls and all(c[1] == "print" for c in fake.calls), fake.calls
+    assert [c for c in fake.calls if c[1] in ("bootstrap", "kickstart", "bootout")] == []
+    assert sleeps == []
+    payload = json.dumps(again, sort_keys=True)
+    assert token not in payload
+    assert "node-token" not in payload

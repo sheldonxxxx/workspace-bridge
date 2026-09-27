@@ -728,6 +728,111 @@ def test_start_and_restart_have_no_redundant_kickstart(tmp_path, monkeypatch):
         assert "runtime-token" not in payload
 
 
+def test_install_bootstrap_exit5_recovers_when_running(tmp_path, monkeypatch):
+    state, _, token, home, _ = _initialized_adapter(tmp_path, port=19201)
+    launcher = _fake_launcher(tmp_path)
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.launch_agent_program",
+                        lambda executable=None: [str(launcher)])
+
+    class _InstallFlakyFake(FakeLaunchctl):
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap":
+                self.calls.append(list(command))
+                plist = command[-1]
+                try:
+                    label = plistlib.loads(Path(plist).read_bytes())["Label"]
+                except Exception:
+                    label = command[-1]
+                domain = command[2]
+                full = f"{domain}/{label}"
+                self.loaded[full] = True
+                self.running[full] = True
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _InstallFlakyFake()
+    manager = _manager(fake, home)
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    result = install_service(state, manager=manager)
+    assert result["installed"] is True
+    assert result["state"] in {"running", "loaded"}
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    assert len(bootstraps) == 1, "fresh install must bootstrap exactly once"
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    assert len(sleeps) <= 50
+    payload = json.dumps(result, sort_keys=True)
+    assert token not in payload
+    assert str(state) not in payload
+    assert "runtime-token" not in payload
+
+
+def test_install_bootstrap_genuine_failure_raises_original(tmp_path, monkeypatch):
+    state, _, token, home, _ = _initialized_adapter(tmp_path, port=19202)
+    launcher = _fake_launcher(tmp_path)
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.launch_agent_program",
+                        lambda executable=None: [str(launcher)])
+
+    class _InstallGenuineFailFake(FakeLaunchctl):
+        def __call__(self, command, **kwargs):
+            if command[1] == "bootstrap":
+                self.calls.append(list(command))
+                return subprocess.CompletedProcess(
+                    command, 5, "", "Bootstrap failed: 5: Input/output error")
+            return super().__call__(command, **kwargs)
+
+    fake = _InstallGenuineFailFake()
+    manager = _manager(fake, home)
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    with pytest.raises(BridgeError) as exc:
+        install_service(state, manager=manager)
+    assert exc.value.code == "adapter_service_launchctl_failed"
+    assert "5" in str(exc.value)
+    assert token not in str(exc.value)
+    assert str(state) not in str(exc.value)
+    bootstraps = [c for c in fake.calls if c[1] == "bootstrap"]
+    assert len(bootstraps) == 1
+    assert [c for c in fake.calls if c[1] == "kickstart"] == []
+    assert 1 <= len(sleeps) <= 50
+    assert all(s == 0.1 for s in sleeps)
+    # Polling is read-only: only print calls besides the single bootstrap.
+    others = [c for c in fake.calls if c[1] not in ("bootstrap", "print")]
+    assert others == []
+
+
+def test_install_idempotent_when_loaded_non_running_performs_no_mutation(tmp_path, monkeypatch):
+    state, _, token, home, _ = _initialized_adapter(tmp_path, port=19203)
+    launcher = _fake_launcher(tmp_path)
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.launch_agent_program",
+                        lambda executable=None: [str(launcher)])
+    fake = FakeLaunchctl()
+    manager = _manager(fake, home)
+    first = install_service(state, manager=manager)
+    assert first["installed"] is True
+    paths = service_paths(state, home=home)
+    target = f"gui/501/{paths.label}"
+    # Simulate already-loaded but non-running; install must not mutate.
+    fake.loaded[target] = True
+    fake.running[target] = False
+    fake.calls.clear()
+    sleeps: list[float] = []
+    monkeypatch.setattr("workspace_bridge.adapter_launchd.time.sleep",
+                        lambda s: sleeps.append(s))
+    again = install_service(state, manager=manager)
+    assert again["installed"] is True
+    assert again["action"] == "install"
+    assert fake.calls and all(c[1] == "print" for c in fake.calls), fake.calls
+    assert [c for c in fake.calls if c[1] in ("bootstrap", "kickstart", "bootout")] == []
+    assert sleeps == []
+    payload = json.dumps(again, sort_keys=True)
+    assert token not in payload
+    assert str(state) not in payload
+
+
 def test_no_shell_or_caller_labels():
     src = Path("workspace_bridge/adapter_launchd.py").read_text()
     assert "shell=True" not in src

@@ -50,8 +50,29 @@ class CodexRpcError(Exception):
     pass
 
 
+_MANAGED_DEFAULT_MODE_REQUEST_USER_INPUT_OVERRIDE = (
+    "features.default_mode_request_user_input=true"
+)
+# Bridge-owned managed app-server launch. The `-c` override must stay after
+# the `app-server` subcommand (upstream mishandles mixed pre/post-subcommand
+# `-c` ordering). Caller-supplied `command=` values are honored verbatim and
+# never gain this flag.
+DEFAULT_CODEX_APP_SERVER_COMMAND: tuple[str, ...] = (
+    "codex",
+    "app-server",
+    "-c",
+    _MANAGED_DEFAULT_MODE_REQUEST_USER_INPUT_OVERRIDE,
+    "--stdio",
+)
+
+
+def default_codex_app_server_command() -> tuple[str, ...]:
+    """Return the managed Bridge-owned app-server argv."""
+    return tuple(DEFAULT_CODEX_APP_SERVER_COMMAND)
+
+
 class CodexRpc:
-    def __init__(self, *, command: tuple[str, ...] = ("codex", "app-server", "--stdio"),
+    def __init__(self, *, command: tuple[str, ...] = DEFAULT_CODEX_APP_SERVER_COMMAND,
                  on_notification: Callable[[str, dict], None] | None = None,
                  on_request: Callable[[int | str, str, dict], None] | None = None,
                  on_unexpected_exit: Callable[[], None] | None = None,

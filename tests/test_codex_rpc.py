@@ -212,3 +212,84 @@ for raw in sys.stdin:
         assert notified == []
     finally:
         rpc.close()
+
+
+def test_default_managed_command_enables_default_mode_request_user_input():
+    import inspect
+
+    from workspace_bridge import codex_rpc as rpc_module
+
+    managed = tuple(rpc_module.DEFAULT_CODEX_APP_SERVER_COMMAND)
+    assert managed[:2] == ("codex", "app-server")
+    assert managed[-1] == "--stdio"
+    override = "features.default_mode_request_user_input=true"
+    assert managed.count(override) == 1
+    index = managed.index(override)
+    # Override lives in the app-server argument segment, after the
+    # subcommand, introduced by a single post-subcommand `-c`.
+    assert index > 1
+    assert managed[index - 1] == "-c"
+    assert managed[:2].count("-c") == 0
+    assert tuple(rpc_module.default_codex_app_server_command()) == managed
+    signature_default = inspect.signature(CodexRpc).parameters["command"].default
+    assert tuple(signature_default) == managed
+
+
+def test_custom_command_is_honored_verbatim_without_managed_flag(monkeypatch):
+    from workspace_bridge import codex_rpc as rpc_module
+
+    child = r'''import json, sys
+for raw in sys.stdin:
+    try:
+        request = json.loads(raw)
+    except Exception:
+        continue
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        print(json.dumps({"id": request["id"],
+                          "result": {"serverInfo": {"version": "test"}}}), flush=True)
+'''
+    custom = (sys.executable, "-u", "-c", child)
+    seen: dict[str, tuple] = {}
+    real_popen = rpc_module.subprocess.Popen
+
+    def _capturing_popen(cmd, **kwargs):
+        seen["cmd"] = tuple(cmd)
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(rpc_module.subprocess, "Popen", _capturing_popen)
+    rpc = CodexRpc(command=custom)
+    try:
+        assert seen["cmd"] == custom
+        assert "features.default_mode_request_user_input=true" not in seen["cmd"]
+        assert rpc.initialize_result["serverInfo"]["version"] == "test"
+    finally:
+        rpc.close()
+
+
+def test_version_probe_executable_extraction_with_managed_default_argv(monkeypatch):
+    from workspace_bridge import codex_host_adapter as adapter_module
+    from workspace_bridge import codex_rpc as rpc_module
+
+    managed = tuple(rpc_module.DEFAULT_CODEX_APP_SERVER_COMMAND)
+    # Descriptor probes `command[0]` only, so extra managed argv must not
+    # change the resolved executable.
+    executable = managed[0] if isinstance(managed, (list, tuple)) and managed else None
+    assert executable == "codex"
+    seen: dict[str, object] = {}
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["env"] = kwargs.get("env")
+        box = type("R", (), {})()
+        box.returncode = 0
+        box.stdout = "codex-cli 1.2.3\n"
+        box.stderr = ""
+        return box
+
+    monkeypatch.setattr(adapter_module.subprocess, "run", _fake_run)
+    env = {"PATH": "/usr/bin:/bin"}
+    assert adapter_module._codex_cli_version(executable, env) == "1.2.3"
+    assert seen["cmd"] == ["codex", "--version"]
+    assert seen["env"] == env
