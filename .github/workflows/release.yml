@@ -165,7 +165,8 @@ jobs:
       - name: Materialize locked production dependencies
         run: |
           set -euo pipefail
-          npm --prefix "$PI_STAGE" ci --omit=dev
+          cd "$PI_STAGE"
+          npm ci --omit=dev
         env:
           PI_STAGE: ${{ env.PI_STAGE }}
       - name: Minimal runtime and release smoke
@@ -370,7 +371,7 @@ jobs:
           "$VENV/bin/workspace-bridge" node --help
           "$VENV/bin/workspace-bridge" adapter --help
           "$VENV/bin/workspace-bridge-node" --help
-          "$VENV/bin/workspace-bridge-codex-adapter" --help
+          "$VENV/bin/python" -c 'from workspace_bridge.codex_host_adapter import main; assert callable(main)'
       - name: Upload prepared PyPI dist
         uses: actions/upload-artifact@v7
         with:
