@@ -1,0 +1,18 @@
+# Tracked Docker sidecar template for the Compose mcp-tunnel service.
+# Copy/adapt to the ignored root ./tunnel-client.yaml and fill in the
+# deployment tunnel ID; secrets stay in the ignored tunnel.env, never here.
+# The sidecar reaches the bridge over the shared Compose network.
+config_version: 1
+control_plane:
+  tunnel_id: tunnel_REPLACE_WITH_YOUR_32_HEX_ID
+  api_key: env:CONTROL_PLANE_API_KEY
+mcp:
+  server_urls:
+    - channel: main
+      url: http://bridge:8765/mcp
+  extra_headers:
+    X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN
+  discovery_extra_headers:
+    X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN
+health:
+  listen_addr: 127.0.0.1:8790

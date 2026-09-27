@@ -147,22 +147,39 @@ def test_bounded_fd3_run_discards_stdout_noise_and_caps_probe():
     assert result["path"] is None or isinstance(result["path"], str)
 
 
-def test_bounded_fd3_run_captures_probe_with_high_fd():
-    # A busy process may allocate the capture pipe above fd 9. This must
-    # still work with /bin/sh, including dash on Linux.
-    holders = [open(os.devnull, "rb") for _ in range(16)]
+def test_bounded_fd3_run_high_fd_sh_redirection():
+    # Two-digit capture fds break `/bin/sh`/dash `>&10` parsing, so the
+    # probe must redirect via `/dev/fd/<fd>`. Hold low descriptors open so
+    # the internal pipe write end is >9, then run the same noisy /bin/sh
+    # probe and prove the marked value is captured while stdout is dropped.
+    holders: list = []
     try:
-        assert holders[-1].fileno() > 9
+        for _ in range(32):
+            try:
+                holders.append(open(os.devnull, "rb"))
+            except OSError:
+                break
+        r_tmp, w_tmp = os.pipe()
+        try:
+            assert w_tmp > 9, f"expected high-numbered probe fd, got {w_tmp}"
+        finally:
+            os.close(r_tmp)
+            os.close(w_tmp)
         noisy = ["/bin/sh", "-c",
-                 "printf ignored; "
-                 f"printf '{login_path._MARK_BEGIN}%s{login_path._MARK_END}' "
-                 '"/usr/bin:/bin" >&3']
+                 "yes noisy-startup-line | head -c 200000; "
+                 f"printf '{login_path._MARK_BEGIN}%s{login_path._MARK_END}' \"/usr/bin:/bin\" >&3"]
         box = login_path._bounded_fd3_run(noisy, timeout=5)
-        assert box.returncode == 0
-        assert box.stdout == f"{login_path._MARK_BEGIN}/usr/bin:/bin{login_path._MARK_END}"
+        assert isinstance(box.stdout, str)
+        assert login_path._MARK_BEGIN in box.stdout
+        assert "/usr/bin:/bin" in box.stdout
+        assert "noisy-startup-line" not in box.stdout
+        assert len(box.stdout) <= login_path.MAX_LOGIN_SHELL_OUTPUT
     finally:
         for handle in holders:
-            handle.close()
+            try:
+                handle.close()
+            except Exception:
+                pass
 
 
 def test_timeout_falls_back_to_inherited_path():

@@ -249,6 +249,19 @@ def test_compose_security_and_same_host_path():
         './tunnel-client.yaml:/etc/tunnel-client/tunnel-client.yaml:ro']
     assert tunnel['command']==[
         '--profile-file', '/etc/tunnel-client/tunnel-client.yaml']
+    # Tracked Docker sidecar template (never the ignored live file):
+    # operators copy/adapt it to ./tunnel-client.yaml (see docs/DOCKER.md).
+    profile=yaml.safe_load((ROOT/'examples/tunnel-client-docker.yaml').read_text())
+    urls=[row['url'] for row in profile['mcp']['server_urls']]
+    assert urls==['http://bridge:8765/mcp']
+    # Template stays non-secret: placeholder tunnel ID, env-based tokens only.
+    assert 'REPLACE_WITH_YOUR_32_HEX_ID' in str(profile['control_plane']['tunnel_id'])
+    assert profile['control_plane']['api_key']=='env:CONTROL_PLANE_API_KEY'
+    assert profile['mcp']['extra_headers']['X-Bridge-Token']=='env:WORKSPACE_BRIDGE_TOKEN'
+    assert profile['mcp']['discovery_extra_headers']['X-Bridge-Token']=='env:WORKSPACE_BRIDGE_TOKEN'
+    # Compose still mounts the operator file to the sidecar profile path.
+    assert any('/etc/tunnel-client/tunnel-client.yaml' in str(m)
+               for m in tunnel.get('volumes', []))
 
 
 def test_tunnel_sidecar_logging_level_format_rotation():

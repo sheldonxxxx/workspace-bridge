@@ -199,9 +199,11 @@ def _bounded_fd3_run(cmd: list[str], *, timeout: float) -> Any:
     if not (0 < timeout_value <= 30):
         timeout_value = LOGIN_PATH_TIMEOUT_S
     r_fd, w_fd = os.pipe()
-    # Redirect through /dev/fd so two-digit descriptors work with /bin/sh
-    # (dash cannot parse `>&10`). pass_fds inherits the pipe without changing
-    # the parent's descriptors or using preexec_fn.
+    # Redirect the probe's trailing `>&3` through `/dev/fd/<fd>` (present on
+    # Linux and macOS) so two-digit descriptors work under /bin/sh/dash,
+    # which cannot parse `>&10` portably. The inherited pipe fd is passed
+    # via pass_fds with no preexec_fn/parent-fd mutation. The replacement
+    # only changes the redirection target, never PATH content.
     try:
         eff_cmd = list(cmd)
         if eff_cmd:
