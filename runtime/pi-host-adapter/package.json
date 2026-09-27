@@ -1,7 +1,7 @@
 {
   "name": "workspace-bridge-pi-host-adapter",
-  "version": "0.1.0",
-  "workspaceBridgeRelease": "0.1.0",
+  "version": "0.1.1",
+  "workspaceBridgeRelease": "0.1.1",
   "type": "module",
   "description": "Native host adapter that owns in-process Pi AgentSession instances for Workspace Bridge. Not a Compose service.",
   "repository": {

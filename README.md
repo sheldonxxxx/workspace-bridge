@@ -75,7 +75,8 @@ opt in to bounded agent runs on explicitly configured adapter instances.
   [Runtimes](docs/RUNTIMES.md).
 - **Platforms:** macOS and Linux, plus WSL2. Native Windows is not supported.
   macOS services use launchd; Linux services use systemd. Docker is a
-  Bridge-control-plane option; Nodes and adapters stay native on their hosts.
+  Bridge-control-plane option, with a versioned multiarch image on GHCR;
+  Nodes and adapters stay native on their hosts. See [Docker](docs/DOCKER.md).
 
 ## How it works
 
@@ -158,7 +159,7 @@ Tool names and schemas are authoritative from tool discovery; see the
 
 ## Project status and limitations
 
-- Current version: `0.1.0`. Manual package updates only
+- Current version: `0.1.1`. Manual package updates only
   (`uv tool upgrade workspace-bridge`, then restart affected services).
 - Native Windows is unsupported; use WSL2.
 - Image previews are first-frame, size-bounded, and not color-managed. A local

@@ -139,18 +139,21 @@ def test_release_triggers_and_permissions():
     for bad in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
         assert bad not in text
     jobs = data.get("jobs", {})
-    for required in ("pypi-publish", "npm-publish", "release-assets",
+    for required in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets",
                      "release-ready", "prepare-pypi-dist", "build-docker"):
         assert required in jobs, required
     pypi = jobs["pypi-publish"]
     npm_pub = jobs["npm-publish"]
+    ghcr = jobs["ghcr-publish"]
     assets = jobs["release-assets"]
     ready = jobs["release-ready"]
     prep = jobs["prepare-pypi-dist"]
     assert pypi.get("environment") == "pypi"
     assert npm_pub.get("environment") == "npm"
+    assert ghcr.get("environment") == "ghcr"
     assert pypi.get("permissions", {}).get("id-token") == "write"
     assert npm_pub.get("permissions", {}).get("id-token") == "write"
+    assert ghcr.get("permissions") == {"contents": "read", "packages": "write"}
     assert assets.get("permissions", {}).get("contents") == "write"
     # Barrier and preparer never hold publishing identity.
     assert ready.get("permissions", {}).get("id-token") != "write"
@@ -158,17 +161,17 @@ def test_release_triggers_and_permissions():
     assert prep.get("permissions", {}).get("id-token") != "write"
     assert prep.get("permissions", {}).get("contents", "read") != "write"
     for name, job in jobs.items():
-        if name in ("pypi-publish", "npm-publish", "release-assets"):
+        if name in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets"):
             continue
         perms = job.get("permissions", {})
         assert perms.get("id-token") != "write", name
         assert perms.get("contents") != "write", name
+        assert perms.get("packages") != "write", name
     for job in jobs.values():
         for step in job.get("steps", []):
             uses = step.get("uses", "")
             assert "workflow_call" not in uses
-    assert "packages: write" not in text
-    assert "GHCR" not in text and "ghcr.io" not in text.lower()
+    assert "ghcr.io" in text.lower()
 
 
 def test_release_tag_consistency_gating():
@@ -216,7 +219,7 @@ def test_release_ready_barrier():
     assert perms.get("id-token") != "write"
     assert perms.get("contents") != "write"
     # All publishers and assets gate on release-ready.
-    for name in ("pypi-publish", "npm-publish", "release-assets"):
+    for name in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets"):
         needs = jobs[name].get("needs", [])
         if isinstance(needs, str):
             needs = [needs]
@@ -246,17 +249,27 @@ def test_release_docker_native_matrix_and_identity():
     assert "build-source-bundle" in needs
     assert "release validate" in dumped
     # Builds same Dockerfile, checks arch, verifies embedded identities
-    # against the C1 target manifest. No GHCR push.
+    # against the C1 target manifest, then transfers exact image bytes.
     assert "docker build" in dumped
     assert ".Architecture" in dumped
     assert "target-manifest" in dumped
     assert "container" in dumped.lower() or "Bridge" in dumped
+    assert "docker save" in dumped
+    assert "docker-image-${{ matrix.arch }}" in dumped
     full = RELEASE_YML.read_text()
     docker_section = full.split("build-docker", 1)[1].split(
         "npm-pack", 1)[0]
     assert "ghcr" not in docker_section.lower()
     assert "docker push" not in docker_section.lower()
-    assert "packages: write" not in full
+    ghcr = jobs["ghcr-publish"]
+    assert set(ghcr["needs"]) == {"release-ready", "build-docker"}
+    published = yaml.safe_dump(ghcr)
+    for needle in ("docker-image-amd64", "docker-image-arm64", "sha256sum --check",
+                   "docker load", "docker push", "imagetools create", "imagetools inspect",
+                   "linux", "amd64", "arm64"):
+        assert needle in published, needle
+    assert "ghcr.io/${{ github.repository }}" in published
+    assert "org.opencontainers.image.source" in (REPO / "Dockerfile").read_text()
 
 
 def test_pypi_oidc_isolation():
@@ -461,7 +474,6 @@ def test_release_assets_use_gh_upload_no_new_tag():
     assert "build-source-bundle" in needs
     assert "build-pi-runtime" in needs
     assert assets.get("permissions", {}).get("id-token") != "write"
-    assert "ghcr" not in text.lower()
     assert ".tar\"" not in text or "pi-runtime" in text
 
 

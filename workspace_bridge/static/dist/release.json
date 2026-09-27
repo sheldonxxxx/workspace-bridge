@@ -1,8 +1,8 @@
 {
   "contract": 1,
   "product": "workspace-bridge",
-  "product_version": "0.1.0",
+  "product_version": "0.1.1",
   "component": "manager",
-  "component_version": "0.1.0",
-  "build_id": "sha256:68d9565c147c8ed447cb7359faf4af7c222a0866a0355687c90c30c1a6cb969d"
+  "component_version": "0.1.1",
+  "build_id": "sha256:2c904faf13037425be7f5b56bfa121fddf9fec241891839a28dc8ead203994d7"
 }
