@@ -183,7 +183,7 @@ def _bounded_fd3_run(cmd: list[str], *, timeout: float) -> Any:
 
     Ordinary shell stdout/stderr go to DEVNULL at the spawn boundary and are
     never buffered. Only bytes on the dedicated capture pipe (the marked
-    probe value, redirected via ``>&<fd>``) are read, capped at
+    probe value, redirected via ``>/dev/fd/<fd>``) are read, capped at
     ``MAX_LOGIN_SHELL_OUTPUT`` during capture: the reader stops and kills
     the child as soon as the bound is exceeded, so unbounded rc noise cannot
     accumulate. Returns a minimal ``(stdout, returncode)`` object matching
@@ -199,13 +199,15 @@ def _bounded_fd3_run(cmd: list[str], *, timeout: float) -> Any:
     if not (0 < timeout_value <= 30):
         timeout_value = LOGIN_PATH_TIMEOUT_S
     r_fd, w_fd = os.pipe()
-    # Redirect the probe's trailing `>&3` to this call's actual pipe fd so no
-    # fd-3 remapping (and no preexec_fn/parent-fd mutation) is needed. The
-    # replacement only swaps the single-char fd number, never PATH content.
+    # Redirect the probe's trailing `>&3` through `/dev/fd/<fd>` (present on
+    # Linux and macOS) so two-digit descriptors work under /bin/sh/dash,
+    # which cannot parse `>&10` portably. The inherited pipe fd is passed
+    # via pass_fds with no preexec_fn/parent-fd mutation. The replacement
+    # only changes the redirection target, never PATH content.
     try:
         eff_cmd = list(cmd)
         if eff_cmd:
-            eff_cmd[-1] = str(eff_cmd[-1]).replace(">&3", f">&{w_fd}")
+            eff_cmd[-1] = str(eff_cmd[-1]).replace(">&3", f">/dev/fd/{w_fd}")
     except Exception:
         eff_cmd = list(cmd)
     proc = None

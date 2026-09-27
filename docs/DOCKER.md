@@ -154,7 +154,9 @@ server {
 }
 ```
 
-Point the sidecar profile at the internal bridge listener:
+Point the sidecar profile at the internal bridge listener. Copy the tracked
+template `examples/tunnel-client-docker.yaml` to the ignored `./tunnel-client.yaml`
+and fill in the deployment tunnel ID/control-plane values there:
 
 ```yaml
 mcp:

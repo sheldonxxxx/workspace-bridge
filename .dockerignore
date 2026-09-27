@@ -4,6 +4,8 @@
 !.dockerignore
 !pyproject.toml
 !uv.lock
+!docker/
+!docker/runtime-requirements.txt
 !README.md
 !LICENSE
 !workspace_bridge/

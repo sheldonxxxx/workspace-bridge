@@ -2,14 +2,21 @@ name: CI
 
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to validate when called from the release workflow
+        required: false
+        type: string
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,9 +37,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@v10.2.0
         with:
+          version: "0.12.5"
           python-version: ${{ matrix.python }}
           enable-cache: true
       - name: Sync test environment
@@ -45,6 +55,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -56,10 +68,30 @@ jobs:
         run: npm --prefix web run lint
       - name: Format check
         run: npm --prefix web run format:check
-      - name: Manager release unit tests
-        run: node --test web/test/manager-release.test.mjs
       - name: Build Manager
         run: npm --prefix web run build
+      - name: Manager unit tests
+        run: node --test web/test/*.test.mjs
+
+  manager-browser:
+    name: Manager browser / Ubuntu x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Manager dependencies
+        run: npm --prefix web ci
+      - name: Install Chromium headless shell and system dependencies
+        run: npm --prefix web exec -- playwright install --with-deps --only-shell chromium
+      - name: Run Manager browser tests
+        run: npm --prefix web run test:e2e
 
   pi:
     name: Pi runtime / ${{ matrix.os }}
@@ -73,6 +105,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -96,6 +130,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - name: Verify Docker runtime requirements match uv.lock
+        run: |
+          uv export --locked --no-dev --no-emit-project --no-header --no-annotate --format requirements-txt > /tmp/runtime-requirements.txt
+          diff -u docker/runtime-requirements.txt /tmp/runtime-requirements.txt
       - name: Build Bridge image (native ${{ matrix.arch }})
         run: docker build --tag workspace-bridge:ci .
       - name: Inspect image architecture

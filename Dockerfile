@@ -26,16 +26,14 @@ RUN npm run build
 FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
-# Dependency-only layer: resolve third-party wheels from pyproject metadata
-# without any Workspace Bridge source, so source/static/test edits do not
-# invalidate this slow layer. uv.lock is copied as a cache key so lock bumps
-# bust the layer even when the dependency ranges in pyproject.toml are unchanged.
+# Dependency-only layer: build only the pinned, hashed production wheels
+# exported from uv.lock. CI verifies the export is current on both image
+# architectures. Source/static/test edits do not invalidate this layer.
 # The build backend is installed once here so the
 # later source-only wheel build can run offline with --no-build-isolation.
-COPY --link pyproject.toml uv.lock ./
+COPY --link pyproject.toml uv.lock docker/runtime-requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]))' > /tmp/bridge-requirements.txt \
-    && python -m pip wheel --wheel-dir /wheels -r /tmp/bridge-requirements.txt \
+    python -m pip wheel --require-hashes --only-binary=:all: --wheel-dir /wheels -r runtime-requirements.txt \
     && python -m pip install "setuptools>=77"
 COPY --link README.md LICENSE ./
 COPY --link workspace_bridge/ ./workspace_bridge/
@@ -57,7 +55,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && mkdir -p /state /opt/workspace-bridge \
     && chown 10001:10001 /state
 COPY --link --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels workspace-bridge==0.1.0 \
+COPY --link --from=builder /build/runtime-requirements.txt /tmp/runtime-requirements.txt
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels --require-hashes -r /tmp/runtime-requirements.txt \
+    && python -m pip install --no-cache-dir --no-index --no-deps /wheels/workspace_bridge-*.whl \
     && rm -rf /wheels
 WORKDIR /opt/workspace-bridge
 USER 10001:10001
