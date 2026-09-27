@@ -3,12 +3,21 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing GitHub Release tag to rebuild/republish (e.g. v0.1.0). Must already exist and not be a draft. No tags or releases are created, moved, or deleted.'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -17,13 +26,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Manual recovery must target an existing non-draft Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          test -n "$TAG"
+          echo "Manual recovery for existing Release: $TAG (no tags or releases will be created, moved, or deleted)"
+          IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+          test "$IS_DRAFT" = "false" || { echo "Release $TAG is missing or is a draft; refusing manual recovery" >&2; exit 1; }
+          echo "Release $TAG exists and is not a draft"
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: Tag must be exactly v<project-version>
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="$RELEASE_TAG"
           test -n "$TAG"
           case "$TAG" in
             v*) ;;
@@ -50,12 +73,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: Install Manager dependencies (locked)
@@ -95,12 +120,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: runtime/pi-host-adapter/package-lock.json
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - uses: actions/download-artifact@v8
@@ -180,11 +207,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/download-artifact@v8
         with:
           name: source-bundle
           path: dist/source-bundle
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: Validate source bundle before Docker build
@@ -199,7 +228,7 @@ jobs:
           set -euo pipefail
           got="$(docker image inspect --format '{{.Architecture}}' workspace-bridge:release-${{ matrix.arch }})"
           test "$got" = "${{ matrix.arch }}" || { echo "arch $got != ${{ matrix.arch }}" >&2; exit 1; }
-          docker run --rm workspace-bridge:release-${{ matrix.arch }} python -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b, 'manager': m}))" > /tmp/container-releases.json
+          docker run --rm --entrypoint python workspace-bridge:release-${{ matrix.arch }} -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b, 'manager': m}))" > /tmp/container-releases.json
           python3 - <<'PY'
           import json, pathlib
           target = json.loads(pathlib.Path("dist/source-bundle/target-manifest.json").read_text())
@@ -215,6 +244,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -247,7 +278,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - uses: actions/download-artifact@v8
@@ -383,6 +416,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
       - uses: actions/download-artifact@v8
         with:
           name: source-bundle
@@ -406,7 +441,7 @@ jobs:
       - name: Stage versioned release assets
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="$RELEASE_TAG"
           VERSION="${TAG#v}"
           rm -rf dist/release-assets
           mkdir -p dist/release-assets
@@ -428,5 +463,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="$RELEASE_TAG"
           gh release upload "$TAG" dist/release-assets/* --clobber

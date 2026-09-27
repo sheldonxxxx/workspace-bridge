@@ -63,7 +63,7 @@ class Handoff(Input):
     goal: str = Field(min_length=1, max_length=8000)
     plan: str = Field(min_length=1, max_length=16000)
     acceptance: str = Field(min_length=1, max_length=10000)
-    constraints: str = Field(default="No commits, pushes, unrelated changes, or secret access.", max_length=8000)
+    constraints: str = Field(default="Work only in this project and task. Preserve unrelated work. No secret access unless explicitly required and authorized. No unrelated destructive actions or scope expansion.", max_length=8000)
     context: str = Field(default="No additional context.", max_length=12000)
     context_hashes: dict[PathString, HashString] = Field(default_factory=dict, max_length=100,
         description="Optional hashes for specifically referenced files; checked only at publication. No workspace snapshot.")

@@ -318,7 +318,19 @@ def test_direct_instruction_auto_handoff_is_auditable_and_idempotent(simplified_
         "job_id": first["job_id"], "document": "TASK.md", "start_line": 1,
         "max_lines": 100})
     assert instruction in task["content"]
-    assert "Do not commit" in task["content"]
+    lowered = task["content"].lower()
+    # Blanket source-control/publication denials must not contradict
+    # an explicitly authorized task; generic scope guardrails remain.
+    for denied in ("do not commit", "do not push", "no commits",
+                   "no pushes", "do not tag", "do not publish",
+                   "do not deploy"):
+        assert denied not in lowered, denied
+    assert "rotate credentials" not in lowered
+    assert "work only in this project" in lowered
+    assert "preserve" in lowered
+    assert "secret" in lowered
+    assert "scope" in lowered or "destructive" in lowered
+    assert "blocker" in lowered
     # Exact retry reuses the same audit handoff and the same run.
     retry = _direct_instruction(service, ws_id, token, "direct-1", instruction)
     assert retry["run_id"] == first["run_id"]
@@ -406,3 +418,62 @@ def test_direct_instruction_identity_is_keyed_by_adapter_and_request():
         assert derived.startswith("direct-")
         assert 1 <= len(derived) <= 64
         assert all(c.isalnum() or c in "-_" for c in derived)
+
+
+def test_direct_instruction_explicit_source_control_authorization_not_contradicted(
+        simplified_env):
+    """An explicitly authorized commit/push/publish must flow through."""
+    service, ws_id, token, job, native, _ = simplified_env
+    instruction = ("You are explicitly authorized to commit and push the "
+                   "release-notes update and publish the draft documentation. "
+                   "Update README and commit the change.")
+    started = _direct_instruction(service, ws_id, token, "direct-authorized-1",
+                                  instruction)
+    assert started["phase"] == "active"
+    task = service.call(ws_id, token, "read_handoff", {
+        "job_id": started["job_id"], "document": "TASK.md", "start_line": 1,
+        "max_lines": 100})
+    assert instruction in task["content"]
+    lowered = task["content"].lower()
+    for denied in ("do not commit", "do not push", "no commits",
+                   "no pushes", "do not tag", "do not publish",
+                   "do not deploy"):
+        assert denied not in lowered, denied
+    assert "rotate credentials" not in lowered
+    # Scope/secret/unrelated-change protections remain.
+    assert "work only in this project" in lowered
+    assert "preserve" in lowered
+    assert "secret" in lowered
+    assert "scope" in lowered or "destructive" in lowered
+    assert "blocker" in lowered
+    _finish_test_run(service, native, ws_id, started["run_id"])
+
+
+def test_prepare_handoff_default_and_run_prompt_have_no_blanket_denial(
+        simplified_env):
+    """Prepare default and run prompt keep guardrails without blanket bans."""
+    service, ws_id, token, job, native, _ = simplified_env
+    default_constraints = Handoff.model_fields["constraints"].default
+    lowered_default = default_constraints.lower()
+    for denied in ("no commits", "no pushes", "do not commit", "do not push",
+                   "do not tag", "do not publish", "do not deploy"):
+        assert denied not in lowered_default, denied
+    assert "rotate credentials" not in lowered_default
+    assert "work only" in lowered_default
+    assert "preserve" in lowered_default
+    assert "secret" in lowered_default
+    assert "scope" in lowered_default or "destructive" in lowered_default
+    ws = service.workspace(ws_id)
+    prompt = service.run_coordinator._prompt(ws, {"id": job["id"]})
+    lowered_prompt = prompt.lower()
+    for denied in ("do not commit", "do not push", "do not tag",
+                   "do not publish", "do not deploy"):
+        assert denied not in lowered_prompt, denied
+    assert "rotate credentials" not in lowered_prompt
+    assert "work only in this project" in lowered_prompt
+    assert "preserve" in lowered_prompt
+    assert "secret" in lowered_prompt
+    assert "scope" in lowered_prompt or "destructive" in lowered_prompt
+    assert "blocker" in lowered_prompt
+    # Dispatch copy prompt keeps its conditional authorization carve-out.
+    assert "unless the handoff explicitly permits" in job["copy_prompt"]

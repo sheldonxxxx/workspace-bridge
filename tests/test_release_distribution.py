@@ -44,7 +44,10 @@ def test_ci_baseline_current_and_least_privilege():
     # Current majors as of 2026-09-26.
     assert "actions/checkout@v7" in text
     assert "actions/setup-node@v7" in text
-    assert "astral-sh/setup-uv@v10" in text
+    assert "astral-sh/setup-uv@v10.2.0" in text
+    # No unresolved bare v10 ref remains (v10.2.0 is the immutable release).
+    import re as _re
+    assert _re.search(r"setup-uv@v10(?!\.[0-9])", text) is None, "unresolved setup-uv@v10"
     assert "actions/setup-node@v6" not in text
     # Locked installs, no Playwright browsers.
     assert "--locked" in text
@@ -113,7 +116,9 @@ def test_release_artifact_action_majors_exact():
     assert "actions/download-artifact@v4" not in text
     assert "actions/checkout@v7" in text
     assert "actions/setup-node@v7" in text
-    assert "astral-sh/setup-uv@v10" in text
+    assert "astral-sh/setup-uv@v10.2.0" in text
+    import re as _re2
+    assert _re2.search(r"setup-uv@v10(?!\.[0-9])", text) is None, "unresolved setup-uv@v10"
 
 
 def test_release_triggers_and_permissions():
@@ -493,3 +498,98 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert "workspace-bridge --version" in text
     assert "workspace-bridge node --help" in text
     assert "workspace-bridge adapter --help" in text
+
+
+def test_setup_uv_pinned_exact_in_ci_and_release():
+    import re
+    for path in (CI_YML, RELEASE_YML):
+        text = path.read_text()
+        assert "astral-sh/setup-uv@v10.2.0" in text, path
+        # Bare v10 without the immutable patch must not remain.
+        assert re.search(r"setup-uv@v10(?!\.[0-9])", text) is None, path
+        # Do not change unrelated actions.
+        assert "actions/checkout@v7" in text
+        assert "actions/setup-node@v7" in text
+
+
+def test_release_manual_recovery_has_required_tag_and_pinned_checkout():
+    data = _load_yml(RELEASE_YML)
+    text = RELEASE_YML.read_text()
+    on = _workflow_on(data)
+    assert "workflow_dispatch" in on, "manual recovery trigger missing"
+    inputs = on["workflow_dispatch"].get("inputs", {})
+    assert "tag" in inputs, "manual recovery tag input missing"
+    assert inputs["tag"].get("required") is True, "tag must be required"
+    # Concurrency is keyed by the effective tag (release event or dispatch).
+    assert "github.event.release.tag_name || inputs.tag" in text
+    assert data.get("concurrency", {}).get("group", "").find("inputs.tag") != -1
+    # The effective tag is exposed as a safe env value, never interpolated
+    # directly into shell source.
+    assert "github.event.release.tag_name || inputs.tag" in str(
+        data.get("env", {}).get("RELEASE_TAG", ""))
+    # Every source checkout is pinned to the effective tag so a recovery
+    # definition from main builds the existing tag's exact source.
+    jobs = data.get("jobs", {})
+    checkouts = 0
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            uses = str(step.get("uses", ""))
+            if "actions/checkout" in uses:
+                checkouts += 1
+                ref = str(step.get("with", {}).get("ref", ""))
+                assert "github.event.release.tag_name || inputs.tag" in ref, (name, step)
+    assert checkouts >= 7, f"expected tag-pinned checkouts, found {checkouts}"
+    # No run: block may embed the effective tag/input expression directly;
+    # shell steps must use the quoted safe env expansion instead.
+    for name, job in jobs.items():
+        for step in job.get("steps", []):
+            run = str(step.get("run", ""))
+            if run:
+                assert "inputs.tag" not in run, (name, step.get("name"))
+                assert "github.event.release.tag_name" not in run, (name, step.get("name"))
+    # Tag/version validation, manual check, asset staging, and release upload
+    # all use the safe env value.
+    assert 'TAG="$RELEASE_TAG"' in text
+    assert text.count('TAG="$RELEASE_TAG"') >= 4
+    assert '"$RELEASE_TAG"' in text
+    # Manual dispatch fails closed for missing/draft releases without
+    # creating, moving, or deleting tags or releases.
+    assert "github.event_name == 'workflow_dispatch'" in text
+    assert "gh release view" in text
+    assert "isDraft" in text
+    lowered = text.lower()
+    assert "gh release create" not in lowered
+    assert "gh release delete" not in lowered
+    assert "git tag" not in lowered
+    assert "git push --delete" not in lowered
+    assert "git push origin :" not in lowered
+    # Release-event behavior remains supported.
+    assert "release" in on
+    assert on["release"].get("types") == ["published"]
+
+
+def test_docker_smoke_uses_explicit_python_entrypoint():
+    for path in (CI_YML, RELEASE_YML):
+        text = path.read_text()
+        assert "--entrypoint python" in text, path
+        # The smoke must bypass the production Bridge entrypoint.
+        assert "docker run --rm --entrypoint python" in text, path
+    ci_text = CI_YML.read_text()
+    assert "docker run --rm workspace-bridge:ci python -c" not in ci_text
+    release_text = RELEASE_YML.read_text()
+    assert "release-${{ matrix.arch }} python -c" not in release_text
+    assert "release-${{ matrix.arch }} -c" in release_text
+
+
+def test_pi_test_command_enumerates_test_files():
+    pkg = json.loads(PI_PKG.read_text())
+    script = pkg.get("scripts", {}).get("test", "")
+    assert "test/*.test.mjs" in script, script
+    assert script.strip() != "node --test test/"
+    assert "fake-sdk" not in script
+    # The one-level pattern still enumerates the tracked test files on Node 24.
+    import glob
+    enumerated = sorted(glob.glob(str(REPO / "runtime" / "pi-host-adapter" / "test" / "*.test.mjs")))
+    assert len(enumerated) >= 20, enumerated
+    assert not any(p.endswith("fake-sdk.mjs") for p in enumerated)
+    assert (REPO / "runtime" / "pi-host-adapter" / "test" / "fake-sdk.mjs").is_file()

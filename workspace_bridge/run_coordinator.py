@@ -668,11 +668,13 @@ class RunCoordinator:
         return (
             f"Work only in this project: {json.dumps(directory)}. "
             f"Read {json.dumps(folder + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md "
-            "in the same folder. Preserve pre-existing edits. Follow the plan "
-            "and satisfy every acceptance criterion. Run the agreed checks. "
+            "in the same folder. Preserve pre-existing edits and unrelated work. "
+            "Follow the plan and satisfy every acceptance criterion. Run the agreed checks. "
+            "Do not access secrets unless the handoff explicitly requires and authorizes it. "
+            "Do not make unrelated destructive actions, expand scope, or edit the handoff "
+            "documents unless the handoff explicitly permits them. "
             "Stop and report a blocker when assumptions fail or the work exceeds "
-            "scope. Do not commit, push, tag, publish, deploy, rotate credentials, "
-            "or edit the handoff documents. Report changed files, exact checks "
+            "scope. Report changed files, exact checks "
             "and outcomes, and remaining risks."
         )
 

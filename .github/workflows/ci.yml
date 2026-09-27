@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -106,4 +106,4 @@ jobs:
       - name: Bounded container release-identity smoke
         run: |
           set -euo pipefail
-          docker run --rm workspace-bridge:ci python -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b['build_id'], 'manager': m['build_id']}))"
+          docker run --rm --entrypoint python workspace-bridge:ci -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b['build_id'], 'manager': m['build_id']}))"

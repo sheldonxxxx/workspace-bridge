@@ -344,11 +344,13 @@ class Service:
         title = ("Direct instruction: " + first_line)[:120]
         constraints = (
             "Direct instruction run. Work only in this project and only on "
-            "what the instruction requires. Preserve pre-existing edits. "
-            "Do not commit, push, tag, publish, deploy, rotate credentials, "
-            "or edit handoff documents. No unrelated changes, secret access, "
-            "or scope expansion. Stop and report a blocker rather than guess "
-            "when assumptions fail.")
+            "what the instruction requires. Preserve pre-existing edits and "
+            "unrelated work. Do not access secrets unless the instruction "
+            "explicitly requires and authorizes it. Do not make unrelated "
+            "destructive actions, expand scope, or edit handoff documents "
+            "unless the instruction explicitly permits them. Stop and report "
+            "a blocker rather than guess when assumptions fail or the "
+            "instruction is ambiguous.")
         return self.prepare_handoff(ws, {
             "request_id": self.direct_instruction_request_id(adapter_id,
                                                              request_id),
