@@ -4,9 +4,11 @@ Runs the **Workspace Bridge** control plane with an internal tunnel sidecar on t
 shared Compose network. The authoritative `workspace-bridge-node` service is a
 separate private process on each data-plane host; it owns workspace files, Git,
 handoffs and Node-side adapter secrets. Native adapter daemons run on those hosts
-and are reached through the Node Protocol. The image is built locally from this
-source; no public Workspace Bridge image has been published. Nodes and agents are
-not part of this Compose stack; run and manage them on their hosts.
+and are reached through the Node Protocol. Compose builds the Bridge image locally
+by default. Stable releases also publish a versioned `linux/amd64` and `linux/arm64`
+image to `ghcr.io/sheldonxxxx/workspace-bridge`; package visibility is managed in
+GitHub Packages. Nodes and agents are not part of this Compose stack; run and
+manage them on their hosts.
 
 ## Requirements and scope
 
@@ -59,6 +61,13 @@ adapter/network checks:
 docker exec workspace-bridge workspace-bridge --state /state doctor --json
 docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
+
+To use the published Bridge image, authenticate to GHCR if the package is
+private, then set `services.bridge.image` to
+`ghcr.io/sheldonxxxx/workspace-bridge:v0.1.1` and remove its `build` block in a
+local copy of the Compose file. Keep the state mount, loopback port bindings, non-root
+user, and tunnel sidecar configuration. The release workflow publishes this
+multiarch tag only after its full CI and native image checks pass.
 
 The helper creates `.env` (0600) and a private Bridge state directory (0700), defaulting
 to `$HOME/.local/state/workspace-bridge-docker`. Set `--state-dir /absolute/path`

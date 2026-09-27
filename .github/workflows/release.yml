@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing GitHub Release tag to rebuild/republish (e.g. v0.1.0). Must already exist and not be a draft. No tags or releases are created, moved, or deleted.'
+        description: 'Existing GitHub Release tag to rebuild/republish (e.g. v0.1.1). Must already exist and not be a draft. No tags or releases are created, moved, or deleted.'
         required: true
         type: string
 
@@ -250,6 +250,22 @@ jobs:
           assert container["manager"] == target["components"]["manager"], "container Manager identity mismatch"
           print("container identities match target manifest")
           PY
+      - name: Save exact validated image
+        run: |
+          set -euo pipefail
+          ARCH="${{ matrix.arch }}"
+          docker save --output "$RUNNER_TEMP/workspace-bridge-$ARCH.tar" "workspace-bridge:release-$ARCH"
+          (cd "$RUNNER_TEMP" && sha256sum "workspace-bridge-$ARCH.tar" > "workspace-bridge-$ARCH.tar.sha256")
+      - name: Upload validated image
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/workspace-bridge-${{ matrix.arch }}.tar
+            ${{ runner.temp }}/workspace-bridge-${{ matrix.arch }}.tar.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   npm-pack:
     name: npm pack / Linux x64
@@ -371,6 +387,64 @@ jobs:
     steps:
       - name: All prerequisites passed
         run: echo release-ready-barrier-passed
+
+  ghcr-publish:
+    name: Publish GHCR image (amd64 and arm64)
+    needs: [release-ready, build-docker]
+    runs-on: ubuntu-24.04
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image-amd64
+          path: dist/docker-amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image-arm64
+          path: dist/docker-arm64
+      - name: Verify and load exact validated images
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            (cd "dist/docker-$ARCH" && sha256sum --check "workspace-bridge-$ARCH.tar.sha256")
+            docker load --input "dist/docker-$ARCH/workspace-bridge-$ARCH.tar"
+            GOT="$(docker image inspect --format '{{.Architecture}}' "workspace-bridge:release-$ARCH")"
+            test "$GOT" = "$ARCH" || { echo "arch $GOT != $ARCH" >&2; exit 1; }
+          done
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push validated images and create multiarch release tag
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          IMAGE="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          VERSION="${RELEASE_TAG#v}"
+          for ARCH in amd64 arm64; do
+            docker tag "workspace-bridge:release-$ARCH" "$IMAGE:$RELEASE_TAG-$ARCH"
+            docker push "$IMAGE:$RELEASE_TAG-$ARCH"
+          done
+          docker buildx imagetools create \
+            --tag "$IMAGE:$RELEASE_TAG" \
+            --tag "$IMAGE:$VERSION" \
+            "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+          docker buildx imagetools inspect --raw "$IMAGE:$RELEASE_TAG" > "$RUNNER_TEMP/ghcr-index.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          index = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "ghcr-index.json").read_text())
+          platforms = {(m["platform"]["os"], m["platform"]["architecture"])
+                       for m in index.get("manifests", [])}
+          assert {("linux", "amd64"), ("linux", "arm64")} <= platforms, platforms
+          print("GHCR release index includes linux/amd64 and linux/arm64")
+          PY
 
   pypi-publish:
     name: Publish Python wheel (OIDC)

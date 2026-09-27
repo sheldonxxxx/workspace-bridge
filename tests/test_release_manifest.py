@@ -22,8 +22,8 @@ from workspace_bridge.release import (
 )
 
 
-def _synthetic(component: str, build: str, product: str = "0.1.0",
-               component_version: str = "0.1.0") -> dict:
+def _synthetic(component: str, build: str, product: str = __version__,
+               component_version: str = __version__) -> dict:
     return validate_release({
         "contract": 1, "product": "workspace-bridge",
         "product_version": product, "component": component,
@@ -97,35 +97,35 @@ def test_manifest_rejects_unsupported_contract():
     assert exc.value.kind == "unsupported"
 
 
-def test_all_version_sources_aligned_at_0_1_0():
-    assert __version__ == "0.1.0"
+def test_all_version_sources_aligned_at_0_1_1():
+    assert __version__ == "0.1.1"
     import tomllib
     repo = Path(__file__).resolve().parent.parent
     pyproject = tomllib.loads((repo / "pyproject.toml").read_text())
-    assert pyproject["project"]["version"] == "0.1.0"
+    assert pyproject["project"]["version"] == "0.1.1"
     pi_meta = json.loads((repo / "runtime" / "pi-host-adapter" / "package.json").read_text())
-    assert pi_meta["version"] == "0.1.0"
-    assert pi_meta["workspaceBridgeRelease"] == "0.1.0"
+    assert pi_meta["version"] == "0.1.1"
+    assert pi_meta["workspaceBridgeRelease"] == "0.1.1"
     web_meta = json.loads((repo / "web" / "package.json").read_text())
-    assert web_meta["version"] == "0.1.0"
+    assert web_meta["version"] == "0.1.1"
     docker = (repo / "Dockerfile").read_text()
     assert "/wheels/workspace_bridge-*.whl" in docker
     assert "workspace-bridge==0.1.0" not in docker
-    assert "0.1.0" in (repo / "compose.yaml").read_text()
-    assert "0.1.0" in (repo / "README.md").read_text()
-    # Served Manager identity is 0.1.0 after rebuild.
+    assert "0.1.1" in (repo / "compose.yaml").read_text()
+    assert "0.1.1" in (repo / "README.md").read_text()
+    # Served Manager identity is 0.1.1 after rebuild.
     release_path = repo / "workspace_bridge" / "static" / "dist" / "release.json"
     if release_path.exists():
         served = validate_release(json.loads(release_path.read_text()))
         assert served["component"] == "manager"
-        assert served["product_version"] == "0.1.0"
-        assert served["component_version"] == "0.1.0"
+        assert served["product_version"] == "0.1.1"
+        assert served["component_version"] == "0.1.1"
     # Codex descriptor constant and Pi adapter constant agree.
     from workspace_bridge.release import CODEX_ADAPTER_VERSION
-    assert CODEX_ADAPTER_VERSION == "0.1.0"
-    assert "0.1.0" in (repo / "runtime" / "pi-host-adapter" / "config.mjs").read_text()
+    assert CODEX_ADAPTER_VERSION == "0.1.1"
+    assert "0.1.1" in (repo / "runtime" / "pi-host-adapter" / "config.mjs").read_text()
     # Lockfiles carry the reset product version.
-    assert 'version = "0.1.0"' in (repo / "uv.lock").read_text()
+    assert 'version = "0.1.1"' in (repo / "uv.lock").read_text()
 
 
 def test_protocol_schema_native_versions_unchanged():
@@ -137,7 +137,7 @@ def test_protocol_schema_native_versions_unchanged():
     import sqlite3  # noqa: F401
     repo = Path(__file__).resolve().parent.parent
     pi_lock = json.loads((repo / "runtime" / "pi-host-adapter" / "package-lock.json").read_text())
-    assert pi_lock["packages"][""]["version"] == "0.1.0"
+    assert pi_lock["packages"][""]["version"] == "0.1.1"
     # Pi native dependency is unchanged.
     pi_meta = json.loads((repo / "runtime" / "pi-host-adapter" / "package.json").read_text())
     assert pi_meta["dependencies"]["@earendil-works/pi-coding-agent"] == "0.87.0"
@@ -183,4 +183,3 @@ def test_build_release_manifest_integration_if_node_available():
     assert pi["component"] == "pi-host-adapter"
     assert manager["product_version"] == __version__
     assert pi["product_version"] == __version__
-

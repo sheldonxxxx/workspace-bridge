@@ -43,6 +43,7 @@ RUN python -m pip wheel --no-deps --no-build-isolation --wheel-dir /wheels .
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 WB_STATE_DIR=/state HOME=/tmp
+LABEL org.opencontainers.image.source="https://github.com/sheldonxxxx/workspace-bridge"
 # OS/user layer first: cached across Python dependency and source changes.
 # Previously this apt-get ran after COPY /wheels, so every dependency bump
 # re-ran `apt-get update`. Splitting keeps the slow network step reusable.

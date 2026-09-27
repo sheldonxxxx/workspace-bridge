@@ -1,6 +1,6 @@
 # Operations
 
-Public operator guide for Workspace Bridge `0.1.0`: state, services, manual
+Public operator guide for Workspace Bridge `0.1.1`: state, services, manual
 upgrades, release identity, logging, support bundles, notifications,
 recovery, and troubleshooting. For installation see [Setup](SETUP.md); for
 architecture see [Architecture](ARCHITECTURE.md).
@@ -127,7 +127,7 @@ IDs, or environment-only values, and no paths or file inventories are
 exposed.
 
 Product and component versions stay distinct: the product version is the
-Workspace Bridge release (`0.1.0`); the component version is that
+Workspace Bridge release (`0.1.1`); the component version is that
 component's own version. Adapter and native semantic versions, protocol and
 feature versions, and Node/adapter revisions remain separate fields.
 
