@@ -98,33 +98,100 @@ def _codex_conversation_run(tmp_path):
     return adapter, rpc, conversation, run
 
 
-def test_codex_usage_uses_last_not_thread_total(tmp_path):
+def test_codex_usage_aggregates_multiple_responses_via_total(tmp_path):
+    """One turn with two model responses exposes their aggregate, not last."""
     adapter, _, conversation, run = _codex_conversation_run(tmp_path)
     try:
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
             "tokenUsage": {
                 "last": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 120},
-                "total": {"inputTokens": 9999, "outputTokens": 9999,
-                          "totalTokens": 19998},
+                "total": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 120},
+            }})
+        assert adapter.run(run["id"])["usage"] == {
+            "inputTokens": 100, "outputTokens": 20, "totalTokens": 120}
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 50, "outputTokens": 10, "totalTokens": 60},
+                "total": {"inputTokens": 150, "outputTokens": 30, "totalTokens": 180},
             }})
         public = adapter.run(run["id"])
-        assert public["usage"] == {"inputTokens": 100, "outputTokens": 20,
-                                   "totalTokens": 120}
+        assert public["usage"] == {"inputTokens": 150, "outputTokens": 30,
+                                   "totalTokens": 180}
     finally:
         adapter.close()
 
 
-def test_codex_duplicate_usage_replaces_instead_of_summing(tmp_path):
+def test_codex_continuation_starts_fresh_boundary(tmp_path):
+    """A continuation turn excludes previous turns via its baseline."""
+    adapter, rpc, conversation, first = _codex_conversation_run(tmp_path)
+    try:
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": first["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 100, "totalTokens": 100},
+                "total": {"inputTokens": 100, "totalTokens": 100},
+            }})
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": first["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 50, "totalTokens": 50},
+                "total": {"inputTokens": 150, "totalTokens": 150},
+            }})
+        assert adapter.run(first["id"])["usage"] == {
+            "inputTokens": 150, "totalTokens": 150}
+        adapter._notification("turn/completed", {
+            "threadId": conversation["nativeId"],
+            "turn": {"id": first["nativeId"], "status": "completed"}})
+        rpc.status = "idle"
+        second = adapter.start_run(conversation["id"], {
+            "input": [{"type": "text", "text": "follow-up"}]})
+        assert "usage" not in adapter.run(second["id"])
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": second["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 70, "totalTokens": 70},
+                "total": {"inputTokens": 220, "totalTokens": 220},
+            }})
+        assert adapter.run(second["id"])["usage"] == {
+            "inputTokens": 70, "totalTokens": 70}
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": second["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 80, "totalTokens": 80},
+                "total": {"inputTokens": 300, "totalTokens": 300},
+            }})
+        assert adapter.run(second["id"])["usage"] == {
+            "inputTokens": 150, "totalTokens": 150}
+        assert adapter.run(first["id"])["usage"] == {
+            "inputTokens": 150, "totalTokens": 150}
+    finally:
+        adapter.close()
+
+
+def test_codex_duplicate_usage_is_idempotent_not_summing(tmp_path):
     adapter, _, conversation, run = _codex_conversation_run(tmp_path)
     try:
-        for payload in ({"inputTokens": 10, "totalTokens": 10},
-                        {"inputTokens": 30, "totalTokens": 30}):
+        payload = {
+            "last": {"inputTokens": 50, "totalTokens": 50},
+            "total": {"inputTokens": 150, "totalTokens": 150},
+        }
+        for _ in range(3):
             adapter._notification("thread/tokenUsage/updated", {
                 "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-                "tokenUsage": {"last": payload}})
-        assert adapter.run(run["id"])["usage"] == {"inputTokens": 30,
-                                                   "totalTokens": 30}
+                "tokenUsage": dict(payload)})
+        assert adapter.run(run["id"])["usage"] == {"inputTokens": 150,
+                                                   "totalTokens": 150}
+        # A later cumulative total still aggregates from the same baseline.
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 10, "totalTokens": 10},
+                "total": {"inputTokens": 160, "totalTokens": 160},
+            }})
+        assert adapter.run(run["id"])["usage"] == {"inputTokens": 160,
+                                                   "totalTokens": 160}
     finally:
         adapter.close()
 
@@ -134,17 +201,27 @@ def test_codex_wrong_thread_or_turn_does_not_alter_run(tmp_path):
     try:
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-            "tokenUsage": {"last": {"inputTokens": 11, "totalTokens": 11}}})
+            "tokenUsage": {
+                "last": {"inputTokens": 11, "totalTokens": 11},
+                "total": {"inputTokens": 11, "totalTokens": 11},
+            }})
         before = adapter.run(run["id"])["usage"]
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": "other-thread", "turnId": run["nativeId"],
-            "tokenUsage": {"last": {"inputTokens": 999}}})
+            "tokenUsage": {
+                "last": {"inputTokens": 999},
+                "total": {"inputTokens": 999}},
+        })
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": "other-turn",
-            "tokenUsage": {"last": {"inputTokens": 999}}})
+            "tokenUsage": {
+                "last": {"inputTokens": 999},
+                "total": {"inputTokens": 999}},
+        })
+        # Last-only without a cumulative total carries no run boundary.
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-            "tokenUsage": {"total": {"inputTokens": 999}}})
+            "tokenUsage": {"last": {"inputTokens": 999}}})
         assert adapter.run(run["id"])["usage"] == before
     finally:
         adapter.close()
@@ -169,23 +246,202 @@ def test_codex_usage_survives_terminal_failure_and_restart(tmp_path):
         "input": [{"type": "text", "text": "Failing task"}]})
     adapter._notification("thread/tokenUsage/updated", {
         "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-        "tokenUsage": {"last": {"inputTokens": 42, "outputTokens": 7,
-                                "totalTokens": 49}}})
+        "tokenUsage": {
+            "last": {"inputTokens": 42, "outputTokens": 7, "totalTokens": 49},
+            "total": {"inputTokens": 42, "outputTokens": 7, "totalTokens": 49},
+        }})
+    adapter._notification("thread/tokenUsage/updated", {
+        "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+        "tokenUsage": {
+            "last": {"inputTokens": 8, "outputTokens": 1, "totalTokens": 9},
+            "total": {"inputTokens": 50, "outputTokens": 8, "totalTokens": 58},
+        }})
     adapter._notification("turn/completed", {
         "threadId": conversation["nativeId"],
         "turn": {"id": run["nativeId"], "status": "failed",
                  "error": {"message": "boom"}}})
     terminal = adapter.run(run["id"])
     assert terminal["outcome"] == "failed"
-    assert terminal["usage"] == {"inputTokens": 42, "outputTokens": 7,
-                                 "totalTokens": 49}
+    assert terminal["usage"] == {"inputTokens": 50, "outputTokens": 8,
+                                 "totalTokens": 58}
     state = adapter.state
     root = workspace.parent
     adapter.close()
     restarted = CodexHostAdapter(state, root, rpc=FakeCodexRpc())
     try:
         assert restarted.run(run["id"])["usage"] == {
-            "inputTokens": 42, "outputTokens": 7, "totalTokens": 49}
+            "inputTokens": 50, "outputTokens": 8, "totalTokens": 58}
+        # Replayed totals after restart stay idempotent.
+        restarted._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 8, "outputTokens": 1, "totalTokens": 9},
+                "total": {"inputTokens": 50, "outputTokens": 8, "totalTokens": 58},
+            }})
+        assert restarted.run(run["id"])["usage"] == {
+            "inputTokens": 50, "outputTokens": 8, "totalTokens": 58}
+    finally:
+        restarted.close()
+
+
+def test_codex_usage_survives_all_terminal_outcomes(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir(exist_ok=True)
+    workspace = projects / "workspace"
+    workspace.mkdir(exist_ok=True)
+    rpc = FakeCodexRpc()
+    adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
+    profile = next(row for row in adapter.profiles(
+        "ws_test", str(workspace))["profiles"]
+        if row["id"] == "workspace-write-reviewed")
+    try:
+        for status, outcome in (("completed", "succeeded"),
+                                ("interrupted", "interrupted"),
+                                ("failed", "failed")):
+            conversation = adapter.create_conversation({
+                "workspaceId": "ws_test", "directory": str(workspace),
+                "securityProfile": {"id": "workspace-write-reviewed",
+                                    "revision": profile["revision"]},
+            })
+            run = adapter.start_run(conversation["id"], {
+                "input": [{"type": "text", "text": f"task {outcome}"}]})
+            adapter._notification("thread/tokenUsage/updated", {
+                "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+                "tokenUsage": {
+                    "last": {"inputTokens": 12, "totalTokens": 12},
+                    "total": {"inputTokens": 12, "totalTokens": 12},
+                }})
+            current = adapter.run(run["id"])["usage"]
+            assert current == {"inputTokens": 12, "totalTokens": 12}
+            adapter._notification("turn/completed", {
+                "threadId": conversation["nativeId"],
+                "turn": {"id": run["nativeId"], "status": status}})
+            rpc.status = "idle"
+            terminal = adapter.run(run["id"])
+            assert terminal["outcome"] == outcome
+            assert terminal["usage"] == current
+    finally:
+        adapter.close()
+
+
+def test_codex_decreasing_and_reset_total_preserves_prior(tmp_path):
+    adapter, _, conversation, run = _codex_conversation_run(tmp_path)
+    try:
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110},
+                "total": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110},
+            }})
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 50, "outputTokens": 5, "totalTokens": 55},
+                "total": {"inputTokens": 150, "outputTokens": 15, "totalTokens": 165},
+            }})
+        before = adapter.run(run["id"])["usage"]
+        assert before == {"inputTokens": 150, "outputTokens": 15, "totalTokens": 165}
+        # Decreasing cumulative (reset/compaction) must not clamp or clear.
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 5, "totalTokens": 5},
+                "total": {"inputTokens": 20, "outputTokens": 2, "totalTokens": 22},
+            }})
+        assert adapter.run(run["id"])["usage"] == before
+        # A later total that grows past the proven max resumes aggregation.
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 10, "totalTokens": 10},
+                "total": {"inputTokens": 160, "outputTokens": 16, "totalTokens": 176},
+            }})
+        assert adapter.run(run["id"])["usage"] == {
+            "inputTokens": 160, "outputTokens": 16, "totalTokens": 176}
+    finally:
+        adapter.close()
+
+
+def test_codex_full_counters_aggregate(tmp_path):
+    adapter, _, conversation, run = _codex_conversation_run(tmp_path)
+    try:
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 100, "cachedInputTokens": 80,
+                           "cacheWriteInputTokens": 5, "outputTokens": 20,
+                           "reasoningOutputTokens": 10, "totalTokens": 120},
+                "total": {"inputTokens": 100, "cachedInputTokens": 80,
+                            "cacheWriteInputTokens": 5, "outputTokens": 20,
+                            "reasoningOutputTokens": 10, "totalTokens": 120},
+            }})
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 50, "cachedInputTokens": 40,
+                           "cacheWriteInputTokens": 2, "outputTokens": 10,
+                           "reasoningOutputTokens": 5, "totalTokens": 60},
+                "total": {"inputTokens": 150, "cachedInputTokens": 120,
+                            "cacheWriteInputTokens": 7, "outputTokens": 30,
+                            "reasoningOutputTokens": 15, "totalTokens": 180},
+            }})
+        assert adapter.run(run["id"])["usage"] == {
+            "inputTokens": 150, "cachedInputTokens": 120,
+            "cacheWriteInputTokens": 7, "outputTokens": 30,
+            "reasoningOutputTokens": 15, "totalTokens": 180}
+    finally:
+        adapter.close()
+
+
+def test_codex_restart_keeps_continuation_boundary(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir(exist_ok=True)
+    workspace = projects / "workspace"
+    workspace.mkdir(exist_ok=True)
+    rpc = FakeCodexRpc()
+    adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
+    profile = next(row for row in adapter.profiles(
+        "ws_test", str(workspace))["profiles"]
+        if row["id"] == "workspace-write-reviewed")
+    conversation = adapter.create_conversation({
+        "workspaceId": "ws_test", "directory": str(workspace),
+        "securityProfile": {"id": "workspace-write-reviewed",
+                            "revision": profile["revision"]},
+    })
+    first = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "first"}]})
+    adapter._notification("thread/tokenUsage/updated", {
+        "threadId": conversation["nativeId"], "turnId": first["nativeId"],
+        "tokenUsage": {
+            "last": {"inputTokens": 150, "totalTokens": 150},
+            "total": {"inputTokens": 150, "totalTokens": 150},
+        }})
+    adapter._notification("turn/completed", {
+        "threadId": conversation["nativeId"],
+        "turn": {"id": first["nativeId"], "status": "completed"}})
+    rpc.status = "idle"
+    state = adapter.state
+    root = workspace.parent
+    adapter.close()
+    continued_rpc = FakeCodexRpc()
+    # Fresh fakes restart their counters; advance past the existing turns so
+    # the next native turn identity stays unique in the persisted table.
+    continued_rpc.next_turn = 10
+    continued_rpc.next_thread = 10
+    restarted = CodexHostAdapter(state, root, rpc=continued_rpc)
+    try:
+        assert restarted.run(first["id"])["usage"] == {
+            "inputTokens": 150, "totalTokens": 150}
+        second = restarted.start_run(conversation["id"], {
+            "input": [{"type": "text", "text": "second"}]})
+        restarted._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": second["nativeId"],
+            "tokenUsage": {
+                "last": {"inputTokens": 70, "totalTokens": 70},
+                "total": {"inputTokens": 220, "totalTokens": 220},
+            }})
+        assert restarted.run(second["id"])["usage"] == {
+            "inputTokens": 70, "totalTokens": 70}
     finally:
         restarted.close()
 
@@ -221,15 +477,28 @@ def test_codex_malformed_usage_preserves_prior_snapshot(tmp_path):
     try:
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-            "tokenUsage": {"last": {"inputTokens": 11, "totalTokens": 11}}})
+            "tokenUsage": {
+                "last": {"inputTokens": 11, "totalTokens": 11},
+                "total": {"inputTokens": 11, "totalTokens": 11},
+            }})
         before = adapter.run(run["id"])["usage"]
-        # Mixed valid + malformed must be dropped entirely, not partially kept.
+        # Mixed valid + malformed cumulative must be dropped, not partially kept.
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-            "tokenUsage": {"last": {"inputTokens": 99, "outputTokens": -1}}})
+            "tokenUsage": {
+                "last": {"inputTokens": 99},
+                "total": {"inputTokens": 99, "outputTokens": -1}},
+        })
         adapter._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": run["nativeId"],
-            "tokenUsage": {"last": {"inputTokens": True}}})
+            "tokenUsage": {
+                "last": {"inputTokens": True},
+                "total": {"inputTokens": True}},
+        })
+        # Last-only without total carries no boundary and is also dropped.
+        adapter._notification("thread/tokenUsage/updated", {
+            "threadId": conversation["nativeId"], "turnId": run["nativeId"],
+            "tokenUsage": {"last": {"inputTokens": 99}}})
         assert adapter.run(run["id"])["usage"] == before
     finally:
         adapter.close()
@@ -269,25 +538,38 @@ def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
     native_turn = native.run(run["native_id"])["nativeId"]
     native._notification("thread/tokenUsage/updated", {
         "threadId": native_thread, "turnId": native_turn,
-        "tokenUsage": {"last": {"inputTokens": 120, "cachedInputTokens": 20,
-                                "outputTokens": 30, "totalTokens": 150}}})
+        "tokenUsage": {
+            "last": {"inputTokens": 120, "cachedInputTokens": 20,
+                       "outputTokens": 30, "totalTokens": 150},
+            "total": {"inputTokens": 120, "cachedInputTokens": 20,
+                        "outputTokens": 30, "totalTokens": 150},
+        }})
+    # A second model response aggregates via the cumulative total.
+    native._notification("thread/tokenUsage/updated", {
+        "threadId": native_thread, "turnId": native_turn,
+        "tokenUsage": {
+            "last": {"inputTokens": 30, "cachedInputTokens": 10,
+                       "outputTokens": 5, "totalTokens": 45},
+            "total": {"inputTokens": 150, "cachedInputTokens": 30,
+                        "outputTokens": 35, "totalTokens": 195},
+        }})
     # Reconcile through the durable snapshot path.
     read = service.call(ws_id, token, "read_agent_run",
                         {"run_id": started["run_id"]})
-    assert read["token_usage"] == {"input_tokens": 120,
-                                   "cached_input_tokens": 20,
-                                   "output_tokens": 30, "total_tokens": 150}
+    assert read["token_usage"] == {"input_tokens": 150,
+                                   "cached_input_tokens": 30,
+                                   "output_tokens": 35, "total_tokens": 195}
     listed = service.call(ws_id, token, "list_agent_runs", {})["runs"]
     assert next(item for item in listed
                 if item["run_id"] == started["run_id"])["token_usage"] == {
-        "input_tokens": 120, "cached_input_tokens": 20,
-        "output_tokens": 30, "total_tokens": 150}
+        "input_tokens": 150, "cached_input_tokens": 30,
+        "output_tokens": 35, "total_tokens": 195}
     with service.lock:
         stored = service.db.execute(
             "SELECT token_usage FROM agent_runs WHERE id=?",
             (started["run_id"],)).fetchone()["token_usage"]
-    assert json.loads(stored) == {"cached_input_tokens": 20, "input_tokens": 120,
-                                  "output_tokens": 30, "total_tokens": 150}
+    assert json.loads(stored) == {"cached_input_tokens": 30, "input_tokens": 150,
+                                  "output_tokens": 35, "total_tokens": 195}
 
 
 def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):

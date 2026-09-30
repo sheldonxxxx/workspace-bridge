@@ -108,6 +108,7 @@ export interface AdapterInfo {
   detail?: string;
   release?: ReleaseIdentity | null;
   model_policy?: ModelPolicy;
+  features?: Record<string, number>;
 }
 export interface ModelPolicy {
   configured?: boolean;
@@ -115,6 +116,61 @@ export interface ModelPolicy {
   default?: string | null;
   reasoning_defaults?: Record<string, string>;
   enabled_count?: number;
+}
+export interface UsageLimitWindow {
+  usedPercent: number;
+  remainingPercent: number;
+  windowDurationMins?: number | null;
+  resetsAt?: number | null;
+}
+export interface UsageLimitBucket {
+  limitId?: string | null;
+  limitName?: string | null;
+  planType?: string | null;
+  rateLimitReachedType?: string | null;
+  spendControlReached?: boolean | null;
+  credits?: {
+    hasCredits: boolean;
+    unlimited: boolean;
+    balance?: string | null;
+  } | null;
+  individualLimit?: {
+    limit: string;
+    used: string;
+    remainingPercent: number;
+    resetsAt?: number | null;
+  } | null;
+  /** Normalized primary/secondary windows; remaining quota needs one. */
+  windows: UsageLimitWindow[];
+}
+export interface UsageLimits {
+  available: boolean;
+  ordinaryUsageAllowed?: boolean | null;
+  buckets: UsageLimitBucket[];
+}
+export function quotaWindowLabel(mins?: number | null): string {
+  if (typeof mins !== "number" || !Number.isFinite(mins) || mins <= 0)
+    return "";
+  if (mins % 1440 === 0) return `${mins / 1440}d`;
+  if (mins % 10080 === 0) return `${mins / 10080}w`;
+  if (mins % 60 === 0) return `${mins / 60}h`;
+  return `${mins}m`;
+}
+export function quotaResetText(resetsAt?: number | null): string {
+  if (
+    typeof resetsAt !== "number" ||
+    !Number.isFinite(resetsAt) ||
+    resetsAt <= 0
+  )
+    return "";
+  const date = new Date(resetsAt * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return `resets ${date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
 }
 export interface Status {
   version: string;

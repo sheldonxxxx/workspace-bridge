@@ -15,7 +15,24 @@ type Profile = {
   revision: string;
   mutable: boolean;
   available?: boolean;
+  unavailableReason?:
+    | "native-permission-unavailable"
+    | "managed-requirements"
+    | "legacy-sandbox-conflict";
 };
+
+function unavailableMessage(profile: Profile): string {
+  switch (profile.unavailableReason) {
+    case "native-permission-unavailable":
+      return "Native permission profile is missing or disallowed here.";
+    case "managed-requirements":
+      return "Blocked by Codex managed security requirements.";
+    case "legacy-sandbox-conflict":
+      return "Remove legacy sandbox_workspace_write settings from Codex config to use this profile.";
+    default:
+      return "Unavailable for this workspace.";
+  }
+}
 
 type RuntimeConfigSecurity = {
   supported: boolean;
@@ -54,6 +71,7 @@ export function ProfileAssignment({
   >(route?.security_binding?.source || "profile");
   const [selectedId, setSelectedId] = useState(route?.profile?.id || "");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -70,7 +88,7 @@ export function ProfileAssignment({
         const available = (data.profiles || []).filter(
           (profile) => profile.available !== false,
         );
-        setProfiles(available);
+        setProfiles(data.profiles || []);
         setSelectedId((current) =>
           available.some((profile) => profile.id === current)
             ? current
@@ -80,6 +98,9 @@ export function ProfileAssignment({
       })
       .catch((failure) => {
         if (live) setError((failure as Error).message);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
       });
     return () => {
       live = false;
@@ -194,18 +215,33 @@ export function ProfileAssignment({
           <div
             className="profile-assignment-list"
             role="group"
-            aria-label="Available Workspace Bridge profiles"
+            aria-label="Workspace Bridge profiles"
           >
+            {loading && <p role="status">Loading profiles…</p>}
+            {!loading && !error && profiles.length === 0 && (
+              <p role="status">No Workspace Bridge profiles were found.</p>
+            )}
+            {!loading && profiles.length > 0 && !selectedId && (
+              <p role="status">
+                No profiles can be assigned here. Review the reasons below
+                {route?.runtime_type === "codex" && " or use Codex config"}.
+              </p>
+            )}
             {profiles.map((profile) => (
               <button
                 key={profile.id}
                 type="button"
                 aria-pressed={selectedId === profile.id}
                 className={`profile-list-item ${selectedId === profile.id ? "current" : ""}`}
+                disabled={profile.available === false}
                 onClick={() => setSelectedId(profile.id)}
               >
                 <strong>{profile.id}</strong>
-                <span>{profile.mutable ? "Custom" : "Built in"}</span>
+                <span>
+                  {profile.mutable ? "Custom" : "Built in"}
+                  {profile.available === false &&
+                    ` · ${unavailableMessage(profile)}`}
+                </span>
               </button>
             ))}
           </div>

@@ -533,7 +533,7 @@ class NodeService:
                        "delete_profile", "create_conversation", "conversation",
                        "rebind_conversation", "start_run",
                        "find_run", "run", "cancel", "steer", "interactions", "resolve",
-                       "activities", "activity", "events"}
+                       "activities", "activity", "events", "usage_limits"}
         if operation not in allowed_ops or not isinstance(body, dict):
             raise BridgeError("Unknown runtime operation", "not_found")
         if set(body) - {"arguments", "workspace", "expected_adapter_revision"}:
@@ -573,7 +573,8 @@ class NodeService:
             if expected_revision != adapter_row["revision"]:
                 raise BridgeError("The Node adapter configuration changed", "adapter_changed")
             client = HttpRuntimeAdapter(adapter_row["id"], adapter_row["runtime_type"],
-                                        adapter_row["base_url"], adapter_row["token"], timeout=30)
+                                        adapter_row["base_url"], adapter_row["token"],
+                                        timeout=10 if operation == "usage_limits" else 30)
         args = arguments
         if operation == "descriptor":
             value = client.descriptor()
@@ -617,5 +618,6 @@ class NodeService:
         if operation == "resolve": return client.resolve(args["interaction_id"], args["response"])
         if operation == "activities": return client.activities(args["run_id"])
         if operation == "activity": return client.activity(args["activity_id"])
+        if operation == "usage_limits": return client.usage_limits()
         if operation == "events": return client.events(after=args["after"], wait_ms=args.get("wait_ms", 0))
         raise BridgeError("Unknown runtime operation", "not_found")

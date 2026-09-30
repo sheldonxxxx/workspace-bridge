@@ -19,7 +19,8 @@ from .security import BridgeError, redact
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
-OPTIONAL_FEATURES = frozenset({"events", "steering", "imageInput", "securityRebind"})
+OPTIONAL_FEATURES = frozenset({"events", "steering", "imageInput", "securityRebind",
+                               "usageLimits"})
 ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
 ACTIVE_STATES = frozenset({"running", "waiting_interaction"})
@@ -38,6 +39,11 @@ MAX_SAFE_INTEGER = 9007199254740991
 RUN_USAGE_FIELDS = frozenset({
     "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
     "outputTokens", "reasoningOutputTokens", "totalTokens"})
+# Account usage limits are an account-level snapshot, separate from the
+# run-scoped token usage above and from adapter health/status.
+USAGE_BUCKETS_MAX = 12
+USAGE_WINDOWS_MAX = 4
+USAGE_WINDOW_MINS_MAX = 10_000_000
 
 
 def _identifier(value: Any, label: str) -> str:
@@ -92,6 +98,128 @@ def _validate_run_usage(value: Any) -> dict:
             raise RuntimeUnavailable("Runtime run usage is invalid")
         result[key] = int(counter)
     return result
+
+
+def _usage_text(value: Any, limit: int) -> str | None:
+    if isinstance(value, str) and value and len(value) <= limit:
+        return value
+    return None
+
+
+def _usage_int(value: Any, minimum: int, maximum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
+
+
+def _usage_limit_window(value: Any) -> dict | None:
+    """Validate one normalized quota window; unusable windows are dropped.
+
+    A missing or invalid ``usedPercent`` means the window carries no
+    observable remaining quota, so it is omitted entirely (never rendered
+    as 0% remaining). ``remainingPercent`` is always derived here as
+    clamp(100 - usedPercent) for display/summary only; ``usedPercent``
+    stays preserved and null duration/reset stay null. Unknown fields are
+    ignored, never forwarded.
+    """
+    if not isinstance(value, dict):
+        return None
+    used = _usage_int(value.get("usedPercent"), 0, 1000)
+    if used is None:
+        return None
+    return {
+        "usedPercent": used,
+        "remainingPercent": max(0, min(100, 100 - used)),
+        "windowDurationMins": _usage_int(value.get("windowDurationMins"),
+                                         0, USAGE_WINDOW_MINS_MAX),
+        "resetsAt": _usage_int(value.get("resetsAt"), 0, MAX_SAFE_INTEGER),
+    }
+
+
+def _usage_limit_bucket(value: Any) -> dict | None:
+    """Validate one normalized quota bucket.
+
+    The bucket carries bounded snapshot metadata plus a nested ``windows``
+    list (primary then secondary when present, normalized by the adapter).
+    A bucket with neither valid windows nor usable metadata is dropped;
+    remaining-quota display always requires at least one valid window.
+    Unknown native fields are ignored, never forwarded.
+    """
+    if not isinstance(value, dict):
+        return None
+    windows_raw = value.get("windows")
+    windows = []
+    if isinstance(windows_raw, list):
+        for row in windows_raw[:USAGE_WINDOWS_MAX]:
+            window = _usage_limit_window(row)
+            if window is not None:
+                windows.append(window)
+    spend_control = value.get("spendControlReached")
+    bucket = {
+        "limitId": _usage_text(value.get("limitId"), 200),
+        "limitName": _usage_text(value.get("limitName"), 120),
+        "planType": _usage_text(value.get("planType"), 60),
+        "rateLimitReachedType": _usage_text(value.get("rateLimitReachedType"), 60),
+        "spendControlReached": (spend_control
+                                if isinstance(spend_control, bool) else None),
+        "credits": None,
+        "individualLimit": None,
+        "windows": windows,
+    }
+    credits = value.get("credits")
+    if (isinstance(credits, dict)
+            and isinstance(credits.get("hasCredits"), bool)
+            and isinstance(credits.get("unlimited"), bool)):
+        bucket["credits"] = {
+            "hasCredits": credits["hasCredits"],
+            "unlimited": credits["unlimited"],
+            "balance": _usage_text(credits.get("balance"), 200)}
+    individual = value.get("individualLimit")
+    if isinstance(individual, dict):
+        limit = _usage_text(individual.get("limit"), 60)
+        used_text = _usage_text(individual.get("used"), 60)
+        remaining = _usage_int(individual.get("remainingPercent"), 0, 100)
+        if limit is not None and used_text is not None and remaining is not None:
+            bucket["individualLimit"] = {
+                "limit": limit, "used": used_text,
+                "remainingPercent": remaining,
+                "resetsAt": _usage_int(individual.get("resetsAt"),
+                                       0, MAX_SAFE_INTEGER)}
+    metadata = (bucket["credits"] is not None
+                or bucket["individualLimit"] is not None
+                or bucket["spendControlReached"] is not None
+                or bucket["rateLimitReachedType"] is not None)
+    if not windows and not metadata:
+        return None
+    return bucket
+
+
+def validate_usage_limits(value: Any) -> dict:
+    """Validate the optional additive account usage-limits snapshot.
+
+    The contract is runtime-neutral and never invents data: a successful
+    read reports ``available`` plus bounded quota buckets whose nested
+    ``windows`` carry the remaining-quota observations. Malformed buckets
+    and windows are dropped rather than guessed at; a structurally
+    invalid payload fails closed as unavailable runtime data.
+    """
+    if not isinstance(value, dict):
+        raise RuntimeUnavailable("Runtime usage limits are invalid")
+    available = value.get("available")
+    ordinary = value.get("ordinaryUsageAllowed")
+    if (not isinstance(available, bool)
+            or (ordinary is not None and not isinstance(ordinary, bool))):
+        raise RuntimeUnavailable("Runtime usage limits are invalid")
+    rows = value.get("buckets")
+    if not isinstance(rows, list):
+        raise RuntimeUnavailable("Runtime usage limits are invalid")
+    buckets = []
+    for row in rows[:USAGE_BUCKETS_MAX]:
+        bucket = _usage_limit_bucket(row)
+        if bucket is not None:
+            buckets.append(bucket)
+    return {"available": available, "ordinaryUsageAllowed": ordinary,
+            "buckets": buckets}
 
 
 def _validate_security_summary(value: Any) -> dict:
@@ -405,6 +533,10 @@ class HttpRuntimeAdapter:
                 item["definitionRevision"] = definition_revision
             if isinstance(row.get("available"), bool):
                 item["available"] = row["available"]
+            if row.get("unavailableReason") in {
+                    "native-permission-unavailable", "managed-requirements",
+                    "legacy-sandbox-conflict"}:
+                item["unavailableReason"] = row["unavailableReason"]
             result.append(item)
         permission_profiles = value.get("permissionProfiles")
         if not isinstance(permission_profiles, list):
@@ -548,6 +680,17 @@ class HttpRuntimeAdapter:
 
     def activity(self, activity_id: str) -> dict:
         return self._request("GET", f"/v1/activities/{_identifier(activity_id, 'activity id')}")
+
+    def usage_limits(self) -> dict:
+        """Read the optional account usage-limits snapshot (usageLimits).
+
+        Account quota belongs to the AdapterInstance/account, so the call
+        needs no workspace authority context. Unsupported adapters fail as
+        unsupported, never as unhealthy.
+        """
+        if not self.descriptor().supports("usageLimits"):
+            raise RuntimeUnsupported("Runtime does not support usage limits")
+        return validate_usage_limits(self._request("GET", "/v1/usage-limits"))
 
     def events(self, *, after: int, wait_ms: int = 0) -> dict:
         if not self.descriptor().supports("events"):

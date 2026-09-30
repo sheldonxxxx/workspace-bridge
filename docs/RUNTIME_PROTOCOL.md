@@ -56,13 +56,15 @@ POST   /v1/interactions/{id}/resolve
 GET    /v1/runs/{id}/activities
 GET    /v1/activities/{id}
 GET    /v1/events?after=...&waitMs=...
+GET    /v1/usage-limits          (optional `usageLimits` feature)
 ```
 
 `descriptor` has `protocol: {major: 1, minor: 0}`, a stable runtime-type ID,
 adapter/native versions, an instance ID, and a map of feature names to positive
 integer contract versions. Missing features mean unsupported. The required v1
 features are `models`, `conversations`, `runs`, `activities`, and
-`interactions`; `events`, `steering`, `imageInput`, and `securityRebind` are optional. A feature
+`interactions`; `events`, `steering`, `imageInput`, `securityRebind`, and
+`usageLimits` are optional. A feature
 may be advertised only when its full contract is implemented.
 Unknown optional feature names and higher optional feature versions are
 ignored by this v1 coordinator; the five core features must remain version 1.
@@ -80,15 +82,41 @@ native provider counters: `inputTokens`, `cachedInputTokens`,
 `cacheWriteInputTokens`, `outputTokens`, `reasoningOutputTokens`, and
 `totalTokens`. Usage is run-scoped for exactly one Bridge run, including
 continuation runs which start a fresh accounting boundary, and may be partial
-while the run is active. Codex reports the owned turn's `tokenUsage.last`
-snapshot (never cumulative thread totals); Pi aggregates provider-reported
-assistant/model-call usage for that run's tool loop (never streaming snapshots
-or previous conversation turns). The field is omitted when native usage is
+while the run is active. Codex derives the owned turn's aggregate as the
+fieldwise delta of the stable cumulative `tokenUsage.total` snapshots
+(`total - baseline`, where the baseline is the predecessor's cumulative
+thread total captured at admission and persisted for restart); `tokenUsage.last`
+carries only the newest model response and is never used alone as the run
+total. Pi aggregates provider-reported assistant/model-call usage for that
+run's tool loop (never streaming snapshots or previous conversation turns).
+Duplicate `tokenUsage.total` notifications are idempotent snapshots (never
+summed), and decreasing/reset or malformed cumulatives are dropped fieldwise
+without fabricating counters. The field is omitted when native usage is
 unavailable; present counters must be non-negative safe integers and absent
 counters are never synthesized as zero or estimated. Unknown or malformed
 usage fails closed as an invalid run snapshot. Already-consumed usage remains
 visible on failed, interrupted, and cancelled runs when the native runtime
 reported it.
+
+Run-scoped token usage is separate from account-level quota. An adapter that
+advertises the optional `usageLimits` feature exposes
+`GET /v1/usage-limits` (no parameters, no workspace context): a normalized
+account usage-limits snapshot `{available, ordinaryUsageAllowed, buckets}`.
+Each bucket mirrors one native RateLimitSnapshot: bounded metadata
+(`limitId`, `limitName`, `planType`, `rateLimitReachedType`,
+`spendControlReached`, bounded credits/spend-control observations when
+present) plus a nested `windows` list normalized from the native
+`primary` then `secondary` RateLimitWindow when present, each window
+preserving `usedPercent` and `resetsAt`/`windowDurationMins` (null stays
+null) and deriving `remainingPercent` = clamp(100 - usedPercent) for
+display only. Labels come only from `windowDurationMins`; primary/secondary
+meanings are never assumed. A bucket with neither valid windows nor usable
+metadata is dropped; remaining-quota display always requires at least one
+valid window, and missing data is never rendered as 0% remaining.
+Runtime-specific raw payloads (account IDs, upsell data) and unknown native
+fields never cross the adapter boundary. Failed, unsupported, or empty
+reads surface as an explicit unavailable state, not as adapter
+unhealthiness, and quota is never part of `/api/status`.
 
 `POST /conversations/{id}/runs` is **idle-only**. It must either accept exactly
 one new run or return `409 conversation_busy`; it must never queue or steer.

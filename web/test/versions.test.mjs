@@ -12,10 +12,7 @@ const API = fs.readFileSync(
 
 test("Versions view is registered and read-only", () => {
   assert.ok(APP.includes('"versions"'), "versions section id exists");
-  assert.ok(
-    APP.includes("System / Versions"),
-    "System/Versions title exists",
-  );
+  assert.ok(APP.includes("System / Versions"), "System/Versions title exists");
   assert.ok(
     APP.includes("/api/system/versions"),
     "system versions endpoint is used",
@@ -64,7 +61,7 @@ test("Versions view has manual guidance and no managed-update UI", () => {
     "Pi npm package is named",
   );
   assert.ok(
-    APP.includes("never installs, restarts, or rolls back"),
+    /never installs,\s*restarts, or\s*rolls back/.test(APP),
     "no-mutation statement exists",
   );
   // No managed-updater concepts.

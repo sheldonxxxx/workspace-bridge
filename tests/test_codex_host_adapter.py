@@ -39,6 +39,9 @@ class FakeCodexRpc:
                                 "origins": {}}
         self.requirements = None
         self.stderr = ""
+        # Optional account quota read (account/rateLimits/read).
+        self.rate_limits = None
+        self.rate_limits_error = None
 
     def permission_profiles(self, cwd):
         self.calls.append(("permissionProfile/list", {"cwd": cwd}))
@@ -146,6 +149,10 @@ class FakeCodexRpc:
             return {}
         if method == "thread/turns/list":
             return {"data": []}
+        if method == "account/rateLimits/read":
+            if self.rate_limits_error:
+                raise CodexRpcError(self.rate_limits_error)
+            return self.rate_limits if isinstance(self.rate_limits, dict) else {}
         raise AssertionError(method)
 
     def respond(self, request_id, result=None, error=None):
@@ -378,6 +385,7 @@ def test_permission_catalog_is_scoped_to_exact_workspace(codex_adapter, tmp_path
     second_row = next(row for row in second["profiles"] if row["id"] == saved["id"])
     assert first_row["available"] is True
     assert second_row["available"] is False
+    assert second_row["unavailableReason"] == "native-permission-unavailable"
     with pytest.raises(AdapterFailure) as unavailable:
         adapter.create_conversation({"workspaceId": "ws-b", "directory": str(other),
             "securityProfile": {"id": saved["id"], "revision": first_row["revision"]}})
@@ -408,6 +416,10 @@ def test_effective_legacy_workspace_write_config_fails_closed(codex_adapter):
         "sandbox_mode": "workspace-write",
         "sandbox_workspace_write": {"network_access": True}},
         "origins": {"sandbox_workspace_write": {"type": "user"}}}
+    catalog = adapter.profiles("ws-test", str(workspace), fresh=True)
+    assert all(row["available"] is False and
+               row["unavailableReason"] == "legacy-sandbox-conflict"
+               for row in catalog["profiles"])
     with pytest.raises(AdapterFailure) as conflict:
         new_conversation(adapter, workspace)
     assert conflict.value.code == "profile_unavailable"
@@ -599,6 +611,7 @@ def test_managed_untrusted_requirement_is_preserved_but_not_selectable(codex_ada
         "ws-test", str(workspace), fresh=True)["profiles"]
                   if row["id"] == saved["id"])
     assert denied["available"] is False
+    assert denied["unavailableReason"] == "managed-requirements"
     assert ":workspace" in {
         row["id"] for row in adapter.profiles(
             "ws-test", str(workspace), fresh=True)["permissionProfiles"]}

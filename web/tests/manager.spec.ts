@@ -23,6 +23,7 @@ type AdapterRow = {
   adapter_version: string;
   native_version: string;
   model_policy: { configured: boolean; enabled: string[]; default: string };
+  features?: Record<string, number>;
   savedToken: string;
 };
 
@@ -234,7 +235,7 @@ function publicAdapter(row: AdapterRow) {
   return publicRow;
 }
 
-function profileCatalog(id: string) {
+function profileCatalog(id: string, codexProfilesUnavailable = false) {
   const profileId = id === GPU_PI ? "gpu-read-only" : "read-only";
   const permission = id === LOCAL_CODEX ? ":read-only" : undefined;
   return {
@@ -244,7 +245,10 @@ function profileCatalog(id: string) {
         id: profileId,
         revision: `profile-rev-${id.slice(-3)}`,
         mutable: false,
-        available: true,
+        available: !(id === LOCAL_CODEX && codexProfilesUnavailable),
+        ...(id === LOCAL_CODEX && codexProfilesUnavailable
+          ? { unavailableReason: "legacy-sandbox-conflict" }
+          : {}),
         config: permission
           ? {
               permissions: permission,
@@ -285,6 +289,10 @@ async function mockApi(
     zeroRoute?: boolean;
     blockedDefault?: boolean;
     runSnapshot?: boolean;
+    codexProfilesUnavailable?: boolean;
+    codexQuota?:
+      "ok" | "empty" | "error" | "ordinary-unavailable" | "same-duration";
+    codexQuotaDelayMs?: number;
   } = {},
 ) {
   const adapters = [
@@ -327,6 +335,8 @@ async function mockApi(
       ),
     );
   }
+  const codexRow = adapters.find((item) => item.id === LOCAL_CODEX);
+  if (codexRow) codexRow.features = { usageLimits: 1 };
   type WorkspacePayload = typeof workspace & {
     available_adapters?: Array<{
       adapter_id: string;
@@ -621,7 +631,120 @@ async function mockApi(
         return;
       }
       if (leaf === "profiles" && method === "GET") {
-        await respond(route, profileCatalog(id));
+        await respond(
+          route,
+          profileCatalog(id, options.codexProfilesUnavailable),
+        );
+        return;
+      }
+      if (leaf === "usage-limits" && method === "GET") {
+        if (id !== LOCAL_CODEX) {
+          await respond(
+            route,
+            {
+              error: "Adapter does not report usage limits",
+              code: "runtime_unsupported",
+            },
+            501,
+          );
+          return;
+        }
+        if (options.codexQuota === "error") {
+          await respond(
+            route,
+            {
+              error: "Runtime adapter is unavailable",
+              code: "runtime_unavailable",
+            },
+            400,
+          );
+          return;
+        }
+        if (options.codexQuotaDelayMs) {
+          await page.waitForTimeout(options.codexQuotaDelayMs);
+        }
+        if (options.codexQuota === "empty") {
+          await respond(route, {
+            available: false,
+            ordinaryUsageAllowed: null,
+            buckets: [],
+          });
+          return;
+        }
+        if (options.codexQuota === "ordinary-unavailable") {
+          await respond(route, {
+            available: true,
+            ordinaryUsageAllowed: false,
+            buckets: [
+              {
+                limitId: "codex",
+                limitName: "Codex",
+                planType: "pro",
+                windows: [],
+              },
+            ],
+          });
+          return;
+        }
+        if (options.codexQuota === "same-duration") {
+          await respond(route, {
+            available: true,
+            ordinaryUsageAllowed: true,
+            buckets: [
+              {
+                limitId: "base_model_inference",
+                limitName: "gpt-reserve",
+                planType: "prolite",
+                windows: [
+                  {
+                    usedPercent: 70,
+                    remainingPercent: 30,
+                    windowDurationMins: 10080,
+                    resetsAt: 1790909226,
+                  },
+                ],
+              },
+              {
+                limitId: "codex",
+                limitName: null,
+                planType: "prolite",
+                windows: [
+                  {
+                    usedPercent: 62,
+                    remainingPercent: 38,
+                    windowDurationMins: 10080,
+                    resetsAt: 1791073029,
+                  },
+                ],
+              },
+            ],
+          });
+          return;
+        }
+        await respond(route, {
+          available: true,
+          ordinaryUsageAllowed: true,
+          buckets: [
+            {
+              limitId: "codex",
+              limitName: "Codex",
+              planType: "pro",
+              windows: [
+                {
+                  usedPercent: 31,
+                  remainingPercent: 69,
+                  windowDurationMins: 300,
+                  resetsAt: 1800000000,
+                },
+                {
+                  usedPercent: 39,
+                  remainingPercent: 61,
+                  windowDurationMins: 10080,
+                },
+              ],
+            },
+          ],
+        });
         return;
       }
     }
@@ -662,6 +785,93 @@ async function navigate(page: Page, title: string) {
     .getByRole("button", { name: title, exact: true })
     .click();
 }
+
+test("Versions shows one target, grouped status, and optional build details", async ({
+  page,
+}) => {
+  await mockApi(page);
+  const build = `sha256:${"a".repeat(64)}`;
+  const versionEntry = (
+    component: string,
+    instance: string,
+    state: string,
+    current: string | null,
+    target: string | null,
+    runtimeType?: string,
+  ) => ({
+    component,
+    instance,
+    runtime_type: runtimeType,
+    state,
+    execution_compatible: state !== "unavailable",
+    reason: state === "unavailable" ? "adapter-unavailable" : "version-skew",
+    current_product_version: current,
+    current_build_id: build,
+    target_product_version: target,
+    target_build_id: runtimeType === "pi" ? null : build,
+    target_precision: runtimeType === "pi" ? "product-version-only" : "exact",
+  });
+  await page.route("**/api/system/versions", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: 1,
+        status: "ok",
+        target: { product_version: "0.2.0", build_id: build },
+        bridge: versionEntry("bridge", "bridge", "current", "0.2.0", "0.2.0"),
+        manager: versionEntry(
+          "manager",
+          "manager",
+          "current",
+          "0.2.0",
+          "0.2.0",
+        ),
+        nodes: [
+          versionEntry(
+            "node",
+            LOCAL_NODE,
+            "update_available",
+            "0.1.1",
+            "0.2.0",
+          ),
+        ],
+        adapters: [
+          versionEntry(
+            "pi-host-adapter",
+            LOCAL_PI,
+            "unavailable",
+            null,
+            "0.2.0",
+            "pi",
+          ),
+        ],
+      }),
+    }),
+  );
+  await page.goto("./#versions");
+  await expect(
+    page.getByRole("heading", { name: "Installed components", level: 2 }),
+  ).toBeVisible();
+  await expect(page.getByText("Target Bridge version")).toBeVisible();
+  await expect(page.locator(".version-target strong")).toHaveText("0.2.0");
+  const node = page.locator(".version-row").filter({ hasText: "Local Mac" });
+  await expect(node.getByText("Update available · Compatible")).toBeVisible();
+  await expect(node.getByText("0.1.1")).toBeVisible();
+  const pi = page.locator(".version-row").filter({ hasText: "Local Pi" });
+  await expect(
+    pi.getByText("Unavailable · Affected routes only"),
+  ).toBeVisible();
+  await pi.getByText("Build and package details").click();
+  await expect(pi.getByText(build)).toBeVisible();
+  await expect(pi.getByText("Compared by version only")).toBeVisible();
+  await expect(pi.getByText("workspace-bridge-pi-host-adapter")).toBeVisible();
+  await expect(pi.getByText(LOCAL_PI)).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: "Adapters" })).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+});
 
 test("same-runtime adapter instances stay distinct in workspaces and exact handoff start", async ({
   page,
@@ -802,6 +1012,234 @@ test("model and profile discovery use each adapter ID", async ({ page }) => {
   expect(
     api.calls.some(
       (call) => call.path === `/api/adapters/${LOCAL_PI}/profiles`,
+    ),
+  ).toBe(true);
+});
+
+test("Codex security dialog explains why Bridge profiles cannot be assigned", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexProfilesUnavailable: true });
+  await page.goto("./");
+  await navigate(page, "Workspaces");
+  const codexTarget = page.locator(".target-row").filter({
+    hasText: "Local Codex · Codex",
+  });
+  await codexTarget.getByRole("button", { name: "Change security" }).click();
+  await page.getByText("Use Workspace Bridge profile").click();
+  const profiles = page.getByRole("group", {
+    name: "Workspace Bridge profiles",
+  });
+  await expect(
+    profiles.getByRole("button", { name: /read-only/ }),
+  ).toBeVisible();
+  await expect(
+    profiles.getByRole("button", { name: /read-only/ }),
+  ).toBeDisabled();
+  await expect(
+    profiles.getByText(/Remove legacy sandbox_workspace_write settings/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Save security source" }),
+  ).toBeDisabled();
+  expect(
+    api.calls.some(
+      (call) =>
+        call.path === `/api/adapters/${LOCAL_CODEX}/profiles` &&
+        call.method === "GET",
+    ),
+  ).toBe(true);
+});
+
+test("Codex security dialog allows an available Bridge profile", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Workspaces");
+  const codexTarget = page.locator(".target-row").filter({
+    hasText: "Local Codex · Codex",
+  });
+  await codexTarget.getByRole("button", { name: "Change security" }).click();
+  await page.getByText("Use Workspace Bridge profile").click();
+  const profiles = page.getByRole("group", {
+    name: "Workspace Bridge profiles",
+  });
+  await expect(
+    profiles.getByRole("button", { name: /read-only/ }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Save security source" }),
+  ).toBeEnabled();
+});
+
+test("Codex adapter card shows current account quota on the Adapters page", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  await expect(codexCard.getByText("Codex quota")).toBeVisible();
+  await expect(codexCard.getByText("69% left")).toBeVisible();
+  await expect(codexCard.getByText("61% left")).toBeVisible();
+  // Window labels carry their bucket identity as well as their duration.
+  await expect(codexCard.getByText("Codex · 5h")).toBeVisible();
+  await expect(codexCard.getByText("Codex · 7d")).toBeVisible();
+  // Both windows come from one bucket; the meter names carry the bucket
+  // label, never a mislabeled primary/secondary meaning.
+  const meters = codexCard.getByRole("meter");
+  await expect(meters).toHaveCount(2);
+  await expect(meters.nth(0)).toHaveAccessibleName(
+    "Codex · 5h remaining percent",
+  );
+  await expect(meters.nth(1)).toHaveAccessibleName(
+    "Codex · 7d remaining percent",
+  );
+  // Quota is fetched per adapter, only for adapters advertising usageLimits.
+  const quotaCalls = api.calls.filter((call) =>
+    call.path.endsWith("/usage-limits"),
+  );
+  expect(quotaCalls).toHaveLength(1);
+  expect(quotaCalls[0]?.path).toBe(`/api/adapters/${LOCAL_CODEX}/usage-limits`);
+  expect(quotaCalls[0]?.method).toBe("GET");
+  // Pi adapter cards gain no quota block.
+  const piCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Pi · Pi" });
+  await expect(piCard.getByText("Codex quota")).toHaveCount(0);
+});
+
+test("delayed quota response survives an unrelated global refresh", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexQuotaDelayMs: 1500 });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  await expect
+    .poll(
+      () =>
+        api.calls.filter((call) => call.path.endsWith("/usage-limits")).length,
+    )
+    .toBe(1);
+  await expect(codexCard.getByText("Loading quota…")).toBeVisible();
+  const statusCallsBefore = api.calls.filter(
+    (call) => call.path === "/api/status",
+  ).length;
+  // Trigger an unrelated global refresh while the quota read is in flight.
+  await page.getByRole("button", { name: "Refresh" }).click();
+  // The eventual quota response must still render; the UI cannot remain in
+  // its loading state or require a manual request.
+  await expect(codexCard.getByText("69% left")).toBeVisible();
+  await expect(codexCard.getByText("Loading quota…")).toHaveCount(0);
+  const statusCallsAfter = api.calls.filter(
+    (call) => call.path === "/api/status",
+  ).length;
+  expect(statusCallsAfter).toBeGreaterThan(statusCallsBefore);
+  expect(
+    api.calls.filter((call) => call.path.endsWith("/usage-limits")).length,
+  ).toBe(1);
+});
+
+test("equal-duration quota windows keep bucket identities visible", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexQuota: "same-duration" });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  await expect(codexCard.getByText("gpt-reserve · 7d")).toBeVisible();
+  await expect(codexCard.getByText("codex · 7d")).toBeVisible();
+  await expect(codexCard.getByText("30% left")).toBeVisible();
+  await expect(codexCard.getByText("38% left")).toBeVisible();
+  await expect(
+    await codexCard.locator(".quota-label").allTextContents(),
+  ).toEqual(["gpt-reserve · 7d", "codex · 7d"]);
+  const meters = codexCard.getByRole("meter");
+  await expect(meters).toHaveCount(2);
+  await expect(meters.nth(0)).toHaveAccessibleName(
+    "gpt-reserve · 7d remaining percent",
+  );
+  await expect(meters.nth(1)).toHaveAccessibleName(
+    "codex · 7d remaining percent",
+  );
+  expect(
+    api.calls.filter((call) => call.path.endsWith("/usage-limits")).length,
+  ).toBe(1);
+});
+
+test("quota stays unfetched outside the Adapters section and reports unavailable cleanly", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexQuota: "error" });
+  await page.goto("./");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(
+    api.calls.filter((call) => call.path.endsWith("/usage-limits")),
+  ).toHaveLength(0);
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  await expect(codexCard.getByText(/Quota unavailable/)).toBeVisible();
+  await expect(codexCard.getByText("69% left")).toHaveCount(0);
+  // The rest of the Adapters page still works despite the quota failure.
+  await expect(codexCard.getByText("Model policy")).toBeVisible();
+  const quotaCalls = api.calls.filter((call) =>
+    call.path.endsWith("/usage-limits"),
+  );
+  expect(quotaCalls).toHaveLength(1);
+});
+
+test("empty quota data reads as unavailable, not as zero remaining", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexQuota: "empty" });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  await expect(codexCard.getByText(/Quota unavailable/)).toBeVisible();
+  await expect(codexCard.getByText(/0% left/)).toHaveCount(0);
+  expect(
+    api.calls.some(
+      (call) =>
+        call.path === `/api/adapters/${LOCAL_CODEX}/usage-limits` &&
+        call.method === "GET",
+    ),
+  ).toBe(true);
+});
+
+test("ordinary-usage-unavailable state survives absent windows", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { codexQuota: "ordinary-unavailable" });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const codexCard = page
+    .locator(".adapter-card")
+    .filter({ hasText: "Local Codex · Codex" });
+  // The explicit backend state is surfaced even with zero window rows.
+  await expect(
+    codexCard.getByText("Ordinary usage unavailable."),
+  ).toBeVisible();
+  // No percentage rows are invented for absent windows.
+  await expect(codexCard.getByRole("meter")).toHaveCount(0);
+  await expect(codexCard.getByText(/% left/)).toHaveCount(0);
+  await expect(codexCard.getByText(/Quota unavailable/)).toHaveCount(0);
+  expect(
+    api.calls.some(
+      (call) =>
+        call.path === `/api/adapters/${LOCAL_CODEX}/usage-limits` &&
+        call.method === "GET",
     ),
   ).toBe(true);
 });

@@ -29,6 +29,7 @@ from .security import BridgeError, MAX_OUTPUT, digest
 from .service import Service, encoded
 
 from .oplog import emit as _emit_ops, error_code as _error_code
+from .runtime import RuntimeUnsupported
 
 _ops_log = logging.getLogger("workspace_bridge.ops")
 
@@ -942,6 +943,21 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
                 if leaf == "model-policy" and request.method == "GET":
                     return JSONResponse({"adapter_id": adapter_id,
                                          **service.run_coordinator.model_policy(adapter_id)})
+                if leaf == "usage-limits" and len(parts) == 4 and request.method == "GET":
+                    # Account quota read; no workspace ID is required and
+                    # nothing here touches /api/status or run state.
+                    try:
+                        return JSONResponse(await run_in_threadpool(
+                            service.run_coordinator.usage_limits, adapter_id))
+                    except RuntimeUnsupported:
+                        return JSONResponse(
+                            {"error": "Adapter does not report usage limits",
+                             "code": "runtime_unsupported"}, 501)
+                    except BridgeError as exc:
+                        return JSONResponse(
+                            {"error": str(exc) or "Usage limits are unavailable",
+                             "code": getattr(exc, "code", "runtime_unavailable")},
+                            400)
                 if leaf == "model-policy" and request.method == "POST":
                     model = AdapterModelPolicy.model_validate(await body_json(request))
                     ws = service.workspace(model.workspace_id) if model.workspace_id else None
@@ -1100,6 +1116,7 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         Route("/api/adapters/{adapter_id}/profiles", api, methods=["GET", "POST"]),
         Route("/api/adapters/{adapter_id}/profiles/{profile_id}", api, methods=["DELETE"]),
         Route("/api/adapters/{adapter_id}/model-policy", api, methods=["GET", "POST"]),
+        Route("/api/adapters/{adapter_id}/usage-limits", api),
         Route("/api/runs/{run_id}", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
         Route("/api/runs/{run_id}/interactions/{interaction_id}", api, methods=["POST"]),

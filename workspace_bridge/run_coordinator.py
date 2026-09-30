@@ -15,6 +15,7 @@ from typing import Any
 
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, HANDOFF, digest, redact
+from .notifications import codex_quota_summary
 from .wbrp import validate_run_state
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
@@ -372,6 +373,29 @@ class RunCoordinator:
     def profiles(self, adapter_id: str, ws: dict | None = None, *,
                  fresh: bool = False) -> list[dict]:
         return self.profile_catalog(adapter_id, ws, fresh=fresh)["profiles"]
+
+    def usage_limits(self, adapter_id: str) -> dict:
+        """Read the optional account usage-limits snapshot for one adapter.
+
+        Account quota belongs to the AdapterInstance/account, so no
+        workspace authority context is required or accepted. Unsupported
+        adapters fail as unsupported, never as unhealthy.
+        """
+        return self.adapter(adapter_id, require_enabled=True).usage_limits()
+
+    def quota_summary(self, adapter_id: str, *, timeout: float = 8.0) -> str:
+        """Best-effort one-line current-quota summary; empty when unavailable.
+
+        Never raises and never touches run state; used only for ephemeral
+        notification enrichment at delivery time.
+        """
+        try:
+            limits = self.service.adapter_registry.client(
+                adapter_id, require_enabled=True,
+                timeout=timeout).usage_limits()
+        except Exception:  # noqa: BLE001 - quota enrichment is best-effort only
+            return ""
+        return codex_quota_summary(limits)
 
     def set_profile(self, ws: dict, adapter_id: str, profile_id: str) -> dict:
         profiles = self.profiles(adapter_id, ws, fresh=True)

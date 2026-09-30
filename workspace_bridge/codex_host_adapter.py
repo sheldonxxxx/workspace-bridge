@@ -74,6 +74,137 @@ def _clean(value: Any, limit: int = 1000) -> str:
     return safe
 
 
+# Account quota buckets are bounded; a snapshot never fabricates data.
+USAGE_BUCKETS_MAX = 12
+
+
+def _usage_text(value: Any, limit: int) -> str | None:
+    if isinstance(value, str) and value and len(value) <= limit:
+        return _clean(value, limit)
+    return None
+
+
+def _usage_int(value: Any, minimum: int, maximum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
+
+
+def _normalize_usage_window(value: Any) -> dict | None:
+    """Normalize one native RateLimitWindow into the contract.
+
+    A missing or invalid ``usedPercent`` means the window carries no
+    observable remaining quota and is dropped (never rendered as 0%
+    remaining). ``remainingPercent`` is derived only for display as
+    clamp(100 - usedPercent); ``usedPercent`` stays preserved and null
+    duration/reset stay null.
+    """
+    if not isinstance(value, dict):
+        return None
+    used = _usage_int(value.get("usedPercent"), 0, 1000)
+    if used is None:
+        return None
+    return {
+        "usedPercent": used,
+        "remainingPercent": max(0, min(100, 100 - used)),
+        "windowDurationMins": _usage_int(value.get("windowDurationMins"),
+                                         0, 10_000_000),
+        "resetsAt": _usage_int(value.get("resetsAt"), 0, 9007199254740991),
+    }
+
+
+def _normalize_usage_bucket(row: Any) -> dict | None:
+    """Normalize one native Codex RateLimitSnapshot into the contract.
+
+    The normalized bucket carries bounded snapshot metadata plus a
+    ``windows`` list normalized from ``primary`` then ``secondary`` when
+    present (order preserved from the native fields; primary/secondary
+    meanings are never assumed and windows are labeled only from
+    ``windowDurationMins``; opaque limit ids are never mapped to models).
+    A snapshot with no valid window is still kept when it carries usable
+    credits/spend-control/rate-limit metadata, so that metadata remains
+    observable; UI quota remaining always requires at least one valid
+    window. accountId and raw upsell payloads never survive
+    normalization and unknown native fields are never forwarded.
+    """
+    if not isinstance(row, dict):
+        return None
+    windows = [window for window in (_normalize_usage_window(row.get("primary")),
+                                     _normalize_usage_window(row.get("secondary")))
+               if window is not None]
+    spend_control = row.get("spendControlReached")
+    bucket = {
+        "limitId": _usage_text(row.get("limitId"), 200),
+        "limitName": _usage_text(row.get("limitName"), 120),
+        "planType": _usage_text(row.get("planType"), 60),
+        "rateLimitReachedType": _usage_text(row.get("rateLimitReachedType"), 60),
+        "spendControlReached": (spend_control
+                                if isinstance(spend_control, bool) else None),
+        "credits": None,
+        "individualLimit": None,
+        "windows": windows,
+    }
+    credits = row.get("credits")
+    if (isinstance(credits, dict)
+            and isinstance(credits.get("hasCredits"), bool)
+            and isinstance(credits.get("unlimited"), bool)):
+        bucket["credits"] = {
+            "hasCredits": credits["hasCredits"],
+            "unlimited": credits["unlimited"],
+            "balance": _usage_text(credits.get("balance"), 200)}
+    individual = row.get("individualLimit")
+    if isinstance(individual, dict):
+        limit = _usage_text(individual.get("limit"), 60)
+        used_text = _usage_text(individual.get("used"), 60)
+        remaining = _usage_int(individual.get("remainingPercent"), 0, 100)
+        if limit is not None and used_text is not None and remaining is not None:
+            bucket["individualLimit"] = {
+                "limit": limit, "used": used_text,
+                "remainingPercent": remaining,
+                "resetsAt": _usage_int(individual.get("resetsAt"),
+                                       0, 9007199254740991)}
+    metadata = (bucket["credits"] is not None
+                or bucket["individualLimit"] is not None
+                or bucket["spendControlReached"] is not None
+                or bucket["rateLimitReachedType"] is not None)
+    if not windows and not metadata:
+        return None
+    return bucket
+
+
+def _normalize_usage_limits(raw: Any) -> dict:
+    """Normalize native account/rateLimits/read into the generic contract.
+
+    Official schema: ``rateLimits`` is one required RateLimitSnapshot
+    object and ``rateLimitsByLimitId`` is an optional object whose values
+    are RateLimitSnapshots. Buckets come from ``rateLimitsByLimitId``
+    when present (all returned buckets preserved), otherwise the single
+    ``rateLimits`` snapshot becomes the one fallback bucket. A read with
+    no usable bucket data is reported as unavailable instead of being
+    guessed at.
+    """
+    if not isinstance(raw, dict):
+        raise AdapterFailure("Codex usage limits are unavailable", 502,
+                             "runtime_unavailable")
+    by_id = raw.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict) and by_id:
+        rows = [by_id[key] for key in sorted(by_id, key=str)]
+    else:
+        limits = raw.get("rateLimits")
+        rows = [limits] if isinstance(limits, dict) else []
+    ordinary = raw.get("ordinaryUsageAllowed")
+    buckets = [bucket for bucket in (_normalize_usage_bucket(row)
+                                     for row in rows[:USAGE_BUCKETS_MAX])
+               if bucket is not None]
+    if not buckets:
+        raise AdapterFailure("Codex usage limits are unavailable", 502,
+                             "runtime_unavailable")
+    return {"available": True,
+            "ordinaryUsageAllowed": (ordinary if isinstance(ordinary, bool)
+                                     else None),
+            "buckets": buckets}
+
+
 class AdapterFailure(Exception):
     def __init__(self, message: str, status: int = 400, code: str = "invalid_arguments"):
         super().__init__(message)
@@ -222,14 +353,14 @@ _CODEX_USAGE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _normalize_codex_usage(raw: Any) -> dict | None:
-    """Normalize a native per-turn usage snapshot to Runtime Protocol counters.
+    """Normalize one native Codex usage snapshot to Runtime Protocol counters.
 
-    Only ``tokenUsage.last`` is accepted; cumulative thread totals are never
-    used. Repeated notifications are snapshots and replace prior usage. Only
-    non-negative safe-integer counters are retained; absent counters stay
-    absent (never synthesized as zero). A present-but-malformed recognized
-    counter invalidates the whole snapshot; unknown provider fields are
-    ignored for forward compatibility.
+    Applies to both per-response (``tokenUsage.last``) and cumulative
+    (``tokenUsage.total``) snapshots. Only non-negative safe-integer
+    counters are retained; absent counters stay absent (never synthesized
+    as zero). A present-but-malformed recognized counter invalidates the
+    whole snapshot; unknown provider fields are ignored for forward
+    compatibility.
     """
     if not isinstance(raw, dict):
         return None
@@ -263,6 +394,37 @@ def _extract_codex_last(token_usage: Any) -> dict | None:
         return None
     last = token_usage.get("last")
     return _normalize_codex_usage(last)
+
+
+def _extract_codex_total(token_usage: Any) -> dict | None:
+    """Normalize the cumulative ``tokenUsage.total`` snapshot, if present."""
+    if not isinstance(token_usage, dict):
+        return None
+    total = token_usage.get("total")
+    return _normalize_codex_usage(total)
+
+
+def _codex_usage_delta(total: dict, baseline: dict) -> dict | None:
+    """Derive run-scoped deltas as ``total - baseline`` per field.
+
+    ``baseline`` fields missing for a counter are treated as zero (fresh
+    thread); ``total`` fields missing stay absent. Every derived delta must
+    be non-negative; callers must check monotonicity before publishing and
+    never clamp a negative delta into a plausible value.
+    """
+    result: dict[str, int] = {}
+    for field, current in total.items():
+        if field not in _CODEX_USAGE_FIELDS:
+            continue
+        base = baseline.get(field, 0) if isinstance(baseline, dict) else 0
+        if (not isinstance(current, int) or isinstance(current, bool)
+                or not isinstance(base, int) or isinstance(base, bool)):
+            return None
+        delta = current - int(base)
+        if delta < 0:
+            return None
+        result[field] = int(delta)
+    return result or None
 
 
 def _codex_cli_version(executable: Any, env: dict | None = None) -> str:
@@ -352,6 +514,10 @@ class CodexHostAdapter:
             self.db.execute("ALTER TABLE runs ADD COLUMN security_binding TEXT")
         if "usage" not in columns:
             self.db.execute("ALTER TABLE runs ADD COLUMN usage TEXT")
+        if "usage_baseline" not in columns:
+            self.db.execute("ALTER TABLE runs ADD COLUMN usage_baseline TEXT")
+        if "usage_cumulative" not in columns:
+            self.db.execute("ALTER TABLE runs ADD COLUMN usage_cumulative TEXT")
         conversation_columns = {row["name"] for row in
                                self.db.execute("PRAGMA table_info(conversations)")}
         if "source" not in conversation_columns:
@@ -528,8 +694,27 @@ class CodexHostAdapter:
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
-                             "steering": 1, "securityRebind": 1},
+                             "steering": 1, "securityRebind": 1, "usageLimits": 1},
                 "release": codex_release()}
+
+    def usage_limits(self) -> dict:
+        """Read current Codex account rate limits, normalized at this boundary.
+
+        The native account/rateLimits/read response never crosses the
+        adapter HTTP surface raw; accountId and upsell payloads are
+        dropped during normalization and unknown native fields are never
+        forwarded. Account quota is separate from run-scoped token usage
+        and from adapter health/status semantics.
+        """
+        if getattr(self.rpc, "alive", True) is False:
+            raise AdapterFailure("Codex app-server is unavailable", 503,
+                                 "runtime_unavailable")
+        try:
+            raw = self.rpc.call("account/rateLimits/read", {}, timeout=10)
+        except CodexRpcError:
+            raise AdapterFailure("Codex usage limits are unavailable", 502,
+                                 "runtime_unavailable") from None
+        return _normalize_usage_limits(raw)
 
     def models(self) -> dict:
         result = self.rpc.call("model/list", {"limit": 1000})
@@ -869,25 +1054,32 @@ class CodexHostAdapter:
         for profile_id, config, definition_revision, mutable in definitions:
             revision = definition_revision
             available = True
+            unavailable_reason = None
             if context is not None:
                 native_id = config["permissions"]
                 native_profile = context["catalog"].get(native_id)
-                available = bool(native_profile and native_profile.get("allowed") is True)
+                if not native_profile or native_profile.get("allowed") is not True:
+                    available = False
+                    unavailable_reason = "native-permission-unavailable"
                 try:
                     self._requirements_allow(context["requirements"], config)
-                    if self._legacy_policy_conflict(context["config"]):
-                        available = False
-                    if available:
-                        revision = _effective_profile_revision(
-                            profile_id, config, context["fingerprint"])
                 except AdapterFailure:
                     available = False
+                    unavailable_reason = unavailable_reason or "managed-requirements"
+                if self._legacy_policy_conflict(context["config"]):
+                    available = False
+                    unavailable_reason = unavailable_reason or "legacy-sandbox-conflict"
+                if available:
+                    revision = _effective_profile_revision(
+                        profile_id, config, context["fingerprint"])
             profile_row = {"id": profile_id, "revision": revision,
                            "definitionRevision": definition_revision,
                            "config": config, "mutable": mutable,
                            "enforcement": ["native-permission-profile", "approval-policy"]}
             if context is not None:
                 profile_row["available"] = available
+                if unavailable_reason is not None:
+                    profile_row["unavailableReason"] = unavailable_reason
             rows.append(profile_row)
         result = {"profiles": rows}
         if context is not None:
@@ -1570,6 +1762,100 @@ class CodexHostAdapter:
             result["usage"] = usage
         return result
 
+    def _predecessor_cumulative(self, conversation_id: str,
+                                before_created: str,
+                                exclude_run_id: str = "") -> dict | None:
+        """Return the fieldwise max cumulative total of prior runs.
+
+        Only runs provably created before the current run are considered,
+        so a continuation boundary never includes its own or future thread
+        totals. Ordering uses ``(created, rowid)`` so equal timestamps still
+        resolve by insertion order. Malformed stored cumulatives are
+        ignored; an empty result means no authoritative baseline exists yet
+        (fresh thread or pre-fix history).
+        """
+        try:
+            current_row = self.db.execute(
+                "SELECT rowid FROM runs WHERE id=?", (exclude_run_id,)).fetchone()
+            current_rowid = int(current_row["rowid"]) if current_row is not None else None
+        except Exception:
+            current_rowid = None
+        try:
+            rows = self.db.execute(
+                "SELECT id, created, rowid, usage_cumulative FROM runs WHERE conversation=?",
+                (conversation_id,)).fetchall()
+        except Exception:
+            return None
+        merged: dict[str, int] = {}
+        for row in rows:
+            try:
+                rid = row["id"]
+                created = row["created"]
+                try:
+                    rowid = int(row["rowid"])
+                except Exception:
+                    rowid = None
+            except Exception:
+                continue
+            if rid == exclude_run_id:
+                continue
+            if not isinstance(created, str):
+                continue
+            is_prior = False
+            if created < before_created:
+                is_prior = True
+            elif (created == before_created and current_rowid is not None
+                    and rowid is not None and rowid < current_rowid):
+                is_prior = True
+            if not is_prior:
+                continue
+            stored = None
+            try:
+                stored = row["usage_cumulative"]
+            except Exception:
+                stored = None
+            parsed = _parse_stored_codex_usage(stored)
+            if not parsed:
+                continue
+            for field, value in parsed.items():
+                if field not in _CODEX_USAGE_FIELDS:
+                    continue
+                if (not isinstance(value, int) or isinstance(value, bool)
+                        or value < 0 or value > _MAX_SAFE_INTEGER):
+                    continue
+                if field not in merged or value > merged[field]:
+                    merged[field] = int(value)
+        return merged or None
+
+    def _has_prior_runs(self, conversation_id: str, before_created: str,
+                        exclude_run_id: str = "") -> bool:
+        try:
+            current_row = self.db.execute(
+                "SELECT rowid FROM runs WHERE id=?", (exclude_run_id,)).fetchone()
+            current_rowid = int(current_row["rowid"]) if current_row is not None else None
+        except Exception:
+            current_rowid = None
+        try:
+            rows = self.db.execute(
+                "SELECT id, created, rowid FROM runs WHERE conversation=? AND id!=?",
+                (conversation_id, exclude_run_id)).fetchall()
+        except Exception:
+            return False
+        for row in rows:
+            try:
+                created = row["created"]
+                rowid = int(row["rowid"])
+            except Exception:
+                continue
+            if not isinstance(created, str):
+                continue
+            if created < before_created:
+                return True
+            if (created == before_created and current_rowid is not None
+                    and rowid < current_rowid):
+                return True
+        return False
+
     def _input(self, items: Any) -> list[dict]:
         if not isinstance(items, list) or not items or len(items) > 10:
             raise AdapterFailure("Input requires 1..10 typed items")
@@ -1789,14 +2075,46 @@ class CodexHostAdapter:
             run_id = _id("run_")
             now = _now()
             with self.lock, self.db:
-                self.db.execute(
-                    "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
-                    "active_state,outcome,result,error,created,updated) "
-                    "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',?,?)",
-                    (run_id, conversation_id, client_run_id, input_hash,
-                     json.dumps(security_binding, sort_keys=True,
-                                separators=(",", ":")) if security_binding else None,
-                     now, now))
+                # Run-scoped accounting boundary: the new turn starts fresh
+                # from the predecessor's cumulative thread total. Persisting
+                # the baseline at admission keeps continuation and restart
+                # correct without depending on experimental raw events.
+                baseline_payload = None
+                try:
+                    predecessor = self._predecessor_cumulative(
+                        conversation_id, now, exclude_run_id=run_id)
+                except Exception:
+                    predecessor = None
+                if predecessor:
+                    baseline_payload = json.dumps(
+                        predecessor, sort_keys=True, separators=(",", ":"))
+                try:
+                    self.db.execute(
+                        "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
+                        "active_state,outcome,result,error,usage,usage_baseline,usage_cumulative,created,updated) "
+                        "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',NULL,?,?,?,?)",
+                        (run_id, conversation_id, client_run_id, input_hash,
+                         json.dumps(security_binding, sort_keys=True,
+                                    separators=(",", ":")) if security_binding else None,
+                         baseline_payload, None, now, now))
+                except Exception:
+                    # Older state files always gain the new columns above, but
+                    # fall back to the legacy shape rather than refusing a run.
+                    self.db.execute(
+                        "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
+                        "active_state,outcome,result,error,created,updated) "
+                        "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',?,?)",
+                        (run_id, conversation_id, client_run_id, input_hash,
+                         json.dumps(security_binding, sort_keys=True,
+                                    separators=(",", ":")) if security_binding else None,
+                         now, now))
+                    if baseline_payload is not None:
+                        try:
+                            self.db.execute(
+                                "UPDATE runs SET usage_baseline=? WHERE id=?",
+                                (baseline_payload, run_id))
+                        except Exception:
+                            pass
                 if replacement_from_id is not None:
                     self.db.execute(
                         "INSERT INTO conversation_replacements(previous,replacement,reason,created) "
@@ -1956,13 +2274,18 @@ class CodexHostAdapter:
         return self._run_public(self._run(run_id))
 
     def _notification_token_usage(self, params: dict) -> None:
-        """Capture the owned per-turn usage snapshot, replacing prior usage.
+        """Aggregate the owned turn from cumulative ``tokenUsage.total``.
 
-        Only ``tokenUsage.last`` for the exact owned thread/turn is stored;
-        cumulative thread totals are never used. Duplicate notifications
-        replace rather than add, wrong thread/turn notifications are ignored,
-        and already-consumed usage survives terminal outcomes because the
-        usage column is never cleared on completion/failure paths.
+        Native ``TokenUsageInfo`` accumulates every model response into
+        ``total`` while ``last`` carries only the newest response, so the
+        run-scoped aggregate is ``total - baseline`` per field. The baseline
+        is the predecessor's cumulative thread total captured at admission
+        (fresh threads imply zero); continuation runs therefore exclude
+        previous turns. Duplicate totals are idempotent snapshots, wrong
+        thread/turn notifications are ignored, and decreasing/reset or
+        malformed cumulatives are dropped fieldwise without fabricating
+        counters. Already-consumed usage survives terminal outcomes because
+        usage columns are never cleared on completion/failure paths.
         """
         thread = params.get("threadId")
         if not isinstance(thread, str):
@@ -1985,13 +2308,16 @@ class CodexHostAdapter:
             token_usage = params.get("token_usage")
         if token_usage is None:
             token_usage = params.get("usage")
-        normalized = _extract_codex_last(token_usage)
-        if normalized is None:
+        total = _extract_codex_total(token_usage)
+        if total is None:
+            # Stable accounting requires the cumulative total. A last-only
+            # or malformed snapshot carries no run boundary and is dropped
+            # without clearing prior valid usage.
             return
-        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        last = _extract_codex_last(token_usage)
         with self.lock:
             row = self.db.execute(
-                "SELECT runs.id FROM runs JOIN conversations "
+                "SELECT runs.* FROM runs JOIN conversations "
                 "ON runs.conversation=conversations.id WHERE conversations.thread=? "
                 "AND runs.turn=?", (thread, turn)).fetchone()
             if row is None:
@@ -2002,10 +2328,145 @@ class CodexHostAdapter:
                 if starting and len(self._early_notifications) < 100:
                     self._early_notifications.append(("thread/tokenUsage/updated", params))
                 return
+            current = dict(row)
+            run_id = current["id"]
+            conversation_id = current["conversation"]
+            created = current["created"]
+            try:
+                stored_baseline = _parse_stored_codex_usage(current.get("usage_baseline"))
+            except Exception:
+                stored_baseline = None
+            try:
+                stored_cumulative = _parse_stored_codex_usage(current.get("usage_cumulative"))
+            except Exception:
+                stored_cumulative = None
+            try:
+                prior_delta = _parse_stored_codex_usage(current.get("usage"))
+            except Exception:
+                prior_delta = None
+            stored_baseline = stored_baseline or {}
+            stored_cumulative = stored_cumulative or {}
+            prior_delta = prior_delta or {}
+            try:
+                predecessor = self._predecessor_cumulative(
+                    conversation_id, created, exclude_run_id=run_id)
+            except Exception:
+                predecessor = None
+            predecessor = predecessor or {}
+            try:
+                has_prior = self._has_prior_runs(
+                    conversation_id, created, exclude_run_id=run_id)
+            except Exception:
+                has_prior = bool(predecessor)
+            # Effective baseline per field: the freshest proven predecessor
+            # total wins over the admission snapshot, so a late predecessor
+            # update cannot leak into this turn. Fresh threads imply zero.
+            new_baseline: dict[str, int] = dict(stored_baseline)
+            new_cumulative: dict[str, int] = dict(stored_cumulative)
+            new_delta: dict[str, int] = dict(prior_delta)
+            baseline_changed = False
+            cumulative_changed = False
+            delta_changed = False
+            for field in _CODEX_USAGE_FIELDS:
+                if field not in total:
+                    continue
+                current_total = total[field]
+                # Decreasing vs this run's own prior end is a reset/replay:
+                # keep the fieldwise max and never publish a smaller delta.
+                prior_end = stored_cumulative.get(field)
+                if (isinstance(prior_end, int) and not isinstance(prior_end, bool)
+                        and current_total < prior_end):
+                    continue
+                candidates: list[int] = []
+                if field in stored_baseline and isinstance(stored_baseline[field], int):
+                    candidates.append(int(stored_baseline[field]))
+                if field in predecessor and isinstance(predecessor[field], int):
+                    candidates.append(int(predecessor[field]))
+                if candidates:
+                    effective = max(candidates)
+                elif not has_prior:
+                    effective = 0
+                elif last is not None and field in last:
+                    candidate_last = last[field]
+                    if (not isinstance(candidate_last, int)
+                            or isinstance(candidate_last, bool)
+                            or current_total < candidate_last):
+                        # Cannot prove a migration baseline; still record the
+                        # cumulative for future boundaries but publish nothing.
+                        if (field not in new_cumulative
+                                or current_total > new_cumulative[field]):
+                            new_cumulative[field] = int(current_total)
+                            cumulative_changed = True
+                        continue
+                    effective = int(current_total) - int(candidate_last)
+                else:
+                    if (field not in new_cumulative
+                            or current_total > new_cumulative[field]):
+                        new_cumulative[field] = int(current_total)
+                        cumulative_changed = True
+                    continue
+                if current_total < effective:
+                    # Decreasing/reset vs the proven baseline: drop fieldwise.
+                    continue
+                if field not in new_baseline or effective > new_baseline[field]:
+                    new_baseline[field] = int(effective)
+                    baseline_changed = True
+                if (field not in new_cumulative
+                        or current_total > new_cumulative[field]):
+                    new_cumulative[field] = int(current_total)
+                    cumulative_changed = True
+                derived = int(current_total) - int(new_baseline[field])
+                if derived < 0:
+                    continue
+                if new_delta.get(field) != derived:
+                    new_delta[field] = int(derived)
+                    delta_changed = True
+            # Drop unknown stored fields that could never have validated.
+            new_baseline = {key: value for key, value in new_baseline.items()
+                            if key in _CODEX_USAGE_FIELDS}
+            new_cumulative = {key: value for key, value in new_cumulative.items()
+                              if key in _CODEX_USAGE_FIELDS}
+            new_delta = {key: value for key, value in new_delta.items()
+                         if key in _CODEX_USAGE_FIELDS}
+            if not new_delta and prior_delta:
+                # Never clear a proven delta on a bad update; keep history.
+                new_delta = dict(prior_delta)
+                delta_changed = False
             with self.db:
-                self.db.execute(
-                    "UPDATE runs SET usage=?,updated=? WHERE id=?",
-                    (payload, _now(), row["id"]))
+                if baseline_changed or cumulative_changed or delta_changed or not prior_delta:
+                    baseline_payload = (json.dumps(new_baseline, sort_keys=True,
+                                                   separators=(",", ":"))
+                                          if new_baseline else None)
+                    cumulative_payload = (json.dumps(new_cumulative, sort_keys=True,
+                                                     separators=(",", ":"))
+                                            if new_cumulative else None)
+                    if new_delta:
+                        delta_payload = json.dumps(new_delta, sort_keys=True,
+                                                 separators=(",", ":"))
+                    else:
+                        # No provable run usage yet; leave the public field
+                        # absent rather than synthesizing zeros.
+                        delta_payload = None
+                        if not prior_delta:
+                            # Nothing to persist yet unless cumulative/baseline
+                            # advanced for future boundaries.
+                            if not (baseline_changed or cumulative_changed):
+                                return
+                    try:
+                        self.db.execute(
+                            "UPDATE runs SET usage=?,usage_baseline=?,usage_cumulative=?,updated=? "
+                            "WHERE id=?",
+                            (delta_payload, baseline_payload, cumulative_payload,
+                             _now(), run_id))
+                    except Exception:
+                        # Legacy state without the new columns keeps the last
+                        # provable delta rather than refusing accounting.
+                        if new_delta:
+                            fallback = json.dumps(new_delta, sort_keys=True,
+                                                separators=(",", ":"))
+                            self.db.execute(
+                                "UPDATE runs SET usage=?,updated=? WHERE id=?",
+                                (fallback, _now(), run_id))
 
     def _notification(self, method: str, params: dict) -> None:
         if not isinstance(params, dict):
@@ -2349,6 +2810,8 @@ def make_app(adapter: CodexHostAdapter, token: str) -> Starlette:
                 result = await run_in_threadpool(adapter.descriptor)
             elif path == "/v1/models" and request.method == "GET":
                 result = await run_in_threadpool(adapter.models)
+            elif path == "/v1/usage-limits" and request.method == "GET":
+                result = await run_in_threadpool(adapter.usage_limits)
             elif path == "/v1/profiles" and request.method == "GET":
                 workspace_id = request.query_params.get("workspaceId")
                 directory = request.query_params.get("directory")

@@ -312,5 +312,8 @@ class NodeRuntimeAdapterProxy:
     def activity(self, activity_id: str) -> dict:
         return self._call("activity", activity_id=activity_id)
 
+    def usage_limits(self) -> dict:
+        return self._call("usage_limits")
+
     def events(self, *, after: int, wait_ms: int = 0) -> dict:
         return self._call("events", after=after, wait_ms=wait_ms)

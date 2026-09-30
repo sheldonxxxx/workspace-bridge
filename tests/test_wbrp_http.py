@@ -128,6 +128,12 @@ def test_codex_http_adapter_contract(tmp_path):
         with _pytest.raises(_BridgeError):
             client.rebind_conversation("", {
                 "source": "profile", "profile": {"id": "x", "revision": "y"}})
+        native.rpc.security_config = {"config": {
+            "sandbox_mode": "workspace-write",
+            "sandbox_workspace_write": {"network_access": True}}, "origins": {}}
+        blocked = client.profile_catalog("ws-one", str(workspace), fresh=True)
+        assert all(row["unavailableReason"] == "legacy-sandbox-conflict"
+                   for row in blocked["profiles"])
     finally:
         server.should_exit = True
         thread.join(timeout=5)

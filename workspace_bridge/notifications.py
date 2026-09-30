@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -27,6 +27,8 @@ DEFAULT_ATTEMPTS = 3
 MAX_DIAGNOSTIC_CHARS = 160
 MAX_ERROR_BODY_BYTES = 2048
 MAX_SUMMARY_EVENTS = 20
+# Ephemeral quota enrichment is a bounded display summary, never persisted.
+MAX_QUOTA_FIELD = 160
 EVENT_TYPES = frozenset({"run_completed", "run_failed", "run_cancelled",
                          "run_interrupted", "run_orphaned", "run_blocked",
                          "run_needs_attention"})
@@ -71,6 +73,68 @@ def _safe_code(value: object) -> str:
     return text[:60] if re.fullmatch(r"[a-zA-Z0-9_.-]{1,60}", text) else "channel_error"
 
 
+def _quota_window_label(minutes: object) -> str:
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        return ""
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 10080 == 0:
+        return f"{minutes // 10080}w"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def codex_quota_summary(limits: object) -> str:
+    """Format a bounded one-line quota summary from normalized data.
+
+    Returns exactly one of:
+    - 'Ordinary usage unavailable' when ordinaryUsageAllowed is false and
+      no bucket has usable windows (state surfaced, never a 0% guess);
+    - 'Ordinary usage unavailable · 5h 69% left · ...' when ordinary
+      usage is unavailable but windows exist;
+    - '5h 69% left · 7d 61% left' when windows exist and ordinary usage
+      is not false (the Discord field is already named Quota, so no
+      redundant 'Quota —' prefix);
+    - '' when ordinary usage is not false and no window data is usable.
+
+    Selects exactly ONE bucket — the canonical Codex bucket when present,
+    otherwise the first bucket with usable windows — and includes at most
+    two of its windows.
+    """
+    if not isinstance(limits, dict):
+        return ""
+    ordinary_unavailable = limits.get("ordinaryUsageAllowed") is False
+    buckets = limits.get("buckets")
+    if not isinstance(buckets, list):
+        return "Ordinary usage unavailable" if ordinary_unavailable else ""
+
+    def usable_windows(bucket: object) -> list:
+        if not isinstance(bucket, dict):
+            return []
+        return [window for window in bucket.get("windows") or []
+                if isinstance(window, dict)
+                and isinstance(window.get("remainingPercent"), int)
+                and not isinstance(window.get("remainingPercent"), bool)]
+
+    usable = [bucket for bucket in buckets if usable_windows(bucket)]
+    if not usable:
+        return "Ordinary usage unavailable" if ordinary_unavailable else ""
+    canonical = [bucket for bucket in usable
+                 if "codex" in (str(bucket.get("limitId") or "")
+                                + str(bucket.get("limitName") or "")).lower()]
+    chosen = (canonical or usable)[0]
+    parts = []
+    for window in usable_windows(chosen)[:2]:
+        label = _quota_window_label(window.get("windowDurationMins"))
+        remaining = window["remainingPercent"]
+        parts.append(f"{label + ' ' if label else ''}{remaining}% left")
+    summary = " · ".join(parts)
+    if ordinary_unavailable:
+        summary = f"Ordinary usage unavailable · {summary}"
+    return summary[:MAX_QUOTA_FIELD]
+
+
 def _safe_detail(value: object) -> str:
     text = value if isinstance(value, str) else ""
     text, _ = redact(text[:MAX_DIAGNOSTIC_CHARS * 2])
@@ -102,6 +166,10 @@ class NotificationEvent:
     subject_id: str = ""
     request_kind: str = ""
     action: str = ""
+    # Ephemeral, delivery-time-only enrichment. Never persisted and never
+    # accepted by build(); Discord renders it as one compact field and every
+    # other channel ignores it.
+    quota: str = ""
 
     @classmethod
     def build(cls, *, event_type: str, run_id: str, workspace_id: str,
@@ -248,6 +316,10 @@ class DiscordChannel:
             fields.append({"name": "Request", "value": event.request_kind[:60], "inline": True})
         if event.action:
             fields.append({"name": "Action", "value": event.action[:80], "inline": True})
+        if event.quota:
+            # Ephemeral best-effort enrichment; omitted entirely when the
+            # current account quota could not be read.
+            fields.append({"name": "Quota", "value": event.quota, "inline": True})
         colors = {"run_needs_attention": 0xE0A800, "run_completed": 0x2E9E5B,
                   "run_blocked": 0x9E6B2E, "run_failed": 0xC0392B,
                   "run_cancelled": 0x6B7280, "run_interrupted": 0x6B7280,
@@ -309,7 +381,8 @@ def notification_channels_from_environment(environ: dict | None = None,
 class NotificationManager:
     """Bridge-owned durable outbox and independent channel fanout."""
 
-    def __init__(self, service, channels: list[NotificationChannel] | None = None):
+    def __init__(self, service, channels: list[NotificationChannel] | None = None,
+                 *, quota_lookup=None):
         self.service = service
         self.channels = {}
         for channel in channels or []:
@@ -324,6 +397,11 @@ class NotificationManager:
             self.channels[channel_id] = channel
         self._stop = threading.Event()
         self._wake = threading.Event()
+        # Best-effort current-quota lookup for Codex run notifications. It
+        # must be a bounded callable(event adapter_id) -> str; failures are
+        # ignored and never affect delivery or run state. Nothing it returns
+        # is persisted to the outbox schema.
+        self._quota_lookup = quota_lookup
         self._signal_lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
@@ -482,6 +560,7 @@ class NotificationManager:
                 node_id=row["node_id"], node_name=row["node_name"],
                 subject_id=row["subject_id"], request_kind=row["request_kind"],
                 action=row["action"])
+            event = self._quota_enriched(event)
             try:
                 result = channel.deliver(event)
                 if not isinstance(result, NotificationResult):
@@ -502,6 +581,30 @@ class NotificationManager:
                         "WHERE event_id=? AND channel_id=? AND status='sending'",
                         (result.status, result.attempts, result.code, result.detail,
                          self._now(), row["event_id"], row["channel_id"]))
+
+    def _quota_enriched(self, event: NotificationEvent) -> NotificationEvent:
+        """Attach an ephemeral remaining-quota line to Codex run events.
+
+        Best-effort only: any lookup error, unsupported adapter, or empty
+        summary leaves the event untouched so the normal notification is
+        still delivered. The summary is never written to the outbox schema
+        and can never affect run state.
+        """
+        if event.runtime_type != "codex":
+            return event
+        lookup = self._quota_lookup
+        if lookup is None:
+            coordinator = getattr(self.service, "run_coordinator", None)
+            lookup = getattr(coordinator, "quota_summary", None)
+        if not callable(lookup):
+            return event
+        try:
+            summary = lookup(event.adapter_id)
+        except Exception:  # noqa: BLE001 - quota is best-effort only
+            return event
+        if isinstance(summary, str) and summary:
+            return replace(event, quota=summary[:MAX_QUOTA_FIELD])
+        return event
 
     def summary(self, run_id: str) -> dict:
         with self.service.lock:

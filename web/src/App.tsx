@@ -84,7 +84,10 @@ import {
   type Run,
   type RunnableRoute,
   type Status,
+  type UsageLimits,
   type Workspace,
+  quotaResetText,
+  quotaWindowLabel,
 } from "@/lib/api";
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
@@ -118,24 +121,131 @@ function versionStateLabel(state: VersionComponentState["state"]): string {
 }
 
 function versionStateDetail(entry: VersionComponentState): string {
-  const current = entry.current_product_version || "unknown";
-  const target = entry.target_product_version || "unknown";
-  if (entry.state === "current")
-    return `Running ${current}; matches target ${target}. No action needed.`;
+  if (entry.state === "current") return "Matches the target. No action needed.";
   if (entry.state === "update_available")
-    return `Running ${current}; target ${target}. Compatible — existing routes stay runnable. Update manually on the host when convenient.`;
+    return "Existing routes stay runnable. Update manually on the host when convenient.";
   if (entry.state === "unsupported_build") {
     if (entry.reason === "release-invalid")
-      return `Unsupported development build with an invalid release identity; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
+      return "Invalid release identity. Reinstall a supported release manually; protocol-compatible routes may still run.";
     if (entry.reason === "release-unsupported")
-      return `Unsupported development build with an unsupported release contract; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
-    return `Unsupported development build without release identity; running version unknown, target ${target}. It can remain operational while protocol-compatible, but install/reinstall it onto a supported 0.1.0+ release manually with a fresh uv tool install of workspace-bridge.`;
+      return "Unsupported release contract. Reinstall a supported release manually; protocol-compatible routes may still run.";
+    return "Release identity is missing. Reinstall a supported release manually; protocol-compatible routes may still run.";
   }
   if (entry.state === "target_mismatch")
-    return `Running ${current} is newer than target ${target}. No downgrade is offered; compatible routes stay runnable.`;
+    return "Newer than the target. No downgrade is offered; compatible routes stay runnable.";
   if (entry.state === "incompatible")
-    return `Incompatible with the Bridge protocol. Only routes using this component are affected; other routes stay runnable.`;
-  return `Unavailable or disabled. Only routes using this component are affected; other routes stay runnable.`;
+    return "Bridge protocol mismatch. Only routes using this component are affected.";
+  return "Unavailable or disabled. Only routes using this component are affected.";
+}
+
+function VersionRow({
+  entry,
+  displayName,
+}: {
+  entry: VersionComponentState;
+  displayName?: string;
+}) {
+  const name =
+    entry.component === "bridge"
+      ? "Bridge"
+      : entry.component === "manager"
+        ? "Manager"
+        : displayName || entry.instance;
+  const packageName =
+    entry.component === "manager"
+      ? null
+      : entry.runtime_type === "pi"
+        ? "workspace-bridge-pi-host-adapter"
+        : "workspace-bridge";
+  return (
+    <div className="version-row">
+      <div className="version-identity">
+        <h4>{name}</h4>
+        {entry.runtime_type && <small>{runtimeName(entry.runtime_type)}</small>}
+      </div>
+      <div className="version-value">
+        <span>Installed</span>
+        <strong>{entry.current_product_version || "Unknown"}</strong>
+      </div>
+      <div className="version-value">
+        <span>Target</span>
+        <strong>{entry.target_product_version || "Unknown"}</strong>
+      </div>
+      <div className="version-status">
+        <span className={`version-status-badge version-status-${entry.state}`}>
+          {versionStateLabel(entry.state)}
+        </span>
+        <p>{versionStateDetail(entry)}</p>
+      </div>
+      <details className="version-details">
+        <summary>Build and package details</summary>
+        <dl>
+          <div>
+            <dt>Installed build</dt>
+            <dd>
+              <code>{entry.current_build_id || "Unknown"}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Target build</dt>
+            <dd>
+              {entry.target_precision === "product-version-only" ? (
+                "Compared by version only"
+              ) : (
+                <code>{entry.target_build_id || "Unknown"}</code>
+              )}
+            </dd>
+          </div>
+          {packageName && (
+            <div>
+              <dt>Package</dt>
+              <dd>
+                <code>{packageName}</code> (
+                {entry.runtime_type === "pi" ? "npm" : "PyPI / uv tool"})
+              </dd>
+            </div>
+          )}
+          {displayName && displayName !== entry.instance && (
+            <div>
+              <dt>Instance ID</dt>
+              <dd>{entry.instance}</dd>
+            </div>
+          )}
+        </dl>
+      </details>
+    </div>
+  );
+}
+
+function VersionGroup({
+  title,
+  entries,
+  empty,
+  names = {},
+}: {
+  title: string;
+  entries: VersionComponentState[];
+  empty: string;
+  names?: Record<string, string>;
+}) {
+  return (
+    <section className="version-group">
+      <h3>{title}</h3>
+      {entries.length ? (
+        <div className="version-list">
+          {entries.map((entry) => (
+            <VersionRow
+              key={`${entry.component}:${entry.instance}`}
+              entry={entry}
+              displayName={names[entry.instance]}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="version-empty">{empty}</p>
+      )}
+    </section>
+  );
 }
 
 type Section =
@@ -214,6 +324,9 @@ const sections: Array<{
 ];
 const pageSize = 25;
 const autoRefreshMs = 30000;
+// Codex account quota is read only while the Adapters section is visible and
+// refreshed at most once per adapter per minute; never from /api/status.
+const quotaRefreshMs = 60000;
 function initialSection(): Section {
   const value = location.hash.slice(1);
   return sections.some((s) => s.id === value) ? (value as Section) : "overview";
@@ -1610,6 +1723,7 @@ export default function App() {
     setHandoffs([]);
     setRunInspect(null);
     setTextDetail(null);
+    setUsageLimits({});
   }
   async function manage(ws: Workspace, operation: string, extra: Json = {}) {
     try {
@@ -1909,6 +2023,77 @@ export default function App() {
       ),
     [adapters],
   );
+  const [usageLimits, setUsageLimits] = useState<
+    Record<string, UsageLimits | null>
+  >({});
+  const quotaEligible = useCallback(
+    (info: AdapterInfo) =>
+      Boolean(
+        info.enabled &&
+        info.healthy &&
+        info.runtime_type === "codex" &&
+        info.features?.usageLimits === 1,
+      ),
+    [],
+  );
+  // A stable string key for the current set of quota-capable adapters keeps
+  // the fetch effect bounded. The effect owns its immediate read, its own
+  // polling timer, and its cleanup; global status refreshes do not cancel
+  // or discard an in-flight quota response.
+  const quotaTargetsKey =
+    section === "adapters"
+      ? adapters
+          .filter(quotaEligible)
+          .map((info) => info.id)
+          .sort()
+          .join(",")
+      : "";
+  useEffect(() => {
+    // Quota is fetched only while the Adapters section is active/visible and
+    // only for enabled, healthy adapters advertising usageLimits. Failures
+    // are recorded per adapter and leave the rest of the page working.
+    if (!quotaTargetsKey) return;
+    const ids = quotaTargetsKey.split(",").filter(Boolean);
+    if (!ids.length) return;
+    let cancelled = false;
+    let requestInFlight = false;
+    let timer: number | undefined;
+    const loadQuota = async () => {
+      if (cancelled || requestInFlight || document.hidden) return;
+      requestInFlight = true;
+      try {
+        const results = await Promise.all(
+          ids.map(async (id) => {
+            try {
+              const limits = await api<UsageLimits>(
+                `/api/adapters/${id}/usage-limits`,
+              );
+              return [id, limits] as const;
+            } catch {
+              return [id, null] as const;
+            }
+          }),
+        );
+        if (!cancelled)
+          setUsageLimits((old) => ({ ...old, ...Object.fromEntries(results) }));
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    void loadQuota();
+    timer = window.setInterval(() => {
+      void loadQuota();
+    }, quotaRefreshMs);
+    const handleQuotaVisibility = () => {
+      if (!document.hidden) void loadQuota();
+    };
+    document.addEventListener("visibilitychange", handleQuotaVisibility);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleQuotaVisibility);
+    };
+  }, [quotaTargetsKey, quotaEligible]);
   const attentionRuns = runs.filter(
     (r) => r.active_state === "waiting_interaction",
   );
@@ -3024,6 +3209,137 @@ export default function App() {
                             </Button>
                           </div>
                         </div>
+                        {info.runtime_type === "codex" &&
+                          info.features?.usageLimits === 1 && (
+                            <div className="adapter-quota-block">
+                              <h4>Codex quota</h4>
+                              {(() => {
+                                const limits = usageLimits[info.id];
+                                if (!info.enabled || info.healthy === false)
+                                  return null;
+                                if (limits === undefined)
+                                  return (
+                                    <p className="adapter-quota-status">
+                                      Loading quota…
+                                    </p>
+                                  );
+                                // ordinaryUsageAllowed=false is an explicit
+                                // backend state and is surfaced even when no
+                                // percentage window rows exist; no 0% is
+                                // invented when windows are absent.
+                                const ordinaryFalse =
+                                  limits !== null &&
+                                  limits.available &&
+                                  limits.ordinaryUsageAllowed === false;
+                                if (
+                                  limits === null ||
+                                  !limits.available ||
+                                  limits.buckets.length === 0
+                                )
+                                  return (
+                                    <p className="adapter-quota-status">
+                                      {ordinaryFalse
+                                        ? "Ordinary usage unavailable."
+                                        : "Quota unavailable. The runtime could not report the current account balance."}
+                                    </p>
+                                  );
+                                // Rows are the normalized windows inside each
+                                // bucket (primary then secondary, order from
+                                // the native fields; labels come only from
+                                // windowDurationMins — never assumed 5h/7d).
+                                // Buckets without windows contribute no row.
+                                const rows = limits.buckets
+                                  .slice(0, 4)
+                                  .flatMap((bucket, bucketIndex) =>
+                                    (bucket.windows || [])
+                                      .slice(0, 4)
+                                      .map((window, windowIndex) => ({
+                                        bucket,
+                                        window,
+                                        bucketIndex,
+                                        windowIndex,
+                                      })),
+                                  )
+                                  .slice(0, 4);
+                                if (!rows.length)
+                                  return (
+                                    <p className="adapter-quota-status">
+                                      {ordinaryFalse
+                                        ? "Ordinary usage unavailable."
+                                        : "Quota unavailable. The runtime could not report the current account balance."}
+                                    </p>
+                                  );
+                                return (
+                                  <div className="quota-rows">
+                                    {ordinaryFalse && (
+                                      <p className="adapter-quota-status">
+                                        Ordinary usage unavailable.
+                                      </p>
+                                    )}
+                                    {rows.map(
+                                      ({
+                                        bucket,
+                                        window,
+                                        bucketIndex,
+                                        windowIndex,
+                                      }) => {
+                                        // Bucket identity is the native quota-bucket label: limitName
+                                        // first, then limitId. Duration identity comes only from
+                                        // windowDurationMins; primary/secondary meanings and any
+                                        // model mapping are never inferred.
+                                        const bucketIdentity =
+                                          bucket.limitName || bucket.limitId;
+                                        const durationIdentity =
+                                          quotaWindowLabel(
+                                            window.windowDurationMins,
+                                          );
+                                        const label =
+                                          bucketIdentity && durationIdentity
+                                            ? `${bucketIdentity} · ${durationIdentity}`
+                                            : bucketIdentity ||
+                                              durationIdentity ||
+                                              `Window ${windowIndex + 1}`;
+                                        const keyed = `${bucket.limitId || bucket.limitName || bucketIndex}:${window.windowDurationMins ?? windowIndex}:${windowIndex}`;
+                                        return (
+                                          <div
+                                            className="quota-row"
+                                            key={keyed}
+                                          >
+                                            <span className="quota-label">
+                                              {label}
+                                            </span>
+                                            <div
+                                              className="quota-bar"
+                                              role="meter"
+                                              aria-valuemin={0}
+                                              aria-valuemax={100}
+                                              aria-valuenow={
+                                                window.remainingPercent
+                                              }
+                                              aria-label={`${label} remaining percent`}
+                                            >
+                                              <span
+                                                className="quota-fill"
+                                                style={{
+                                                  width: `${window.remainingPercent}%`,
+                                                }}
+                                              />
+                                            </div>
+                                            <strong className="quota-remaining">
+                                              {window.remainingPercent}% left
+                                            </strong>
+                                            <small className="quota-reset">
+                                              {quotaResetText(window.resetsAt)}
+                                            </small>
+                                          </div>
+                                        );
+                                      },
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          )}
                       </div>
                       <div className="node-card-foot">
                         <small>Adapter ID: {info.id}</small>
@@ -3141,15 +3457,8 @@ export default function App() {
           {section === "versions" && (
             <div className="surface-panel updates-page">
               <SectionHeading
-                title="System / Versions"
-                description="Component versions and compatibility. Informational only; updates are manual local operations."
-                action={
-                  versions?.target?.product_version ? (
-                    <StateBadge
-                      value={`Target Bridge ${versions.target.product_version}`}
-                    />
-                  ) : undefined
-                }
+                title="Installed components"
+                description="See what is installed and whether each component can work with this Bridge."
               />
               {versionsError ? (
                 <div className="diagnostic-unavailable" role="status">
@@ -3157,7 +3466,9 @@ export default function App() {
                   <p>{versionsError}</p>
                 </div>
               ) : !versions ? (
-                <p>Loading versions status…</p>
+                <p className="version-loading" role="status">
+                  Loading versions status…
+                </p>
               ) : versions.status === "failed" ? (
                 <div className="diagnostic-unavailable" role="status">
                   <strong>Versions status is unavailable.</strong>
@@ -3168,134 +3479,69 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  <p>
-                    Target Bridge version{" "}
-                    <strong>
-                      {versions.target.product_version || "unknown"}
-                    </strong>{" "}
-                    {versions.target.build_id && (
-                      <span title={versions.target.build_id}>
-                        · {shortBuildId(versions.target.build_id)}
-                      </span>
-                    )}{" "}
-                    — Bridge and Manager update first; compatible Nodes and
-                    adapters may lag until a convenient maintenance window.
-                    Release skew is informational and never blocks an otherwise
-                    protocol-compatible route.
-                  </p>
-                  <p className="path-text">
-                    This view never installs, restarts, or rolls back anything.
-                    Python components (Bridge, Node, Codex adapter) update
-                    locally on the host with `uv tool upgrade workspace-bridge`,
-                    followed by an explicit restart of the affected service. The
-                    Pi adapter (`workspace-bridge-pi-host-adapter`) is a local
-                    npm-managed component updated with npm on its host.
-                  </p>
-                  {[versions.bridge, versions.manager]
-                    .filter(Boolean)
-                    .map((entry) => (
-                      <div key={`${entry!.component}:${entry!.instance}`}>
-                        <h3>
-                          {entry!.component === "bridge" ? "Bridge" : "Manager"}{" "}
-                          <StateBadge value={versionStateLabel(entry!.state)} />
-                        </h3>
-                        <p>{versionStateDetail(entry!)}</p>
-                        <p className="path-text">
-                          Current {entry!.current_product_version || "unknown"}{" "}
-                          · {shortBuildId(entry!.current_build_id)} · target{" "}
-                          {entry!.target_product_version || "unknown"} ·{" "}
-                          {shortBuildId(entry!.target_build_id)}
+                  <div className="version-target">
+                    <div>
+                      <span>Target Bridge version</span>
+                      <strong>
+                        {versions.target.product_version || "Unknown"}
+                      </strong>
+                    </div>
+                    <p>
+                      Compatible older Nodes and adapters can keep running.
+                      Version differences alone do not block routes.
+                    </p>
+                  </div>
+                  <div className="version-groups">
+                    <VersionGroup
+                      title="Bridge and Manager"
+                      entries={[versions.bridge, versions.manager].filter(
+                        (entry): entry is VersionComponentState =>
+                          Boolean(entry),
+                      )}
+                      empty="Bridge and Manager versions are unavailable."
+                    />
+                    <VersionGroup
+                      title="Nodes"
+                      entries={versions.nodes || []}
+                      empty="No Nodes configured."
+                      names={Object.fromEntries(
+                        nodes.map((node) => [node.id, node.name]),
+                      )}
+                    />
+                    <VersionGroup
+                      title="Adapters"
+                      entries={versions.adapters || []}
+                      empty="No adapters configured."
+                      names={Object.fromEntries(
+                        adapters.map((adapter) => [adapter.id, adapter.name]),
+                      )}
+                    />
+                  </div>
+                  <section className="version-guidance">
+                    <h3>Updating components</h3>
+                    <p>
+                      Informational only. This view never installs, restarts, or
+                      rolls back anything. Update on each component’s host when
+                      convenient, then restart the affected service explicitly.
+                    </p>
+                    <div className="version-guidance-grid">
+                      <div>
+                        <strong>Bridge, Node, and Codex adapter</strong>
+                        <p>
+                          Upgrade the local Python package with{" "}
+                          <code>uv tool upgrade workspace-bridge</code>.
                         </p>
                       </div>
-                    ))}
-                  <h3>Nodes</h3>
-                  {(versions.nodes || []).length ? (
-                    (versions.nodes || []).map((entry) => {
-                      return (
-                        <div key={entry.instance}>
-                          <h4>
-                            {entry.instance}{" "}
-                            <StateBadge
-                              value={versionStateLabel(entry.state)}
-                            />
-                          </h4>
-                          <p>{versionStateDetail(entry)}</p>
-                          <p className="path-text">
-                            Source: PyPI package `workspace-bridge` (uv tool)
-                          </p>
-                          {entry.state === "update_available" ? (
-                            <p>
-                              Update available · Compatible — update manually on
-                              the host: `uv tool upgrade workspace-bridge`, then
-                              restart the service.
-                            </p>
-                          ) : entry.state === "unsupported_build" ? (
-                            <p>
-                              Unsupported development build / reinstall
-                              manually.
-                            </p>
-                          ) : null}
-                          <p className="path-text">
-                            Current {entry.current_product_version || "unknown"}{" "}
-                            · {shortBuildId(entry.current_build_id)} · target{" "}
-                            {entry.target_product_version || "unknown"} ·{" "}
-                            {shortBuildId(entry.target_build_id)}
-                          </p>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <p>No Nodes configured.</p>
-                  )}
-                  <h3>Adapters</h3>
-                  {(versions.adapters || []).length ? (
-                    (versions.adapters || []).map((entry) => {
-                      return (
-                        <div key={entry.instance}>
-                          <h4>
-                            {entry.instance}
-                            {entry.runtime_type
-                              ? ` · ${runtimeName(entry.runtime_type)}`
-                              : ""}{" "}
-                            <StateBadge
-                              value={versionStateLabel(entry.state)}
-                            />
-                          </h4>
-                          <p>{versionStateDetail(entry)}</p>
-                          <p className="path-text">
-                            Source:{" "}
-                            {entry.runtime_type === "pi"
-                              ? "npm package `workspace-bridge-pi-host-adapter` (local npm operation)"
-                              : "PyPI package `workspace-bridge` (uv tool)"}
-                          </p>
-                          {entry.state === "update_available" ? (
-                            <p>
-                              Update available · Compatible — update manually on
-                              the host.
-                            </p>
-                          ) : entry.state === "unsupported_build" ? (
-                            <p>
-                              Unsupported development build / reinstall
-                              manually.
-                            </p>
-                          ) : null}
-                          <p className="path-text">
-                            Current {entry.current_product_version || "unknown"}{" "}
-                            · {shortBuildId(entry.current_build_id)} · target{" "}
-                            {entry.target_product_version || "unknown"}
-                            {entry.target_precision ===
-                            "product-version-only" ? (
-                              " · build: product-version-only"
-                            ) : (
-                              <> · {shortBuildId(entry.target_build_id)}</>
-                            )}
-                          </p>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <p>No adapters configured.</p>
-                  )}
+                      <div>
+                        <strong>Pi adapter</strong>
+                        <p>
+                          Upgrade the local npm package{" "}
+                          <code>workspace-bridge-pi-host-adapter</code> on its
+                          host.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
                 </>
               )}
             </div>
