@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workspace-bridge"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP bridge and control plane for protected local workspaces with bounded Pi and Codex agent runs"
 requires-python = ">=3.11"
 dependencies = ["starlette>=0.50,<1", "uvicorn>=0.35,<1", "pydantic>=2.12,<3", "regex>=2025.7.34,<2027", "Pillow>=12.3,<13"]

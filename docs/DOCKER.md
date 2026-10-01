@@ -63,7 +63,7 @@ docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 
 To use the published Bridge image, authenticate to GHCR if the package is
 private, then set `services.bridge.image` to
-`ghcr.io/sheldonxxxx/workspace-bridge:v0.1.1` and remove its `build` block in a
+`ghcr.io/sheldonxxxx/workspace-bridge:v0.1.2` and remove its `build` block in a
 local copy of the Compose file. Keep the state mount, loopback port bindings, non-root
 user, and tunnel sidecar configuration. The release workflow publishes this
 multiarch tag only after its full CI and native image checks pass.
