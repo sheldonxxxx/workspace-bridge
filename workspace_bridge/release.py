@@ -35,7 +35,7 @@ _RELEASE_KEYS = frozenset({
     "component", "component_version", "build_id",
 })
 
-CODEX_ADAPTER_VERSION = "0.1.1"
+CODEX_ADAPTER_VERSION = "0.1.2"
 
 
 class ReleaseError(ValueError):
@@ -186,7 +186,7 @@ def codex_release() -> dict:
 
     The Python core is shared with Bridge/Node, so the build ID is the same
     Python-core ID. The component version stays the adapter contract version
-    (``0.1.1``); ``adapterVersion``/``nativeVersion`` remain separate fields.
+    (``0.1.2``); ``adapterVersion``/``nativeVersion`` remain separate fields.
     The descriptor ``adapterVersion`` reuses this constant so release identity
     cannot drift from the advertised descriptor.
     """

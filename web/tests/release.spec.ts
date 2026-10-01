@@ -29,13 +29,13 @@ async function mockRelease(page: any, managerRelease: any) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          version: "0.1.1",
+          version: "0.1.2",
           release: {
             contract: 1,
             product: "workspace-bridge",
-            product_version: "0.1.1",
+            product_version: "0.1.2",
             component: "bridge",
-            component_version: "0.1.1",
+            component_version: "0.1.2",
             build_id: "sha256:" + "a".repeat(64),
           },
           manager_release: managerRelease,
@@ -108,12 +108,12 @@ async function mockRelease(page: any, managerRelease: any) {
 test("same-build Manager shows release without mismatch", async ({ page }) => {
   const built = builtManagerRelease();
   expect(built.component).toBe("manager");
-  expect(built.product_version).toBe("0.1.1");
+  expect(built.product_version).toBe("0.1.2");
   await mockRelease(page, built);
   await page.goto("./");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.getByText("Bridge release 0.1.1").first()).toBeVisible();
-  await expect(page.getByText("Manager release 0.1.1").first()).toBeVisible();
+  await expect(page.getByText("Bridge release 0.1.2").first()).toBeVisible();
+  await expect(page.getByText("Manager release 0.1.2").first()).toBeVisible();
   await expect(
     page.getByText("Manager build mismatch / refresh or rebuild required"),
   ).toHaveCount(0);

@@ -85,7 +85,7 @@ def test_bridge_node_codex_share_python_core_build_id():
     assert node["component"] == "node"
     assert codex["component"] == "codex-host-adapter"
     # Codex keeps its adapter contract version separate from adapterVersion fields.
-    assert codex["component_version"] == "0.1.1"
+    assert codex["component_version"] == "0.1.2"
 
 
 def _legacy_descriptor_payload(runtime="pi"):
@@ -155,12 +155,12 @@ def test_node_status_and_codex_descriptor_expose_release():
     native = CodexHostAdapter(tmp / "codex-adapter", projects, rpc=FakeCodexRpc())
     try:
         descriptor = native.descriptor()
-        assert descriptor["runtime"]["adapterVersion"] == "0.1.1"
+        assert descriptor["runtime"]["adapterVersion"] == "0.1.2"
         assert "adapterVersion" in descriptor["runtime"]
         assert "nativeVersion" in descriptor["runtime"]
         release = validate_release(descriptor["release"])
         assert release["component"] == "codex-host-adapter"
-        assert release["component_version"] == "0.1.1"
+        assert release["component_version"] == "0.1.2"
         assert release["product_version"] == __version__
         assert release["build_id"] == bridge_release()["build_id"]
     finally:

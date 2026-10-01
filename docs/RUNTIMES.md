@@ -1,6 +1,6 @@
 # Runtimes
 
-Consolidated Pi and Codex runtime notes for Workspace Bridge `0.1.1`. For
+Consolidated Pi and Codex runtime notes for Workspace Bridge `0.1.2`. For
 the wire contract see [Runtime Protocol](RUNTIME_PROTOCOL.md); for service
 commands see [Setup](SETUP.md) and [Operations](OPERATIONS.md).
 

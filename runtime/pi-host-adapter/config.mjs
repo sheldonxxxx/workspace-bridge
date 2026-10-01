@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ADAPTER_VERSION = "0.1.1";
+export const ADAPTER_VERSION = "0.1.2";
 export const DEFAULT_LOG_LEVEL = "INFO";
 export const ALLOWED_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"];
 export const DEFAULT_HOST = "127.0.0.1";

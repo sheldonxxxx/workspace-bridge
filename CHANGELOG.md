@@ -4,6 +4,17 @@
 
 - No changes yet.
 
+## 0.1.2
+
+- Terminal-style Manager redesign with a command palette.
+- Password-based admin account replaces the admin token for Manager sign-in.
+- Codex usage-limits quota reporting and run-scoped usage deltas.
+- Release pipeline fixes: validated multiarch image published to GHCR, macOS
+  runtime and wheel smoke repairs, and Docker tunnel template inclusion.
+- Version `0.1.2` across the Python product and package, Bridge and Node
+  components, Codex component, Pi package and adapter, Manager package, Docker
+  image tag, and served release metadata.
+
 ## 0.1.0
 
 First public baseline: version `0.1.0` across the Python product and package,

@@ -158,7 +158,7 @@ Tool names and schemas are authoritative from tool discovery; see the
 
 ## Project status and limitations
 
-- Current version: `0.1.1`. Manual package updates only
+- Current version: `0.1.2`. Manual package updates only
   (`uv tool upgrade workspace-bridge`, then restart affected services).
 - Native Windows is unsupported; use WSL2.
 - Image previews are first-frame, size-bounded, and not color-managed. A local
