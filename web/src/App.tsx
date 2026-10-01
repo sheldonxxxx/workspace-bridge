@@ -1480,8 +1480,12 @@ function ModelDialog({
 }
 
 export default function App() {
-  const [auth, setAuth] = useState<"checking" | "login" | "ready">("checking");
+  const [auth, setAuth] = useState<"checking" | "login" | "password" | "ready">(
+    "checking",
+  );
   const [loginError, setLoginError] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [theme, setTheme] = useState(initialTheme);
   const [section, setSection] = useState<Section>(initialSection);
   const [mobileNav, setMobileNav] = useState(false);
@@ -1636,7 +1640,13 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       try {
-        await api<Status>("/api/status");
+        const account = await api<{ must_change_password: boolean }>(
+          "/api/account",
+        );
+        if (account.must_change_password) {
+          setAuth("password");
+          return;
+        }
         await refresh();
         setAuth("ready");
       } catch {
@@ -1684,24 +1694,54 @@ export default function App() {
     event.preventDefault();
     setLoginError("");
     const form = event.currentTarget;
-    const token = ((new FormData(form).get("token") as string) || "").trim();
-    form.reset();
+    const data = new FormData(form);
+    setAuthBusy(true);
     try {
-      const response = await fetch("/api/login", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok)
-        throw new Error(
-          response.status === 401
-            ? "That token is not current. Use the token from the active production state directory."
-            : `Sign in failed (HTTP ${response.status}).`,
-        );
-      await refresh();
-      setAuth("ready");
+      const account = await api<{ must_change_password: boolean }>(
+        "/api/login",
+        "POST",
+        {
+          username: data.get("username"),
+          password: data.get("password"),
+        },
+      );
+      form.reset();
+      if (account.must_change_password) {
+        setAuth("password");
+      } else {
+        await refresh();
+        setAuth("ready");
+      }
     } catch (error) {
       setLoginError((error as Error).message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoginError("");
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    if (data.get("new_password") !== data.get("confirm_password")) {
+      setLoginError("New passwords do not match.");
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await api("/api/account/password", "POST", {
+        current_password: data.get("current_password"),
+        new_password: data.get("new_password"),
+      });
+      form.reset();
+      await refresh();
+      setChangingPassword(false);
+      setAuth("ready");
+      setLoginError("");
+    } catch (error) {
+      setLoginError((error as Error).message);
+    } finally {
+      setAuthBusy(false);
     }
   }
   async function logout() {
@@ -1714,6 +1754,8 @@ export default function App() {
       /* local cleanup still applies */
     }
     setAuth("login");
+    setChangingPassword(false);
+    setLoginError("");
     setStatus(null);
     setDiagnostics(null);
     setDiagnosticsError(null);
@@ -2169,6 +2211,91 @@ export default function App() {
         <span className="sr-only">Checking session</span>
       </div>
     );
+  if (auth === "password" || changingPassword)
+    return (
+      <div className="login-shell">
+        <main className="login-main">
+          <div className="login-intro">
+            <span className="section-kicker">Admin account</span>
+            <h1>Change your password</h1>
+            <p>
+              {auth === "password"
+                ? "Choose a new password before using the Manager."
+                : "Update the password for your admin account."}
+            </p>
+          </div>
+          <div className="login-panel">
+            <h2>
+              {auth === "password"
+                ? "Replace the temporary password"
+                : "New password"}
+            </h2>
+            <form onSubmit={changePassword}>
+              <Label htmlFor="current-password">Current password</Label>
+              <Input
+                id="current-password"
+                name="current_password"
+                type="password"
+                autoComplete="current-password"
+                maxLength={256}
+                required
+              />
+              <Label htmlFor="new-password">New password</Label>
+              <Input
+                id="new-password"
+                name="new_password"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={256}
+                required
+              />
+              <Label htmlFor="confirm-password">Confirm new password</Label>
+              <Input
+                id="confirm-password"
+                name="confirm_password"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={256}
+                required
+              />
+              <small>
+                Use 8 to 256 characters. Other sessions will be signed out.
+              </small>
+              <Button type="submit" size="lg" disabled={authBusy}>
+                {authBusy ? "Saving…" : "Save password"}
+              </Button>
+              {changingPassword ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setChangingPassword(false);
+                    setLoginError("");
+                  }}
+                >
+                  Cancel
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void logout()}
+                >
+                  Sign out
+                </Button>
+              )}
+            </form>
+            {loginError && (
+              <p className="form-error" role="alert">
+                {loginError}
+              </p>
+            )}
+          </div>
+        </main>
+      </div>
+    );
   if (auth === "login")
     return (
       <div className="login-shell">
@@ -2205,19 +2332,27 @@ export default function App() {
           <div className="login-panel">
             <span className="section-kicker">Local manager</span>
             <h2>Open the console</h2>
-            <p>Enter the current admin token to manage this Bridge.</p>
+            <p>Sign in with your admin account to manage this Bridge.</p>
             <form onSubmit={login}>
-              <Label htmlFor="admin-token">Admin token</Label>
+              <Label htmlFor="admin-username">Username</Label>
               <Input
-                id="admin-token"
-                name="token"
-                type="password"
-                autoComplete="off"
-                placeholder="Paste admin token"
+                id="admin-username"
+                name="username"
+                autoComplete="username"
+                defaultValue="admin"
                 required
               />
-              <Button type="submit" size="lg">
-                Open manager <ArrowRight size={16} />
+              <Label htmlFor="admin-password">Password</Label>
+              <Input
+                id="admin-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                maxLength={256}
+                required
+              />
+              <Button type="submit" size="lg" disabled={authBusy}>
+                Sign in <ArrowRight size={16} />
               </Button>
             </form>
             {loginError && (
@@ -2226,8 +2361,8 @@ export default function App() {
               </p>
             )}
             <small>
-              A database reset creates a new token in the private state
-              directory.
+              Forgot your password? Run workspace-bridge reset-admin-password on
+              the Bridge host.
             </small>
           </div>
         </main>
@@ -2305,6 +2440,15 @@ export default function App() {
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
             >
               {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setLoginError("");
+                setChangingPassword(true);
+              }}
+            >
+              Change password
             </Button>
             <Button
               variant="ghost"

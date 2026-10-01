@@ -1,3 +1,4 @@
+from admin_helpers import admin_cookie
 """Generic file tools: permissions are local policy, not tool-name prefixes."""
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -184,13 +185,13 @@ def test_queued_call_uses_current_policy_not_old_discovery(env):
 
 
 async def test_only_admin_listener_and_admin_credential_can_set_policy(env):
-    svc=env['service'];key=(env['state']/'admin-token').read_text().strip()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_admin(svc,digest(key.encode()))),base_url='http://127.0.0.1:8766') as c:
+    svc=env['service'];app=make_admin(svc);key=admin_cookie(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:8766') as c:
         route='/api/workspaces/'+env['id'];body=dict(operation='set_write_scope',write_scope='workspace')
         assert (await c.post(route,json=body,headers={'Authorization':'Bearer '+env['token']})).status_code==401
-        r=await c.post(route,json=body,headers={'Authorization':'Bearer '+key})
+        r=await c.post(route,json=body,headers={"Cookie": key})
         assert r.status_code==200 and r.json()['workspace']['write_scope']=='workspace'
-        r=await c.post(route,json=dict(operation='set_write_scope',write_scope='all'),headers={'Authorization':'Bearer '+key})
+        r=await c.post(route,json=dict(operation='set_write_scope',write_scope='all'),headers={"Cookie": key})
         assert r.status_code==400
     assert 'set_write_scope' not in TOOLS and 'manage_workspace' not in TOOLS
     with pytest.raises(BridgeError):call(env,'set_write_scope',write_scope='workspace')

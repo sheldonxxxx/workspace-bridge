@@ -12,7 +12,8 @@ import uvicorn
 from . import __version__
 from .api import make_admin, make_mcp
 from .oplog import configure_operational_logging, emit, error_code
-from .security import BridgeError, digest, open_absolute_dir
+from .security import BridgeError, open_absolute_dir
+from .admin_account import AdminAccount
 from .service import Service
 from .diagnostics import failure_report
 import logging
@@ -80,15 +81,16 @@ def initialize(state: Path, mcp_port: int, admin_port: int) -> dict:
     if (state / "config.json").exists():
         raise BridgeError("Already initialized; existing state was not overwritten")
     os.chmod(state, 0o700)
-    token = secrets.token_urlsafe(32)
+    cursor_secret = secrets.token_urlsafe(32)
     config = {"schema_version": 1, "mcp_port": mcp_port,
-              "admin_port": admin_port, "admin_token_hash": digest(token.encode())}
-    for filename, text in (("config.json", json.dumps(config, indent=2)), ("admin-token", token + "\n")):
+              "admin_port": admin_port, "cursor_secret": cursor_secret}
+    for filename, text in (("config.json", json.dumps(config, indent=2)),):
         fd = os.open(state / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as out:
             out.write(text)
             out.flush()
             os.fsync(out.fileno())
+    AdminAccount(state).ensure()
     return config
 
 
@@ -391,7 +393,7 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
         uvicorn.Config(make_mcp(service, config["mcp_port"], public_port=mcp_public_port,
                                 container_mode=container_mode), host=mcp_bind, port=config["mcp_port"],
                        access_log=False, proxy_headers=False, log_level="warning"),
-        uvicorn.Config(make_admin(service, config["admin_token_hash"], config["admin_port"],
+        uvicorn.Config(make_admin(service, port=config["admin_port"],
                                  public_port=admin_public_port, public_mcp_port=mcp_public_port,
                                  container_mode=container_mode,
                                  extra_hosts=extra_admin_hosts), host=admin_bind, port=config["admin_port"],
@@ -447,7 +449,7 @@ def main(argv: list[str] | None = None):
     doctor.add_argument("--container", action="store_true", help=argparse.SUPPRESS)
     doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
     doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
-    sub.add_parser("show-admin-token", help="Print the local UI token to this terminal; never paste it into ChatGPT")
+    sub.add_parser("reset-admin-password", help="Reset admin to the temporary bootstrap password; invalidates all sessions")
     release = sub.add_parser("release", help="Deterministic release bundle build and validation (release engineering)")
     release_sub = release.add_subparsers(dest="release_command", required=True)
     release_build = release_sub.add_parser("build", help="Build deterministic release bundle")
@@ -503,7 +505,7 @@ def main(argv: list[str] | None = None):
         if args.command == "init":
             config = initialize(state, args.mcp_port, args.admin_port)
             print(f"Initialized {state}\nLocal management: http://127.0.0.1:{config['admin_port']}/")
-            print("Run workspace-bridge serve, then workspace-bridge show-admin-token in another terminal.")
+            print("Run workspace-bridge serve. Sign in as admin with temporary password admin; change it on first login.")
             return
         if args.command == "doctor":
             exit_code = _doctor(state, offline=args.offline, as_json=args.json,
@@ -565,11 +567,9 @@ def main(argv: list[str] | None = None):
                 return
             parser.error("Unknown release subcommand")
         config = load_config(state)
-        if args.command == "show-admin-token":
-            token_path = state / "admin-token"
-            if token_path.is_symlink():
-                raise BridgeError("Unsafe token file")
-            print(token_path.read_text().strip())
+        if args.command == "reset-admin-password":
+            AdminAccount(state).reset()
+            print("Admin password reset. Sign in as admin with temporary password admin; change it on first login.")
             return
         lock_fd = os.open(state / "process.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
@@ -588,7 +588,7 @@ def main(argv: list[str] | None = None):
                     extra_admin_hosts = admin_allowed_hosts_from_env()
                     print(f"MCP: http://127.0.0.1:{config['mcp_port']}/mcp | Local admin: http://127.0.0.1:{config['admin_port']}/")
                     if extra_admin_hosts:
-                        print(f"WARNING: {ADMIN_ALLOWED_HOSTS_ENV}={','.join(extra_admin_hosts)} widens the admin listener to 0.0.0.0 with those Host values allowed. Prefer SSH port-forwarding or VPN; HTTP bears the admin token in clear. Never tunnel the manager.", file=sys.stderr)
+                        print(f"WARNING: {ADMIN_ALLOWED_HOSTS_ENV}={','.join(extra_admin_hosts)} widens the admin listener to 0.0.0.0 with those Host values allowed. Prefer SSH port-forwarding or VPN; HTTP carries admin credentials in clear. Never tunnel the manager.", file=sys.stderr)
                     if args.container:
                         print("Container bind: 0.0.0.0; publish both ports on host 127.0.0.1 ONLY. Do not tunnel management.")
                         print(f"Host MCP: http://127.0.0.1:{args.mcp_public_port}/mcp | Host admin: http://127.0.0.1:{args.admin_public_port}/")

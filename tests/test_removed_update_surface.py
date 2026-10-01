@@ -5,6 +5,7 @@ planning, deployment installer probing, remote backup, or admission
 locking remains in product runtime, while release/CLI surfaces work.
 """
 from __future__ import annotations
+from admin_helpers import admin_cookie
 
 import importlib.metadata
 import importlib.util
@@ -19,14 +20,14 @@ def test_removed_bridge_update_endpoints_absent(env):
     import httpx
     from workspace_bridge.api import make_admin
     service = env["service"]
-    app = make_admin(service, env["config"]["admin_token_hash"])
+    app = make_admin(service)
 
     async def _call():
-        token = (env["state"] / "admin-token").read_text().strip()
+        token = admin_cookie(app)
         async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app),
                 base_url="http://127.0.0.1:8766",
-                headers={"Authorization": "Bearer " + token}) as client:
+                headers={"Cookie": token}) as client:
             for method, path in (
                     ("GET", "/api/deployment/plan"),
                     ("POST", "/api/deployment/plan"),

@@ -1,5 +1,6 @@
 """Docker-facing app contracts without pretending to execute Docker namespaces."""
 from __future__ import annotations
+from admin_helpers import admin_cookie
 import importlib.util
 import json
 import os
@@ -96,21 +97,21 @@ async def test_container_mcp_rejects_sidecar_on_public_port_and_spoof(env,header
 @pytest.mark.parametrize('host',['bridge:8766','workspace-bridge:8766'])
 async def test_container_admin_still_rejects_sidecar_names(env,host):
     # Management stays loopback-only; the tunnel sidecar must never reach /api/.
-    app=make_admin(env['service'],env['config']['admin_token_hash'],8766,public_port=8876,
+    app=make_admin(env['service'],8766,public_port=8876,
                    public_mcp_port=8875,container_mode=True)
-    token=(env['state']/'admin-token').read_text().strip()
+    token=admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://'+host) as client:
-        response=await client.get('/api/status',headers={'Authorization':'Bearer '+token})
+        response=await client.get('/api/status',headers={"Cookie": token})
         assert response.status_code==403
 
 
 async def test_admin_status_uses_published_port_and_auth(env):
-    app=make_admin(env['service'],env['config']['admin_token_hash'],8766,public_port=8876,
+    app=make_admin(env['service'],8766,public_port=8876,
                    public_mcp_port=8875,container_mode=True)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:8876') as client:
         assert (await client.get('/api/status')).status_code==401
-        token=(env['state']/'admin-token').read_text().strip()
-        response=await client.get('/api/status',headers={'Authorization':'Bearer '+token,'Origin':'http://127.0.0.1:8876'})
+        token=admin_cookie(app)
+        response=await client.get('/api/status',headers={"Cookie": token,'Origin':'http://127.0.0.1:8876'})
         data=response.json()
         assert response.status_code==200 and data['mcp_port']==8875 and data['admin_port']==8876
         assert data['listen_mode']=='docker-published-loopback'
@@ -119,10 +120,10 @@ async def test_admin_status_uses_published_port_and_auth(env):
 
 
 async def test_native_admin_advertises_native_port(env):
-    app=make_admin(env['service'],env['config']['admin_token_hash'])
-    token=(env['state']/'admin-token').read_text().strip()
+    app=make_admin(env['service'])
+    token=admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:8766') as client:
-        data=(await client.get('/api/status',headers={'Authorization':'Bearer '+token})).json()
+        data=(await client.get('/api/status',headers={"Cookie": token})).json()
         assert data['mcp_port']==8765 and data['listen_mode']=='loopback'
 
 
@@ -142,10 +143,10 @@ def test_env_port_default_and_override(monkeypatch):
 def test_fresh_bootstrap_preserves_credentials_and_policy(tmp_path,capsys):
     state=tmp_path/'state';state.mkdir(mode=0o700)
     cfg=bootstrap(state)
-    token=(state/'admin-token').read_bytes()
+    token=(state/'admin-account.json').read_bytes()
     assert token.decode().strip() not in capsys.readouterr().out
     assert bootstrap(state)==cfg
-    assert (state/'admin-token').read_bytes()==token
+    assert (state/'admin-account.json').read_bytes()==token
 
 
 @pytest.mark.parametrize('file',['bridge.sqlite3','admin-token','unrelated.txt'])
@@ -453,12 +454,12 @@ def test_boundary_extra_hosts_admin_only():
 async def test_admin_allows_configured_host(env, host):
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      public_port=8876, container_mode=False, extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://' + host) as client:
-        r = await client.get('/api/status', headers={'Authorization': 'Bearer ' + token})
+        r = await client.get('/api/status', headers={"Cookie": token})
         assert r.status_code == 200
         assert r.json()['admin_allowed_hosts'] == ['admin.lan']
         assert 'remote-admin' in r.json()['listen_mode']
@@ -467,13 +468,13 @@ async def test_admin_allows_configured_host(env, host):
 async def test_admin_https_origin_allowed_for_extra_host(env):
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://admin.lan:8766') as client:
         r = await client.get('/api/status', headers={
-            'Authorization': 'Bearer ' + token, 'Origin': 'https://admin.lan:8766'})
+            "Cookie": token, 'Origin': 'https://admin.lan:8766'})
         assert r.status_code == 200
 
 
@@ -484,13 +485,13 @@ async def test_admin_https_origin_allowed_for_extra_host(env):
 async def test_admin_still_rejects_untrusted_with_allowlist(env, headers):
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://admin.lan:8766') as client:
         r = await client.get('/api/status', headers={
-            **headers, 'Authorization': 'Bearer ' + token})
+            **headers, "Cookie": token})
         assert r.status_code == 403
 
 
@@ -524,13 +525,13 @@ async def test_admin_allows_proxy_host_forms(env, host):
     """TLS-terminating nginx sends bare Host or :443, not the internal port."""
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
         r = await client.get('/api/status', headers={
-            'Host': host, 'Authorization': 'Bearer ' + token})
+            'Host': host, "Cookie": token})
         assert r.status_code == 200
 
 
@@ -541,28 +542,28 @@ async def test_admin_allows_proxy_origins(env, origin):
     """Browsers behind https://<name> send Origin without the internal port."""
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
         r = await client.get('/api/status', headers={
             'Host': 'admin.lan', 'Origin': origin,
-            'Authorization': 'Bearer ' + token})
+            "Cookie": token})
         assert r.status_code == 200
 
 
 async def test_admin_proxy_host_and_origin_together(env):
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.example.com')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
         r = await client.get('/api/status', headers={
             'Host': 'admin.example.com', 'Origin': 'https://admin.example.com',
-            'Authorization': 'Bearer ' + token})
+            "Cookie": token})
         assert r.status_code == 200
 
 
@@ -574,13 +575,13 @@ async def test_admin_proxy_host_and_origin_together(env):
 async def test_admin_proxy_still_rejects_wrong_port_and_evil(env, headers):
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
         r = await client.get('/api/status', headers={
-            **headers, 'Authorization': 'Bearer ' + token})
+            **headers, "Cookie": token})
         assert r.status_code == 403
 
 
@@ -589,14 +590,14 @@ async def test_boundary_reject_is_structured_without_host_origin_path(env, caplo
     import logging
     from workspace_bridge.cli import parse_admin_allowed_hosts
     extra = parse_admin_allowed_hosts('admin.lan')
-    app = make_admin(env['service'], env['config']['admin_token_hash'], 8766,
+    app = make_admin(env['service'], 8766,
                      extra_hosts=extra)
-    token = (env['state'] / 'admin-token').read_text().strip()
+    token = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url='http://127.0.0.1:8766') as client:
         with caplog.at_level(logging.WARNING, logger="workspace_bridge.ops"):
             r = await client.get('/api/status', headers={
-                'Host': 'someone-else.example', 'Authorization': 'Bearer ' + token})
+                'Host': 'someone-else.example', "Cookie": token})
         assert r.status_code == 403
         lines = [rec.message for rec in caplog.records
                  if rec.name == "workspace_bridge.ops"]

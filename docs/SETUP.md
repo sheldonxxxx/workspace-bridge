@@ -73,16 +73,16 @@ subcommand:
 workspace-bridge --state "$HOME/.local/state/workspace-bridge" doctor --offline
 ```
 
-## 3. Tokens you will handle
+## 3. Credentials you will handle
 
-Four credentials appear in this guide. Creation, storage, and local reveal
-are distinct steps: reveal commands only read back a stored secret, they do
+The Manager uses an admin password; Node, adapter, and MCP access use tokens.
+Token creation, storage, and local reveal are distinct steps: reveal commands only read back a stored secret, they do
 not create it. Treat initial creation output as sensitive and local, and
 never paste tokens into chat, project files, or handoffs.
 
 | Token | Created / stored | How to reveal / enter locally |
 |---|---|---|
-| Bridge admin token | Created during `workspace-bridge init`, stored privately in Bridge state (`admin-token`) | Reveal locally with `workspace-bridge show-admin-token` (or inside the Bridge container with `--state /state`); enter at the browser login for the local Manager at `http://127.0.0.1:8766/`, exchanged for an HttpOnly session cookie |
+| Manager admin account | Username `admin`; temporary password `admin`; salted scrypt hash in private `admin-account.json` | Sign in locally and change the password on first login; recover with `workspace-bridge reset-admin-password` |
 | Node token | Created during `workspace-bridge node --state <node-state> init`, stored privately in Node state (`node-token`) | Reveal locally with `workspace-bridge node --state <node-state> show-token`; enter in the Manager Node form (or `POST /api/nodes`); stored in private Bridge SQLite (mode `0600`) |
 | Adapter runtime token | Created during `workspace-bridge adapter --state <adapter-state> init`, printed by `init` and stored privately in adapter state (`runtime-token`) | May be revealed locally again later with `workspace-bridge adapter --state <adapter-state> show-token`; enter in the Manager adapter form for the owning Node; stored in private Node SQLite (mode `0600`) |
 | Shared MCP gateway token | Created or rotated by the Manager or `POST /api/bridge {"operation":"rotate_token"}` while serving, or by `workspace-bridge rotate-bridge-token` while stopped; stored in Bridge state | Copy the displayed value locally into the tunnel environment file (mode `0600`) as the `X-Bridge-Token` header; never tunnel the Manager |
@@ -105,13 +105,7 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service
 workspace-bridge serve
 ```
 
-In another terminal in the same environment:
-
-```sh
-workspace-bridge show-admin-token
-```
-
-Open `http://127.0.0.1:8766/`, enter the admin token, and continue with
+Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password `admin`, change the password, and continue with
 section 6. Keep this terminal attached; stopping it stops the Bridge unless
 you install the Bridge as a persistent service per your OS policy (see
 [Operations](OPERATIONS.md)).
@@ -128,7 +122,6 @@ cd /path/to/workspace-bridge
 python3 scripts/configure_docker.py --mcp-port 8875 --admin-port 8766
 docker compose config --quiet
 docker compose up -d --build
-docker compose exec bridge workspace-bridge --state /state show-admin-token
 docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
@@ -221,8 +214,12 @@ against a user-owned state is rejected, never converted. See
 
 ## 7. Register Node, workspaces, adapters, routes
 
-Open the Manager with the admin token, or use the local admin API with
-`Authorization: Bearer <admin-token>`. Order matters:
+Sign in to the Manager with the admin account. Local API clients must POST
+`{"username":"admin","password":"<password>"}` as JSON to `/api/login`
+and keep the HttpOnly session cookie. A temporary-password session can only
+read `/api/account`, change the password through `/api/account/password`
+(with JSON `current_password` and `new_password`), or sign out. Bearer tokens
+are not accepted by the Manager. Order matters:
 
 1. **Node:** add the Node URL with its token. Native evaluation uses the
    loopback Node URL; container Bridge uses the host-reachable Node URL from

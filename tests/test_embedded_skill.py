@@ -139,7 +139,7 @@ async def test_server_discovery_advertises_skill_without_full_text(env, modern):
 
 async def test_skill_requires_bridge_auth_and_obeys_pause_and_rotation(env):
     assert (await rpc(env, token="invalid")).status_code == 401
-    admin_token = (env["state"] / "admin-token").read_text().strip()
+    admin_token = "admin"
     assert (await rpc(env, token=admin_token)).status_code == 401
     env["service"].manage_bridge("disable")
     assert (await rpc(env)).status_code == 401

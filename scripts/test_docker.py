@@ -7,6 +7,7 @@ An absent Docker engine is an error, not a passing/skipped runtime validation.
 """
 from __future__ import annotations
 import argparse
+import httpx
 import base64
 import json
 import os
@@ -55,8 +56,12 @@ def http(port: int, path: str, data=None, headers=None):
         with exc:return exc.code,exc.read()
 
 
-def verify_service(mcp: int, admin: int, parent: Path, admin_token: str):
-    admin_headers={'Authorization':'Bearer '+admin_token}
+def verify_service(mcp: int, admin: int, parent: Path):
+    with httpx.Client(base_url=f'http://127.0.0.1:{admin}', trust_env=False) as client:
+        assert client.post('/api/login',json={'username':'admin','password':'admin'}).status_code==200
+        changed=client.post('/api/account/password',json={'current_password':'admin','new_password':'docker-smoke-password'})
+        assert changed.status_code==200
+        admin_headers={'Cookie':'wb-session='+changed.cookies['wb-session']}
     def manage(path,data=None):
         status,body=http(admin,path,data,admin_headers)
         assert status in (200,201),(status,body.decode())
@@ -151,8 +156,8 @@ def main():
             compose('config','--quiet')
             build=[] if args.no_build else ['--build']
             compose('up','-d','bridge',*build,'--wait','--wait-timeout','180',timeout=900)
-            admin_token=compose('exec','-T','bridge','workspace-bridge','--state','/state','show-admin-token',capture=True).stdout.strip()
-            ids,token=verify_service(mp,ap,parent,admin_token)
+            ids,token=verify_service(mp,ap,parent)
+            account_before=(temp/'state'/'admin-account.json').read_bytes()
             cid=compose('ps','-q','bridge',capture=True).stdout.strip()
             inspection=json.loads(subprocess.check_output(['docker','inspect',cid],text=True))[0]
             assert inspection['Config']['User'].split(':')[0]!='0'
@@ -164,8 +169,9 @@ def main():
             git_version=compose('exec','-T','bridge','python','-c',git_check,capture=True).stdout.strip()
             assert git_version.startswith('git version '),git_version
             compose('up','-d','--force-recreate','--wait','--wait-timeout','180','bridge')
-            new_admin=compose('exec','-T','bridge','workspace-bridge','--state','/state','show-admin-token',capture=True).stdout.strip()
-            assert new_admin==admin_token
+            assert (temp/'state'/'admin-account.json').read_bytes()==account_before
+            with httpx.Client(base_url=f'http://127.0.0.1:{ap}',trust_env=False) as client:
+                assert client.post('/api/login',json={'username':'admin','password':'docker-smoke-password'}).status_code==200
             status,body=http(mp,'/mcp',{'jsonrpc':'2.0','id':2,'method':'tools/call',
                                'params':{'name':'list_workspaces','arguments':{}}},{'X-Bridge-Token':token})
             data=json.loads(json.loads(body)['result']['content'][0]['text'])

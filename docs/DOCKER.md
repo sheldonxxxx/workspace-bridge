@@ -48,7 +48,6 @@ python3 scripts/configure_docker.py \
 docker compose config --quiet
 docker compose up -d --build
 docker compose ps
-docker compose exec bridge workspace-bridge --state /state show-admin-token
 docker exec workspace-bridge workspace-bridge --state /state doctor
 ```
 
@@ -75,7 +74,7 @@ for a different **separate** state location. It does not overwrite an existing
 `.env`, change Node files, run Docker or enable mappings. Later, edit `.env`
 deliberately; rerunning the helper is not required.
 
-Open **http://127.0.0.1:8766/** and enter the admin token locally. Add each
+Open **http://127.0.0.1:8766/**, sign in as `admin` with temporary password `admin`, and choose a new password before continuing. Add each
 Node (its endpoint and write-only token), then register workspace roots that are
 canonical paths on that Node. Add AdapterInstances from the Node detail and
 configure exact execution routes. Node adapter tokens are stored in private Node
@@ -185,8 +184,9 @@ local host access, not for sidecar-to-bridge traffic.
 
 Credentials are obtained/generated in the local manager and supplied to the host
 tunnel using the existing setup guide. They are not image build arguments or
-Compose environment variables. The container's admin token is available with the
-explicit `exec ... show-admin-token` command, never printed in startup logs.
+Compose environment variables. The Manager starts with account `admin` and
+temporary password `admin`; first login requires a new password. For recovery,
+run `docker compose exec bridge workspace-bridge --state /state reset-admin-password`.
 
 ## Native Node (macOS launchd / Linux systemd system service)
 

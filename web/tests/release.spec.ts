@@ -13,6 +13,17 @@ function builtManagerRelease() {
 async function mockRelease(page: any, managerRelease: any) {
   await page.route("**/api/**", async (route: any) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/account") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          username: "admin",
+          must_change_password: false,
+        }),
+      });
+      return;
+    }
     if (url.pathname === "/api/status") {
       await route.fulfill({
         status: 200,

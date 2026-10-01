@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse, Response, FileResponse
 from starlette.routing import Route
 
 from . import __version__
+from .admin_account import AdminAccount
 from .media import ImageReadResult
 from .embedded_skill import SKILL_TOOL
 from .protocol import LEGACY, VERSIONS, PREFIX, validate as validate_protocol
@@ -650,6 +651,7 @@ class AdminSessionStore:
 
     def __init__(self, _clock=None):
         self._sessions: dict[str, float] = {}
+        self._revisions: dict[str, str] = {}
         self._clock = _clock or time.monotonic
 
     def _cleanup(self):
@@ -657,25 +659,29 @@ class AdminSessionStore:
         expired = [k for k, v in self._sessions.items() if v <= now]
         for k in expired:
             del self._sessions[k]
+            self._revisions.pop(k, None)
 
-    def create(self) -> str:
+    def create(self, revision: str = "") -> str:
         """Create a new session; return the raw secret (for Set-Cookie only)."""
         self._cleanup()
         if len(self._sessions) >= self.MAX_SESSIONS:
             oldest_key = min(self._sessions, key=self._sessions.get)
             del self._sessions[oldest_key]
+            self._revisions.pop(oldest_key, None)
         secret = secrets.token_urlsafe(32)
-        self._sessions[digest(secret.encode())] = self._clock() + self.SESSION_TTL_SECONDS
+        key = digest(secret.encode())
+        self._sessions[key] = self._clock() + self.SESSION_TTL_SECONDS
+        self._revisions[key] = revision
         return secret
 
-    def validate(self, secret: str) -> bool:
+    def validate(self, secret: str, revision: str = "") -> bool:
         """Return True if the session is valid and not expired."""
         if not secret:
             return False
         self._cleanup()
         key = digest(secret.encode())
         expiry = self._sessions.get(key)
-        if expiry is None:
+        if expiry is None or self._revisions.get(key) != revision:
             return False
         if self._clock() >= expiry:
             del self._sessions[key]
@@ -687,6 +693,7 @@ class AdminSessionStore:
         if secret:
             key = digest(secret.encode())
             self._sessions.pop(key, None)
+            self._revisions.pop(key, None)
 
     @property
     def count(self) -> int:
@@ -706,12 +713,16 @@ def _parse_cookie(request: Request, name: str) -> str:
     return ""
 
 
-def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
+def make_admin(service: Service, port: int = 8766, *,
                public_port: int | None = None, public_mcp_port: int | None = None,
                container_mode: bool = False,
                extra_hosts: tuple[str, ...] = ()):
     static = Path(__file__).parent / "static"
     sessions = AdminSessionStore()
+    account_store = AdminAccount(service.state)
+    account_store.ensure()
+    login_failures: list[float] = []
+    auth_lock = asyncio.Lock()
     listen_mode = "docker-published-loopback" if container_mode else "loopback"
     if extra_hosts:
         listen_mode += "+remote-admin"
@@ -724,19 +735,37 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         if not target.is_relative_to(root) or not target.is_file():
             return Response(status_code=404)
         return FileResponse(target)
-    def _bearer_valid(request: Request) -> bool:
-        auth = request.headers.get("authorization", "")
-        return auth.startswith("Bearer ") and secrets.compare_digest(admin_hash, digest(auth[7:].encode()))
-    async def login(request: Request):
-        if not _bearer_valid(request):
-            return JSONResponse({"error": "Admin token required"}, 401)
-        secret = sessions.create()
-        response = JSONResponse({"status": "ok"})
-        response.set_cookie(
-            AdminSessionStore.COOKIE_NAME, secret,
-            httponly=True, samesite="strict", path="/api",
-        )
+    def session_response(account):
+        secret = sessions.create(account["revision"])
+        response = JSONResponse({"status": "ok", "username": "admin",
+                                 "must_change_password": account["must_change_password"]})
+        response.set_cookie(AdminSessionStore.COOKIE_NAME, secret,
+                            httponly=True, samesite="strict", path="/api",
+                            max_age=AdminSessionStore.SESSION_TTL_SECONDS)
         return response
+
+    async def login(request: Request):
+        async with auth_lock:
+            now = time.monotonic()
+            login_failures[:] = [t for t in login_failures if t > now - 60]
+            if len(login_failures) >= 5:
+                return JSONResponse({"error": "Too many attempts. Try again in one minute."}, 429,
+                                    headers={"Retry-After": "60"})
+            try:
+                data = await body_json(request, max_bytes=2048)
+                if (not isinstance(data, dict) or set(data) != {"username", "password"}
+                        or not isinstance(data["username"], str) or not isinstance(data["password"], str)
+                        or len(data["username"]) > 64 or len(data["password"]) > 256):
+                    raise BridgeError("Invalid sign-in request")
+            except (BridgeError, TimeoutError):
+                return JSONResponse({"error": "Username and password required"}, 401)
+            account = await run_in_threadpool(account_store.read)
+            password_ok = await run_in_threadpool(account_store.verify, account, data["password"])
+            if data["username"] != "admin" or not password_ok:
+                login_failures.append(now)
+                return JSONResponse({"error": "Incorrect username or password"}, 401)
+            login_failures.clear()
+            return session_response(account)
     async def logout(request: Request):
         cookie_value = _parse_cookie(request, AdminSessionStore.COOKIE_NAME)
         if cookie_value:
@@ -748,11 +777,31 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
         path = request.url.path
         if path in ("/api/login", "/api/logout"):
             return JSONResponse({"error": "Method not allowed here"}, 405)
-        bearer_ok = _bearer_valid(request)
-        cookie_ok = sessions.validate(_parse_cookie(request, AdminSessionStore.COOKIE_NAME))
-        if not bearer_ok and not cookie_ok:
-            return JSONResponse({"error": "Admin token required"}, 401)
+        account = await run_in_threadpool(account_store.read)
+        cookie_ok = sessions.validate(_parse_cookie(request, AdminSessionStore.COOKIE_NAME), account["revision"])
+        if not cookie_ok:
+            return JSONResponse({"error": "Admin sign-in required"}, 401)
         try:
+            if path == "/api/account":
+                if request.method != "GET":
+                    return JSONResponse({"error": "Method not allowed"}, 405)
+                return JSONResponse({"username": "admin", "must_change_password": account["must_change_password"]})
+            if path == "/api/account/password":
+                if request.method != "POST":
+                    return JSONResponse({"error": "Method not allowed"}, 405)
+                data = await body_json(request, max_bytes=4096)
+                if (not isinstance(data, dict) or set(data) != {"current_password", "new_password"}
+                        or not isinstance(data["current_password"], str)
+                        or not isinstance(data["new_password"], str)
+                        or len(data["current_password"]) > 256):
+                    raise BridgeError("Invalid password change request")
+                async with auth_lock:
+                    changed = await run_in_threadpool(account_store.change, data["current_password"],
+                                                     data["new_password"], account["revision"])
+                return session_response(changed)
+            if account["must_change_password"]:
+                return JSONResponse({"error": "Change your temporary password before using the Manager",
+                                     "code": "password_change_required"}, 403)
             if path == "/api/diagnostics":
                 if request.method != "GET":
                     return JSONResponse({"error": "Method not allowed"}, 405)
@@ -1100,6 +1149,8 @@ def make_admin(service: Service, admin_hash: str, port: int = 8766, *,
     app = Starlette(routes=[Route("/", home), Route("/static/dist/{path:path}", built_asset),
         Route("/api/login", login, methods=["POST"]),
         Route("/api/logout", logout, methods=["POST"]),
+        Route("/api/account", api),
+        Route("/api/account/password", api, methods=["POST"]),
         Route("/api/status", api), Route("/api/diagnostics", api), Route("/api/events", api),
         Route("/api/system/versions", api),
         Route("/api/runs", api),

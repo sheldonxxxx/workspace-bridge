@@ -1,5 +1,6 @@
 """Diagnostics and schema checks for exact workspace/adapter routes."""
 from __future__ import annotations
+from admin_helpers import admin_cookie
 
 import json
 import sqlite3
@@ -201,9 +202,9 @@ def test_adapter_connection_revision_and_blank_token_update(diagnostic_env):
 @pytest.mark.asyncio
 async def test_adapter_admin_crud_is_strict_and_never_reads_back_token(diagnostic_env):
     service = diagnostic_env["service"]
-    app = make_admin(service, service.config["admin_token_hash"])
-    token = (service.state / "admin-token").read_text().strip()
-    headers = {"Authorization": f"Bearer {token}"}
+    app = make_admin(service)
+    token = admin_cookie(app)
+    headers = {"Cookie": token}
     payload = {"node_id": diagnostic_env["node_id"],
                "name": "Local Codex", "runtime_type": "codex",
                "base_url": "http://127.0.0.1:9876", "token": "secret-for-test"}

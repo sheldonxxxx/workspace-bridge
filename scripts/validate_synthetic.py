@@ -42,20 +42,22 @@ with tempfile.TemporaryDirectory(prefix='workspace-bridge-v05-') as tmp:
         ids[name]=service.add_workspace(name,str(root),[])['workspace']['id']
         service.manage_workspace(ids[name],'enable')
     token=service.manage_bridge('rotate_token')['token']
-    admin_token=(state/'admin-token').read_text().strip()
+    admin_password='synthetic-admin-password'
     service.close()
     serverlog=tmp/'server.log'
     with serverlog.open('w') as output:
         proc=subprocess.Popen([sys.executable,'-m','workspace_bridge.cli','--state',str(state),'serve'],cwd=PROJECT,stdout=output,stderr=output,env={**os.environ,'PYTHONPATH':str(PROJECT)})
         try:
             client=httpx.Client(base_url=f'http://127.0.0.1:{mp}',trust_env=False,timeout=20)
-            admin=httpx.Client(base_url=f'http://127.0.0.1:{ap}',trust_env=False,headers={'Authorization':'Bearer '+admin_token},timeout=20)
+            admin=httpx.Client(base_url=f'http://127.0.0.1:{ap}',trust_env=False,timeout=20)
             for _ in range(100):
                 try:
                     if admin.get('/').status_code==200: break
                 except httpx.TransportError: pass
                 time.sleep(.05)
             else: raise RuntimeError('local server did not become ready')
+            assert admin.post('/api/login',json={'username':'admin','password':'admin'}).status_code==200
+            assert admin.post('/api/account/password',json={'current_password':'admin','new_password':admin_password}).status_code==200
             seq=0
             def raw(name,args={},key=None):
                 global seq
@@ -188,7 +190,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-bridge-v05-') as tmp:
                         }
                     }''')
                     page.add_script_tag(content=admin.get('/static/app.js').text)
-                    page.locator('#admin-token').fill(admin_token)
+                    page.locator('#admin-password').fill(admin_password)
                     page.locator('#login-form button').click()
                     page.locator('#dashboard').wait_for(state='visible')
                     assert page.locator('#workspace-count').inner_text()=='2'
@@ -196,7 +198,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-bridge-v05-') as tmp:
                     page.locator('#bridge-profile').click()
                     profile=page.locator('#output').inner_text()
                     assert profile.count('channel: main')==1 and 'X-Bridge-Token' in profile and '/mcp/ws_' not in profile
-                    assert token not in profile and admin_token not in profile
+                    assert token not in profile and admin_password not in profile
                     page.locator('#close-output').click()
                     page.locator('#bridge-pause').click()
                     page.wait_for_function("document.querySelector('#bridge-status').textContent === 'Paused'")

@@ -1,5 +1,6 @@
 """One coordinator drives a conforming adapter without native runtime types."""
 from __future__ import annotations
+from admin_helpers import admin_cookie
 
 import json
 import threading
@@ -257,9 +258,9 @@ def test_diagnostics_ignores_profile_revision_drift(modern_env):
 @pytest.mark.asyncio
 async def test_admin_prepared_handoff_start_is_strict_and_idempotent(modern_env):
     service, ws_id, _, job, _, _ = modern_env
-    app = make_admin(service, service.config["admin_token_hash"])
-    token = (service.state / "admin-token").read_text().strip()
-    headers = {"Authorization": f"Bearer {token}"}
+    app = make_admin(service)
+    token = admin_cookie(app)
+    headers = {"Cookie": token}
     path = f"/api/workspaces/{ws_id}/jobs/{job['id']}/runs"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
@@ -297,7 +298,7 @@ async def test_admin_prepared_handoff_start_is_strict_and_idempotent(modern_env)
 @pytest.mark.asyncio
 async def test_custom_profile_manager_routes_require_admin(modern_env):
     service, _, _, _, _, _ = modern_env
-    app = make_admin(service, service.config["admin_token_hash"])
+    app = make_admin(service)
     config = {"permissions": ":workspace", "approvalPolicy": "on-request",
               "approvalsReviewer": "user"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
@@ -305,8 +306,8 @@ async def test_custom_profile_manager_routes_require_admin(modern_env):
         assert (await client.post(f"/api/adapters/{ADAPTER_ID}/profiles", json={
             "id": "custom", "config": config,
             "expected_revision": None})).status_code == 401
-        token = (service.state / "admin-token").read_text().strip()
-        headers = {"Authorization": "Bearer " + token}
+        token = admin_cookie(app)
+        headers = {"Cookie": token}
         created = await client.post(f"/api/adapters/{ADAPTER_ID}/profiles", json={
             "id": "custom", "config": config,
             "expected_revision": None}, headers=headers)
@@ -335,9 +336,9 @@ async def test_codex_profile_catalog_api_uses_exact_workspace_context(modern_env
     profile = service.run_coordinator.save_profile(ADAPTER_ID, "project-access", {
         "permissions": "project-only", "approvalPolicy": "on-request",
         "approvalsReviewer": "user"}, None)
-    app = make_admin(service, service.config["admin_token_hash"])
-    token = (service.state / "admin-token").read_text().strip()
-    headers = {"Authorization": "Bearer " + token}
+    app = make_admin(service)
+    token = admin_cookie(app)
+    headers = {"Cookie": token}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
         first_response = await client.get(

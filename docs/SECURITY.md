@@ -81,7 +81,7 @@ The SQLite quota is a preventive allocation gate, not an OS disk quota; WAL/jour
 
 ## Deployment rule
 
-Never tunnel the admin listener. Never use an admin token as a bridge token. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus their handoff directories. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
+Never tunnel the admin listener. Admin passwords and browser sessions never authorize MCP requests. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus their handoff directories. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
 
 The admin listener is loopback-only by default. Setting `WB_ADMIN_ALLOWED_HOSTS`
 (admin only; MCP is unaffected) is the sole opt-in remote-admin path: a
@@ -89,7 +89,7 @@ comma-separated list of bare hostnames/IPs (no ports, schemes or wildcards)
 that widens only the admin listener to `0.0.0.0` and allows those `Host` values
 (`http` + `https` origins). Empty (default) keeps loopback-only and fails
 closed on invalid values. Prefer SSH port-forwarding or VPN; plain HTTP bears
-the admin token in clear, so use TLS termination and firewall rules when remote
+admin credentials in clear, so use TLS termination and firewall rules when remote
 is unavoidable. Docker additionally requires republishing the admin host port
 beyond `127.0.0.1` to reach LAN.
 

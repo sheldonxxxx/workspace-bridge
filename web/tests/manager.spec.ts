@@ -470,6 +470,10 @@ async function mockApi(
         : (request.postDataJSON() as Record<string, unknown>);
     calls.push({ path, method, body });
 
+    if (path === "/api/account") {
+      await respond(route, { username: "admin", must_change_password: false });
+      return;
+    }
     if (path === "/api/status") {
       await respond(route, {
         version: "0.1.0",
@@ -1461,4 +1465,127 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(page.getByText(/Local Mac · rev node-run-rev/)).toBeVisible();
   await expect(page.getByText("Token usage")).toBeVisible();
   await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
+});
+
+test("admin login requires a password change and supports later changes", async ({
+  page,
+}) => {
+  let signedIn = false;
+  let mustChange = true;
+  let password = "admin";
+  await page.route("**/api/account", async (route) => {
+    await route.fulfill({
+      status: signedIn ? 200 : 401,
+      contentType: "application/json",
+      body: JSON.stringify(
+        signedIn
+          ? { username: "admin", must_change_password: mustChange }
+          : { error: "Admin sign-in required" },
+      ),
+    });
+  });
+  await page.route("**/api/login", async (route) => {
+    const body = route.request().postDataJSON();
+    signedIn = body.username === "admin" && body.password === password;
+    await route.fulfill({
+      status: signedIn ? 200 : 401,
+      contentType: "application/json",
+      body: JSON.stringify(
+        signedIn
+          ? { must_change_password: mustChange }
+          : { error: "Incorrect username or password" },
+      ),
+    });
+  });
+  await page.route("**/api/account/password", async (route) => {
+    const body = route.request().postDataJSON();
+    expect(body.current_password).toBe(password);
+    password = body.new_password;
+    mustChange = false;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ must_change_password: false }),
+    });
+  });
+  await page.route("**/api/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: "0.1.1",
+        bridge: { configured: false, enabled: false },
+        nodes: [],
+        adapters: { adapters: [] },
+      }),
+    }),
+  );
+  await page.route("**/api/diagnostics*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ checks: [], runnable_routes: [] }),
+    }),
+  );
+  await page.route("**/api/workspaces", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ workspaces: [] }),
+    }),
+  );
+  await page.route("**/api/events", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ events: [] }),
+    }),
+  );
+  await page.route("**/api/runs", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ runs: [] }),
+    }),
+  );
+  await page.goto("/static/dist/");
+  await page.getByLabel("Password", { exact: true }).fill("wrong");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "Incorrect username or password",
+  );
+  await page.getByLabel("Password", { exact: true }).fill("admin");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Replace the temporary password" }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Replace the temporary password" }),
+  ).toBeVisible();
+  await page.getByLabel("Current password", { exact: true }).fill("admin");
+  await page
+    .getByLabel("New password", { exact: true })
+    .fill("browser-password");
+  await page
+    .getByLabel("Confirm new password", { exact: true })
+    .fill("different-password");
+  await page.getByRole("button", { name: "Save password" }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "New passwords do not match.",
+  );
+  await page
+    .getByLabel("Confirm new password", { exact: true })
+    .fill("browser-password");
+  await page.getByRole("button", { name: "Save password" }).click();
+  await page
+    .getByRole("button", { name: "Change password", exact: true })
+    .click();
+  await page
+    .getByLabel("Current password", { exact: true })
+    .fill("browser-password");
+  await page
+    .getByLabel("New password", { exact: true })
+    .fill("changed-again-password");
+  await page
+    .getByLabel("Confirm new password", { exact: true })
+    .fill("changed-again-password");
+  await page.getByRole("button", { name: "Save password" }).click();
+  await expect(
+    page.getByRole("button", { name: "Change password", exact: true }),
+  ).toBeVisible();
 });

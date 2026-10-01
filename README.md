@@ -117,11 +117,10 @@ Then in another terminal, display the tokens you will register (output stays
 in this terminal; never paste it into chat):
 
 ```sh
-workspace-bridge show-admin-token
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
 ```
 
-Open `http://127.0.0.1:8766/`, enter the admin token, add and register the
+Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password `admin`, change the password, add and register the
 Node with its URL plus Node token FIRST, then add one workspace mapping,
 create the shared gateway credential, and enable the project. Adapter setup
 is optional for browsing and manual handoffs and is required only for

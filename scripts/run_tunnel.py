@@ -38,7 +38,7 @@ def main() -> int:
     try:
         for key, label in (
             ("CONTROL_PLANE_API_KEY", "OpenAI tunnel runtime key"),
-            ("WORKSPACE_BRIDGE_TOKEN", "Shared bridge token (not the admin token)"),
+            ("WORKSPACE_BRIDGE_TOKEN", "Shared bridge token (MCP gateway credential)"),
         ):
             value = env.get(key) or getpass.getpass(label + ": ")
             if not value or "\n" in value or "\r" in value:

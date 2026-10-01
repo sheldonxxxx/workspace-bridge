@@ -1,3 +1,4 @@
+from admin_helpers import admin_cookie
 """The manual-return contract and non-destructive removal of snapshot review."""
 from pathlib import Path
 import json
@@ -171,9 +172,10 @@ def test_skill_and_discovery_describe_manual_return_not_retired_tools():
 
 async def test_manager_only_offers_planning_documents(env, payload):
     job = publish(env, payload)
-    token = (env['state']/'admin-token').read_text().strip()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_admin(env['service'],env['config']['admin_token_hash'])),
-                                base_url='http://127.0.0.1:8766', headers={'Authorization':'Bearer '+token}) as c:
+    app = make_admin(env['service'])
+    token = admin_cookie(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                base_url='http://127.0.0.1:8766', headers={"Cookie": token}) as c:
         js = (__import__('pathlib').Path(__file__).resolve().parents[1] / 'web' / 'src' / 'App.tsx').read_text()
         html = (await c.get('/')).text
         assert 'Agent result' not in js and 'Reported tests' not in js

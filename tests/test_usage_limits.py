@@ -1,3 +1,4 @@
+from admin_helpers import admin_cookie
 """Account usage-limits visibility: native normalization, Node/Bridge path,
 Manager API route, and Discord enrichment.
 
@@ -401,12 +402,12 @@ def test_service_usage_limits_and_admin_api_route(env, tmp_path):
         import httpx
 
         async def fetch():
-            app = make_admin(service, service.config["admin_token_hash"])
+            app = make_admin(service)
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://127.0.0.1:8766") as client:
-                token = (env["state"] / "admin-token").read_text().strip()
-                headers = {"Authorization": "Bearer " + token}
+                token = admin_cookie(app)
+                headers = {"Cookie": token}
                 unauth = await client.get(f"/api/adapters/{adapter_id}/usage-limits")
                 ok = await client.get(f"/api/adapters/{adapter_id}/usage-limits",
                                       headers=headers)
@@ -431,13 +432,13 @@ def test_admin_usage_limits_unsupported_and_disabled(env):
     import httpx
 
     async def fetch(adapter_id):
-        app = make_admin(service, service.config["admin_token_hash"])
+        app = make_admin(service)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://127.0.0.1:8766") as client:
-            token = (env["state"] / "admin-token").read_text().strip()
+            token = admin_cookie(app)
             return await client.get(f"/api/adapters/{adapter_id}/usage-limits",
-                                    headers={"Authorization": "Bearer " + token})
+                                    headers={"Cookie": token})
     # Disabled adapter fails cleanly, not as an unhealthy probe.
     disabled = service.adapter_registry.create({
         "name": "Disabled quota", "runtime_type": "codex",

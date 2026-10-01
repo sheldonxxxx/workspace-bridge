@@ -36,14 +36,14 @@ with tempfile.TemporaryDirectory(prefix='wb-container-entry-') as tmp:
     if check():break
     time.sleep(.1)
    else:raise RuntimeError('entrypoint did not start')
-   admin=(state/'admin-token').read_text().strip()
-   ids,token=verify_service(8765,8766,parent,admin)
+   ids,token=verify_service(8765,8766,parent)
+   account_before=(state/'admin-account.json').read_bytes()
    proc.terminate();proc.wait(timeout=15)
    proc=start()
    for _ in range(150):
     if check():break
     time.sleep(.1)
-   assert (state/'admin-token').read_text().strip()==admin
+   assert (state/'admin-account.json').read_bytes()==account_before
    status,body=http(8765,'/mcp',{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'list_workspaces','arguments':{}}},{'X-Bridge-Token':token})
    data=json.loads(json.loads(body)['result']['content'][0]['text'])
    assert status==200 and {i['workspace_id'] for i in data['workspaces']}==set(ids)

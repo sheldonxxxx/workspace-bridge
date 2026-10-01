@@ -8,7 +8,7 @@ architecture see [Architecture](ARCHITECTURE.md).
 ## State, secrets, backups
 
 Default Bridge state is `$HOME/.local/state/workspace-bridge` (mode `0700`).
-Configuration, SQLite database, and the admin-token file are private;
+Configuration, SQLite database, and the salted admin password file (`admin-account.json`) are private;
 `bridge.sqlite3` is mode `0600`. Node connection tokens are stored in
 private Bridge SQLite and runtime adapter tokens in private Node SQLite.
 Normal Manager APIs return only whether a token exists, and tokens are
@@ -47,11 +47,30 @@ via `workspace-bridge rotate-bridge-token` while stopped. It generates a new
 token, enables the gateway, and does not enable disabled mappings. Update
 the one tunnel environment and restart its process.
 
-There is no admin-token rotation button. For a compromised admin secret,
-stop the daemon and perform a reviewed local credential rotation or
-initialize fresh private state; do not keep exposing projects with a
-compromised local administrator account. Fresh state does not import old
-mappings or handoffs automatically.
+Use **Change password** in the Manager to update the admin account. Enter the
+current password and a different new password of 8 to 256 characters. The
+current browser receives a new session; every other session is invalidated.
+Browser sessions expire after eight hours and do not survive service restart.
+
+If the password is lost, run this on the Bridge host with the service user's
+private state directory (the Manager may remain running):
+
+```sh
+workspace-bridge --state "$HOME/.local/state/workspace-bridge" reset-admin-password
+```
+
+For Docker, use `docker compose exec bridge workspace-bridge --state /state
+reset-admin-password`. Recovery resets the account to username `admin` and
+temporary password `admin`, revokes existing sessions, and requires another
+password change on first login. It preserves mappings, run history, and MCP,
+Node, and adapter tokens.
+
+Fresh state and upgraded token-login state bootstrap this same temporary
+account. Upgrade creates `admin-account.json` on first Manager startup; old
+`admin-token` files and configuration hashes are preserved,
+but no longer authenticate the Manager. Complete the first-login password
+change promptly. Passwords are stored only as salted scrypt hashes; normal
+APIs never return them. Failed sign-ins are limited to five per minute.
 
 ## Root replacement and moving projects
 

@@ -1,3 +1,4 @@
+from admin_helpers import admin_cookie
 import asyncio
 import json
 from pathlib import Path
@@ -97,12 +98,13 @@ async def test_bridge_pause_resume_rotation_and_old_header_rejection(env):
 
 
 async def test_admin_and_bridge_credentials_are_not_interchangeable(env):
-    admin = (env["state"] / "admin-token").read_text().strip()
+    app = make_admin(env["service"])
+    admin = admin_cookie(app)
     assert (await request(env, "list_workspaces", token=admin)).status_code == 401
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_admin(env["service"], env["config"]["admin_token_hash"])),
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as c:
         assert (await c.get("/api/bridge", headers={"Authorization": "Bearer " + env["token"]})).status_code == 401
-        c.headers["Authorization"] = "Bearer " + admin
+        c.headers["Cookie"] = admin
         result = (await c.post("/api/bridge", json={"operation": "rotate_token"})).json()
         assert result["bridge"]["endpoint"] == "/mcp" and result["token"]
         assert "token" not in (await c.get("/api/bridge")).json()

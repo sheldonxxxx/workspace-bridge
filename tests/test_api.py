@@ -1,3 +1,4 @@
+from admin_helpers import admin_cookie
 import json
 import time
 import httpx
@@ -71,7 +72,7 @@ async def test_notifications_no_write_and_invalid_batch(env, mcp):
         assert r.json()["error"]["code"] == -32700
 
 async def test_admin_auth_policy_and_mapping(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
+    app = make_admin(env["service"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.get("/"); assert r.status_code == 200 and "frame-ancestors 'none'" in r.headers["content-security-policy"]
         csp = r.headers["content-security-policy"]
@@ -87,8 +88,8 @@ async def test_admin_auth_policy_and_mapping(env):
         assert (await c.get('/static/app.js')).status_code == 404
         assert (await c.get("/api/workspaces")).status_code == 401
         assert (await c.get("/api/diagnostics")).status_code == 401
-        token = (env["state"] / "admin-token").read_text().strip()
-        c.headers["Authorization"] = "Bearer " + token
+        token = "admin"
+        c.headers["Cookie"] = admin_cookie(app)
         assert (await c.get("/api/workspaces")).status_code == 200
         diagnostics = await c.get("/api/diagnostics")
         assert diagnostics.status_code == 200
@@ -105,7 +106,7 @@ async def test_admin_auth_policy_and_mapping(env):
         assert (await c.get("/mcp")).status_code == 404
 
 async def test_workspace_token_is_not_admin_token(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
+    app = make_admin(env["service"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         assert (await c.get("/api/workspaces", headers={"Authorization":"Bearer "+env["token"]})).status_code == 401
 
@@ -137,10 +138,10 @@ async def test_non_string_tool_name_is_protocol_error(env, mcp, name):
 
 
 async def test_admin_login_and_session_cookie(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
-    token = (env["state"] / "admin-token").read_text().strip()
+    app = make_admin(env["service"])
+    token = "admin"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
-        r = await c.post("/api/login", headers={"Authorization": "Bearer " + token})
+        r = await c.post("/api/login", json={"username": "admin", "password": token})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
         cookies = r.cookies
@@ -151,42 +152,49 @@ async def test_admin_login_and_session_cookie(env):
         assert "path=/api" in cookie_header
         assert "token" not in r.json()
         assert "secret" not in r.json()
-        r2 = await c.get("/api/status", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
+        assert r.json()["must_change_password"] is True
+        assert (await c.get("/api/status")).status_code == 403
+        assert (await c.get("/api/workspaces")).status_code == 403
+        changed = await c.post("/api/account/password", json={"current_password": "admin", "new_password": "new-admin-password"})
+        assert changed.status_code == 200
+        assert changed.json()["must_change_password"] is False
+        assert (await c.get("/api/status", headers={"Cookie": f"wb-session={cookies['wb-session']}"})).status_code == 401
+        r2 = await c.get("/api/status")
         assert r2.status_code == 200
         assert r2.json()["version"]
-        r3 = await c.get("/api/workspaces", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
+        r3 = await c.get("/api/workspaces")
         assert r3.status_code == 200
 
 
 async def test_admin_login_rejects_bridge_token(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
+    app = make_admin(env["service"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.post("/api/login", headers={"Authorization": "Bearer " + env["token"]})
         assert r.status_code == 401
 
 
 async def test_admin_login_rejects_no_auth(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
+    app = make_admin(env["service"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.post("/api/login")
         assert r.status_code == 401
 
 
 async def test_admin_login_rejects_session_cookie_only(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
-    token = (env["state"] / "admin-token").read_text().strip()
+    app = make_admin(env["service"])
+    token = "admin"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
-        r = await c.post("/api/login", headers={"Authorization": "Bearer " + token})
+        r = await c.post("/api/login", json={"username": "admin", "password": token})
         cookies = r.cookies
         r2 = await c.post("/api/login", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
         assert r2.status_code == 401
 
 
 async def test_admin_logout_invalidates_session(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
-    token = (env["state"] / "admin-token").read_text().strip()
+    app = make_admin(env["service"])
+    token = "admin"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
-        r = await c.post("/api/login", headers={"Authorization": "Bearer " + token})
+        r = await c.post("/api/login", json={"username": "admin", "password": token})
         cookies = r.cookies
         r2 = await c.post("/api/logout", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
         assert r2.status_code == 200
@@ -198,10 +206,10 @@ async def test_admin_logout_invalidates_session(env):
 
 
 async def test_admin_expired_session_is_401(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
-    token = (env["state"] / "admin-token").read_text().strip()
+    app = make_admin(env["service"])
+    token = "admin"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
-        r = await c.post("/api/login", headers={"Authorization": "Bearer " + token})
+        r = await c.post("/api/login", json={"username": "admin", "password": token})
         cookies = r.cookies
         await c.post("/api/logout", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
         r2 = await c.get("/api/status", headers={"Cookie": f"wb-session={cookies['wb-session']}"})
@@ -237,19 +245,18 @@ async def test_admin_session_cleanup_removes_expired_entries():
 
 
 async def test_admin_unknown_session_cookie_is_401(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
+    app = make_admin(env["service"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.get("/api/status", headers={"Cookie": "wb-session=invalid-session-value"})
         assert r.status_code == 401
 
 
-async def test_admin_bearer_still_works(env):
-    app = make_admin(env["service"], env["config"]["admin_token_hash"])
-    token = (env["state"] / "admin-token").read_text().strip()
+async def test_admin_bearer_is_rejected(env):
+    app = make_admin(env["service"])
+    token = "admin"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8766") as c:
         r = await c.get("/api/status", headers={"Authorization": "Bearer " + token})
-        assert r.status_code == 200
-        assert r.json()["version"]
+        assert r.status_code == 401
 
 
 async def test_admin_session_bounded_count(env):

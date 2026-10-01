@@ -82,7 +82,7 @@ def main():
         raise SystemExit(1) from None
     print(f'Created {output}. No Docker command was run and no workspace was enabled.')
     print('Next: docker compose config --quiet && docker compose up -d --build')
-    print('Admin token: docker compose exec bridge workspace-bridge --state /state show-admin-token')
+    print('Manager: sign in as admin with temporary password admin; change it on first login.')
 
 
 if __name__ == '__main__':

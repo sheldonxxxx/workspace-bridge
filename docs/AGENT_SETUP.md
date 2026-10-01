@@ -7,7 +7,7 @@ local host safely and knows exactly when it cannot proceed automatically.
 Rules that override everything below:
 
 - Never print, copy, or expose secrets into chat. Tokens stay in local files
-  and local commands only. Refer to them as `<admin-token>`,
+  and local commands only. Refer to them as `<admin-password>`,
   `<gateway-token>`, `<node-token>`, `<adapter-token>` when talking to the
   user.
 - Never invent URLs, versions, ports, paths, or validation claims. Use the
@@ -145,8 +145,8 @@ one-time runtime token on stdout, so the agent MUST redirect that stdout to
 `/dev/null` (the token remains safe in the state's private `runtime-token`
 file; only a non-secret stderr note stays visible). The user later runs
 `show-token` locally for Manager entry. Bridge `init` and Node `init` print
-no tokens and may run normally; `show-admin-token` and every `show-token`
-remain user/manual steps the agent never executes.
+no tokens and may run normally; every `show-token` command
+remains a user/manual step the agent never executes.
 
 ```sh
 workspace-bridge init
@@ -192,7 +192,7 @@ Stop/ask before proceeding when any of these appear:
 - macOS privacy (TCC) prompts for Files & Folders or external storage: tell
   the user which executable or interpreter needs access and wait for them to
   grant it in System Settings. Do not automate or bypass the prompt.
-- Token display or entry (`show-admin-token`, `show-token`, Manager login,
+- Password or token entry (`show-token`, Manager login,
   Node/adapter forms): the user performs the copy or entry. The agent never
   reads a token aloud into chat.
 - Firewall or non-loopback decisions (`--host 0.0.0.0`,
@@ -216,8 +216,9 @@ escalated privilege.
 The agent cannot log into the Manager for the user. Hand over with exact
 steps:
 
-1. User runs `workspace-bridge show-admin-token` locally and opens
-   `http://127.0.0.1:8766/`.
+1. User opens `http://127.0.0.1:8766/`, signs in as `admin` with temporary
+   password `admin`, and changes the password before using the Manager. If
+   they lose it later, `workspace-bridge reset-admin-password` is local recovery.
 2. User adds the Node URL plus `<node-token>`.
 3. User adds one workspace mapping per canonical Node-local root, enables
    it, and sets write scope (`handoff` default).

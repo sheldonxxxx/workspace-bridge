@@ -17,6 +17,7 @@ For runtime behavior see [Runtimes](../docs/RUNTIMES.md); for repo checks
 see [Contributing](../CONTRIBUTING.md). Run `npm run build` after UI
 changes so the packaged assets stay current.
 
-Do not put the admin token in frontend storage or source. The login form
-exchanges it for an HttpOnly same-origin session cookie. Show all untrusted
+Do not put the admin password in frontend storage or source. The login form
+exchanges the username and password for an HttpOnly same-origin session cookie.
+Temporary passwords must be changed before Manager access. Show all untrusted
 run, transcript, and path data as text.

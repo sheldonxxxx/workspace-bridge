@@ -46,7 +46,7 @@ def bootstrap(state: Path) -> dict:
             if config_path.is_symlink() or any(p.name != 'bootstrap.lock' for p in state.iterdir()):
                 raise BridgeError("Missing config in nonempty state; restore a backup or use fresh private state")
             initialize(state, INTERNAL_MCP_PORT, INTERNAL_ADMIN_PORT)
-            print("Initialized fresh Docker state. No workspace is enabled. Retrieve the admin token with docker compose exec.", flush=True)
+            print("Initialized fresh Docker state. No workspace is enabled. Sign in as admin with temporary password admin; change it on first login.", flush=True)
         config = load_config(state)
         if (config.get('mcp_port') != INTERNAL_MCP_PORT
                 or config.get('admin_port') != INTERNAL_ADMIN_PORT):
@@ -66,9 +66,9 @@ def main(argv: list[str] | None = None):
         doctor_args_valid = (bool(args) and args[0] == 'doctor'
                              and all(flag in {'--json', '--offline'} for flag in args[1:])
                              and len(args[1:]) == len(set(args[1:])))
-        if args not in (['serve'], ['show-admin-token'], ['rotate-bridge-token']) \
+        if args not in (['serve'], ['reset-admin-password'], ['rotate-bridge-token']) \
                 and not doctor_args_valid:
-            raise BridgeError("Supported container commands: serve, doctor, show-admin-token, rotate-bridge-token")
+            raise BridgeError("Supported container commands: serve, doctor, reset-admin-password, rotate-bridge-token")
         state = Path(os.environ.get('WB_STATE_DIR', '/state'))
         mcp_port = port_value('WB_MCP_PORT', INTERNAL_MCP_PORT)
         admin_port = port_value('WB_ADMIN_PORT', INTERNAL_ADMIN_PORT)

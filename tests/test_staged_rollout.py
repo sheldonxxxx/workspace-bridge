@@ -8,6 +8,7 @@ Compatibility state is informational only; component updates are manual
 local host operations.
 """
 from __future__ import annotations
+from admin_helpers import admin_cookie
 
 import json
 
@@ -528,17 +529,15 @@ def test_api_system_versions_is_read_only(staged_env):
     _ready_workspace(staged_env, adapter_id)
     db_path = staged_env["tmp"] / "state" / "bridge.sqlite3"
     before = db_path.read_bytes()
-    app = make_admin(service, staged_env["service"].config.get(
-        "admin_token_hash", "x"))
-    # Use the real admin token hash from config; fall back to state file.
+    app = make_admin(service)
     import asyncio
 
     async def _call():
-        token = (staged_env["tmp"] / "state" / "admin-token").read_text().strip()
+        token = admin_cookie(app)
         async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app),
                 base_url="http://127.0.0.1:8766",
-                headers={"Authorization": "Bearer " + token}) as client:
+                headers={"Cookie": token}) as client:
             response = await client.get("/api/system/versions")
             assert response.status_code == 200
             payload = response.json()

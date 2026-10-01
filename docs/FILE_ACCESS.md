@@ -27,7 +27,7 @@ that workspace or bypass exclusions. `read_scope` remains `workspace` in all mod
 | `workspace` | Allowed source and handoff text files inside the selected mapping |
 
 Each new mapping starts disabled and handoff-only. Only the
-local manager, authenticated with the separate admin token, can change permission.
+local manager, authenticated with the admin account, can change permission.
 There is no MCP `write_scope`, `force`, permission-changing tool or bypass parameter.
 
 ## Enable workspace writes later
