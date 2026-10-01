@@ -28,6 +28,7 @@ import {
   Server,
   Settings2,
   Shield,
+  SquareTerminal,
   Sun,
   Workflow,
   X,
@@ -92,6 +93,7 @@ import {
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
+import { CommandPalette, type PaletteCommand } from "./CommandPalette";
 import { describeManagerIdentity } from "@/lib/manager-identity";
 
 function compiledManagerReleaseRaw(): unknown {
@@ -338,7 +340,24 @@ function initialTheme(): "light" | "dark" {
   } catch {
     /* storage unavailable */
   }
-  return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  // The console is designed dark-first; light stays one toggle away.
+  return "dark";
+}
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
+    Boolean(target.closest("[role=dialog],[role=alertdialog]"))
+  );
+}
+function relativeTime(then: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - then) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
 }
 function StateBadge({ value }: { value: string }) {
   const lower = value.toLowerCase();
@@ -1533,6 +1552,8 @@ export default function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [startingHandoff, setStartingHandoff] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
   const startRequestIds = useRef(new Map<string, string>());
   const notify = useCallback((text: string) => {
@@ -2200,12 +2221,127 @@ export default function App() {
     ];
   }, [diagnostics, diagnosticsUnavailable, readyRoutes]);
   const page = sections.find((s) => s.id === section)!;
+  const ready = auth === "ready" && !changingPassword;
+  useEffect(() => {
+    if (!lastUpdated) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [lastUpdated]);
+  const focusWorkspaceSearch = useCallback(() => {
+    navigate("workspaces");
+    window.setTimeout(
+      () => document.getElementById("workspace-search")?.focus(),
+      0,
+    );
+  }, [navigate]);
+  useEffect(() => {
+    if (!ready) return;
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if (
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.defaultPrevented ||
+        isTypingTarget(event.target)
+      )
+        return;
+      const index = Number(event.key) - 1;
+      if (Number.isInteger(index) && index >= 0 && index < sections.length) {
+        event.preventDefault();
+        navigate(sections[index].id);
+      } else if (event.key === "/") {
+        event.preventDefault();
+        focusWorkspaceSearch();
+      } else if (event.key === ":" || event.key === "?") {
+        event.preventDefault();
+        setPaletteOpen(true);
+      } else if (event.key === "r") {
+        event.preventDefault();
+        void refresh();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ready, navigate, refresh, focusWorkspaceSearch]);
+  const commands = useMemo<PaletteCommand[]>(
+    () => [
+      ...sections.map((s, index) => ({
+        id: `go-${s.id}`,
+        group: "Go to",
+        label: s.title,
+        keys: String(index + 1),
+        run: () => navigate(s.id),
+      })),
+      {
+        id: "search-workspaces",
+        group: "Actions",
+        label: "Search workspaces",
+        keys: "/",
+        run: focusWorkspaceSearch,
+      },
+      {
+        id: "add-workspace",
+        group: "Actions",
+        label: "Add a workspace",
+        run: () => {
+          navigate("workspaces");
+          setAddOpen(true);
+        },
+      },
+      {
+        id: "refresh",
+        group: "Actions",
+        label: "Refresh data now",
+        keys: "r",
+        run: () => void refresh(),
+      },
+      {
+        id: "auto-refresh",
+        group: "Actions",
+        label: autoRefresh
+          ? "Pause auto-refresh"
+          : "Resume auto-refresh (every 30s)",
+        run: () => setAutoRefresh(!autoRefresh),
+      },
+      {
+        id: "theme",
+        group: "Console",
+        label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`,
+        run: () => setTheme(theme === "dark" ? "light" : "dark"),
+      },
+      {
+        id: "password",
+        group: "Console",
+        label: "Change password",
+        run: () => {
+          setLoginError("");
+          setChangingPassword(true);
+        },
+      },
+      {
+        id: "lock",
+        group: "Console",
+        label: "Lock console",
+        run: () => void logout(),
+      },
+    ],
+    [navigate, focusWorkspaceSearch, refresh, autoRefresh, theme],
+  );
   if (auth === "checking")
     return (
       <div className="loading-shell">
         <div className="bridge-mark">
-          <Workflow size={27} />
+          <SquareTerminal size={26} />
         </div>
+        <p className="boot-line" aria-hidden="true">
+          checking session
+          <span className="cursor" />
+        </p>
         <Skeleton className="h-7 w-52" />
         <Skeleton className="h-4 w-72" />
         <span className="sr-only">Checking session</span>
@@ -2312,11 +2448,23 @@ export default function App() {
         </div>
         <main className="login-main">
           <div className="login-intro">
-            <div className="signal-line">
-              <i />
-              <i />
-              <i />
-            </div>
+            <pre className="boot-log" aria-hidden="true">
+              <span>
+                <b>$</b> workspace-bridge manager
+              </span>
+              <span>
+                <i>[ ok ]</i> loopback listener bound
+              </span>
+              <span>
+                <i>[ ok ]</i> node registry loaded
+              </span>
+              <span>
+                <i>[ ok ]</i> audit log attached
+              </span>
+              <span>
+                <em>[wait]</em> operator authentication
+              </span>
+            </pre>
             <h1>
               Your projects.
               <br />
@@ -2330,6 +2478,12 @@ export default function App() {
             </p>
           </div>
           <div className="login-panel">
+            <div className="window-bar" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <span>login — tty1</span>
+            </div>
             <span className="section-kicker">Local manager</span>
             <h2>Open the console</h2>
             <p>Sign in with your admin account to manage this Bridge.</p>
@@ -2366,7 +2520,7 @@ export default function App() {
             </small>
           </div>
         </main>
-        <footer className="login-foot">Local agent operations</footer>
+        <footer className="login-foot">loopback only · never tunnelled</footer>
       </div>
     );
   return (
@@ -2378,22 +2532,34 @@ export default function App() {
         <Brand />
         <div className="sidebar-label">OPERATIONS</div>
         <nav aria-label="Main navigation">
-          {sections.map((s) => (
+          {sections.map((s, index) => (
             <button
               type="button"
               key={s.id}
               className={`nav-item ${section === s.id ? "current" : ""}`}
               aria-current={section === s.id ? "page" : undefined}
+              aria-keyshortcuts={String(index + 1)}
               onClick={() => navigate(s.id)}
             >
-              <s.icon size={17} />
+              <s.icon size={16} />
               <span>{s.title}</span>
               {s.id === "runs" && attentionRuns.length > 0 && (
                 <b>{attentionRuns.length}</b>
               )}
+              <kbd aria-hidden="true">{index + 1}</kbd>
             </button>
           ))}
         </nav>
+        <button
+          type="button"
+          className="palette-trigger"
+          aria-keyshortcuts="Control+K Meta+K"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <SquareTerminal size={15} />
+          <span>Commands</span>
+          <kbd aria-hidden="true">ctrl k</kbd>
+        </button>
         <div className="sidebar-bottom">
           <div className="local-status">
             <span className="live-dot" />
@@ -2420,9 +2586,9 @@ export default function App() {
             >
               <Menu />
             </Button>
-            <span className="breadcrumb">Workspace Bridge</span>
-            <span className="breadcrumb-sep">/</span>
-            <strong>{page.title}</strong>
+            <span className="breadcrumb">admin@bridge</span>
+            <span className="breadcrumb-sep">:~/</span>
+            <strong>{page.id}</strong>
           </div>
           <div className="topbar-right">
             <span className="topbar-health">
@@ -2464,7 +2630,13 @@ export default function App() {
         <main id="main-content" className="main-content">
           <div className="page-title">
             <div>
-              <h1>{page.title}</h1>
+              <span className="page-prompt" aria-hidden="true">
+                <b>$</b> wb {page.id}
+              </span>
+              <h1>
+                {page.title}
+                <span className="cursor" aria-hidden="true" />
+              </h1>
               <p>{page.description}</p>
             </div>
             <div className="page-title-actions">
@@ -2481,7 +2653,7 @@ export default function App() {
                   className="last-updated"
                   title={new Date(lastUpdated).toLocaleString()}
                 >
-                  Updated {new Date(lastUpdated).toLocaleTimeString()}
+                  Updated {relativeTime(lastUpdated, now)}
                 </span>
               )}
               <Button
@@ -2916,7 +3088,9 @@ export default function App() {
                 <div className="search-box">
                   <Search size={17} />
                   <Input
+                    id="workspace-search"
                     aria-label="Find a workspace"
+                    aria-keyshortcuts="/"
                     placeholder="Search workspaces"
                     value={workspaceQuery}
                     onChange={(e) => setWorkspaceQuery(e.target.value)}
@@ -3732,7 +3906,43 @@ export default function App() {
             </div>
           )}
         </main>
+        <footer className="statusline" aria-label="Console status">
+          <span className="statusline-mode">
+            {refreshing ? "SYNC" : "LIVE"}
+          </span>
+          <span className="statusline-path">~/{page.id}</span>
+          <span
+            className={`statusline-gateway ${
+              status?.bridge.configured && status.bridge.enabled
+                ? "is-on"
+                : "is-off"
+            }`}
+          >
+            gateway{" "}
+            {!status?.bridge.configured
+              ? "unset"
+              : status.bridge.enabled
+                ? "on"
+                : "paused"}
+          </span>
+          {attentionRuns.length > 0 && (
+            <span className="statusline-attention">
+              {attentionRuns.length} waiting
+            </span>
+          )}
+          <span className="statusline-spacer" />
+          <span>auto {autoRefresh ? "30s" : "off"}</span>
+          {lastUpdated && <span>sync {relativeTime(lastUpdated, now)}</span>}
+          <span className="statusline-hint">
+            <kbd>ctrl k</kbd> commands
+          </span>
+        </footer>
       </div>
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        commands={commands}
+      />
       <Sheet open={mobileNav} onOpenChange={setMobileNav}>
         <SheetContent side="left" className="mobile-sheet">
           <SheetHeader>
@@ -4161,12 +4371,14 @@ export default function App() {
 function Brand() {
   return (
     <div className="brand">
-      <span className="bridge-mark">
-        <Workflow size={21} strokeWidth={2.3} />
+      <span className="bridge-mark" aria-hidden="true">
+        <SquareTerminal size={20} strokeWidth={2.2} />
       </span>
       <span>
-        <strong>Workspace Bridge</strong>
-        <small>Local agent operations</small>
+        <strong>
+          workspace<span className="brand-dash">-</span>bridge
+        </strong>
+        <small>local agent operations</small>
       </span>
     </div>
   );
