@@ -1,0 +1,30 @@
+# Allowlist: never send local credentials, state, projects, tests or VCS to build.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!docker/
+!docker/runtime-requirements.txt
+!README.md
+!LICENSE
+!workspace_bridge/
+!workspace_bridge/**
+!web/
+!web/**
+web/node_modules/
+web/dist/
+# Stale checked-in frontend output: the builder always overwrites this with a
+# fresh web-builder build, so excluding it keeps the context small and avoids
+# invalidating COPY workspace_bridge/ on dist-only changes.
+workspace_bridge/static/dist/
+# Web files never COPYd by the Dockerfile build-inputs-only layer: excluding
+# them keeps the context small (layer cache already ignores un-COPYd files).
+web/tests/
+web/test-results/
+web/playwright.config.ts
+web/README.md
+web/.oxlintrc.json
+workspace_bridge/**/__pycache__/
+workspace_bridge/**/*.pyc
+workspace_bridge/**/.env*

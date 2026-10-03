@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Workspace Bridge Pi host adapter LaunchAgent template (native macOS only).
+
+  This file is an EXAMPLE. Install the adapter under the user's home directory
+  before loading this LaunchAgent. Replace every placeholder with an absolute
+  path or value; launchd performs no shell expansion.
+
+  Required:
+    WB_RUNTIME_TOKEN      shared token; empty locks every operational endpoint.
+    WB_PI_PROJECTS_DIR    absolute dedicated projects parent (must already exist).
+
+  Optional:
+    WB_PI_BINARY          Pi executable; default "pi". Never installed/upgraded.
+    PI_CODING_AGENT_DIR   isolated Pi agent dir; default ~/.pi/workspace-bridge.
+    WB_PI_ADAPTER_HOST    default 127.0.0.1 (keep loopback; do not broaden).
+    WB_PI_ADAPTER_PORT    default 8780.
+    WB_LOG_LEVEL          default INFO (DEBUG/INFO/WARNING/ERROR; invalid fails startup).
+
+  The adapter resolves the terminal-equivalent executable search path at
+  startup from the current user's configured login shell (login-shell PATH
+  only, validated, with fallback to the inherited service PATH). Do not set
+  a hardcoded PATH here; no Homebrew/user-local/Cargo/pyenv/mise/nvm
+  directories are hardcoded.
+
+  The Docker Bridge and this native adapter are separate processes: set
+  WB_LOG_LEVEL for each deployment environment. Compose config does not
+  automatically configure this LaunchAgent.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.workspace-bridge.pi-host-adapter</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BINARY__</string>
+    <string>__HOME__/Library/Application Support/workspace-bridge/pi-host-adapter/main.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>WB_RUNTIME_TOKEN</key>
+    <string>REPLACE_WITH_SHARED_TOKEN</string>
+    <key>WB_PI_PROJECTS_DIR</key>
+    <string>__PROJECTS_DIR__</string>
+    <key>WB_PI_BINARY</key>
+    <string>__PI_BINARY__</string>
+    <key>PI_CODING_AGENT_DIR</key>
+    <string>__HOME__/.pi/workspace-bridge</string>
+    <key>WB_PI_ADAPTER_HOST</key>
+    <string>127.0.0.1</string>
+    <key>WB_PI_ADAPTER_PORT</key>
+    <string>8780</string>
+    <key>WB_LOG_LEVEL</key>
+    <string>INFO</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/workspace-bridge-pi-adapter.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/workspace-bridge-pi-adapter.err</string>
+  <key>WorkingDirectory</key>
+  <string>__HOME__/Library/Application Support/workspace-bridge/pi-host-adapter</string>
+</dict>
+</plist>

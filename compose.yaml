@@ -1,0 +1,93 @@
+# Bridge + internal tunnel sidecar on the shared
+# Compose network. The tunnel sidecar reaches the bridge at http://bridge:8765/mcp;
+# the bridge allowlist trusts those Compose DNS names on the internal MCP port only.
+# Native adapter daemons are managed separately on their hosts; this Compose
+# stack never starts, packages or publishes them.
+# Run scripts/configure_docker.py first, or follow the manual .env.example setup.
+services:
+  bridge:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${WB_PYTHON_IMAGE:-python:3.13-slim-bookworm}
+        NODE_IMAGE: ${WB_NODE_IMAGE:-node:24-bookworm-slim}
+    container_name: workspace-bridge
+    image: workspace-bridge:0.2.0
+    user: "${WB_UID:?Set WB_UID in .env}:${WB_GID:?Set WB_GID in .env}"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 1536m
+    cpus: 2.0
+    stop_grace_period: 30s
+    environment:
+      WB_STATE_DIR: /state
+      WB_MCP_PORT: ${WB_MCP_PORT:-8765}
+      WB_ADMIN_PORT: ${WB_ADMIN_PORT:-8766}
+      # Opt-in remote admin Host allowlist (bare hostnames/IPs, comma-separated).
+      # Empty (default) keeps the manager loopback-only. When set, the admin
+      # listener binds 0.0.0.0 inside the container and allows those Host values.
+      # MCP is unaffected. Prefer SSH forwarding/VPN; never tunnel the manager.
+      WB_ADMIN_ALLOWED_HOSTS: ${WB_ADMIN_ALLOWED_HOSTS:-}
+      WB_DISCORD_WEBHOOK_URL: ${WB_DISCORD_WEBHOOK_URL:-}
+      # Operational container log level: DEBUG/INFO/WARNING/ERROR, default INFO.
+      # Invalid values fail fast at bridge startup (BridgeError); see docs/DOCKER.md.
+      WB_LOG_LEVEL: ${WB_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:${WB_MCP_PORT:-8765}:8765"
+      - "127.0.0.1:${WB_ADMIN_PORT:-8766}:8766"
+    volumes:
+      - type: bind
+        source: ${WB_STATE_DIR:?Set a private state directory outside projects}
+        target: /state
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-m", "workspace_bridge.container_health"]
+      interval: 30s
+      timeout: 6s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mcp-tunnel:
+    image: ghcr.io/openai/tunnel-client:v0.0.14
+    container_name: workspace-bridge-mcp-tunnel
+    volumes:
+      - ./tunnel-client.yaml:/etc/tunnel-client/tunnel-client.yaml:ro
+    # environment:
+      # HEALTH_LISTEN_ADDR: 0.0.0.0:8080
+      # ALLOW_REMOTE_UI: "true"
+    environment:
+      # Tunnel-client production logging: JSON records at the configured
+      # level. Valid WB_TUNNEL_LOG_LEVEL values are debug/info/warn
+      # (tunnel vocabulary only; there is no ERROR threshold), default info.
+      # Never set LOG_HTTP_RAW_UNSAFE: raw HTTP logging may expose
+      # sensitive headers/bodies. See docs/DOCKER.md.
+      LOG_LEVEL: ${WB_TUNNEL_LOG_LEVEL:-info}
+      LOG_FORMAT: json
+    command:
+      [
+        "--profile-file",
+        "/etc/tunnel-client/tunnel-client.yaml"
+      ]        
+    env_file:
+      - tunnel.env
+    depends_on:
+      bridge:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

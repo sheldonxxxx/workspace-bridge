@@ -1,0 +1,61 @@
+{
+  "name": "workspace-bridge-pi-host-adapter",
+  "version": "0.2.0",
+  "workspaceBridgeRelease": "0.2.0",
+  "type": "module",
+  "description": "Pi runtime adapter for Workspace Bridge: let ChatGPT plan and review while Pi builds on your machine.",
+  "keywords": [
+    "workspace-bridge",
+    "mcp",
+    "chatgpt",
+    "pi",
+    "ai-agents",
+    "coding-agent"
+  ],
+  "homepage": "https://github.com/sheldonxxxx/workspace-bridge/blob/main/docs/RUNTIMES.md",
+  "bugs": {
+    "url": "https://github.com/sheldonxxxx/workspace-bridge/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sheldonxxxx/workspace-bridge",
+    "directory": "runtime/pi-host-adapter"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "bin": {
+    "workspace-bridge-pi-adapter": "pi-adapter.mjs"
+  },
+  "files": [
+    "adapter.mjs",
+    "config.mjs",
+    "executions.mjs",
+    "extensions.mjs",
+    "fingerprint.mjs",
+    "logging.mjs",
+    "login-path.mjs",
+    "main.mjs",
+    "paths.mjs",
+    "pi-adapter.mjs",
+    "policy.mjs",
+    "release.mjs",
+    "sdk-events.mjs",
+    "sdk-transport.mjs",
+    "server.mjs",
+    "trusted-permission-extension.mjs",
+    "wbrp.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.0"
+  },
+  "scripts": {
+    "start": "node main.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

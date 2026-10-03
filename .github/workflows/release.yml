@@ -1,0 +1,565 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing GitHub Release tag to rebuild/republish (e.g. v0.1.1). Must already exist and not be a draft. No tags or releases are created, moved, or deleted.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    name: Validate release tag and versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Manual recovery must target an existing non-draft Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          test -n "$TAG"
+          echo "Manual recovery for existing Release: $TAG (no tags or releases will be created, moved, or deleted)"
+          IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+          test "$IS_DRAFT" = "false" || { echo "Release $TAG is missing or is a draft; refusing manual recovery" >&2; exit 1; }
+          echo "Release $TAG exists and is not a draft"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - name: Tag must be exactly v<project-version>
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          test -n "$TAG"
+          case "$TAG" in
+            v*) ;;
+            *) echo "tag must start with v" >&2; exit 1;;
+          esac
+          VERSION="${TAG#v}"
+          echo "Release tag: $TAG (version $VERSION)"
+          # pyproject version must match tag version exactly.
+          PY_VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          test "$PY_VERSION" = "$VERSION" || { echo "pyproject $PY_VERSION != tag $VERSION" >&2; exit 1; }
+          # Pi package version + workspaceBridgeRelease must match tag.
+          PI_VERSION="$(node -p 'require("./runtime/pi-host-adapter/package.json").version')"
+          PI_WB="$(node -p 'require("./runtime/pi-host-adapter/package.json").workspaceBridgeRelease')"
+          test "$PI_VERSION" = "$VERSION" || { echo "pi $PI_VERSION != tag $VERSION" >&2; exit 1; }
+          test "$PI_WB" = "$VERSION" || { echo "pi workspaceBridgeRelease $PI_WB != tag $VERSION" >&2; exit 1; }
+          # workspace-bridge product version must match tag.
+          WB_VERSION="$(uv run python -c 'from workspace_bridge import __version__; print(__version__)')"
+          test "$WB_VERSION" = "$VERSION" || { echo "product $WB_VERSION != tag $VERSION" >&2; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+  quality:
+    name: Full CI on release tag
+    needs: [validate-release]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+  build-source-bundle:
+    name: Source bundle / Linux x64
+    needs: [validate-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - name: Install Manager dependencies (locked)
+        run: npm --prefix web ci
+      - name: Sync Python test env (locked)
+        run: uv sync --locked --extra test
+      - name: Build and validate C1 source bundle
+        run: |
+          set -euo pipefail
+          rm -rf dist/source-bundle
+          mkdir -p dist
+          uv run workspace-bridge release build --output dist/source-bundle --json > dist/source-bundle.json
+          uv run workspace-bridge release validate --bundle dist/source-bundle --json > dist/source-validated.json
+      - name: Upload source bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-bundle
+          path: dist/source-bundle
+          if-no-files-found: error
+          retention-days: 30
+
+  build-pi-runtime:
+    name: Pi runtime / ${{ matrix.platform }}-${{ matrix.arch }}
+    needs: [validate-release, build-source-bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            os: ubuntu-24.04
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+          - platform: darwin
+            arch: arm64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: runtime/pi-host-adapter/package-lock.json
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-bundle
+          path: dist/source-bundle
+      - name: Sync Python env (locked, for runtime tooling)
+        run: uv sync --locked --extra test
+      - name: Validate source bundle before extraction
+        run: |
+          set -euo pipefail
+          uv run workspace-bridge release validate --bundle dist/source-bundle
+      - name: Stage Pi production source (private)
+        run: |
+          set -euo pipefail
+          STAGE="$(mktemp -d)"
+          echo "PI_STAGE=$STAGE" >> "$GITHUB_ENV"
+          chmod 700 "$STAGE"
+          tar -xzf dist/source-bundle/artifacts/pi-host-adapter.tar.gz -C "$STAGE"
+          chmod 700 "$STAGE"
+          ls -la "$STAGE"
+      - name: Materialize locked production dependencies
+        run: |
+          set -euo pipefail
+          cd "$PI_STAGE"
+          npm ci --omit=dev
+        env:
+          PI_STAGE: ${{ env.PI_STAGE }}
+      - name: Minimal runtime and release smoke
+        run: |
+          set -euo pipefail
+          node --input-type=module -e "const m = await import(process.argv[1]); const r = m.piRelease(process.argv[2]); if (r.component !== 'pi-host-adapter') throw new Error('bad release'); console.log(JSON.stringify({component: r.component, build_id: r.build_id}));" "$GITHUB_WORKSPACE/runtime/pi-host-adapter/release.mjs" "$PI_STAGE"
+          test -f "$PI_STAGE/package.json"
+          test -d "$PI_STAGE/node_modules"
+          test -f "$PI_STAGE/node_modules/.package-lock.json" || test -d "$PI_STAGE/node_modules/@earendil-works"
+        env:
+          PI_STAGE: ${{ env.PI_STAGE }}
+      - name: Build deterministic runtime artifact
+        run: |
+          set -euo pipefail
+          rm -rf dist/pi-runtime
+          mkdir -p dist/pi-runtime
+          NODE_MAJOR="$(node -p 'String(process.versions.node.split(".")[0])')"
+          echo "Node major: $NODE_MAJOR"
+          uv run python - <<PY
+          from pathlib import Path
+          from workspace_bridge.pi_runtime_artifact import build_runtime_from_source_bundle
+          result = build_runtime_from_source_bundle(
+              source_bundle_dir=Path("dist/source-bundle"),
+              staged_root=Path("${{ env.PI_STAGE }}"),
+              platform="${{ matrix.platform }}",
+              arch="${{ matrix.arch }}",
+              node_major=int("$NODE_MAJOR"),
+              output_dir=Path("dist/pi-runtime"),
+          )
+          print("runtime_artifact_id:", result["runtime_artifact_id"])
+          PY
+          ls -lh dist/pi-runtime
+      - name: Upload Pi runtime artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pi-runtime-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/pi-runtime
+          if-no-files-found: error
+          retention-days: 30
+
+  build-docker:
+    name: Docker Bridge / ${{ matrix.arch }}
+    needs: [validate-release, build-source-bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-bundle
+          path: dist/source-bundle
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - name: Validate source bundle before Docker build
+        run: |
+          set -euo pipefail
+          uv sync --locked --extra test
+          uv run workspace-bridge release validate --bundle dist/source-bundle
+      - name: Build Bridge image (native ${{ matrix.arch }})
+        run: docker build --tag workspace-bridge:release-${{ matrix.arch }} .
+      - name: Require image architecture and embedded identities
+        run: |
+          set -euo pipefail
+          got="$(docker image inspect --format '{{.Architecture}}' workspace-bridge:release-${{ matrix.arch }})"
+          test "$got" = "${{ matrix.arch }}" || { echo "arch $got != ${{ matrix.arch }}" >&2; exit 1; }
+          docker run --rm --entrypoint python workspace-bridge:release-${{ matrix.arch }} -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b, 'manager': m}))" > /tmp/container-releases.json
+          python3 - <<'PY'
+          import json, pathlib
+          target = json.loads(pathlib.Path("dist/source-bundle/target-manifest.json").read_text())
+          container = json.loads(pathlib.Path("/tmp/container-releases.json").read_text())
+          assert container["bridge"] == target["components"]["bridge"], "container Bridge identity mismatch"
+          assert container["manager"] == target["components"]["manager"], "container Manager identity mismatch"
+          print("container identities match target manifest")
+          PY
+      - name: Save exact validated image
+        run: |
+          set -euo pipefail
+          ARCH="${{ matrix.arch }}"
+          docker save --output "$RUNNER_TEMP/workspace-bridge-$ARCH.tar" "workspace-bridge:release-$ARCH"
+          (cd "$RUNNER_TEMP" && sha256sum "workspace-bridge-$ARCH.tar" > "workspace-bridge-$ARCH.tar.sha256")
+      - name: Upload validated image
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/workspace-bridge-${{ matrix.arch }}.tar
+            ${{ runner.temp }}/workspace-bridge-${{ matrix.arch }}.tar.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  npm-pack:
+    name: npm pack / Linux x64
+    needs: [validate-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: runtime/pi-host-adapter/package-lock.json
+      - name: Install locked dependencies
+        run: npm --prefix runtime/pi-host-adapter ci
+      - name: Test Pi adapter
+        run: npm --prefix runtime/pi-host-adapter test
+      - name: Pack exact npm tarball (no rebuild on publish)
+        run: |
+          set -euo pipefail
+          rm -rf dist/npm
+          mkdir -p dist/npm
+          (cd runtime/pi-host-adapter && npm pack --dry-run --json > "$GITHUB_WORKSPACE/dist/npm/dry-run.json")
+          (cd runtime/pi-host-adapter && npm pack --pack-destination "$GITHUB_WORKSPACE/dist/npm")
+          ls -lh dist/npm
+          test "$(ls dist/npm/*.tgz | wc -l)" = "1"
+      - name: Upload npm tarball artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: dist/npm
+          if-no-files-found: error
+          retention-days: 30
+
+  prepare-pypi-dist:
+    name: Prepare PyPI dist (no OIDC)
+    needs: [validate-release, build-source-bundle]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-bundle
+          path: dist/source-bundle
+      - name: Inspect wheel console entry points
+        run: |
+          set -euo pipefail
+          uv sync --locked --extra test
+          python3 - <<'PY'
+          import glob, zipfile
+          wheels = glob.glob("dist/source-bundle/artifacts/python-wheel.whl")
+          assert len(wheels) == 1, wheels
+          with zipfile.ZipFile(wheels[0]) as z:
+              names = z.namelist()
+              eps = [n for n in names if n.endswith("entry_points.txt")]
+              assert len(eps) == 1, names
+              text = z.read(eps[0]).decode()
+          assert "workspace-bridge = workspace_bridge.cli:main" in text, text
+          assert "workspace-bridge-node = workspace_bridge.node_cli:main" in text, text
+          assert "workspace-bridge-codex-adapter = workspace_bridge.codex_host_adapter:main" in text, text
+          print("wheel console_scripts ok")
+          PY
+      - name: Strict bundle validation and stage exact wheel bytes
+        run: |
+          set -euo pipefail
+          uv sync --locked --extra test
+          uv run workspace-bridge release validate --bundle dist/source-bundle
+          python3 - <<'PY'
+          import json, hashlib, pathlib, shutil
+          bundle = json.loads(pathlib.Path("dist/source-bundle/bundle.json").read_text())
+          by_logical = {e["logical"]: e for e in bundle["artifacts"]}
+          entry = by_logical["artifacts/python-wheel.whl"]
+          data = pathlib.Path("dist/source-bundle/artifacts/python-wheel.whl").read_bytes()
+          actual = "sha256:" + hashlib.sha256(data).hexdigest()
+          assert actual == entry["sha256"], f"wheel SHA mismatch {actual} != {entry['sha256']}"
+          assert len(data) == entry["size"], "wheel size mismatch"
+          print("wheel SHA verified:", actual)
+          version = bundle["product_version"]
+          std_name = f"workspace_bridge-{version}-py3-none-any.whl"
+          out_dir = pathlib.Path("dist/pypi")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile("dist/source-bundle/artifacts/python-wheel.whl", out_dir / std_name)
+          assert hashlib.sha256((out_dir / std_name).read_bytes()).hexdigest() == actual[7:]
+          print("staged for PyPI:", std_name)
+          PY
+          ls -lh dist/pypi
+      - name: Smoke exact staged wheel in a clean environment
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/bridge-wheel-smoke"
+          uv venv "$VENV"
+          uv pip install --python "$VENV/bin/python" dist/pypi/*.whl
+          "$VENV/bin/workspace-bridge" --version
+          "$VENV/bin/workspace-bridge" node --help
+          "$VENV/bin/workspace-bridge" adapter --help
+          "$VENV/bin/workspace-bridge-node" --help
+          "$VENV/bin/python" -c 'from workspace_bridge.codex_host_adapter import main; assert callable(main)'
+      - name: Upload prepared PyPI dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-dist
+          path: dist/pypi
+          if-no-files-found: error
+          retention-days: 30
+
+  release-ready:
+    name: Release ready barrier
+    needs: [validate-release, quality, build-source-bundle, build-pi-runtime, npm-pack, build-docker, prepare-pypi-dist]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: All prerequisites passed
+        run: echo release-ready-barrier-passed
+
+  ghcr-publish:
+    name: Publish GHCR image (amd64 and arm64)
+    needs: [release-ready, build-docker]
+    runs-on: ubuntu-24.04
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image-amd64
+          path: dist/docker-amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image-arm64
+          path: dist/docker-arm64
+      - name: Verify and load exact validated images
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            (cd "dist/docker-$ARCH" && sha256sum --check "workspace-bridge-$ARCH.tar.sha256")
+            docker load --input "dist/docker-$ARCH/workspace-bridge-$ARCH.tar"
+            GOT="$(docker image inspect --format '{{.Architecture}}' "workspace-bridge:release-$ARCH")"
+            test "$GOT" = "$ARCH" || { echo "arch $GOT != $ARCH" >&2; exit 1; }
+          done
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push validated images and create multiarch release tag
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          IMAGE="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          VERSION="${RELEASE_TAG#v}"
+          for ARCH in amd64 arm64; do
+            docker tag "workspace-bridge:release-$ARCH" "$IMAGE:$RELEASE_TAG-$ARCH"
+            docker push "$IMAGE:$RELEASE_TAG-$ARCH"
+          done
+          docker buildx imagetools create \
+            --tag "$IMAGE:$RELEASE_TAG" \
+            --tag "$IMAGE:$VERSION" \
+            "$IMAGE:$RELEASE_TAG-amd64" "$IMAGE:$RELEASE_TAG-arm64"
+          docker buildx imagetools inspect --raw "$IMAGE:$RELEASE_TAG" > "$RUNNER_TEMP/ghcr-index.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          index = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "ghcr-index.json").read_text())
+          platforms = {(m["platform"]["os"], m["platform"]["architecture"])
+                       for m in index.get("manifests", [])}
+          assert {("linux", "amd64"), ("linux", "arm64")} <= platforms, platforms
+          print("GHCR release index includes linux/amd64 and linux/arm64")
+          PY
+
+  pypi-publish:
+    name: Publish Python wheel (OIDC)
+    needs: [release-ready, prepare-pypi-dist]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: pypi-dist
+          path: dist/pypi
+      - name: Publish exact wheel via Trusted Publishing (no token)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/pypi
+          verbose: true
+
+  npm-publish:
+    name: Publish npm package (OIDC, gated)
+    if: vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true'
+    needs: [release-ready, npm-pack]
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-package
+          path: dist/npm
+      - name: Require npm >=11.15.0 for staged publishing
+        run: |
+          set -euo pipefail
+          npm --version
+          node -p "const v=require('child_process').execSync('npm --version').toString().trim(); const p=v.split('.').map(Number); if (p[0]<11 || (p[0]===11 && p[1]<15)) { console.error('npm >=11.15.0 required, got '+v); process.exit(1); } else { console.log('npm staged-publish-ready: '+v); }"
+      - name: Publish exact tarball (staged by default)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tgzs=(dist/npm/*.tgz)
+          test "${#tgzs[@]}" = "1" || { echo "expected exactly one .tgz from pack job" >&2; exit 1; }
+          echo "Publishing exact artifact: ${tgzs[0]} (no rebuild)"
+          # Private repos cannot satisfy provenance; never require it.
+          # Default is staged publish for initial safety; direct only via
+          # repository variable NPM_PUBLISH_MODE=direct.
+          if [ "${{ vars.NPM_PUBLISH_MODE }}" = "direct" ]; then
+            npm publish "${tgzs[0]}" --access public --provenance=false
+          else
+            npm stage publish "${tgzs[0]}" --access public
+          fi
+
+  release-assets:
+    name: Upload GitHub Release assets
+    needs: [release-ready, build-source-bundle, build-pi-runtime, npm-pack, build-docker, prepare-pypi-dist]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: source-bundle
+          path: dist/source-bundle
+      - uses: actions/download-artifact@v8
+        with:
+          name: pi-runtime-linux-x64
+          path: dist/pi-runtime-linux-x64
+      - uses: actions/download-artifact@v8
+        with:
+          name: pi-runtime-linux-arm64
+          path: dist/pi-runtime-linux-arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: pi-runtime-darwin-arm64
+          path: dist/pi-runtime-darwin-arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-package
+          path: dist/npm
+      - name: Stage versioned release assets
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          VERSION="${TAG#v}"
+          rm -rf dist/release-assets
+          mkdir -p dist/release-assets
+          # Source bundle truth (exact bytes, versioned names where relevant).
+          cp dist/source-bundle/bundle.json "dist/release-assets/workspace-bridge-bundle-${VERSION}.json"
+          cp dist/source-bundle/target-manifest.json "dist/release-assets/workspace-bridge-target-manifest-${VERSION}.json"
+          cp dist/source-bundle/artifacts/python-wheel.whl "dist/release-assets/workspace_bridge-${VERSION}-py3-none-any.whl"
+          cp dist/source-bundle/artifacts/pi-host-adapter.tar.gz "dist/release-assets/workspace-bridge-pi-source-${VERSION}.tar.gz"
+          # Pi runtime archives + metadata (already versioned by builder).
+          cp dist/pi-runtime-linux-x64/*.tar.gz dist/release-assets/
+          cp dist/pi-runtime-linux-x64/*.json dist/release-assets/
+          cp dist/pi-runtime-linux-arm64/*.tar.gz dist/release-assets/
+          cp dist/pi-runtime-linux-arm64/*.json dist/release-assets/
+          cp dist/pi-runtime-darwin-arm64/*.tar.gz dist/release-assets/
+          cp dist/pi-runtime-darwin-arm64/*.json dist/release-assets/
+          ls -lh dist/release-assets
+      - name: Upload to already-published Release (no new tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          gh release upload "$TAG" dist/release-assets/* --clobber

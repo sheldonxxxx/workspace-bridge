@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste tokens, passwords, private source, or unreviewed support bundles. Report vulnerabilities privately instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `workspace-bridge --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Native (macOS)
+        - Native (Linux)
+        - WSL2
+        - Docker Bridge
+    validations:
+      required: true
+  - type: checkboxes
+    id: runtimes
+    attributes:
+      label: Runtimes involved
+      options:
+        - label: Claude Code
+        - label: Codex
+        - label: Pi
+        - label: None (browsing or manual handoffs only)
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Relevant, reviewed lines from `workspace-bridge doctor`.
+      render: text
