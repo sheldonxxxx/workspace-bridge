@@ -1,12 +1,12 @@
 # Runtimes
 
-Consolidated Pi and Codex runtime notes for Workspace Bridge `0.1.2`. For
+Consolidated Pi, Codex, and Claude Code runtime notes for Workspace Bridge `0.2.0`. For
 the wire contract see [Runtime Protocol](RUNTIME_PROTOCOL.md); for service
 commands see [Setup](SETUP.md) and [Operations](OPERATIONS.md).
 
 ## Concepts
 
-A `RuntimeType` (`pi` or `codex`) names the protocol family. An
+A `RuntimeType` (`pi`, `codex`, or `claude`) names the protocol family. An
 `AdapterInstance` is one Node-owned destination with its own name, endpoint,
 token, enabled state, and connection revision. A `WorkspaceRoute` binds one
 workspace to one exact same-Node adapter ID with a security binding. Two
@@ -16,12 +16,12 @@ the runtime type never selects a destination and there is no fallback.
 
 ## Installation surface
 
-| Item | Pi | Codex |
-|---|---|---|
-| Package | `workspace-bridge-pi-host-adapter` on npm, executable `workspace-bridge-pi-adapter` | Python product (`uv tool install workspace-bridge`), executable `workspace-bridge-codex-adapter` |
-| Instance init | `workspace-bridge adapter --state <dir> init --runtime pi --projects-root <parent> --port 8780` | `workspace-bridge adapter --state <dir> init --runtime codex --projects-root <parent> --port 8772` |
-| Token | Printed once by `init`; reprint locally with `show-token`; register on the owning Node | Same lifecycle; stored in private Node SQLite |
-| Health | `GET /health` unauthenticated; every `/v1/*` needs the runtime token header | Same |
+| Item | Pi | Codex | Claude Code |
+|---|---|---|---|
+| Package | `workspace-bridge-pi-host-adapter` on npm, executable `workspace-bridge-pi-adapter` | Python product (`uv tool install workspace-bridge`), executable `workspace-bridge-codex-adapter` | Python product with the optional extra (`uv tool install 'workspace-bridge[claude]'`), executable `workspace-bridge-claude-adapter` |
+| Instance init | `workspace-bridge adapter --state <dir> init --runtime pi --projects-root <parent> --port 8780` | `workspace-bridge adapter --state <dir> init --runtime codex --projects-root <parent> --port 8772` | `workspace-bridge adapter --state <dir> init --runtime claude --projects-root <parent> --port 8774` |
+| Token | Printed once by `init`; reprint locally with `show-token`; register on the owning Node | Same lifecycle; stored in private Node SQLite | Same lifecycle; stored in private Node SQLite |
+| Health | `GET /health` unauthenticated; every `/v1/*` needs the runtime token header | Same | Every `/v1/*` needs the runtime token header; use `service status` (authenticated descriptor check) for readiness |
 
 Each adapter state owns exactly one instance. Service artifacts contain only
 the stable `workspace-bridge adapter --state <state> serve` launcher, never
@@ -30,7 +30,7 @@ adapters; they stay native on their hosts.
 
 ## Service lifecycle
 
-Both runtimes use the same verbs on their own state directory:
+All runtimes use the same verbs on their own state directory:
 
 ```sh
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service install
@@ -53,9 +53,24 @@ stay alive but permanently degraded. Active runs are marked interrupted on
 restart and are never replayed; idle persisted conversations remain
 resumable.
 
+The Claude Code adapter drives Claude Code through the Claude Agent SDK
+(`claude-agent-sdk`, installed by the `claude` extra), which bundles its own
+Claude Code CLI. Pass `--claude-binary <absolute path or name>` to `init` to
+use a different Claude Code executable instead. The adapter uses the host
+user's existing Claude Code login; no provider credential is stored by the
+Bridge, the Node, or the service artifact. Run `claude` once on that host
+and sign in before installing the service. `--claude-setting-sources` picks the
+settings layers to load: `user`, `project`, `local` (default, all three), or
+`none`. If the SDK is missing, the
+descriptor fails closed with an install hint instead of starting runs.
+Each run starts one Claude Code process for that prompt and resumes the
+adapter-created session for continuations, so idle conversations survive an
+adapter restart; runs that were active are marked interrupted and never
+replayed.
+
 ## Security-profile differences
 
-Pi and Codex share the Runtime Protocol but enforce different native
+Pi, Codex, and Claude Code share the Runtime Protocol but enforce different native
 mechanisms. Never describe a profile as an OS sandbox unless that runtime
 provides that guarantee.
 
@@ -80,6 +95,38 @@ provides that guarantee.
   adapter verifies idle state, re-reads effective security, and applies
   supported changes or starts a fresh thread with a bounded reason when the
   change cannot be represented.
+- **Claude Code (Bridge-managed profile):** the adapter owns the Claude Code
+  session and enforces a profile of four controls: `edits`, `shell`, `web`,
+  and `extensions` (MCP tools), each `deny`, `ask`, or `allow`. The built-in
+  read-only profile offers read, glob, and grep plus the orchestration tools
+  and denies everything else; `workspace-write-reviewed` asks before edits,
+  shell commands, and MCP tools and denies web access. The adapter hands
+  Claude Code a closed tool list, evaluates every tool call in a pre-tool
+  hook, including calls made by sub-agents and MCP tools, and again in the
+  permission callback, and turns `ask` into a Bridge interaction. File tools
+  must stay inside the canonical workspace (symlinks are resolved), never
+  touch Git internals or `.env` files, and never edit `.claude` or
+  `.mcp.json`. Settings cannot widen a profile: allow rules, a permissive
+  default mode, or `disableAllHooks` in a settings file do not skip the gate.
+  Claude Code otherwise behaves as in the terminal: user, project and local
+  settings, `CLAUDE.md`, skills, sub-agents, plugins, and MCP servers load
+  from the host. Their hooks and MCP servers run with the host user's
+  authority and the SDK does not ask for workspace trust, so only register
+  workspaces whose `.claude/settings.json` and `.mcp.json` you trust, or run
+  `workspace-bridge adapter init --claude-setting-sources user` (or `none`) to
+  drop the project and local layers. Shell `allow` and `ask` approvals also
+  run with the host user's authority and are not sandboxed; prefer `ask`.
+  Prompts are sent verbatim, so `@path` expansion and slash commands are not
+  applied. Claude Code supports text input only, and the adapter does not
+  support steering. Account usage limits report the five-hour and seven-day
+  windows from the most recent rate-limit event of a run, so they are a
+  last-observed snapshot that stays empty until the first run and drops a
+  window once it has reset.
+  Editing a custom profile creates a new revision: a conversation bound to
+  the old revision must be rebound by an explicit continuation or replaced
+  by a fresh conversation. The built-in profiles are immutable. Claude Code is not part of the release
+  manifest or verified bundle; its release identity is advertised in the
+  descriptor and diagnosed live like the other adapters.
 
 ## Continuation and rebind (conceptual)
 

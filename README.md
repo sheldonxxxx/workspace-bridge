@@ -1,111 +1,92 @@
 # Workspace Bridge
 
-![Workspace Bridge connects ChatGPT Web to local agent runtimes](docs/assets/workspace-bridge-banner.png)
+![Workspace Bridge: plan in ChatGPT, build with your local agents](https://raw.githubusercontent.com/sheldonxxxx/workspace-bridge/main/docs/assets/workspace-bridge-banner.png)
 
-**Connect ChatGPT Web to your local workspace and agent runtime.**
+**Plan in ChatGPT. Build with your local agents.**
 
-Workspace Bridge is a local MCP control plane that lets ChatGPT Web work with
-the real files, Git state, handoffs, and coding agents on your machine. It
-turns a conversation into a practical loop: ChatGPT inspects the workspace,
-develops and explains a plan, breaks the work into bounded implementation
-tasks, sends those tasks to a configured local runtime such as Pi or Codex,
-then reads the result back to audit and iterate.
+Workspace Bridge lets ChatGPT read the real code on your machine, plan the
+work, hand bounded tasks to Claude Code, Codex, or Pi running locally, and
+then review what they changed. You keep the strongest model for thinking and
+reviewing, a cheaper local agent does the typing, and nothing runs that you
+have not enabled.
 
 ```text
-ChatGPT Web — plan, decompose, audit
-       │
-       │ private MCP tunnel
-       ▼
-Workspace Bridge + local Manager
-       │
-       │ authoritative Node
-       ▼
-Local workspace, Git, handoffs, and agent adapters
-       ├── Pi
-       ├── Codex
-       └── future runtimes
+ChatGPT ── plans, splits the work, reviews the result
+   │
+   │  one private MCP tunnel
+   ▼
+Workspace Bridge ── your local admin console decides what is visible and allowed
+   │
+   ▼
+Your machine ── real files, Git, and local agents (Claude Code, Codex, Pi)
 ```
 
-## Why this project exists
+## Why
 
-The goal is to use ChatGPT Web's large reasoning capacity where it has the
-most leverage: elaborating the approach, breaking complex work into precise
-tasks that a lower-cost implementer can follow, and auditing the result for
-another iteration when needed. This keeps planning and review in the strongest
-conversation while execution happens against the current local checkout.
+Big reasoning models are best at understanding a codebase, designing an
+approach, and checking work. They are expensive to use for every keystroke.
+Local coding agents are good at carrying out a precise task against the
+current checkout. Workspace Bridge connects the two in one loop:
 
-The project itself follows that same split development loop: ChatGPT 5.6 at
-extra-high reasoning acts as the planner and auditor, while Muse Spark 1.3
-running through Pi acts as the local implementer. Workspace Bridge supplies
-the file, Git, handoff, and runtime connection between those roles.
+1. **Inspect.** ChatGPT browses your project, searches it, and reads live Git
+   status and diffs.
+2. **Plan.** It writes a short, reviewable handoff: task, context, and
+   acceptance criteria.
+3. **Build.** You paste the handoff into your agent, or, if you have enabled
+   it, ChatGPT starts a bounded run on Claude Code, Codex, or Pi directly.
+4. **Review.** ChatGPT reads the result and the new diff, then approves the
+   work or plans the next iteration.
 
-Operationally, Workspace Bridge exposes bounded project and agent APIs — not
-an arbitrary remote shell. Source is read-only by default. A local
-administrator can explicitly enable text writes per workspace and, separately,
-opt in to bounded agent runs on explicitly configured adapter instances.
+Workspace Bridge is built this way: a frontier model plans and audits, and a
+local agent implements through the Bridge.
 
-- One private MCP endpoint (`/mcp`) behind one outbound tunnel and one shared
-  gateway credential, serving every explicitly enabled workspace.
-- Every project call carries an explicit `workspace_id`. There is no ambient
-  working directory and no per-chat authorization.
-- Manual handoff flow always works: ChatGPT publishes a small plan, you paste
-  it into your local agent, then paste the reply back for audit.
-- Optional agent runs (Pi or Codex) through Runtime Protocol v1, only on an
-  explicitly enabled workspace route, using exactly one of a prepared handoff
-  or a bounded direct instruction (the Bridge publishes the latter as a
-  minimal auditable handoff).
-- Local Manager on loopback for mappings, tokens, routes, models, profiles,
-  runs, and diagnostics. It is never tunnelled.
+![The local Manager showing Pi, Codex, and Claude Code adapters](https://raw.githubusercontent.com/sheldonxxxx/workspace-bridge/main/docs/assets/workspace-manager.png)
 
-> Security in one minute: one shared gateway credential authorizes all
-> enabled mappings, so disable anything ChatGPT should not see. Source read
-> through the tunnel leaves your machine. There is no remote shell, no
-> per-chat ACL, and no complete secret detection. Keep the Manager local,
-> keep tokens out of chat and repos, and review each runtime profile before
-> enabling writes or runs. See [Security](docs/SECURITY.md).
+## Safe by default
 
-## Supported clients, runtimes, platforms
+- **Read-only until you say otherwise.** New projects start disabled. Once
+  enabled, ChatGPT can write only planning notes; source edits are a separate,
+  per-project switch.
+- **No remote shell.** ChatGPT gets typed tools for browsing, Git evidence,
+  handoffs, and runs. It cannot run arbitrary commands.
+- **Agent runs are opt-in per project and per agent.** Each run uses a
+  security profile you choose; anything the profile marks "ask" pauses the
+  run until it gets an explicit answer.
+- **Your admin console never leaves your machine.** The Manager listens on
+  loopback only and is never tunnelled.
+- **Secrets stay out.** Common credential files are blocked, tokens are kept
+  out of APIs, logs, and chat, and support bundles are created locally and
+  never uploaded automatically.
 
-- **Clients:** ChatGPT (prominent, via the official secure tunnel client) and
-  any compatible MCP client that supports Streamable HTTP and the tool
-  shapes in [MCP tools](docs/MCP_TOOLS.md).
-- **Runtimes:** Pi (`workspace-bridge-pi-host-adapter` on npm) and Codex
-  (packaged `workspace-bridge-codex-adapter` executable). Both speak Runtime
-  Protocol v1 through a Node-owned adapter instance. See
-  [Runtimes](docs/RUNTIMES.md).
-- **Platforms:** macOS and Linux, plus WSL2. Native Windows is not supported.
-  macOS services use launchd; Linux services use systemd. Docker is a
-  Bridge-control-plane option, with a versioned multiarch image on GHCR;
-  Nodes and adapters stay native on their hosts. See [Docker](docs/DOCKER.md).
+Know the limits too: one shared connection credential covers every enabled
+project, and source that ChatGPT reads leaves your machine. Read
+[Security](docs/SECURITY.md) before enabling writes or agent runs.
 
-## How it works
+## What you get
 
-```mermaid
-flowchart LR
-    Client["ChatGPT / MCP client"] --> Tunnel["Private MCP tunnel<br/>one channel, X-Bridge-Token"]
-    Tunnel --> Bridge["Bridge control plane<br/>/mcp + local Manager"]
-    Bridge --> Node["Authoritative Node<br/>files, Git, handoffs, adapter secrets"]
-    Node --> Pi["Pi adapter instance"]
-    Node --> Codex["Codex adapter instance"]
-```
+- **Project browsing:** directory trees, globs, regex search, paginated reads
+  with hashes, and read-only Git status and diffs.
+- **Planning handoffs:** `TASK.md`, `CONTEXT.md`, and `ACCEPTANCE.md`
+  published under `.workspace-handoff/`, ready to paste into any agent.
+- **Local agent runs:** Claude Code, Codex, and Pi through one runtime
+  protocol, with per-agent model policy, security profiles, resumable
+  approvals, and run-scoped usage.
+- **Images:** screenshots and other rasters return as native previews.
+- **Local Manager:** a terminal-style admin console for projects, agents,
+  routes, models, runs, and diagnostics.
+- **Operations:** `doctor` diagnostics, sanitized support bundles, native
+  services on macOS and Linux, Discord run notifications, and a Docker image.
 
-ChatGPT calls typed tools (`list_workspaces`, `read_file`, `prepare_handoff`,
-`start_agent_run`, and others; see the tool reference for the exact list). The Bridge resolves the workspace to its
-authoritative Node; the Node enforces its host `allowed_roots` ceiling and
-serves files, Git evidence, handoffs, and runtime proxying. Adapter daemons own
-their native sessions and security enforcement. See
-[Architecture](docs/ARCHITECTURE.md) and [Runtime Protocol](docs/RUNTIME_PROTOCOL.md).
+Works with ChatGPT through OpenAI's secure MCP tunnel, and with any MCP
+client that supports Streamable HTTP. Runs on macOS, Linux, and WSL2.
 
-## Quick start (about 5–10 minutes)
+## Quick start (about 10 minutes)
 
-This is the supported happy path: persistent installs, a local Bridge, one
-host-only Node, and the local Manager. Details, Docker, and alternatives live
-in [Setup](docs/SETUP.md).
+Install the package, then initialize the Bridge and one Node (the local
+service that owns your files):
 
 ```sh
 uv tool install workspace-bridge
-workspace-bridge --version
-
 workspace-bridge init
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
   --allow-root "$HOME/Projects"
@@ -113,85 +94,81 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service
 workspace-bridge serve
 ```
 
-Then in another terminal, display the tokens you will register (output stays
-in this terminal; never paste it into chat):
+In another terminal, show the Node token. It stays in your terminal; never
+paste it into chat:
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
 ```
 
-Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password `admin`, change the password, add and register the
-Node with its URL plus Node token FIRST, then add one workspace mapping,
-create the shared gateway credential, and enable the project. Adapter setup
-is optional for browsing and manual handoffs and is required only for
-automated Pi/Codex runs; see [Setup](docs/SETUP.md) and
-[Runtimes](docs/RUNTIMES.md). Generate the tunnel profile and connect your
-MCP client to `/mcp` only.
-Verify with:
+Then open the Manager at `http://127.0.0.1:8766/`:
+
+1. Sign in with the temporary bootstrap account (see
+   [Setup](docs/SETUP.md#3-credentials-you-will-handle)) and choose your own
+   password.
+2. Register the Node with its URL and the token from above.
+3. Add a workspace mapping for one project and enable it.
+4. Create the shared gateway credential and generate the tunnel profile.
+5. Connect ChatGPT (or another MCP client) to `/mcp`.
+
+Check everything with:
 
 ```sh
 workspace-bridge doctor
 ```
 
-`doctor` reports configuration, workspace prerequisites, adapter health, and
-runnable workspace/adapter routes. The Manager enables a prepared-handoff
-start only when the exact `(workspace_id, adapter_id)` route is ready.
+Browsing and manual handoffs work at this point. To let ChatGPT start agent
+runs, add a Claude Code, Codex, or Pi adapter; see [Runtimes](docs/RUNTIMES.md).
+Full instructions, including Docker, are in [Setup](docs/SETUP.md). If you
+would rather have a coding agent do the install, point it at
+[Agent setup](docs/AGENT_SETUP.md).
 
-## Features
+## How it works
 
-- Bounded browsing: trees, globs, regex search, paginated reads with hashes,
-  and read-only Git status/diffs as live review evidence.
-- Planning handoffs: `prepare_handoff` publishes `TASK.md`, `CONTEXT.md`,
-  `ACCEPTANCE.md` under `.workspace-handoff/jobs/job_<id>/`.
-- Policy-controlled writing: per-workspace `none`, `handoff` (default), or
-  `workspace` scope. Local-admin only; no MCP override.
-- Image reads through the same reader: supported rasters return native MCP
-  image previews with explicit limits. Visible pixel secrets are not redacted.
-- Runtime Protocol v1 runs with resumable interactions, bounded activity and
-  execution evidence, and durable per-channel notifications (Discord).
-- Diagnostics (`doctor`), sanitized support bundles, native logging bounds,
-  release identity, and manual updates. No automatic updater and no automatic
-  support upload.
+```mermaid
+flowchart LR
+    Client["ChatGPT / MCP client"] --> Tunnel["Private MCP tunnel"]
+    Tunnel --> Bridge["Bridge<br/>/mcp + local Manager"]
+    Bridge --> Node["Node<br/>files, Git, handoffs"]
+    Node --> Claude["Claude Code adapter"]
+    Node --> Codex["Codex adapter"]
+    Node --> Pi["Pi adapter"]
+```
 
-Tool names and schemas are authoritative from tool discovery; see the
-[tool reference](docs/MCP_TOOLS.md) for the exact list.
+The **Bridge** serves the MCP endpoint and the local Manager. Each **Node**
+owns the files, Git, and handoffs on its host and never lets the Bridge reach
+outside its allowed roots. **Adapters** wrap each local agent and enforce its
+security profile. A run reaches an agent only through an exact
+workspace-to-adapter route you enabled. See
+[Architecture](docs/ARCHITECTURE.md).
 
-## Project status and limitations
+## Status
 
-- Current version: `0.1.2`. Manual package updates only
-  (`uv tool upgrade workspace-bridge`, then restart affected services).
-- Native Windows is unsupported; use WSL2.
-- Image previews are first-frame, size-bounded, and not color-managed. A local
-  tool success does not prove your tunnel client passes pixels to the model;
-  verify with a fresh visual marker. See [Image support](docs/IMAGE_SUPPORT.md).
-- No automatic package updater and no automatic support upload. Support
-  bundles are created locally and must be reviewed before sharing.
-- Live deployment combinations may not all be validated in every checkout.
-  Combinations that have not run as a live Bridge plus Node plus tunnel smoke
-  are listed under [Known limitations / validation status](docs/OPERATIONS.md#known-limitations--validation-status).
-- Root service mode is advanced only. A root-owned Node state managed as root
-  runs the Node as root with full Node filesystem authority; a root-owned
-  adapter state managed as root runs that adapter and its native agent as
-  root. Running the Node as root does not by itself make separately non-root
-  adapter services root. Prefer dedicated non-root service identities.
+Version `0.2.0`, an early release under active development. Updates are
+manual (`uv tool upgrade workspace-bridge`, then restart services); there is
+no auto-updater. Native Windows is not supported; use WSL2. Known gaps and
+validation status are listed in
+[Operations](docs/OPERATIONS.md#known-limitations--validation-status).
 
 ## Documentation
 
-- [Documentation index](docs/README.md) — map by audience.
-- [Setup](docs/SETUP.md) — canonical human installation and configuration.
-- [Agent setup](docs/AGENT_SETUP.md) — deterministic runbook for an AI agent
-  preparing Workspace Bridge for a user.
-- [Architecture](docs/ARCHITECTURE.md) — components, authority, trust
-  boundaries, and deployment.
-- [Runtimes](docs/RUNTIMES.md) — Pi and Codex notes in one place.
-- [Operations](docs/OPERATIONS.md) — state, services, upgrades, bundles,
-  recovery, limitations.
-- [Security](docs/SECURITY.md), [MCP tools](docs/MCP_TOOLS.md),
-  [Runtime Protocol](docs/RUNTIME_PROTOCOL.md),
+- [Setup](docs/SETUP.md): install and configure.
+- [Agent setup](docs/AGENT_SETUP.md): runbook for a coding agent installing
+  Workspace Bridge for you.
+- [Runtimes](docs/RUNTIMES.md): Claude Code, Codex, and Pi.
+- [Security](docs/SECURITY.md): threat model and controls.
+- [Architecture](docs/ARCHITECTURE.md) and [Operations](docs/OPERATIONS.md).
+- [MCP tools](docs/MCP_TOOLS.md), [Runtime Protocol](docs/RUNTIME_PROTOCOL.md),
   [File access](docs/FILE_ACCESS.md), [Images](docs/IMAGE_SUPPORT.md),
   [Handoff protocol](docs/HANDOFF_PROTOCOL.md), [Docker](docs/DOCKER.md),
   [References](docs/REFERENCES.md).
-- [Contributing](CONTRIBUTING.md) — contributor setup, tests, and docs rules.
+- [Full documentation index](docs/README.md).
+
+## Contributing and security
+
+Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Report vulnerabilities privately as described in the
+[security policy](.github/SECURITY.md), not in public issues.
 
 ## License
 

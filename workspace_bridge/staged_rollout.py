@@ -8,7 +8,7 @@ update plan: component updates are manual local operations on each host.
 The running Bridge is the active target after a Bridge-first upgrade:
 
 - ``target_product_version`` is the running Bridge product version.
-- Target Python-core build for Node and Codex is the Bridge build ID.
+- Target Python-core build for Node, Codex and Claude is the Bridge build ID.
 - Manager target is the Bridge-served Manager identity.
 - Pi target product version is the Bridge product version; the exact Pi
   build is unknown, so Pi uses ``product-version-only`` precision rather
@@ -187,7 +187,8 @@ def classify_component(
     if not reachable:
         if observation == "disabled":
             reason = ("adapter-disabled" if component in {
-                "pi-host-adapter", "codex-host-adapter", "adapter"}
+                "pi-host-adapter", "codex-host-adapter", "claude-host-adapter",
+                "adapter"}
                 else "node-disabled" if component == "node"
                 else "unobserved")
             if component in ("bridge", "manager"):
@@ -200,7 +201,8 @@ def classify_component(
         if component == "node":
             return _final(state="unavailable", execution=False,
                           reason="node-unavailable")
-        if component in ("pi-host-adapter", "codex-host-adapter", "adapter"):
+        if component in ("pi-host-adapter", "codex-host-adapter",
+                         "claude-host-adapter", "adapter"):
             return _final(state="unavailable", execution=False,
                           reason="adapter-unavailable")
         if component == "bridge":
@@ -392,7 +394,7 @@ def build_staged_status(
         runtime_type = obs.get("runtime_type")
         # Unknown runtime types never coerce: they are unavailable with a
         # bounded reason, never a fabricated Pi/Codex target.
-        if runtime_type not in ("pi", "codex"):
+        if runtime_type not in ("pi", "codex", "claude"):
             adapters.append(classify_component(
                 component="adapter", instance=adapter_id,
                 current=obs.get("current"),
@@ -408,8 +410,9 @@ def build_staged_status(
         precision = ("product-version-only" if runtime_type == "pi"
                      else "exact")
         target_build_for = (None if runtime_type == "pi" else target_build)
-        desired_component = ("pi-host-adapter" if runtime_type == "pi"
-                             else "codex-host-adapter")
+        desired_component = {"pi": "pi-host-adapter",
+                             "codex": "codex-host-adapter",
+                             "claude": "claude-host-adapter"}[runtime_type]
         adapters.append(classify_component(
             component=desired_component, instance=adapter_id,
             current=obs.get("current"),

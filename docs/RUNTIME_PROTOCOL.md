@@ -4,12 +4,12 @@ Workspace Bridge owns workspace authorization, handoffs, model policy, run
 records, and audit. An authoritative Node owns the workspace filesystem/Git/
 handoff data plane and runtime adapter registry/secrets. A runtime adapter owns
 its native process or SDK, session files, model syntax, and security enforcement.
-Pi and Codex adapters implement the same resource contract; Bridge never sends a
+Pi, Codex, and Claude Code adapters implement the same resource contract; Bridge never sends a
 vendor RPC directly to an adapter.
 
 ## Bridge routing identities
 
-`RuntimeType` is the protocol family (`pi` or `codex`) in the native descriptor.
+`RuntimeType` is the protocol family (`pi`, `codex`, or `claude`) in the native descriptor.
 It describes behavior and does not identify a destination. `AdapterInstance` is
 one Node-owned destination with an opaque `adapter_id`, unique display name,
 runtime type, Node-local/reachable base URL, Node-held per-instance token,
@@ -21,7 +21,7 @@ authoritative Node.
 Bridge stores sanitized adapter references, Node credentials, model policies,
 routes, conversations, and runs in private SQLite. Its local Manager owns
 Bridge-to-Node connection settings; each Node stores adapter credentials in
-private Node SQLite. The native Pi/Codex daemon's listen port, bootstrap token, state path,
+private Node SQLite. The native Pi/Codex/Claude daemon's listen port, bootstrap token, state path,
 and process lifecycle remain configured on that host. A daemon's own
 `WB_RUNTIME_TOKEN` is its HTTP credential; it is not a Bridge-wide registry or
 shared Bridge environment variable.
@@ -31,7 +31,7 @@ shared Bridge environment variable.
 | Resource | Meaning |
 | --- | --- |
 | Conversation | Bridge-owned native context bound to one workspace, exact same-Node `adapter_id`, Node/adapter connection revisions, descriptive `runtime_type`, security source, and applied security revision. |
-| Run | One accepted operation on one AdapterInstance in a conversation, with immutable Node/adapter revision and effective-security evidence. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. |
+| Run | One accepted operation on one AdapterInstance in a conversation, with immutable Node/adapter revision and effective-security evidence. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. Claude Code: one prompt through the terminal result message. |
 | Activity | One command, file change, tool call, search, subagent action, or other observable action within a run. |
 | Interaction | One live blocking request with exact adapter-provided response options or form fields. |
 
@@ -87,7 +87,8 @@ fieldwise delta of the stable cumulative `tokenUsage.total` snapshots
 (`total - baseline`, where the baseline is the predecessor's cumulative
 thread total captured at admission and persisted for restart); `tokenUsage.last`
 carries only the newest model response and is never used alone as the run
-total. Pi aggregates provider-reported assistant/model-call usage for that
+total. Claude Code reports the terminal result's run total, with per-message
+sums as the interim value while the run is active. Pi aggregates provider-reported assistant/model-call usage for that
 run's tool loop (never streaming snapshots or previous conversation turns).
 Duplicate `tokenUsage.total` notifications are idempotent snapshots (never
 summed), and decreasing/reset or malformed cumulatives are dropped fieldwise
@@ -160,6 +161,19 @@ persist in the adapter's private state; edits require the prior definition
 revision. Deletion requires all workspaces to be reassigned and no active
 native run for that profile.
 
+Claude Code profiles contain exactly `edits`, `shell`, `web`, and
+`extensions`, each `deny`, `ask`, or `allow`. `extensions` governs MCP tools
+(including plugin-provided ones); `deny` also keeps MCP servers from starting.
+Reads inside the workspace are always allowed, as are the orchestration tools
+(sub-agents, skills, to-do and tool search), whose own tool calls are gated by
+the same profile. Git internals, `.env` files (templates such as `.env.example`
+excepted), and paths outside the workspace are always denied, and edits never
+reach `.claude` or `.mcp.json`. The adapter applies the
+selected profile to every run of the conversation (a closed tool list plus a
+pre-tool hook), so a named-profile rebind at an idle boundary is a single
+atomic update of the stored binding with no native mutation; it needs no
+rebind marker. Claude Code does not support `runtime-config` bindings.
+
 Codex wrapper profiles contain only permissions, approvalPolicy, and
 approvalsReviewer. The adapter sends the native permissions selector and
 omits legacy sandbox from thread start/resume requests; permissions and
@@ -177,6 +191,9 @@ not support.
 For example, Pi exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
 (Extra high), and `max` when supported by that model. Codex efforts come from
 the live app-server model list and are passed to `turn/start` as `effort`.
+Claude Code models and supported efforts (`low`, `medium`, `high`, `xhigh`,
+`max`) come from the live Claude Code model list; the `default` selector
+sends no model so Claude Code uses its own default.
 
 The Bridge admits a run only when the workspace is enabled, the exact same-Node
 WorkspaceRoute and AdapterInstance are enabled, the handoff is prepared in that
@@ -202,7 +219,7 @@ Activities have stable IDs within a run and kinds `command`, `file_change`,
 `tool_call`, `search`, `subagent`, or `other`. Snapshots contain bounded input
 and result summaries, with no environment variables, credentials, hidden
 reasoning, or full output bodies. Image input is reserved for adapters that
-advertise `imageInput`; the current Pi and Codex adapters advertise text only.
+advertise `imageInput`; the current Pi, Codex, and Claude Code adapters advertise text only.
 
 ## Recovery
 
@@ -216,9 +233,13 @@ identifies the same native operation/request. Otherwise the run becomes
 a prompt or approval on recovery.
 
 The adapter may resume a conversation it created. It must never adopt a Pi TUI
-session, Codex Desktop/TUI thread, or another client's context. Pi's extension
-policy and Codex's native sandbox/approval policy are different enforcement
-mechanisms; a security profile describes the adapter's exact claims and never
+session, Codex Desktop/TUI thread, a Claude Code terminal session, or another
+client's context. The Claude Code adapter proves a session is its own by
+creating it with an adapter-chosen session ID, confirming that ID in the
+native init message of every run, and checking the session still exists
+before it resumes. Pi's extension policy, Codex's native sandbox/approval
+policy, and the Claude Code adapter's tool-list and permission-hook policy are
+different enforcement mechanisms; a security profile describes the adapter's exact claims and never
 asserts they are equivalent.
 
 ## Conformance gate

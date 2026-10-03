@@ -46,7 +46,7 @@ STATE_EVENTS = {
 }
 SAFE_KINDS = frozenset({"permission", "question", "choice", "approval",
                         "form", "interaction"})
-BRIDGE_USER_AGENT = "Workspace-Bridge/0.1.2 (+local-admin; notification channel)"
+BRIDGE_USER_AGENT = "Workspace-Bridge/0.2.0 (+local-admin; notification channel)"
 
 
 def _safe_label(value: object, fallback: str, limit: int) -> str:
@@ -190,7 +190,7 @@ class NotificationEvent:
             safe_subject = "sub_" + hashlib.sha256(raw_subject.encode("utf-8", errors="replace")).hexdigest()[:32]
         if (not safe_run or not safe_workspace
                 or not re.fullmatch(r"adapter_[0-9a-f]{24}", safe_adapter)
-                or runtime_type not in {"pi", "codex"}):
+                or runtime_type not in {"pi", "codex", "claude"}):
             raise BridgeError("Invalid notification identity", "invalid_notification")
         if event_type == "run_needs_attention" and not safe_subject:
             raise BridgeError("Attention notifications require a subject id", "invalid_notification")

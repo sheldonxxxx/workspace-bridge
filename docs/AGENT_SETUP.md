@@ -38,7 +38,7 @@ machine path from examples). Prerequisites are conditional:
 
 - Python 3.11+ and `uv` are always needed for Workspace Bridge itself.
 - Node 20+ with npm is needed only when the user selects the Pi runtime
-  (or for contributor/web work), not for a Codex-only deployment.
+  (or for contributor/web work), not for a Codex-only or Claude-only deployment.
 - Docker/Compose is needed only for container Bridge (Path B).
 
 Check only what the planned deployment needs: always `python3 --version`
@@ -81,9 +81,11 @@ uv tool install workspace-bridge
 workspace-bridge --version
 ```
 
-Runtime package installs happen in Stage 3 after the user selects Pi-only,
-Codex-only, or both (Codex needs no npm package; Pi needs
-`npm install -g workspace-bridge-pi-host-adapter` on its host).
+Runtime package installs happen in Stage 3 after the user selects the
+runtimes (Codex needs no npm package; Claude Code needs the optional extra
+`uv tool install 'workspace-bridge[claude]'` and an existing Claude Code
+login on that host; Pi needs `npm install -g workspace-bridge-pi-host-adapter`
+on its host).
 
 Validate checkout tests only if the user asked for contributor verification
 (see [Contributing](../CONTRIBUTING.md)); otherwise skip to Stage 2.
@@ -102,10 +104,10 @@ Agree with the user before creating anything:
   overlap a mapped project).
 - Distinct MCP and Manager host ports (1024–65535).
 - Node port (default `8770`); Pi port (`8780`) only for Pi; Codex port
-  (`8772`) only for Codex.
-- Runtime selection: Pi-only, Codex-only, or both. Every later stage
-  executes ONLY the selected runtime(s): never initialize or install Pi
-  for a Codex-only setup, and never omit Codex for a both-runtimes setup.
+  (`8772`) only for Codex; Claude Code port (`8774`) only for Claude Code.
+- Runtime selection: any combination of Pi, Codex, and Claude Code. Every
+  later stage executes ONLY the selected runtime(s): never initialize or
+  install Pi for a Codex-only setup, and never omit a selected runtime.
 
 Command templates (fill in the agreed values; include ONLY the selected
 runtime blocks; do not run until the user confirms the plan):
@@ -121,6 +123,10 @@ workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi
 # Codex only (no npm package; executable ships with uv tool install):
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
   --runtime codex --projects-root "$HOME/Projects" --port 8772 > /dev/null
+# Claude Code only (SDK extra; needs an existing Claude Code login):
+uv tool install --force 'workspace-bridge[claude]'
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
+  --runtime claude --projects-root "$HOME/Projects" --port 8774 > /dev/null
 ```
 
 For Docker Desktop Bridge, the Node template instead uses an explicit
@@ -159,6 +165,10 @@ workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi
 # Codex only, when selected:
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
   --runtime codex --projects-root "$HOME/Projects" --port 8772 > /dev/null
+# Claude Code only, when selected:
+uv tool install --force 'workspace-bridge[claude]'
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
+  --runtime claude --projects-root "$HOME/Projects" --port 8774 > /dev/null
 ```
 
 Checkpoint: confirm each created state directory (Bridge, Node, plus each
@@ -179,10 +189,12 @@ workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service status
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service install
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service status
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service install
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service status
 ```
 
-Select exactly the instances chosen in Stage 2 (Pi-only, Codex-only, or
-both); checkpoints enumerate those instances by name.
+Select exactly the instances chosen in Stage 2; checkpoints enumerate those
+instances by name.
 
 Stop/ask before proceeding when any of these appear:
 

@@ -24,6 +24,7 @@ from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        parts, redact, require_write_path)
 from .wbrp import HttpRuntimeAdapter
 from .adapter_registry import validate_base_url
+from .schema_upgrade import widen_runtime_type_check
 from . import __version__
 
 
@@ -135,7 +136,7 @@ class NodeService:
               PRAGMA journal_mode=WAL;
               CREATE TABLE runtime_adapters (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex')),
+                runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude')),
                 base_url TEXT NOT NULL, token TEXT NOT NULL,
                 enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision TEXT NOT NULL,
                 created TEXT NOT NULL, updated TEXT NOT NULL);
@@ -150,6 +151,8 @@ class NodeService:
         elif not {"runtime_adapters", "node_workspaces"}.issubset(tables):
             self.db.close()
             raise BridgeError("Node state schema is incompatible", "state_schema_incompatible")
+        elif not read_only:
+            widen_runtime_type_check(self.db, "runtime_adapters")
         self.browser = Browser(self)
 
     def close(self) -> None:
@@ -459,7 +462,7 @@ class NodeService:
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid adapter name", "invalid_arguments")
         runtime_type = payload.get("runtime_type", current["runtime_type"] if current else None)
-        if runtime_type not in {"pi", "codex"} or (current and runtime_type != current["runtime_type"]):
+        if runtime_type not in {"pi", "codex", "claude"} or (current and runtime_type != current["runtime_type"]):
             raise BridgeError("Adapter runtime type is immutable", "invalid_arguments")
         base_url = validate_base_url(payload.get("base_url", current["base_url"] if current else None))
         token = payload.get("token", "")
@@ -503,7 +506,7 @@ class NodeService:
         adapter_id = payload.get("adapter_id")
         saved = self.adapter(adapter_id) if adapter_id else None
         runtime_type = payload.get("runtime_type", saved["runtime_type"] if saved else None)
-        if runtime_type not in {"pi", "codex"} or (saved and runtime_type != saved["runtime_type"]):
+        if runtime_type not in {"pi", "codex", "claude"} or (saved and runtime_type != saved["runtime_type"]):
             raise BridgeError("Invalid or immutable runtime type", "invalid_arguments")
         base_url = validate_base_url(payload.get("base_url", saved["base_url"] if saved else None))
         token = payload.get("token", "")

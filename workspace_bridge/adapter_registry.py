@@ -7,7 +7,7 @@ from .node_client import NodeRuntimeAdapterProxy
 from .security import BridgeError
 
 ADAPTER_ID_RE = re.compile(r"^adapter_[0-9a-f]{24}$")
-RUNTIME_TYPES = frozenset({"pi", "codex"})
+RUNTIME_TYPES = frozenset({"pi", "codex", "claude"})
 
 
 def validate_base_url(value: object) -> str:

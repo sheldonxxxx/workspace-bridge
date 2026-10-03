@@ -20,7 +20,8 @@ No shell, Codex/Pi SDK, ripgrep process, automatic agent control, OpenAI model c
 - https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html — raster format handling.
 
 These references establish implementation primitives, not actual ChatGPT/tunnel
-compatibility. Live visual recognition is a separate pending validation step.
+compatibility. Confirm live visual recognition in your own client as described in
+[Image support](IMAGE_SUPPORT.md).
 
 ## Docker Compose deployment
 

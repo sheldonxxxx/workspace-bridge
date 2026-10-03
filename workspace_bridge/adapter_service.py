@@ -1,6 +1,6 @@
 """Runtime-neutral AdapterInstance state schema v1 and trusted launcher helpers.
 
-One state directory owns exactly one Pi or Codex AdapterInstance. This module
+One state directory owns exactly one Pi, Codex or Claude AdapterInstance. This module
 owns only the private state contract (permissions, bounded nonsecret config,
 token handling, executable resolution, allowlisted serve environment, and
 authenticated descriptor health). It never installs/upgrades packages, never
@@ -29,14 +29,15 @@ TOKEN_NAME = "runtime-token"
 RUNTIME_DIR_NAME = "runtime"
 LOG_DIR_NAME = "logs"
 
-RUNTIME_TYPES = frozenset({"pi", "codex"})
+RUNTIME_TYPES = frozenset({"pi", "codex", "claude"})
 LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 DEFAULT_PI_PORT = 8780
 DEFAULT_CODEX_PORT = 8772
+DEFAULT_CLAUDE_PORT = 8774
 
 _SERVICE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
-_LABEL_RE = re.compile(r"^com\.workspace-bridge\.adapter\.(pi|codex)\.[0-9a-f]{12}$")
-_UNIT_RE = re.compile(r"^workspace-bridge-adapter-(pi|codex)-[0-9a-f]{12}\.service$")
+_LABEL_RE = re.compile(r"^com\.workspace-bridge\.adapter\.(pi|codex|claude)\.[0-9a-f]{12}$")
+_UNIT_RE = re.compile(r"^workspace-bridge-adapter-(pi|codex|claude)-[0-9a-f]{12}\.service$")
 
 _HEALTH_TIMEOUT = 3
 _MAX_HEALTH_RESPONSE = 64 * 1024
@@ -56,7 +57,7 @@ def _absolute_path(value: str | os.PathLike[str]) -> Path:
 
 def validate_runtime_type(value: object) -> str:
     if not isinstance(value, str) or value not in RUNTIME_TYPES:
-        raise _state_error("Adapter runtime type must be 'pi' or 'codex'",
+        raise _state_error("Adapter runtime type must be 'pi', 'codex' or 'claude'",
                            "adapter_config_invalid")
     return value
 
@@ -198,6 +199,8 @@ def default_executable_name(runtime_type: str) -> str:
     runtime_type = validate_runtime_type(runtime_type)
     if runtime_type == "pi":
         return "workspace-bridge-pi-adapter"
+    if runtime_type == "claude":
+        return "workspace-bridge-claude-adapter"
     return "workspace-bridge-codex-adapter"
 
 
@@ -206,7 +209,8 @@ def resolve_adapter_executable(runtime_type: str,
     """Resolve the stable lexical adapter executable.
 
     The default is the package-manager-provided stable command found on PATH
-    (``workspace-bridge-pi-adapter`` or ``workspace-bridge-codex-adapter``);
+    (``workspace-bridge-pi-adapter``, ``workspace-bridge-codex-adapter`` or
+    ``workspace-bridge-claude-adapter``);
     the lexical symlink path is preserved across package upgrades. An
     explicit absolute path is a local-admin development/test override only;
     it is validated as a regular executable and preserved lexically. No
@@ -261,21 +265,44 @@ def launcher_program(executable: str | os.PathLike[str] | None = None) -> list[s
     return [str(validated), "-m", "workspace_bridge.cli"]
 
 
-def _validate_pi_binary(raw: object) -> str:
+def _validate_native_binary(raw: object, label: str) -> str:
     if not isinstance(raw, str):
-        raise _state_error("Pi binary must be a bounded executable name or path",
+        raise _state_error(f"{label} binary must be a bounded executable name or path",
                            "adapter_config_invalid")
     text = raw.strip()
     if not 1 <= len(text) <= 256 or "\x00" in text or "\n" in text or "\r" in text:
-        raise _state_error("Pi binary must be a bounded executable name or path",
+        raise _state_error(f"{label} binary must be a bounded executable name or path",
                            "adapter_config_invalid")
     if any(ord(c) < 32 or ord(c) == 127 for c in text):
-        raise _state_error("Pi binary must be a bounded executable name or path",
+        raise _state_error(f"{label} binary must be a bounded executable name or path",
                            "adapter_config_invalid")
     if "/" in text and not text.startswith("/"):
-        raise _state_error("Pi binary path must be absolute",
+        raise _state_error(f"{label} binary path must be absolute",
                            "adapter_config_invalid")
     return text
+
+
+def _validate_pi_binary(raw: object) -> str:
+    return _validate_native_binary(raw, "Pi")
+
+
+def _validate_claude_binary(raw: object) -> str:
+    return _validate_native_binary(raw, "Claude Code")
+
+
+_CLAUDE_SETTING_SOURCES = ("user", "project", "local")
+
+
+def _validate_claude_setting_sources(raw: object) -> str:
+    """Normalize the Claude Code settings layers to load (``none`` or a subset)."""
+    items = ([part.strip().lower() for part in raw.split(",") if part.strip()]
+             if isinstance(raw, str) and len(raw) <= 64 else [])
+    if items == ["none"]:
+        return "none"
+    if not items or any(item not in _CLAUDE_SETTING_SOURCES for item in items):
+        raise _state_error("Claude setting sources must be none or a list of "
+                           "user, project and local", "adapter_config_invalid")
+    return ",".join(source for source in _CLAUDE_SETTING_SOURCES if source in items)
 
 
 def _validate_agent_dir(raw: object) -> str:
@@ -300,7 +327,7 @@ def _validate_config_dict(config: object, state: Path) -> dict:
     # Exact allowlist: no secrets, no arbitrary env, no Bridge/Node state.
     allowed = {"schema_version", "runtime_type", "projects_root", "port",
                "executable", "service_id", "pi_binary", "agent_dir",
-               "log_level"}
+               "claude_binary", "claude_setting_sources", "log_level"}
     if set(config) - allowed:
         raise _state_error("Adapter configuration has unexpected fields",
                            "adapter_config_invalid")
@@ -315,6 +342,19 @@ def _validate_config_dict(config: object, state: Path) -> dict:
             raise _state_error("pi_binary applies only to the Pi runtime",
                                "adapter_config_invalid")
         _validate_pi_binary(config["pi_binary"])
+    if "claude_binary" in config:
+        if runtime_type != "claude":
+            raise _state_error("claude_binary applies only to the Claude runtime",
+                               "adapter_config_invalid")
+        _validate_claude_binary(config["claude_binary"])
+    if "claude_setting_sources" in config:
+        if runtime_type != "claude":
+            raise _state_error("claude_setting_sources applies only to the Claude runtime",
+                               "adapter_config_invalid")
+        if _validate_claude_setting_sources(
+                config["claude_setting_sources"]) != config["claude_setting_sources"]:
+            raise _state_error("Claude setting sources must be normalized",
+                               "adapter_config_invalid")
     if "agent_dir" in config:
         if runtime_type != "pi":
             raise _state_error("agent_dir applies only to the Pi runtime",
@@ -429,6 +469,8 @@ def initialize_adapter(state: str | os.PathLike[str], *,
                        port: int | None = None,
                        executable: str | os.PathLike[str] | None = None,
                        pi_binary: str | None = None,
+                       claude_binary: str | None = None,
+                       claude_setting_sources: str | None = None,
                        agent_dir: str | None = None,
                        log_level: str | None = None) -> tuple[dict, str]:
     """Create fresh AdapterInstance state only.
@@ -440,7 +482,8 @@ def initialize_adapter(state: str | os.PathLike[str], *,
     """
     runtime_type = validate_runtime_type(runtime_type)
     if port is None:
-        port = DEFAULT_PI_PORT if runtime_type == "pi" else DEFAULT_CODEX_PORT
+        port = {"pi": DEFAULT_PI_PORT, "claude": DEFAULT_CLAUDE_PORT}.get(
+            runtime_type, DEFAULT_CODEX_PORT)
     port = validate_port(port)
     state_path = _absolute_path(state)
     projects_canonical = validate_projects_root(projects_root, state=state_path,
@@ -459,6 +502,17 @@ def initialize_adapter(state: str | os.PathLike[str], *,
             raise _state_error("pi_binary applies only to the Pi runtime",
                                "adapter_config_invalid")
         config["pi_binary"] = _validate_pi_binary(pi_binary)
+    if claude_binary is not None:
+        if runtime_type != "claude":
+            raise _state_error("claude_binary applies only to the Claude runtime",
+                               "adapter_config_invalid")
+        config["claude_binary"] = _validate_claude_binary(claude_binary)
+    if claude_setting_sources is not None:
+        if runtime_type != "claude":
+            raise _state_error("claude_setting_sources applies only to the Claude runtime",
+                               "adapter_config_invalid")
+        config["claude_setting_sources"] = _validate_claude_setting_sources(
+            claude_setting_sources)
     if agent_dir is not None:
         if runtime_type != "pi":
             raise _state_error("agent_dir applies only to the Pi runtime",
@@ -592,6 +646,17 @@ def validate_adapter_state(state: str | os.PathLike[str], *,
     return config, token
 
 
+_CODEX_ENV = ("WB_CODEX_PROJECTS_ROOT", "WB_CODEX_ADAPTER_PORT", "WB_CODEX_ADAPTER_STATE")
+_PI_ENV = ("WB_PI_PROJECTS_DIR", "WB_PI_ADAPTER_PORT", "WB_PI_BINARY", "PI_CODING_AGENT_DIR")
+_CLAUDE_ENV = ("WB_CLAUDE_PROJECTS_ROOT", "WB_CLAUDE_ADAPTER_PORT",
+               "WB_CLAUDE_ADAPTER_STATE", "WB_CLAUDE_BINARY",
+               "WB_CLAUDE_SETTING_SOURCES")
+# Never leak another runtime's names into a runtime child.
+_OTHER_RUNTIME_ENV = {"pi": _CODEX_ENV + _CLAUDE_ENV,
+                      "codex": _PI_ENV + _CLAUDE_ENV,
+                      "claude": _PI_ENV + _CODEX_ENV}
+
+
 def build_adapter_env(
     config: dict,
     token: str,
@@ -631,8 +696,25 @@ def build_adapter_env(
         if "log_level" in config:
             env["WB_LOG_LEVEL"] = str(config["log_level"])
         # Never leak the other runtime's names into a Pi child.
-        for stale in ("WB_CODEX_PROJECTS_ROOT", "WB_CODEX_ADAPTER_PORT",
-                      "WB_CODEX_ADAPTER_STATE"):
+        for stale in _OTHER_RUNTIME_ENV["pi"]:
+            env.pop(stale, None)
+    elif runtime_type == "claude":
+        state_path = _absolute_path(state)
+        env["WB_RUNTIME_TOKEN"] = token
+        env["WB_CLAUDE_PROJECTS_ROOT"] = projects_root
+        env["WB_CLAUDE_ADAPTER_PORT"] = str(port)
+        env["WB_CLAUDE_ADAPTER_STATE"] = str(state_path / RUNTIME_DIR_NAME)
+        if "claude_binary" in config:
+            env["WB_CLAUDE_BINARY"] = str(config["claude_binary"])
+        else:
+            env.pop("WB_CLAUDE_BINARY", None)
+        if "claude_setting_sources" in config:
+            env["WB_CLAUDE_SETTING_SOURCES"] = str(config["claude_setting_sources"])
+        else:
+            env.pop("WB_CLAUDE_SETTING_SOURCES", None)
+        if "log_level" in config:
+            env["WB_LOG_LEVEL"] = str(config["log_level"])
+        for stale in _OTHER_RUNTIME_ENV["claude"]:
             env.pop(stale, None)
     else:
         state_path = _absolute_path(state)
@@ -642,8 +724,7 @@ def build_adapter_env(
         env["WB_CODEX_ADAPTER_STATE"] = str(state_path / RUNTIME_DIR_NAME)
         if "log_level" in config:
             env["WB_LOG_LEVEL"] = str(config["log_level"])
-        for stale in ("WB_PI_PROJECTS_DIR", "WB_PI_ADAPTER_PORT",
-                      "WB_PI_BINARY", "PI_CODING_AGENT_DIR"):
+        for stale in _OTHER_RUNTIME_ENV["codex"]:
             env.pop(stale, None)
     return env
 

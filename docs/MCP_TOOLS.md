@@ -228,7 +228,7 @@ on failure, `features` plus instance/adapter/native versions on success).
 Descriptor diagnostics are observability only and never change `available`/
 `readiness`. It does not return endpoints, tokens, URLs, paths, profiles,
 prompts, or raw runtime payloads. `runtime_type`
-(`pi` or `codex`) describes protocol behavior; only `adapter_id` selects a
+(`pi`, `codex`, or `claude`) describes protocol behavior; only `adapter_id` selects a
 destination. Do not infer an AdapterInstance from a runtime type. Use a ready
 default when one is reported; if there is no default and exactly one ready target
 exists it may be used, otherwise ask which destination to use. Never fail over

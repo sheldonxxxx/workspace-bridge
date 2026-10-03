@@ -1543,6 +1543,8 @@ test("admin login requires a password change and supports later changes", async 
     }),
   );
   await page.goto("/static/dist/");
+  await expect(page.getByLabel("Username")).toHaveValue("");
+  await page.getByLabel("Username").fill("admin");
   await page.getByLabel("Password", { exact: true }).fill("wrong");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("alert")).toHaveText(

@@ -1,8 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-- No changes yet.
+First release from the public repository.
+
+- Claude Code runtime: a `claude` adapter type driven through the Claude Agent
+  SDK (`uv tool install 'workspace-bridge[claude]'`, executable
+  `workspace-bridge-claude-adapter`, `workspace-bridge adapter init --runtime
+  claude`) with Bridge-managed `edits`/`shell`/`web`/`extensions` security
+  profiles, approvals through Bridge interactions, run-scoped usage, and
+  Manager support. Claude Code loads its user, project and local settings,
+  `CLAUDE.md`, skills, sub-agents, plugins and MCP servers as the CLI does
+  (`--claude-setting-sources` narrows the layers); every tool call, including
+  sub-agent and MCP calls, still passes the profile gate, and edits never
+  reach `.claude` or `.mcp.json`. Account usage limits report the five-hour and
+  seven-day windows from the last run. The Node now treats `.claude` and
+  `.mcp.json` as protected names for Bridge reads and writes.
+  Existing Bridge and Node databases are upgraded in place to accept the new
+  runtime type. Claude Code is not part of the release manifest or verified
+  bundle.
+- Public README and package listings: one tagline ("Plan in ChatGPT. Build
+  with your local agents."), a current Manager screenshot, PyPI and npm
+  project links, keywords, and classifiers.
+- Security policy with private vulnerability reporting, plus bug and feature
+  issue templates.
+- Documentation now matches shipped behavior: the published GHCR image,
+  in-place v4 state upgrades, and Claude Code alongside Pi and Codex.
+- Version `0.2.0` across the Python product and package, Bridge and Node
+  components, Codex and Claude Code components, Pi package and adapter,
+  Manager package, Docker image tag, and served release metadata.
 
 ## 0.1.2
 

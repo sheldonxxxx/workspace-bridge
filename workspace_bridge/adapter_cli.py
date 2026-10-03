@@ -83,21 +83,27 @@ def _serve(state: Path) -> None:
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Manage one native Pi/Codex adapter instance")
+        description="Manage one native Pi/Codex/Claude adapter instance")
     parser.add_argument("--state", type=Path, required=True,
                         help="Adapter instance state directory")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Initialize one adapter instance state")
-    init.add_argument("--runtime", required=True, choices=["pi", "codex"],
+    init.add_argument("--runtime", required=True, choices=["pi", "codex", "claude"],
                       help="Runtime type for this instance")
     init.add_argument("--projects-root", required=True,
                       help="Canonical existing projects parent")
     init.add_argument("--port", type=int, default=None,
-                      help="Loopback port (default 8780 for pi, 8772 for codex)")
+                      help="Loopback port (default 8780 for pi, 8772 for codex, 8774 for claude)")
     init.add_argument("--executable", type=Path, default=None,
                       help="Explicit absolute adapter executable (development/tests only)")
     init.add_argument("--pi-binary", default=None,
                       help="Pi executable override (pi runtime only)")
+    init.add_argument("--claude-binary", default=None,
+                      help="Claude Code executable override (claude runtime only; "
+                           "default is the CLI bundled with the Claude Agent SDK)")
+    init.add_argument("--claude-setting-sources", default=None,
+                      help="Claude Code settings layers to load, none or a comma list of "
+                           "user,project,local (claude runtime only; default all three)")
     init.add_argument("--agent-dir", type=Path, default=None,
                       help="Isolated Pi agent dir (pi runtime only)")
     init.add_argument("--log-level", default=None,
@@ -129,6 +135,8 @@ def main(argv: list[str] | None = None):
                 port=args.port,
                 executable=args.executable,
                 pi_binary=args.pi_binary,
+                claude_binary=args.claude_binary,
+                claude_setting_sources=args.claude_setting_sources,
                 agent_dir=str(args.agent_dir) if args.agent_dir is not None else None,
                 log_level=args.log_level,
             )

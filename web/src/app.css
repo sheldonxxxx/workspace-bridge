@@ -1502,7 +1502,7 @@ a {
   margin-top: 18px;
 }
 .adapter-detail-panel .profiles-runtime-tabs {
-  padding: 0 26px;
+  padding: 18px 26px 0;
 }
 .adapter-detail-panel .profiles-layout {
   padding: 0 26px 26px;
@@ -2380,8 +2380,15 @@ a {
   display: grid;
   place-items: center;
 }
+.execution-tool > div {
+  min-width: 0;
+}
 .execution-tool h3 {
   font-size: 12px;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .execution-tool > div > span {
   color: var(--quiet);

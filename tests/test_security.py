@@ -8,7 +8,7 @@ from workspace_bridge.cli import initialize
 def test_paths_reject(path):
     with pytest.raises(BridgeError): parts(path)
 
-@pytest.mark.parametrize("path", [".env", ".env.local", "src/.env.test", ".git/config", ".SSH/key", "auth.pem", "a/credentials.json", "node_modules/a.js", ".workspace-handoff/jobs/a/TASK.md", "a/secret.key", ".npmrc", "cache.sqlite3"])
+@pytest.mark.parametrize("path", [".env", ".env.local", "src/.env.test", ".git/config", ".SSH/key", "auth.pem", "a/credentials.json", "node_modules/a.js", ".workspace-handoff/jobs/a/TASK.md", "a/secret.key", ".npmrc", "cache.sqlite3", ".claude/settings.json", "pkg/.claude/hooks/x.sh", ".mcp.json"])
 def test_default_denies(path):
     assert not allowed(path)
 

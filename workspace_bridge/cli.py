@@ -463,7 +463,7 @@ def main(argv: list[str] | None = None):
                       help="Node state directory (separate from Bridge --state)")
     node.add_argument("node_argv", nargs=argparse.REMAINDER,
                       help="Node command: init | serve | show-token | service ...")
-    adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex adapter instance")
+    adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex/Claude adapter instance")
     adapter.add_argument("--state", dest="adapter_state", type=Path, required=True,
                          help="Adapter instance state directory (separate from Bridge --state and Node state)")
     adapter.add_argument("adapter_argv", nargs=argparse.REMAINDER,

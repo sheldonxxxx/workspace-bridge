@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/sheldonxxxx/workspace-bridge/security/advisories/new
+    about: Please report vulnerabilities privately, not as public issues.
+  - name: Documentation
+    url: https://github.com/sheldonxxxx/workspace-bridge/blob/main/docs/README.md
+    about: Setup, runtimes, security, and operations guides.

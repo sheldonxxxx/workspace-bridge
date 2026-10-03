@@ -1,8 +1,8 @@
 # Architecture
 
-Source-accurate reference for Workspace Bridge `0.1.2`: Bridge control plane
+Source-accurate reference for Workspace Bridge `0.2.0`: Bridge control plane
 plus local Manager, authoritative Nodes, Node-owned adapter instances
-(Pi/Codex), exact workspace routes, Runtime Protocol v1, optional secure MCP
+(Pi/Codex/Claude Code), exact workspace routes, Runtime Protocol v1, optional secure MCP
 tunnel, native services on macOS and Linux, manual package updates, and
 bounded logs with support bundles.
 
@@ -18,9 +18,11 @@ flowchart TB
     NodeB["Node B (native)<br/>allowed roots, files, Git, handoffs"]
     Pi["Pi adapter instance<br/>native sessions, trusted permission extension"]
     Codex["Codex adapter instance<br/>native threads, app-server"]
+    Claude["Claude Code adapter instance<br/>Agent SDK sessions, permission hook"]
     subgraph Hosts["Data-plane hosts"]
         NodeA --- Pi
         NodeB --- Codex
+        NodeB --- Claude
     end
     Client --> Tunnel --> Bridge
     Bridge --> NodeA
@@ -48,6 +50,11 @@ Component responsibilities:
 - `wbrp.py`: validated bounded private HTTP client for adapters.
 - `codex_host_adapter.py` / `codex_rpc.py`: Codex app-server host adapter
   with native thread ownership.
+- `claude_host_adapter.py`: Claude Code host adapter over the Claude Agent
+  SDK with adapter-owned sessions, a closed tool list, and a pre-tool
+  permission hook.
+- `schema_upgrade.py`: in-place SQLite constraint upgrades for existing
+  Bridge and Node state.
 - `runtime/pi-host-adapter/`: Pi adapter around natively hosted Pi sessions,
   including its trusted permission extension.
 - `notifications.py`: Bridge-owned semantic events, durable per-channel
@@ -71,14 +78,14 @@ flowchart LR
     Node["Node<br/>root ceiling, files/Git/handoffs,<br/>adapter registry + secrets"]
     Route["WorkspaceRoute<br/>one workspace to one<br/>same-Node adapter ID"]
     Adapter["AdapterInstance<br/>one destination,<br/>endpoint + token,<br/>profiles + models"]
-    Native["Native runtime<br/>Pi sessions / Codex threads"]
+    Native["Native runtime<br/>Pi sessions / Codex threads / Claude sessions"]
     Bridge -->|"resolve workspace to Node"| Node
     Node -->|"enforce route + binding"| Route
     Route -->|"select destination"| Adapter
     Adapter -->|"Runtime Protocol v1"| Native
 ```
 
-A `RuntimeType` (`pi` or `codex`) names the protocol family; it is not a
+A `RuntimeType` (`pi`, `codex`, or `claude`) names the protocol family; it is not a
 destination. An `AdapterInstance` is one Node-owned destination with its own
 name, endpoint, token, enabled state, and connection revision. A
 `WorkspaceRoute` binds one workspace to one exact same-Node adapter ID with
@@ -128,7 +135,8 @@ Boundaries:
   route enablement governs run admission. One does not imply the other.
 - Runtime profiles are pre-tool policy claims, not necessarily OS sandboxes.
   Pi runs with the host user's authority through its trusted permission
-  extension; Codex enforces its native permission and approval policy. Review
+  extension; Codex enforces its native permission and approval policy; Claude Code is
+  constrained by its adapter's tool list and permission hook. Review
   each profile before enabling writes or runs.
 - Source returned through the tunnel reaches model processing. The tunnel
   removes a public inbound endpoint; it does not keep code local. Exclusions
@@ -239,7 +247,7 @@ is loopback-only in both modes and is never tunnelled.
 ## Release identity and skew
 
 Every deployed component exposes a bounded content-addressed identity with
-product `workspace-bridge`, product version `0.1.2`, component name and
+product `workspace-bridge`, product version `0.2.0`, component name and
 version, and a deterministic build ID over production inputs only. The
 product version is the release; the component version is that component's
 own version; adapter and native semantic versions stay separate fields.

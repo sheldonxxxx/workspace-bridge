@@ -1,6 +1,6 @@
 """Per-instance Linux system-level systemd lifecycle for adapters.
 
-One adapter state owns exactly one Pi or Codex AdapterInstance. The system
+One adapter state owns exactly one Pi, Codex or Claude AdapterInstance. The system
 unit name derives only from the validated config-generated ``runtime_type``
 plus the opaque ``service_id``
 (``workspace-bridge-adapter-<runtime>-<id>.service``). The plain non-root CLI

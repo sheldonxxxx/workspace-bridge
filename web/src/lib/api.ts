@@ -3,7 +3,7 @@ export type Json = Record<string, unknown>;
 export interface WorkspaceRoute {
   adapter_id: string;
   name: string;
-  runtime_type: "pi" | "codex";
+  runtime_type: "pi" | "codex" | "claude";
   node_id?: string;
   node_name?: string;
   adapter_enabled: boolean;
@@ -44,7 +44,7 @@ export interface WorkspaceRoute {
 export interface AvailableAdapter {
   adapter_id: string;
   name: string;
-  runtime_type: "pi" | "codex";
+  runtime_type: "pi" | "codex" | "claude";
   enabled: boolean;
   node_id: string;
   route_enabled?: boolean;
@@ -93,7 +93,7 @@ export interface AdapterInfo {
   node_id?: string;
   node_name?: string;
   name: string;
-  runtime_type: "pi" | "codex";
+  runtime_type: "pi" | "codex" | "claude";
   base_url: string;
   enabled: boolean;
   revision: string;
@@ -382,7 +382,13 @@ export function dateTime(value?: string): string {
   return value ? new Date(value).toLocaleString() : "—";
 }
 export function runtimeName(id: string): string {
-  return id === "pi" ? "Pi" : id === "codex" ? "Codex" : id;
+  return id === "pi"
+    ? "Pi"
+    : id === "codex"
+      ? "Codex"
+      : id === "claude"
+        ? "Claude Code"
+        : id;
 }
 export function adapterName(
   adapter?: Pick<AdapterInfo, "name" | "runtime_type">,

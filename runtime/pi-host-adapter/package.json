@@ -1,9 +1,22 @@
 {
   "name": "workspace-bridge-pi-host-adapter",
-  "version": "0.1.2",
-  "workspaceBridgeRelease": "0.1.2",
+  "version": "0.2.0",
+  "workspaceBridgeRelease": "0.2.0",
   "type": "module",
-  "description": "Native host adapter that owns in-process Pi AgentSession instances for Workspace Bridge. Not a Compose service.",
+  "description": "Pi runtime adapter for Workspace Bridge: let ChatGPT plan and review while Pi builds on your machine.",
+  "keywords": [
+    "workspace-bridge",
+    "mcp",
+    "chatgpt",
+    "pi",
+    "ai-agents",
+    "coding-agent"
+  ],
+  "homepage": "https://github.com/sheldonxxxx/workspace-bridge/blob/main/docs/RUNTIMES.md",
+  "bugs": {
+    "url": "https://github.com/sheldonxxxx/workspace-bridge/issues"
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/sheldonxxxx/workspace-bridge",

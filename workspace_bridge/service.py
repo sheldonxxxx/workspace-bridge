@@ -15,6 +15,7 @@ from .notifications import (NotificationChannel, NotificationManager,
                             notification_manager_from_environment, _safe_label)
 from .run_coordinator import RunCoordinator
 from .adapter_registry import AdapterRegistry
+from .schema_upgrade import widen_runtime_type_check
 from .node_registry import NodeRegistry
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        WRITE_SCOPES, allowed, handoff_allowed, file_text, digest,
@@ -126,7 +127,7 @@ class Service:
             key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
           CREATE TABLE node_adapters (
             adapter_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id),
-            name TEXT NOT NULL, runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex')),
+            name TEXT NOT NULL, runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude')),
             base_url TEXT NOT NULL DEFAULT '',
             revision TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
             has_token INTEGER NOT NULL CHECK(has_token IN (0,1)), last_seen TEXT NOT NULL);
@@ -164,6 +165,8 @@ class Service:
                 self.db.close()
                 raise BridgeError("Bridge state is incomplete for schema v4; use a fresh state path",
                                   "state_schema_incompatible")
+            if not read_only:
+                widen_runtime_type_check(self.db, "node_adapters")
         if not read_only:
             self.db.execute("PRAGMA journal_mode=WAL")
         if read_only:

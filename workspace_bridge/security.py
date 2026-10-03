@@ -22,7 +22,7 @@ MAX_FILES = 10000
 MAX_OUTPUT = 24000
 DENY_NAMES = frozenset({
     ".git", ".hg", ".svn", ".ssh", ".aws", ".azure", ".kube", ".gnupg",
-    HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc", ".DS_Store", "node_modules",
+    ".claude", ".mcp.json", HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc", ".DS_Store", "node_modules",
     ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "dist", "build", "target", ".next", ".nuxt", "coverage", "vendor",
 })

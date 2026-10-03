@@ -1,6 +1,14 @@
 # Pi host adapter
 
-Native host package that owns Pi agent sessions for Workspace Bridge. It is
+The Pi runtime adapter for [Workspace Bridge](https://github.com/sheldonxxxx/workspace-bridge):
+plan in ChatGPT, build with your local agents. Install it on any host where
+you want ChatGPT to start bounded Pi runs through Workspace Bridge.
+
+```sh
+npm install -g workspace-bridge-pi-host-adapter
+```
+
+This package owns Pi agent sessions on the host. It is
 not a Compose service and never runs in Docker. The npm package
 `workspace-bridge-pi-host-adapter` ships the stable
 `workspace-bridge-pi-adapter` executable (`pi-adapter.mjs` via the `bin`
@@ -9,8 +17,8 @@ no npm-managed service installer. The Bridge and this adapter communicate
 only through Runtime Protocol v1.
 
 For runtime behavior, profiles, and troubleshooting see
-[Runtimes](../../docs/RUNTIMES.md). For repo checks see
-[Contributing](../../CONTRIBUTING.md).
+[Runtimes](https://github.com/sheldonxxxx/workspace-bridge/blob/main/docs/RUNTIMES.md). For repo checks see
+[Contributing](https://github.com/sheldonxxxx/workspace-bridge/blob/main/CONTRIBUTING.md).
 
 ## Topology
 

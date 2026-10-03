@@ -437,7 +437,7 @@ def project_diagnostics(report: Any) -> dict:
         if aid:
             entry["adapter_id"] = aid
         rt = row.get("runtime_type")
-        if isinstance(rt, str) and rt in {"pi", "codex"}:
+        if isinstance(rt, str) and rt in {"pi", "codex", "claude"}:
             entry["runtime_type"] = rt
         # Never copy id/detail/names/endpoints/secrets.
         checks_out.append(entry)
@@ -454,7 +454,7 @@ def project_diagnostics(report: Any) -> dict:
         rt = row.get("runtime_type")
         if wid is None or aid is None or nid is None:
             continue
-        if rt not in {"pi", "codex"}:
+        if rt not in {"pi", "codex", "claude"}:
             continue
         ready = row.get("ready")
         route_status = row.get("status")
@@ -645,7 +645,7 @@ def project_adapter_status(raw: Any) -> dict:
         except Exception:
             pass
     rt = raw.get("runtime_type")
-    if isinstance(rt, str) and rt in {"pi", "codex"}:
+    if isinstance(rt, str) and rt in {"pi", "codex", "claude"}:
         out["runtime_type"] = rt
     sid = raw.get("service_id")
     if _safe_id(sid, limit=12) and isinstance(sid, str) and re.fullmatch(r"[0-9a-f]{12}", sid):
@@ -939,7 +939,7 @@ def _collect_service_evidence(*, node_state: Path | None,
             from .adapter_service import load_adapter_config as _load
             cfg = _load(state_path, require_roots=False)
             candidate = cfg.get("runtime_type")
-            if candidate in {"pi", "codex"}:
+            if candidate in {"pi", "codex", "claude"}:
                 runtime = candidate
         except Exception:
             pass
@@ -958,7 +958,7 @@ def _collect_service_evidence(*, node_state: Path | None,
                        "state": "unknown", "health": {"status": "unknown", "code": "unsupported-platform"}}
             projected = project_adapter_status(raw)
             projected["source"] = f"adapter-{index:02d}"
-            projected["runtime_type"] = runtime if runtime in {"pi", "codex"} else projected.get("runtime_type", runtime)
+            projected["runtime_type"] = runtime if runtime in {"pi", "codex", "claude"} else projected.get("runtime_type", runtime)
             adapters_out.append(projected)
             # Logs per adapter.
             try:
@@ -1237,7 +1237,7 @@ def build_support_bundle(*, output: str | os.PathLike[str],
         lines = log_map[name]
         # Enforce generic naming: logs/node.jsonl or logs/adapter-NN-<rt>.jsonl
         if name not in {"logs/node.jsonl"} and not re.fullmatch(
-                r"logs/adapter-\d{2}-(pi|codex|unknown)\.jsonl", name):
+                r"logs/adapter-\d{2}-(pi|codex|claude|unknown)\.jsonl", name):
             continue
         payload = ("".join(line + "\n" for line in lines)).encode("utf-8")
         entries[name] = payload

@@ -158,7 +158,9 @@ function VersionRow({
       ? null
       : entry.runtime_type === "pi"
         ? "workspace-bridge-pi-host-adapter"
-        : "workspace-bridge";
+        : entry.runtime_type === "claude"
+          ? "workspace-bridge[claude]"
+          : "workspace-bridge";
   return (
     <div className="version-row">
       <div className="version-identity">
@@ -1396,7 +1398,8 @@ function ModelDialog({
                   return (
                     <div
                       className={
-                        adapter?.runtime_type === "codex"
+                        adapter?.runtime_type === "codex" ||
+                        adapter?.runtime_type === "claude"
                           ? "model-option model-option-codex"
                           : "model-option"
                       }
@@ -2094,7 +2097,7 @@ export default function App() {
       Boolean(
         info.enabled &&
         info.healthy &&
-        info.runtime_type === "codex" &&
+        (info.runtime_type === "codex" || info.runtime_type === "claude") &&
         info.features?.usageLimits === 1,
       ),
     [],
@@ -2493,7 +2496,6 @@ export default function App() {
                 id="admin-username"
                 name="username"
                 autoComplete="username"
-                defaultValue="admin"
                 required
               />
               <Label htmlFor="admin-password">Password</Label>
@@ -3527,10 +3529,15 @@ export default function App() {
                             </Button>
                           </div>
                         </div>
-                        {info.runtime_type === "codex" &&
+                        {(info.runtime_type === "codex" ||
+                          info.runtime_type === "claude") &&
                           info.features?.usageLimits === 1 && (
                             <div className="adapter-quota-block">
-                              <h4>Codex quota</h4>
+                              <h4>
+                                {info.runtime_type === "claude"
+                                  ? "Claude quota (last run)"
+                                  : "Codex quota"}
+                              </h4>
                               {(() => {
                                 const limits = usageLimits[info.id];
                                 if (!info.enabled || info.healthy === false)
@@ -3558,7 +3565,9 @@ export default function App() {
                                     <p className="adapter-quota-status">
                                       {ordinaryFalse
                                         ? "Ordinary usage unavailable."
-                                        : "Quota unavailable. The runtime could not report the current account balance."}
+                                        : info.runtime_type === "claude"
+                                          ? "No quota observed yet. Claude Code reports usage while a run is active."
+                                          : "Quota unavailable. The runtime could not report the current account balance."}
                                     </p>
                                   );
                                 // Rows are the normalized windows inside each
@@ -3584,7 +3593,9 @@ export default function App() {
                                     <p className="adapter-quota-status">
                                       {ordinaryFalse
                                         ? "Ordinary usage unavailable."
-                                        : "Quota unavailable. The runtime could not report the current account balance."}
+                                        : info.runtime_type === "claude"
+                                          ? "No quota observed yet. Claude Code reports usage while a run is active."
+                                          : "Quota unavailable. The runtime could not report the current account balance."}
                                     </p>
                                   );
                                 return (
@@ -3667,8 +3678,8 @@ export default function App() {
                 })}
                 {!adapters.length && (
                   <Empty title="No adapters configured">
-                    Add Local Pi, GPU Pi, or Codex as separate execution
-                    targets.
+                    Add Local Pi, GPU Pi, Codex, or Claude Code as separate
+                    execution targets.
                   </Empty>
                 )}
               </div>
@@ -3844,7 +3855,9 @@ export default function App() {
                     </p>
                     <div className="version-guidance-grid">
                       <div>
-                        <strong>Bridge, Node, and Codex adapter</strong>
+                        <strong>
+                          Bridge, Node, Codex and Claude Code adapters
+                        </strong>
                         <p>
                           Upgrade the local Python package with{" "}
                           <code>uv tool upgrade workspace-bridge</code>.
@@ -4196,6 +4209,7 @@ export default function App() {
                   >
                     <option value="pi">Pi</option>
                     <option value="codex">Codex</option>
+                    <option value="claude">Claude Code</option>
                   </select>
                 ) : (
                   <p className="form-readonly">
@@ -4957,11 +4971,15 @@ function RunInspector({
                     const details = item.details;
                     const input = objectValue(details?.input);
                     const result = objectValue(details?.result);
-                    const title = String(
+                    const fullTitle = String(
                       details?.title ||
                         input.summary ||
                         item.kind.replace(/_/g, " "),
                     );
+                    const title =
+                      fullTitle.length > 120
+                        ? `${fullTitle.slice(0, 117)}…`
+                        : fullTitle;
                     const activityRecord: ExecutionRecord = {
                       execution_id: item.id,
                       tool: title,
@@ -4988,7 +5006,7 @@ function RunInspector({
                               <Command size={15} aria-hidden="true" />
                             </span>
                             <div>
-                              <h3>{title}</h3>
+                              <h3 title={fullTitle}>{title}</h3>
                               <span>
                                 Activity · {item.kind.replace(/_/g, " ")}
                               </span>

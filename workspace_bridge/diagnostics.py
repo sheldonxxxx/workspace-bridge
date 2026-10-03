@@ -473,11 +473,12 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     "Adapter product version differs from the Bridge.",
                     remediation="Align adapter and Bridge product versions.",
                     adapter_id=aid, runtime_type=runtime_type)
-        elif (runtime_type == "codex" and _bridge_build is not None
+        elif (runtime_type in ("codex", "claude") and _bridge_build is not None
                 and observed.get("build_id") != _bridge_build):
+            label = "Codex" if runtime_type == "codex" else "Claude"
             out.add("release.adapter_build_skew", "release", "warning",
-                    "Codex Python-core build differs from the Bridge.",
-                    remediation="Deploy the same Workspace Bridge package to Codex and Bridge.",
+                    f"{label} Python-core build differs from the Bridge.",
+                    remediation=f"Deploy the same Workspace Bridge package to {label} and Bridge.",
                     adapter_id=aid, runtime_type=runtime_type)
         else:
             out.add("release.adapter_identity", "release", "pass",

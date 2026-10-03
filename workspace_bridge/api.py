@@ -606,7 +606,7 @@ class AdapterModelPolicy(Input):
 class AdapterCreate(Input):
     node_id: NodeID
     name: str = Field(min_length=1, max_length=80)
-    runtime_type: Literal["pi", "codex"]
+    runtime_type: Literal["pi", "codex", "claude"]
     base_url: str = Field(min_length=1, max_length=2048)
     token: str = Field(min_length=1, max_length=4096)
     enabled: bool = True
@@ -623,7 +623,7 @@ class AdapterUpdate(Input):
 class AdapterTest(Input):
     node_id: NodeID | None = None
     name: str = Field(min_length=1, max_length=80)
-    runtime_type: Literal["pi", "codex"]
+    runtime_type: Literal["pi", "codex", "claude"]
     base_url: str = Field(min_length=1, max_length=2048)
     adapter_id: AdapterID | None = None
     token: str = Field(default="", max_length=4096,

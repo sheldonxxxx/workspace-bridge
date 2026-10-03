@@ -74,7 +74,7 @@ uv run workspace-bridge release --help
 - Keep the public information architecture: README as landing page,
   `docs/SETUP.md` as the single human install guide,
   `docs/AGENT_SETUP.md` as the agent runbook, `docs/ARCHITECTURE.md` for
-  authority and boundaries, `docs/RUNTIMES.md` for Pi/Codex specifics,
+  authority and boundaries, `docs/RUNTIMES.md` for Pi/Codex/Claude Code specifics,
   `docs/OPERATIONS.md` for operator behavior, and the remaining files as
   focused references.
 - No internal milestone labels, implementation-slice names, development
@@ -102,6 +102,8 @@ Keep `.env`, tokens, private state, and tunnel profiles out of commits.
 Start from `.env.example`; read [docs/SECURITY.md](docs/SECURITY.md) before
 changing access, write scopes, or runtime policy. Keep the management
 listener local and expose only the intended MCP endpoint through a tunnel.
+Report vulnerabilities privately as described in the
+[security policy](.github/SECURITY.md), never in public issues or PRs.
 
 Do not commit, push, tag, publish, deploy, rotate credentials, restart live
 services, or edit handoff documents as part of a docs or code change unless

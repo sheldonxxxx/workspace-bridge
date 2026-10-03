@@ -49,6 +49,12 @@ type CodexConfig = {
   approvalPolicy: "on-request" | "never";
   approvalsReviewer: "user" | "auto_review";
 };
+type ClaudeConfig = {
+  edits: AccessMode;
+  shell: AccessMode;
+  web: AccessMode;
+  extensions: AccessMode;
+};
 
 const fileTools = ["read", "grep", "find", "ls", "edit", "write"] as const;
 const accessModes: AccessMode[] = ["deny", "ask", "allow"];
@@ -137,6 +143,7 @@ export function ProfileManager({
   );
   const pi = draft as unknown as PiConfig;
   const codex = draft as unknown as CodexConfig;
+  const claude = draft as unknown as ClaudeConfig;
 
   useEffect(() => {
     if (!available && adapters[0]) setAdapterId(adapters[0].id);
@@ -352,7 +359,9 @@ export function ProfileManager({
                         {selectedConfig
                           ? runtimeType === "pi"
                             ? `Files outside workspace: ${(selectedConfig as unknown as PiConfig).external_access?.default_mode || "deny"}`
-                            : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
+                            : runtimeType === "claude"
+                              ? `Edits ${(selectedConfig as unknown as ClaudeConfig).edits || "deny"} · shell ${(selectedConfig as unknown as ClaudeConfig).shell || "deny"} · web ${(selectedConfig as unknown as ClaudeConfig).web || "deny"} · extensions ${(selectedConfig as unknown as ClaudeConfig).extensions || "deny"}`
+                              : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
                           : "Controls unavailable from the installed adapter"}
                       </span>
                       <span>
@@ -646,6 +655,59 @@ export function ProfileManager({
                         </div>
                       </section>
                     </>
+                  ) : runtimeType === "claude" ? (
+                    <section className="profile-section">
+                      <h3>Claude Code security profile</h3>
+                      <small>
+                        Reading inside the workspace is always allowed. Git
+                        internals, <code>.env</code> files, and paths outside
+                        the workspace are always denied, and edits never reach{" "}
+                        <code>.claude</code> or <code>.mcp.json</code>.
+                      </small>
+                      <SelectField
+                        id="profile-claude-edits"
+                        label="File edits"
+                        value={claude.edits || "deny"}
+                        options={accessModes}
+                        onChange={(value) =>
+                          setDraft((current) => ({ ...current, edits: value }))
+                        }
+                        hint="Edit, Write, and notebook edits inside the workspace."
+                      />
+                      <SelectField
+                        id="profile-claude-shell"
+                        label="Shell commands"
+                        value={claude.shell || "deny"}
+                        options={accessModes}
+                        onChange={(value) =>
+                          setDraft((current) => ({ ...current, shell: value }))
+                        }
+                        hint="Allowed commands run with this host user's authority and are not sandboxed. Prefer ask."
+                      />
+                      <SelectField
+                        id="profile-claude-web"
+                        label="Web access"
+                        value={claude.web || "deny"}
+                        options={accessModes}
+                        onChange={(value) =>
+                          setDraft((current) => ({ ...current, web: value }))
+                        }
+                        hint="Web fetch and web search."
+                      />
+                      <SelectField
+                        id="profile-claude-extensions"
+                        label="MCP extensions"
+                        value={claude.extensions || "deny"}
+                        options={accessModes}
+                        onChange={(value) =>
+                          setDraft((current) => ({
+                            ...current,
+                            extensions: value,
+                          }))
+                        }
+                        hint="Tools from MCP servers and plugins. Deny also stops those servers from starting. Sub-agents and skills are available, and every tool they call follows this profile."
+                      />
+                    </section>
                   ) : (
                     <>
                       <section className="profile-section">

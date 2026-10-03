@@ -41,7 +41,7 @@ test("product-version-only change changes Manager build ID", () => {
     { rel: "package.json", data: Buffer.from("{}\n") },
   ];
   const first = computeManagerBuildId("0.1.0", entries);
-  const second = computeManagerBuildId("0.1.2", entries);
+  const second = computeManagerBuildId("0.2.0", entries);
   assert.match(first, BUILD_ID_RE);
   assert.match(second, BUILD_ID_RE);
   assert.notEqual(first, second);
@@ -188,7 +188,7 @@ test("missing canonical product metadata fails instead of falling back", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
   // The checked-in canonical metadata resolves and validates.
-  assert.equal(readProductVersion(WEB_ROOT), "0.1.2");
+  assert.equal(readProductVersion(WEB_ROOT), "0.2.0");
   assert.deepEqual(
     validateManagerRelease(computeManagerRelease(WEB_ROOT)),
     computeManagerRelease(WEB_ROOT),
@@ -245,15 +245,15 @@ test("full-identity mismatch warns on version skew with equal build ID", () => {
   assert.equal(
     describeManagerIdentity(compiled, {
       ...compiled,
-      product_version: "0.1.2",
-      component_version: "0.1.2",
+      product_version: "0.2.0",
+      component_version: "0.2.0",
     }),
     "mismatch",
   );
   assert.equal(
     describeManagerIdentity(compiled, {
       ...compiled,
-      component_version: "0.1.2",
+      component_version: "0.2.0",
     }),
     "mismatch",
   );

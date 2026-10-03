@@ -6,8 +6,7 @@ separate private process on each data-plane host; it owns workspace files, Git,
 handoffs and Node-side adapter secrets. Native adapter daemons run on those hosts
 and are reached through the Node Protocol. Compose builds the Bridge image locally
 by default. Stable releases also publish a versioned `linux/amd64` and `linux/arm64`
-image to `ghcr.io/sheldonxxxx/workspace-bridge`; package visibility is managed in
-GitHub Packages. Nodes and agents are not part of this Compose stack; run and
+image to `ghcr.io/sheldonxxxx/workspace-bridge`. Nodes and agents are not part of this Compose stack; run and
 manage them on their hosts.
 
 ## Requirements and scope
@@ -61,9 +60,8 @@ docker exec workspace-bridge workspace-bridge --state /state doctor --json
 docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
-To use the published Bridge image, authenticate to GHCR if the package is
-private, then set `services.bridge.image` to
-`ghcr.io/sheldonxxxx/workspace-bridge:v0.1.2` and remove its `build` block in a
+To use the published Bridge image, set `services.bridge.image` to
+`ghcr.io/sheldonxxxx/workspace-bridge:v0.2.0` and remove its `build` block in a
 local copy of the Compose file. Keep the state mount, loopback port bindings, non-root
 user, and tunnel sidecar configuration. The release workflow publishes this
 multiarch tag only after its full CI and native image checks pass.
@@ -81,10 +79,11 @@ configure exact execution routes. Node adapter tokens are stored in private Node
 SQLite and are never read back by normal APIs. Do not use `/state` or invented
 `/workspace` aliases as workspace roots.
 
-The first startup initializes **only fresh** Docker control-plane state. Bridge state
-schema v4 is the development contract; non-v4 state reports
-`state_schema_incompatible` and is never migrated or altered. Use a separate fresh
-state path for this cutover. Runtime adapter secrets and workspace data remain in
+The first startup initializes fresh Docker control-plane state with the current
+schema (v4). Existing v4 state is upgraded in place when a release needs it; for
+example, `0.2.0` widens the runtime-type constraint to accept Claude Code. Older
+pre-v4 state reports `state_schema_incompatible` and is left untouched; use a
+fresh state path for it. Runtime adapter secrets and workspace data remain in
 the private Node service. Container recreation retains Node records, mappings,
 handoffs and selected write scopes. A new mapping is still disabled and
 handoff-only.
@@ -195,7 +194,7 @@ tunnel — plus host-native processes:
 
 ```text
 Docker:       workspace-bridge Bridge + mcp-tunnel
-Host native:  workspace-bridge-node service + native Pi/Codex adapters
+Host native:  workspace-bridge-node service + native Pi/Codex/Claude Code adapters
               (macOS LaunchAgent or Linux system unit)
               |-- identical absolute workspace paths and host-owned allowed_roots
 ```
@@ -247,7 +246,7 @@ root mode with a root-owned state is documented in OPERATIONS.md).
 ## Adapter instances (optional)
 
 Agent execution requires enabling the exact WorkspaceRoute for a workspace;
-there is no separate workspace-wide agent switch. Start the native Pi or Codex
+there is no separate workspace-wide agent switch. Start the native Pi, Codex, or Claude Code
 daemon on its host and configure its
 own listen address, bootstrap token and process lifecycle there. The Bridge
 container does not start or publish those daemons.
@@ -257,8 +256,8 @@ destination. Save a distinct name, runtime type, endpoint reachable from the
 container, and the credential expected by that daemon. Docker Desktop and
 OrbStack commonly use `host.docker.internal`; Linux Engine needs a reachable host
 address. Do not assume `localhost` inside a container means the host. The
-per-instance Bridge connection token is stored as plaintext in private SQLite
-during this development phase; the file is mode `0600`, and the UI never reads
+per-instance Bridge connection token is stored as plaintext in private SQLite;
+the file is mode `0600`, and the UI never reads
 the token back. `.env` does not contain `WB_RUNTIME_ADAPTERS` or a Bridge-wide
 `WB_RUNTIME_TOKEN`. The same native daemon may still use `WB_RUNTIME_TOKEN` in
 its separate host process environment.

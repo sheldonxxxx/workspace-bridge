@@ -25,7 +25,8 @@ RELEASE_CONTRACT = 1
 PRODUCT = "workspace-bridge"
 
 COMPONENTS = frozenset({
-    "bridge", "node", "codex-host-adapter", "pi-host-adapter", "manager",
+    "bridge", "node", "codex-host-adapter", "claude-host-adapter",
+    "pi-host-adapter", "manager",
 })
 
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$")
@@ -35,7 +36,8 @@ _RELEASE_KEYS = frozenset({
     "component", "component_version", "build_id",
 })
 
-CODEX_ADAPTER_VERSION = "0.1.2"
+CODEX_ADAPTER_VERSION = "0.2.0"
+CLAUDE_ADAPTER_VERSION = "0.2.0"
 
 
 class ReleaseError(ValueError):
@@ -186,12 +188,25 @@ def codex_release() -> dict:
 
     The Python core is shared with Bridge/Node, so the build ID is the same
     Python-core ID. The component version stays the adapter contract version
-    (``0.1.2``); ``adapterVersion``/``nativeVersion`` remain separate fields.
+    (``0.2.0``); ``adapterVersion``/``nativeVersion`` remain separate fields.
     The descriptor ``adapterVersion`` reuses this constant so release identity
     cannot drift from the advertised descriptor.
     """
     return make_release(component="codex-host-adapter",
                         component_version=CODEX_ADAPTER_VERSION,
+                        build_id=python_core_build_id(),
+                        product_version=__version__)
+
+
+def claude_release() -> dict:
+    """Release identity for the Claude Code host adapter.
+
+    Same Python-core build ID as Bridge/Node/Codex. The release manifest and
+    bundle stay a closed five-component set, so this identity is advertised
+    in the descriptor and diagnosed live but is not a manifest target.
+    """
+    return make_release(component="claude-host-adapter",
+                        component_version=CLAUDE_ADAPTER_VERSION,
                         build_id=python_core_build_id(),
                         product_version=__version__)
 

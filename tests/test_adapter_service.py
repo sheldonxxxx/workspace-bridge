@@ -522,3 +522,97 @@ def test_no_arbitrary_helper_argv_or_shell():
     assert "--service-name" not in cli_src
     assert "--unit" not in cli_src
     assert "SUDO_USER" not in Path("workspace_bridge/adapter_systemd.py").read_text()
+
+
+def test_claude_instance_defaults_env_and_identity(tmp_path, monkeypatch):
+    projects = _projects(tmp_path)
+    exe = _fake_executable(tmp_path, "workspace-bridge-claude-adapter")
+    state = tmp_path / "claude-env"
+    config, token = initialize_adapter(
+        state, runtime_type="claude", projects_root=str(projects),
+        executable=str(exe), claude_binary="/opt/claude/bin/claude", log_level="warning")
+    assert config["port"] == 8774 and config["claude_binary"] == "/opt/claude/bin/claude"
+    assert load_adapter_config(state) == config
+    assert adapter_label("claude", config["service_id"]).startswith(
+        "com.workspace-bridge.adapter.claude.")
+    assert adapter_unit("claude", config["service_id"]).startswith(
+        "workspace-bridge-adapter-claude-")
+    monkeypatch.setenv("WB_PI_PROJECTS_DIR", "stale-must-go")
+    monkeypatch.setenv("WB_CODEX_PROJECTS_ROOT", "stale-must-go")
+    env = build_adapter_env(config, token, state)
+    assert env["WB_RUNTIME_TOKEN"] == token
+    assert env["WB_CLAUDE_PROJECTS_ROOT"] == config["projects_root"]
+    assert env["WB_CLAUDE_ADAPTER_PORT"] == "8774"
+    assert env["WB_CLAUDE_ADAPTER_STATE"] == str(state / "runtime")
+    assert env["WB_CLAUDE_BINARY"] == "/opt/claude/bin/claude"
+    assert env["WB_LOG_LEVEL"] == "WARNING"
+    assert "WB_PI_PROJECTS_DIR" not in env and "WB_CODEX_PROJECTS_ROOT" not in env
+    monkeypatch.setenv("WB_CLAUDE_BINARY", "stale-must-go")
+    other = tmp_path / "claude-plain"
+    plain, plain_token = initialize_adapter(
+        other, runtime_type="claude", projects_root=str(projects), port=18993,
+        executable=str(exe))
+    assert "WB_CLAUDE_BINARY" not in build_adapter_env(plain, plain_token, other)
+
+
+def test_claude_setting_sources_config_env_and_validation(tmp_path, monkeypatch):
+    projects = _projects(tmp_path)
+    exe = _fake_executable(tmp_path, "workspace-bridge-claude-adapter")
+    state = tmp_path / "claude-sources"
+    config, token = initialize_adapter(
+        state, runtime_type="claude", projects_root=str(projects),
+        executable=str(exe), claude_setting_sources="local, user")
+    assert config["claude_setting_sources"] == "user,local"
+    assert load_adapter_config(state) == config
+    assert build_adapter_env(config, token, state)["WB_CLAUDE_SETTING_SOURCES"] == "user,local"
+    monkeypatch.setenv("WB_CLAUDE_SETTING_SOURCES", "stale-must-go")
+    plain = tmp_path / "claude-sources-plain"
+    default, default_token = initialize_adapter(
+        plain, runtime_type="claude", projects_root=str(projects), port=18994,
+        executable=str(exe))
+    assert "claude_setting_sources" not in default
+    assert "WB_CLAUDE_SETTING_SOURCES" not in build_adapter_env(default, default_token, plain)
+    none_state = tmp_path / "claude-sources-none"
+    none, _ = initialize_adapter(
+        none_state, runtime_type="claude", projects_root=str(projects), port=18995,
+        executable=str(exe), claude_setting_sources="none")
+    assert none["claude_setting_sources"] == "none"
+    for bad in ("", "managed", "none,user", "user,,x"):
+        with pytest.raises(BridgeError):
+            initialize_adapter(tmp_path / ("bad-" + str(abs(hash(bad)))),
+                               runtime_type="claude", projects_root=str(projects),
+                               executable=str(exe), claude_setting_sources=bad)
+    with pytest.raises(BridgeError):
+        initialize_adapter(tmp_path / "codex-sources", runtime_type="codex",
+                           projects_root=str(projects), executable=str(exe),
+                           claude_setting_sources="user")
+
+
+def test_claude_binary_is_only_valid_for_the_claude_runtime(tmp_path):
+    projects = _projects(tmp_path)
+    exe = _fake_executable(tmp_path)
+    with pytest.raises(BridgeError):
+        initialize_adapter(tmp_path / "pi-bad", runtime_type="pi",
+                           projects_root=str(projects), port=18994,
+                           executable=str(exe), claude_binary="claude")
+    with pytest.raises(BridgeError):
+        initialize_adapter(tmp_path / "claude-bad", runtime_type="claude",
+                           projects_root=str(projects), port=18995,
+                           executable=str(exe), pi_binary="pi")
+    with pytest.raises(BridgeError):
+        initialize_adapter(tmp_path / "claude-rel", runtime_type="claude",
+                           projects_root=str(projects), port=18996,
+                           executable=str(exe), claude_binary="bin/claude")
+
+
+def test_claude_default_executable_name_and_cli_choice(tmp_path, capsys):
+    from workspace_bridge.adapter_service import default_executable_name
+    assert default_executable_name("claude") == "workspace-bridge-claude-adapter"
+    projects = _projects(tmp_path)
+    exe = _fake_executable(tmp_path)
+    state = tmp_path / "cli-claude"
+    adapter_main(["--state", str(state), "init", "--runtime", "claude",
+                  "--projects-root", str(projects), "--executable", str(exe),
+                  "--claude-binary", "claude"])
+    assert "Initialized claude adapter" in capsys.readouterr().out
+    assert load_adapter_config(state)["claude_binary"] == "claude"

@@ -1,9 +1,9 @@
 # Setup
 
 Single canonical human installation and configuration guide for Workspace
-Bridge `0.1.2`. Follow it top to bottom. For container detail see
+Bridge `0.2.0`. Follow it top to bottom. For container detail see
 [Docker](DOCKER.md); for daily operation see [Operations](OPERATIONS.md);
-for Pi/Codex specifics see [Runtimes](RUNTIMES.md).
+for Pi/Codex/Claude Code specifics see [Runtimes](RUNTIMES.md).
 
 If an AI/coding agent is performing this work for you, it follows
 [Agent setup](AGENT_SETUP.md) instead. That runbook states what the agent
@@ -20,12 +20,12 @@ Bridge control plane -- /mcp plus a loopback-only Manager (never tunnel it)
   |
 Authoritative Node (native, per host) -- files, Git, handoffs, adapter secrets
   |
-Pi and/or Codex adapter instances (native, per host)
+Pi, Codex, and/or Claude Code adapter instances (native, per host)
 ```
 
 The Bridge never inspects workspace files directly; the Node owns the data
 plane under its host `allowed_roots` ceiling. Each adapter state owns exactly
-one Pi or Codex instance. Keep package installs, state, and tunnel profiles
+one Pi, Codex, or Claude Code instance. Keep package installs, state, and tunnel profiles
 outside mapped projects.
 
 ## 1. Prerequisites
@@ -44,16 +44,18 @@ outside mapped projects.
   Bridge `$HOME/.local/state/workspace-bridge`, Node
   `$HOME/.local/state/workspace-bridge-node`, Pi adapter
   `$HOME/.local/state/workspace-bridge-adapter-pi`, Codex adapter
-  `$HOME/.local/state/workspace-bridge-adapter-codex`.
+  `$HOME/.local/state/workspace-bridge-adapter-codex`, Claude Code adapter
+  `$HOME/.local/state/workspace-bridge-adapter-claude`.
 
-Do not invent repository URLs or support channels. The image is built locally
-from this source; no public Workspace Bridge image is published.
+Docker is optional. Compose builds the Bridge image locally by default, and each
+release also publishes a multiarch image to
+`ghcr.io/sheldonxxxx/workspace-bridge`; see [Docker](DOCKER.md).
 
 ## 2. Install packages
 
 Install the Python product persistently (provides `workspace-bridge`, the
 nested `node` and `adapter` surfaces, and the `workspace-bridge-codex-adapter`
-executable):
+and `workspace-bridge-claude-adapter` executables):
 
 ```sh
 uv tool install workspace-bridge
@@ -112,7 +114,7 @@ you install the Bridge as a persistent service per your OS policy (see
 
 ## 5. Path B — persistent deployment (container Bridge, native Node and adapters)
 
-Run the Bridge control plane in Compose and keep the Node plus Pi/Codex
+Run the Bridge control plane in Compose and keep the Node plus Pi/Codex/Claude Code
 adapters native on each data-plane host so absolute workspace paths match.
 Do not add the Node or adapters to Compose. See [Docker](DOCKER.md) for the
 full container reference; this section is the minimal supported flow.
@@ -155,8 +157,11 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-to
 ## 6. Runtime adapters (native, per host)
 
 The supported path is package installation followed by the runtime-neutral
-`workspace-bridge adapter` lifecycle. Each adapter state owns exactly one Pi
-or Codex instance; use a separate `--state` directory per instance. Service
+`workspace-bridge adapter` lifecycle. Each adapter state owns exactly one Pi,
+Codex, or Claude Code instance; use a separate `--state` directory per
+instance. A Claude Code instance also needs the optional SDK extra
+(`uv tool install 'workspace-bridge[claude]'`) and an existing Claude Code
+login on that host. Service
 artifacts never contain the runtime token or the projects root.
 
 ```sh
@@ -164,6 +169,8 @@ workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi
   --runtime pi --projects-root "$HOME/Projects" --port 8780
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
   --runtime codex --projects-root "$HOME/Projects" --port 8772
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
+  --runtime claude --projects-root "$HOME/Projects" --port 8774
 ```
 
 Save each printed token immediately: it lives only in that state's private
@@ -177,6 +184,8 @@ workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service status
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service install
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service status
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service install
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service status
 ```
 
 Expected: `service status` reports the per-instance unit with installed state
@@ -228,7 +237,7 @@ are not accepted by the Manager. Order matters:
    it and set write scope (`handoff` default; `none` denies all writes
    including handoff publication; `workspace` allows permitted source text).
 3. **Adapter instances:** on the owning Node, add each destination with the
-   name, runtime type (`pi` or `codex`), the base URL as seen by the Node
+   name, runtime type (`pi`, `codex`, or `claude`), the base URL as seen by the Node
    host (loopback such as `http://127.0.0.1:8780` is correct there), and its
    one-time runtime token.
 4. **Model policy** per adapter: list the live catalog first, then save the
@@ -236,8 +245,8 @@ are not accepted by the Manager. Order matters:
    save is rejected. With no policy the adapter is unrestricted by Bridge
    governance and the runtime chooses its own default.
 5. **Routes** per workspace: enable the exact `(workspace_id, adapter_id)`
-   pair and set its security binding. Pi uses a Bridge profile; Codex uses
-   either a Bridge profile or its native configuration source. Discovery and
+   pair and set its security binding. Pi and Claude Code use a Bridge profile;
+   Codex uses either a Bridge profile or its native configuration source. Discovery and
    binding use the exact workspace context.
 
 Endpoint and token edits take effect on the next request without restarting
@@ -342,6 +351,7 @@ Stop and remove services before deleting state. Service removal preserves
 state, tokens, bindings, and logs; deleting state is the destructive step.
 
 ```sh
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service uninstall
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service uninstall
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service uninstall
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall

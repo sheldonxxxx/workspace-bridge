@@ -40,7 +40,9 @@ authority; prose never overrides them.
   intentional non-goals, with Mermaid diagrams.
 - [Security](SECURITY.md) — threat model, credential scope, implemented
   controls, limits, and deployment rules.
-- [Runtimes](RUNTIMES.md) — consolidated Pi and Codex runtime notes:
+- [Security policy](../.github/SECURITY.md) — how to report a
+  vulnerability privately.
+- [Runtimes](RUNTIMES.md) — consolidated Pi, Codex, and Claude Code runtime notes:
   installation surface, service lifecycle, security-profile differences,
   continuation behavior, model policy, and troubleshooting.
 

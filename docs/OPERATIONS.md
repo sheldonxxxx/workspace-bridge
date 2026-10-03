@@ -1,6 +1,6 @@
 # Operations
 
-Public operator guide for Workspace Bridge `0.1.2`: state, services, manual
+Public operator guide for Workspace Bridge `0.2.0`: state, services, manual
 upgrades, release identity, logging, support bundles, notifications,
 recovery, and troubleshooting. For installation see [Setup](SETUP.md); for
 architecture see [Architecture](ARCHITECTURE.md).
@@ -17,8 +17,11 @@ databases and project handoff folders as sensitive: the Bridge holds
 sanitized adapter references while the Node holds adapter secrets and
 data-plane state.
 
-Fresh state creates the current schema directly. Older databases report
-`state_schema_incompatible` and are left untouched; use a fresh state path.
+Fresh state creates the current schema (v4) directly. Existing v4 databases
+are upgraded in place when a release needs it, in one transaction that keeps
+rows and indexes; `0.2.0` widens the runtime-type constraint to accept Claude
+Code. Pre-v4 databases report `state_schema_incompatible` and are left
+untouched; use a fresh state path for them. Back up state before upgrading.
 
 Stop the service before a plain filesystem copy; preserve SQLite WAL/SHM
 files alongside the database. Alternatively use an explicitly managed SQLite
@@ -146,7 +149,7 @@ IDs, or environment-only values, and no paths or file inventories are
 exposed.
 
 Product and component versions stay distinct: the product version is the
-Workspace Bridge release (`0.1.2`); the component version is that
+Workspace Bridge release (`0.2.0`); the component version is that
 component's own version. Adapter and native semantic versions, protocol and
 feature versions, and Node/adapter revisions remain separate fields.
 
@@ -197,7 +200,7 @@ deployable bytes to exact release identities with content-addressed bundle
 and receipt IDs. Corrupt or tampered bundles fail before any use.
 
 Routine component updates do not transfer bundles: host owners install the
-published versions locally — Node and Codex from the Python package via
+published versions locally — Node, Codex and Claude Code from the Python package via
 `uv`, Pi from the npm package via `npm`. Bundles remain release
 verification and audit material, not update transport.
 
@@ -291,11 +294,12 @@ manifest and preserves Node state, adapters, bindings, allowed roots,
 tokens, and logs. Unsupported operating systems fail explicitly; a Node
 container is not part of this deployment.
 
-### Adapter instances (Pi/Codex via `workspace-bridge adapter`)
+### Adapter instances (Pi/Codex/Claude via `workspace-bridge adapter`)
 
-Each adapter state owns exactly one Pi or Codex AdapterInstance. The
+Each adapter state owns exactly one Pi, Codex, or Claude Code AdapterInstance. The
 supported path is package installation (`uv tool install workspace-bridge`
-for the `workspace-bridge-codex-adapter` executable, `npm install -g
+for the `workspace-bridge-codex-adapter` executable, `uv tool install
+'workspace-bridge[claude]'` for `workspace-bridge-claude-adapter`, `npm install -g
 workspace-bridge-pi-host-adapter` for `workspace-bridge-pi-adapter`)
 followed by `workspace-bridge adapter --state <path> init` (token printed
 once) plus `service install`; hand-written plists are not supported. The
@@ -395,7 +399,7 @@ cannot confirm an operation, the Bridge records an interrupted or orphaned
 outcome and marks pending interactions stale. Transient adapter failures are
 reported as availability errors and do not cause a prompt retry.
 
-Pi and Codex adapters are Node-owned private processes using the same
+Pi, Codex, and Claude Code adapters are Node-owned private processes using the same
 Runtime Protocol v1 contract. Native listen ports, bootstrap tokens, state
 paths, and service lifecycle remain configured on their hosts. Bridge Node
 endpoints and tokens are managed in the local Manager and stored in Bridge
@@ -425,7 +429,12 @@ conversations. Review each profile's scope in the local Manager before
 assigning it. Each adapter instance has its own profile discovery and model
 policy even when two instances share one runtime type. Codex uses a separate
 native permission profile with an approval policy and reviewer; the two
-runtimes' profile claims are not equivalent. See [Runtimes](RUNTIMES.md).
+runtimes' profile claims are not equivalent. Claude Code profiles set
+`edits`, `shell`, `web`, and `extensions` (MCP tools) to `deny`, `ask`, or
+`allow` and are enforced by the adapter's tool list and permission hook;
+approved shell commands run with the host user's authority, and the host's
+Claude settings, hooks, skills, and MCP servers load unless
+`adapter init --claude-setting-sources` narrows them. See [Runtimes](RUNTIMES.md).
 
 Codex workspaces may instead follow the effective native configuration
 security settings. The Bridge observes a security-only revision and bounded

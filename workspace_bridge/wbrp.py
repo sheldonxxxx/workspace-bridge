@@ -374,7 +374,7 @@ class HttpRuntimeAdapter:
         if (not isinstance(adapter_id, str)
                 or not re.fullmatch(r"adapter_[0-9a-f]{24}", adapter_id)):
             raise BridgeError("Invalid adapter id", "invalid_arguments")
-        if runtime_type not in {"pi", "codex"}:
+        if runtime_type not in {"pi", "codex", "claude"}:
             raise BridgeError("Invalid runtime type", "invalid_arguments")
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
