@@ -62,9 +62,25 @@ CLI smoke that does not mutate live services:
 
 ```sh
 uv run workspace-bridge --help
-uv run workspace-bridge doctor --offline
 uv run workspace-bridge release --help
 ```
+
+Doctor checks the selected deployment's private state. For a native Bridge,
+select its actual state directory explicitly:
+
+```sh
+uv run workspace-bridge --state /path/to/bridge-state doctor --offline
+```
+
+For the running Docker Bridge:
+
+```sh
+docker exec workspace-bridge workspace-bridge --state /state doctor --offline
+```
+
+Without `--state`, Doctor checks the default host state, which can be unused
+and unconfigured even while a separate Docker Bridge is working. Offline mode
+skips Node and adapter probes; use live Doctor for route readiness.
 
 ## Docs expectations
 

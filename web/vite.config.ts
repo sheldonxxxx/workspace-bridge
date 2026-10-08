@@ -1,6 +1,6 @@
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import path from "node:path";
 import { computeManagerRelease } from "./manager-release.mjs";
 
@@ -36,10 +36,38 @@ function managerReleasePlugin(release: typeof managerRelease) {
   };
 }
 
+function scrollLockWhitespacePlugin(): Plugin {
+  return {
+    name: "workspace-bridge-scroll-lock-whitespace",
+    apply: "build",
+    transform(code, id) {
+      if (
+        !/\/react-remove-scroll-bar\/dist\/es(?:5|2015|2019)\/component\.js$/.test(
+          id,
+        )
+      ) {
+        return null;
+      }
+      // This dependency embeds CSS with indented blank lines. Normalize only
+      // this module's CSS blanks, including escaped newlines in its ES5 build,
+      // before minification turns them into multiline template literals.
+      return {
+        code: code.replace(/^[ \t]+$/gm, "").replace(/\\n[ \t]+\\n/g, "\\n\\n"),
+        map: null,
+      };
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   base: "/static/dist/",
-  plugins: [react(), tailwindcss(), managerReleasePlugin(managerRelease)],
+  plugins: [
+    react(),
+    tailwindcss(),
+    scrollLockWhitespacePlugin(),
+    managerReleasePlugin(managerRelease),
+  ],
   define: {
     __MANAGER_RELEASE__: JSON.stringify(managerRelease),
   },

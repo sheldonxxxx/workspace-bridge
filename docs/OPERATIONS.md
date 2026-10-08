@@ -109,6 +109,12 @@ local-admin `GET /api/diagnostics` endpoint returns the same schema;
 `GET /api/diagnostics?offline=1` selects offline mode. Doctor and the API
 use one server-side evaluator.
 
+Doctor inspects only the selected state. For a native deployment, use
+`workspace-bridge --state /path/to/bridge-state doctor`; for Docker, use
+`docker exec workspace-bridge workspace-bridge --state /state doctor`.
+An unconfigured default host state does not describe a separate running
+Docker Bridge. Add `--offline` to either command to skip network probes.
+
 Statuses are `pass`, `warning`, `action_required`, `failed`, and `unknown`.
 Overall severity ranks failed, action required, unknown, warning, then pass.
 Doctor exits nonzero for failed or action-required reports and zero for
