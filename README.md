@@ -40,6 +40,17 @@ current checkout. Workspace Bridge connects the two in one loop:
 Workspace Bridge is built this way: a frontier model plans and audits, and a
 local agent implements through the Bridge.
 
+Why plan in ChatGPT:
+
+- **It already knows you.** ChatGPT's built-in memory carries your preferences
+  and past decisions into every planning session, with nothing to set up.
+- **Take your time.** Planning is a conversation, not a metered job. With
+  ChatGPT's generous usage limits you can explore, push back, and refine a
+  plan without worrying about running up a bill.
+- **Truly remote work.** The ChatGPT mobile app can drive the whole loop, so
+  you can plan, start runs on your Claude Code, Codex, or Pi agents, and review
+  the results from anywhere while your machine does the building.
+
 ![The local Manager showing Pi, Codex, and Claude Code adapters](https://raw.githubusercontent.com/sheldonxxxx/workspace-bridge/main/docs/assets/workspace-manager.png)
 
 ## Safe by default
@@ -163,6 +174,8 @@ validation status are listed in
   [Handoff protocol](docs/HANDOFF_PROTOCOL.md), [Docker](docs/DOCKER.md),
   [References](docs/REFERENCES.md).
 - [Full documentation index](docs/README.md).
+- [Plugin skill packaging](docs/PLUGIN_SKILL_PACKAGING.md): embed the canonical
+  skill with an existing private/workspace MCP app.
 
 ## Contributing and security
 

@@ -13,7 +13,7 @@ from workspace_bridge.security import BridgeError, HANDOFF, SafeRoot, digest
 from workspace_bridge.service import Service
 
 RETIRED = ('review_changes', 'read_change', 'record_audit')
-EXPECTED = {'read_project_lead_skill', 'list_workspaces', 'workspace_info',
+EXPECTED = {'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
             'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',

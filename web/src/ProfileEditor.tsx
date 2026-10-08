@@ -118,8 +118,8 @@ export function ProfileManager({
   const [permissionProfiles, setPermissionProfiles] = useState<
     NativePermissionProfile[]
   >([]);
-  const [contextWorkspaceId, setContextWorkspaceId] = useState(
-    workspaces[0]?.id || "",
+  const [contextWorkspaceId, setContextWorkspaceId] = useState<string | null>(
+    null,
   );
   const [selectedId, setSelectedId] = useState("");
   const [mode, setMode] = useState<Mode>("choose");
@@ -130,11 +130,20 @@ export function ProfileManager({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const effectiveContextWorkspaceId = workspaces.some(
-    (workspace) => workspace.id === contextWorkspaceId,
-  )
-    ? contextWorkspaceId
-    : workspaces[0]?.id || "";
+  const eligibleWorkspaces = adapter?.node_id
+    ? workspaces.filter(
+        (workspace) =>
+          Boolean(workspace.node_id) && workspace.node_id === adapter.node_id,
+      )
+    : [];
+  const effectiveContextWorkspaceId =
+    contextWorkspaceId === ""
+      ? ""
+      : eligibleWorkspaces.find(
+          (workspace) => workspace.id === contextWorkspaceId,
+        )?.id ||
+        eligibleWorkspaces[0]?.id ||
+        "";
   const selected = profiles.find((profile) => profile.id === selectedId);
   const selectedConfig = selected?.config;
   const available = Boolean(adapter);
@@ -439,7 +448,7 @@ export function ProfileManager({
                         }
                       >
                         <option value="">No workspace context</option>
-                        {workspaces.map((workspace) => (
+                        {eligibleWorkspaces.map((workspace) => (
                           <option key={workspace.id} value={workspace.id}>
                             {workspace.name}
                           </option>

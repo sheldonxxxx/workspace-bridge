@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 from .media import (ImageReadResult, DEFAULT_DIMENSION, SUPPORTED_SUFFIXES,
                     image_capabilities, read_image, selected_read_limit, sniff_image)
-from .embedded_skill import SKILL_TOOL, read_project_lead_skill, skill_hint
+from .embedded_skill import skill_hint
+from .event_broker import EventBroker
 from .notifications import (NotificationChannel, NotificationManager,
                             notification_channels_from_environment,
                             notification_manager_from_environment, _safe_label)
@@ -179,6 +180,7 @@ class Service:
         else:
             channels = notification_channels if notification_channels is not None else [notifier]
             self.notification_manager = NotificationManager(self, channels)
+        self.event_broker = None if read_only else EventBroker(self)
         self.node_registry = NodeRegistry(self)
         self.adapter_registry = AdapterRegistry(self)
         if not read_only:
@@ -197,6 +199,7 @@ class Service:
             self.run_coordinator.start_background()
         if not read_only:
             self.notification_manager.start()
+            self.event_broker.start()
 
     def adapter_diagnostics(self) -> dict:
         """Sanitized health observations keyed by AdapterInstance ID."""
@@ -731,6 +734,8 @@ class Service:
         return self.read_agent_execution(ws, run_id, execution_id)
 
     def close(self):
+        if self.event_broker is not None:
+            self.event_broker.close()
         try:
             self.notification_manager.close()
         except Exception:  # noqa: BLE001 - shutdown must always close the database
@@ -739,7 +744,8 @@ class Service:
             self.run_coordinator.close()
         except Exception:
             pass
-        self.db.close()
+        with self.lock:
+            self.db.close()
     def setting(self, key: str) -> str | None:
         with self.lock:
             row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -1130,12 +1136,6 @@ class Service:
         # Re-authenticate inside the serialized operation, not only before queued work.
         with self.lock:
             self.authenticate_bridge(token)
-            if name == SKILL_TOOL:
-                if ws_id is not None or args:
-                    raise BridgeError("The embedded skill accepts no workspace or arguments", "invalid_arguments")
-                result = read_project_lead_skill()
-                self.event(None, name)
-                return result
             if name == "list_workspaces":
                 result = self.discover_workspaces(**args)
                 self.event(None, name)

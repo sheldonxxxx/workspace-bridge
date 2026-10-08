@@ -1,30 +1,50 @@
 # MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 26 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 25 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
 local MCP gateway being enabled does not establish runtime readiness or remote
 ChatGPT/tunnel connectivity; the latter remains unobserved by Bridge.
 
-`workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` and `read_project_lead_skill` are unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. `workspace_info` also reports the authoritative Node ID/name and node-local root. All file, Git, handoff, and runtime evidence resolves through that Node; Bridge never falls back to a local checkout when it is unavailable. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
+`workspace_id` is **required on every project tool**, including all handoff tools. Only `list_workspaces` is unscoped. Copy the exact opaque `ws_...` value returned by discovery. Workspace names are display labels, not unique selectors. Every project result includes `workspace_id` for attribution. `workspace_info` also reports the authoritative Node ID/name and node-local root. All file, Git, handoff, and runtime evidence resolves through that Node; Bridge never falls back to a local checkout when it is unavailable. Paths are relative POSIX paths inside that project; use `""` to list/search the root. Absolute paths, `..`, `.` segments and backslashes are rejected.
 
-## read_project_lead_skill
+## MCP run events
 
-```text
-read_project_lead_skill()
-```
+MCP 2.0 `server/discover` advertises `capabilities.events: {}`. The same
+authenticated endpoint implements `events/list`, `events/subscribe` and
+`events/unsubscribe` with verified, signed webhook delivery for ChatGPT.
+Events share Bridge authentication and enabled-workspace policy, and add no
+tools. See [Run events](EVENTS.md) for filters, bounds, refresh, delivery and
+the ChatGPT test workflow. No polling method is exposed.
 
-Read the one embedded project-lead skill before planning, handing off or auditing;
-reload after context loss. Returns `name`, `version`, `sha256` (UTF-8 content hash),
-and `content` (complete Markdown). No arguments, workspace ID, path selection or
-repository reads. Bridge authentication, pause and token revocation apply.
-`readOnlyHint=true`, `idempotentHint=true`, `destructiveHint=false`.
+## Project-lead skill (MCP skills extension)
 
-Canonical content: `workspace_bridge/skills/project-lead/SKILL.md`, packaged in
-source distributions and wheels. `list_workspaces` and `workspace_info` return a
-small `project_lead_skill` pointer, not a repeated copy. The skill is advisory and
-cannot expand permissions or ensure model compliance.
+The project-lead skill is not a tool. The server declares
+`capabilities.extensions["io.modelcontextprotocol/skills"]` alongside `capabilities.resources` and serves the
+bounded static subset of the draft Skills extension:
+
+- `skills/list` returns one entry: `uri` (`skill://workspace-bridge/project-lead/SKILL.md`),
+  parsed `frontmatter` (`name`, `description`, `version`), and `resources` with a
+  `sha256:` digest of the UTF-8 content. No pagination.
+- `skills/get` with that `uri` returns the entry under `skill` (SEP-2640) and also
+  as top-level fields (the shape OpenAI's import docs describe).
+- `resources/read` with that `uri` returns the complete Markdown as `text/markdown`.
+
+Any other URI is rejected; no path, workspace ID or repository read is involved.
+Bridge authentication, pause and token revocation apply. Clients importing the
+MCP-served skill take a submission-time snapshot (for that ChatGPT import path,
+run **Scan Tools** again after skill changes and submit a new plugin version).
+For an existing private/workspace app connected through a Tunnel, the
+[plugin skill packaging guide](PLUGIN_SKILL_PACKAGING.md) builds the snapshot
+directly from canonical source using the registered app ID and local package
+state; byte-identical skills produce no new ZIP or version bump. The MCP Skills
+extension remains available. `list_workspaces` and
+`workspace_info` return a small `project_lead_skill` pointer (name, version,
+URI), not a repeated copy. Canonical content:
+`workspace_bridge/skills/project-lead/SKILL.md`, packaged in source
+distributions and wheels. The skill is advisory and cannot expand permissions
+or ensure model compliance. It is not part of the release/build ID.
 
 ## list_workspaces
 

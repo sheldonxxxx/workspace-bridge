@@ -1255,8 +1255,14 @@ function ModelDialog({
   onSaved: () => Promise<void>;
   onNotice: (text: string) => void;
 }) {
-  const eligible = workspaces.filter((w) => w.enabled);
-  const [workspaceId, setWorkspaceId] = useState(eligible[0]?.id || "");
+  const eligible = adapter?.node_id
+    ? workspaces.filter((w) => w.enabled && w.node_id === adapter.node_id)
+    : [];
+  const [selectedWorkspaceId, setWorkspaceId] = useState("");
+  const workspaceId =
+    eligible.find((w) => w.id === selectedWorkspaceId)?.id ||
+    eligible[0]?.id ||
+    "";
   const [models, setModels] = useState<Model[]>([]);
   const [enabled, setEnabled] = useState<string[]>(policy?.enabled || []);
   const [defaultModel, setDefaultModel] = useState(policy?.default || "");
@@ -1343,8 +1349,9 @@ function ModelDialog({
           </DialogDescription>
         </DialogHeader>
         {!eligible.length ? (
-          <Empty title="Enable a workspace first">
-            Model discovery needs an enabled workspace.
+          <Empty title="Enable a workspace on this Node">
+            Model discovery needs an enabled workspace on{" "}
+            {adapter?.node_name || "the adapter’s Node"}.
           </Empty>
         ) : (
           <>
@@ -3850,25 +3857,61 @@ export default function App() {
                     <h3>Updating components</h3>
                     <p>
                       Informational only. This view never installs, restarts, or
-                      rolls back anything. Update on each component’s host when
-                      convenient, then restart the affected service explicitly.
+                      rolls back anything, and there is no automatic updater.
+                      Update each component locally on its own host, then
+                      restart its service explicitly: an upgrade never restarts
+                      anything by itself. Differences between compatible
+                      versions do not block routes, so components can be updated
+                      one at a time.
                     </p>
                     <div className="version-guidance-grid">
                       <div>
-                        <strong>
-                          Bridge, Node, Codex and Claude Code adapters
-                        </strong>
+                        <strong>Bridge and Manager</strong>
                         <p>
-                          Upgrade the local Python package with{" "}
-                          <code>uv tool upgrade workspace-bridge</code>.
+                          Docker: from the checkout, run{" "}
+                          <code>docker compose up -d --build</code>; this
+                          recreates the container and ships the Manager with it.
+                          Without Docker: run{" "}
+                          <code>uv tool upgrade workspace-bridge</code>, then
+                          restart the <code>serve</code> process.
+                        </p>
+                      </div>
+                      <div>
+                        <strong>Node</strong>
+                        <p>
+                          On the Node host, run{" "}
+                          <code>uv tool upgrade workspace-bridge</code>, then{" "}
+                          <code>
+                            workspace-bridge node --state &lt;node-state&gt;
+                            service restart
+                          </code>
+                          .
+                        </p>
+                      </div>
+                      <div>
+                        <strong>Codex and Claude Code adapters</strong>
+                        <p>
+                          Same Python package as the Node. Install the Claude
+                          Code adapter with its extra (
+                          <code>workspace-bridge[claude]</code>). Then run{" "}
+                          <code>
+                            workspace-bridge adapter --state
+                            &lt;adapter-state&gt; service restart
+                          </code>{" "}
+                          for each adapter instance. This does not update the
+                          Codex or Claude Code CLI itself.
                         </p>
                       </div>
                       <div>
                         <strong>Pi adapter</strong>
                         <p>
-                          Upgrade the local npm package{" "}
-                          <code>workspace-bridge-pi-host-adapter</code> on its
-                          host.
+                          On its host, update the npm package with{" "}
+                          <code>
+                            npm install -g workspace-bridge-pi-host-adapter
+                          </code>
+                          , then restart it with the same{" "}
+                          <code>adapter ... service restart</code> command. This
+                          does not update the Pi CLI itself.
                         </p>
                       </div>
                     </div>
@@ -4306,6 +4349,7 @@ export default function App() {
       )}
       {modelAdapterId && (
         <ModelDialog
+          key={modelAdapterId}
           adapterId={modelAdapterId}
           adapter={adapters.find((item) => item.id === modelAdapterId)}
           open

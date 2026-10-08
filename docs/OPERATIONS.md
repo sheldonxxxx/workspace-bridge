@@ -418,6 +418,15 @@ notifications use Bridge-owned event and delivery tables; channel failures
 do not change run state. The run `notifications` object shows bounded event
 summaries and per-channel delivery status.
 
+[Run events](EVENTS.md) use MCP 2.0 discovery and verified, signed HTTPS webhooks
+to ChatGPT's subscription callbacks. They reuse the durable notification journal
+even without Discord, and expose only identifiers, state and timestamps.
+After deploying server changes, rescan the existing ChatGPT MCP connection and
+test in a Work chat with Cloud selected. The Bridge needs outbound public HTTPS;
+the Manager remains loopback-only. Aggregate event delivery states are available
+under `mcp_events` in authenticated `/api/status`. Never enable raw HTTP/tunnel
+logging or inspect subscription signing secrets through a public API.
+
 ## Runtime profiles
 
 Pi runs natively with the host user's authority, so its security profile is
@@ -475,19 +484,50 @@ enabling scope does not grant filesystem privileges. See
 
 ## Manual upgrades
 
-There is no automatic or remote updater. Update the installed tool locally
-on each host, then explicitly restart the affected persistent services:
+There is no automatic or remote updater. Update each component locally on its
+own host, then explicitly restart its persistent service. A package upgrade
+never restarts anything by itself, and compatible version differences do not
+block routes, so components can be updated one at a time. The Manager
+System / Versions view shows component versions and compatibility as
+information only; it performs no installs or restarts.
+
+**Bridge and Manager.** With Docker, rebuild and recreate the container from
+the checkout; the image builds the Manager, so it ships with the Bridge:
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+Without Docker, upgrade the Python package, then restart the `serve` process.
+
+**Node, Codex adapter, and Claude Code adapter.** These share the Python
+package. Upgrade it, then restart each service with its own state directory:
 
 ```sh
 uv tool upgrade workspace-bridge
 workspace-bridge --version
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service restart
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service restart
 ```
 
-A package upgrade never restarts anything by itself. The Pi adapter is a
-separate local npm-managed component updated with npm on its host. The
-Manager System / Versions view shows component versions and compatibility
-as information only.
+A Claude Code adapter installed with its extra
+(`uv tool install 'workspace-bridge[claude]'`) keeps it on upgrade. A host that
+runs a Node or adapter from a source checkout (an editable install) needs
+only the restart after `git pull`.
+
+**Pi adapter.** It is a separate npm package:
+
+```sh
+npm install -g workspace-bridge-pi-host-adapter
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
+```
+
+These steps do not update the native Codex, Claude Code, or Pi CLIs, which you
+update with their own installers. A restart interrupts any run in flight on that
+service; Bridge never replays prompts or approvals, so check for active runs
+first.
 
 ## Known limitations / validation status
 

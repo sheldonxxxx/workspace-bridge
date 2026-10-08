@@ -32,7 +32,7 @@ flowchart TB
 
 Component responsibilities:
 
-- `api.py`: strict typed tool schemas, tools-only MCP adapter, loopback
+- `api.py`: strict typed tool schemas, MCP adapter (tools plus the skills extension), loopback
   Manager API.
 - `service.py`: auth, mappings, Node-routed operations, handoff publication,
   write policy, adapter references, workspace routes.
@@ -59,6 +59,11 @@ Component responsibilities:
   including its trusted permission extension.
 - `notifications.py`: Bridge-owned semantic events, durable per-channel
   outbox, named channel adapters (Discord configured from local environment).
+- `event_broker.py` / `event_protocol.py`: durable subscriptions over the same
+  notification journal, identity-only event projection and a separate webhook
+  outbox using the documented MCP 2.0 event contract. `webhook_transport.py`
+  signs and verifies callbacks with DNS-pinned public HTTPS connections.
+  See [Events](EVENTS.md).
 - `security.py`: shared validation primitives (traversal, exclusions,
   bounded reads, publication, hash-checked writes).
 - `media.py` / `image_worker.py`: typed image results and a fixed, timed
@@ -66,7 +71,7 @@ Component responsibilities:
 - `browse.py`: live trees, globs, bounded search with signed cursors and
   hashes.
 - `embedded_skill.py` plus `skills/project-lead/SKILL.md`: packaged
-  project-lead guidance retrieved on demand.
+  project-lead guidance served through the MCP skills extension.
 - `web/` plus `static/dist/`: Manager source and compiled assets served by
   Starlette on the same loopback listener.
 

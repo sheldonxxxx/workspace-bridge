@@ -57,6 +57,17 @@ metadata-only event envelope. Channel result codes/details are bounded and
 redacted; raw HTTP bodies are discarded. Delivery failures cannot change run state,
 and status/read APIs expose channel ids and delivery summaries without secrets.
 
+The [MCP event broker](EVENTS.md) projects only Bridge-issued
+identifiers, allowlisted state/request kind and timestamps from that same journal.
+Subscriptions use the shared Bridge credential, explicit enabled-workspace
+filters and expiry; they introduce no per-chat ACL. Credential rotation and
+disabled mappings stop delivery. Callback URLs and Standard Webhooks signing keys
+stay in private Bridge state and never appear in status APIs or events. A signed
+challenge verifies each callback before activation; HTTPS connections validate
+public DNS answers and pin the connected address while preserving TLS hostname
+verification. No redirect, proxy, private/local destination, event-triggered run
+or approval response is allowed. Verification and delivery hold no Service DB lock.
+
 Source returned through the tunnel reaches ChatGPT. The tunnel removes a public inbound endpoint; it does not make model processing local or mean code never leaves the machine. Check organizational AI rules and your account's data controls.
 
 ## Limits

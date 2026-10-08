@@ -63,7 +63,7 @@ def test_python_core_build_id_is_deterministic_and_excludes_noise(tmp_path):
     assert all("__pycache__" not in rel for rel in inputs)
     assert all(not rel.endswith((".pyc", ".pyo")) for rel in inputs)
     assert any(rel.endswith(".py") for rel in inputs)
-    assert any(rel == "skills/project-lead/SKILL.md" for rel in inputs)
+    assert all(not rel.startswith("skills/") for rel in inputs)
     # Changing a production input changes the ID (framing is unambiguous).
     import hashlib
     hasher = hashlib.sha256()

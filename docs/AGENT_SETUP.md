@@ -1,293 +1,318 @@
 # Agent setup runbook
 
-Deterministic runbook for an AI/coding agent asked to install or configure
-Workspace Bridge for a user. An agent following only this file prepares the
-local host safely and knows exactly when it cannot proceed automatically.
+Use this runbook when a user asks an AI/coding agent to install or configure
+Workspace Bridge. [Setup](SETUP.md) is the canonical human guide;
+[Contributing](../CONTRIBUTING.md) covers repository development.
 
-Rules that override everything below:
+Follow the steps in order, using the user's existing choices and approvals.
+Ask only for outstanding decisions or authorization. Substitute approved
+paths and ports in the templates; run only the selected blocks.
 
-- Never print, copy, or expose secrets into chat. Tokens stay in local files
-  and local commands only. Refer to them as `<admin-password>`,
-  `<gateway-token>`, `<node-token>`, `<adapter-token>` when talking to the
-  user.
-- Never invent URLs, versions, ports, paths, or validation claims. Use the
-  commands and files in this runbook against the current checkout.
-- Do not restart, install, or uninstall live services silently; confirm each
-  mutating step and report the exact command plus outcome.
-- Do not access Linux test servers, publish packages, push, deploy, rotate
-  credentials on your own initiative, or modify private or ignored configs
-  except the explicit local state and tunnel files below.
+## Execution rules
 
-## Stage 0 — host, platform, and prerequisite discovery
+- **Agent checks:** inspect the host, command help, package metadata,
+  permissions, service status, and diagnostics. Report observed results.
+- **Mutations:** present exact commands before execution. Approval must cover
+  package installs, state creation, service changes, and any privileged or
+  non-loopback step. Stop on failure; never retry with broader permissions.
+- **User steps:** passwords, tokens, runtime login, tunnel authorization, and
+  client connection stay with the user. Never collect credentials through
+  chat, tools, screenshots, or handoffs.
+- **Secrets:** tool output counts as disclosure. Never execute `show-token`
+  or read secret files. Redirect adapter `init` stdout to `/dev/null` because
+  it prints a token. Bridge and Node `init` print no tokens. Sanitize errors.
+- **Scope:** preserve existing state and private or ignored configuration.
+  Unrelated hosts, commits, pushes, publication, deployment, credential
+  rotation, and deletion require explicit authorization. Keep the Manager
+  loopback-only and never tunnel it.
 
-Run first. Stop if the platform is unsupported.
+If a command or package entry point differs from this guide, stop and report
+it. Source and current `--help` output are authoritative.
+
+## 1. Discover the host and required tools
 
 ```sh
 uname -a
+pwd
 python3 --version
 uv --version
-node --version
-npm --version
-docker --version
-docker compose version
 ```
 
-Record: OS (macOS or Linux), native Windows unsupported (WSL2 only),
-and the checkout path (use the actual current directory; never a personal
-machine path from examples). Prerequisites are conditional:
+Supported hosts are macOS and Linux; native Windows requires WSL2. Python
+3.11+ and `uv` are needed for the native Node and Python adapters, including
+when the Bridge itself runs in a container.
 
-- Python 3.11+ and `uv` are always needed for Workspace Bridge itself.
-- Node 20+ with npm is needed only when the user selects the Pi runtime
-  (or for contributor/web work), not for a Codex-only or Claude-only deployment.
-- Docker/Compose is needed only for container Bridge (Path B).
+Establish deployment and runtime choices before checking optional tools:
 
-Check only what the planned deployment needs: always `python3 --version`
-and `uv --version`; add `node --version` and `npm --version` for Pi or
-contributor work; add `docker --version` and `docker compose version` for
-Path B.
+| Choice | Additional checks |
+|---|---|
+| Path A: native evaluation | No Docker requirement |
+| Path B: container Bridge, native Node and adapters | `docker --version`, `docker compose version`; locate the checkout containing Compose and the setup helper |
+| Pi | `node --version` (20+), `npm --version` |
+| Codex | `codex --version`; confirm the native CLI and required runtime login on its host |
+| Claude Code | Confirm the host user's existing Claude Code login; the optional Python SDK extra supplies its CLI |
 
-Checkpoint: report OS, checked tool versions, checkout path, and whether
-container Bridge is available. Ask the user to choose Path A (native
-evaluation) or Path B (container Bridge plus native Node) from
-[Setup](SETUP.md). Do not assume.
+For missing tools, propose an installation using [References](REFERENCES.md),
+including Astral's instructions for `uv`; do not assume an `apt` package for
+`uv`. Approve downloads and privileged installs before proceeding.
 
-Stop/ask: if the OS is native Windows, stop and explain WSL2 is required.
-If required tools are missing, stop and propose the install step for the
-detected OS without executing it. Any downloaded installer or `sudo`
-package install is an explicit stop/ask step; do not auto-execute it.
+**Checkpoint:** report OS, checked versions, checkout path where relevant,
+deployment, and runtime choices. Do not require Pi or Node/npm for a
+Codex-only or Claude-only setup. Contributor tests run only if requested;
+never install test assets implicitly.
 
-Supported install sources only (examples; use the host's manager and confirm
-first):
+## 2. Confirm the installation plan
+
+Agree on the projects parent, component hosts, paths, ports, and instances.
+These are generic examples, not detected settings:
+
+| Component | State path | Port |
+|---|---|---|
+| Native Bridge (Path A) | `$HOME/.local/state/workspace-bridge` | MCP `8765`, Manager `8766` |
+| Container Bridge (Path B) | `$HOME/.local/state/workspace-bridge-docker` on the host, `/state` inside the container | Published MCP `8875`, Manager `8766` |
+| Native Node | `$HOME/.local/state/workspace-bridge-node` | `8770` |
+| Pi instance | `$HOME/.local/state/workspace-bridge-adapter-pi` | `8780` |
+| Codex instance | `$HOME/.local/state/workspace-bridge-adapter-codex` | `8772` |
+| Claude Code instance | `$HOME/.local/state/workspace-bridge-adapter-claude` | `8774` |
+
+Use distinct available ports in `1024–65535` for listeners on the same host.
+Keep package installs, state, and private tunnel files outside mapped
+projects. Each adapter instance needs its own state directory and port.
+Adapter state must not already exist, even as an empty directory; its parent
+must already exist. Do not overwrite an existing installation.
+
+Use an existing dedicated projects parent such as `$HOME/Projects`, not a
+home or filesystem root. The Node owns files, Git, handoffs, and adapter
+secrets under its `allowed_roots` ceiling; the Bridge never opens roots directly.
+
+Default to loopback. For Path B, decide how the container reaches the Node
+before initialization. Docker Desktop normally uses
+`http://host.docker.internal:8770` with an explicitly approved non-loopback
+Node listener and firewall review. Linux Engine needs a host address reachable
+from the container. Adapter URLs are relative to the Node host, where
+loopback is appropriate. See [Docker](DOCKER.md).
+
+**Checkpoint:** present the selected commands, paths, ports, and privilege or
+network exposure. Obtain outstanding approvals and retain them during execution.
+
+## 3. Install the selected packages
+
+On each native component host, choose **one** Python install command:
 
 ```sh
-# macOS
-brew install uv python3
-brew install node   # only when the Pi runtime is selected
-# Debian/Ubuntu (install Python and, only for Pi, Node/npm with the
-# distro package manager as applicable; do not assume an apt package for uv)
-sudo apt-get update && sudo apt-get install -y python3
-```
-
-Install `uv` using an Astral-documented method; see the Astral install docs at
-https://docs.astral.sh/uv/getting-started/installation/. Do not assume an
-`apt` package for `uv` and never present an `apt` command that installs it.
-
-## Stage 1 — local preparation the agent may run
-
-These commands do not mutate live services and do not handle secrets.
-
-```sh
+# Without a Claude Code instance:
 uv tool install workspace-bridge
+# With a Claude Code instance (includes the optional SDK):
+uv tool install 'workspace-bridge[claude]'
+```
+
+The Python package provides Bridge, Node, Codex adapter, and Claude Code
+adapter commands. Native Codex is separate. If adding the Claude extra to an
+existing installation requires `--force`, include the replacement in the plan.
+
+Only on hosts selected for Pi:
+
+```sh
+npm install -g workspace-bridge-pi-host-adapter
+```
+
+Check the installed product:
+
+```sh
 workspace-bridge --version
+workspace-bridge --help
 ```
 
-Runtime package installs happen in Stage 3 after the user selects the
-runtimes (Codex needs no npm package; Claude Code needs the optional extra
-`uv tool install 'workspace-bridge[claude]'` and an existing Claude Code
-login on that host; Pi needs `npm install -g workspace-bridge-pi-host-adapter`
-on its host).
+**Checkpoint:** report installed versions or the sanitized failure.
 
-Validate checkout tests only if the user asked for contributor verification
-(see [Contributing](../CONTRIBUTING.md)); otherwise skip to Stage 2.
-Never install or update browsers or test assets implicitly.
+## 4. Initialize the native Node and selected adapters
 
-Checkpoint: report installed versions. If installation fails, stop and paste
-the exact error; do not retry with broader permissions.
-
-## Stage 2 — plan state, ports, and runtimes (no mutation)
-
-Agree with the user before creating anything:
-
-- Projects parent (must already exist; generic form `$HOME/Projects`).
-- Bridge state, Node state, and one adapter state directory per SELECTED
-  instance (generic form `$HOME/.local/state/<name>`; directories must not
-  overlap a mapped project).
-- Distinct MCP and Manager host ports (1024–65535).
-- Node port (default `8770`); Pi port (`8780`) only for Pi; Codex port
-  (`8772`) only for Codex; Claude Code port (`8774`) only for Claude Code.
-- Runtime selection: any combination of Pi, Codex, and Claude Code. Every
-  later stage executes ONLY the selected runtime(s): never initialize or
-  install Pi for a Codex-only setup, and never omit a selected runtime.
-
-Command templates (fill in the agreed values; include ONLY the selected
-runtime blocks; do not run until the user confirms the plan):
+Run on the Node host, using the approved projects parent:
 
 ```sh
-workspace-bridge init
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects"
-# Pi only (needs Node 20+/npm on this host):
-npm install -g workspace-bridge-pi-host-adapter
+  --allow-root "$HOME/Projects" --port 8770
+```
+
+For an approved Docker Desktop deployment, add `--host 0.0.0.0` to the Node
+initialization. Never expose the Node through the MCP tunnel.
+
+Run selected adapter blocks on their hosts. Tokens remain in private
+`runtime-token` files; redirection keeps them out of tool output.
+
+```sh
+# Pi only:
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" init \
   --runtime pi --projects-root "$HOME/Projects" --port 8780 > /dev/null
-# Codex only (no npm package; executable ships with uv tool install):
+# Codex only:
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
   --runtime codex --projects-root "$HOME/Projects" --port 8772 > /dev/null
-# Claude Code only (SDK extra; needs an existing Claude Code login):
-uv tool install --force 'workspace-bridge[claude]'
+# Claude Code only:
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
   --runtime claude --projects-root "$HOME/Projects" --port 8774 > /dev/null
 ```
 
-For Docker Desktop Bridge, the Node template instead uses an explicit
-non-loopback host (requires a firewall review; see [Setup](SETUP.md)):
+Follow [Runtimes](RUNTIMES.md) for login and Claude settings-layer choices.
 
-```sh
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects" --host 0.0.0.0 --port 8770
-```
+**Checkpoint:** enumerate created instances and verify directory (`0700`)
+and credential-file (`0600`) permissions using metadata only. Do not delete
+or reinitialize incomplete existing state.
 
-Checkpoint: present the exact planned commands and paths. Wait for explicit
-confirmation.
+## 5. Start the approved components
 
-## Stage 3 — create state (agent-runnable after confirmation)
-
-Run only after the user approved the Stage 2 plan, and only the selected
-runtime block(s).
-
-Token-safety rule: an agent tool transcript counts as disclosure to the
-agent even if nothing is pasted into chat. Adapter `init` prints its
-one-time runtime token on stdout, so the agent MUST redirect that stdout to
-`/dev/null` (the token remains safe in the state's private `runtime-token`
-file; only a non-secret stderr note stays visible). The user later runs
-`show-token` locally for Manager entry. Bridge `init` and Node `init` print
-no tokens and may run normally; every `show-token` command
-remains a user/manual step the agent never executes.
-
-```sh
-workspace-bridge init
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects"
-# Pi only, when selected:
-npm install -g workspace-bridge-pi-host-adapter
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" init \
-  --runtime pi --projects-root "$HOME/Projects" --port 8780 > /dev/null
-# Codex only, when selected:
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
-  --runtime codex --projects-root "$HOME/Projects" --port 8772 > /dev/null
-# Claude Code only, when selected:
-uv tool install --force 'workspace-bridge[claude]'
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
-  --runtime claude --projects-root "$HOME/Projects" --port 8774 > /dev/null
-```
-
-Checkpoint: confirm each created state directory (Bridge, Node, plus each
-selected adapter instance) exists with private permissions, without ever
-displaying a token. If a state directory is half-empty and `init` fails
-closed, stop and ask whether to restore or wipe it fully.
-
-## Stage 4 — services (explicit stop/ask points)
-
-Service install, start, stop, restart, and uninstall are mutating. Confirm
-each command with the user first.
+Install and check the native Node service:
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
-# Each selected adapter instance only:
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service status
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service status
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service status
 ```
 
-Select exactly the instances chosen in Stage 2; checkpoints enumerate those
-instances by name.
-
-Stop/ask before proceeding when any of these appear:
-
-- `sudo` is requested (Linux systemd steps): explain the narrow
-  administration being authorized and wait for approval. Never prepend
-  `sudo` yourself to a command that forbids it.
-- macOS privacy (TCC) prompts for Files & Folders or external storage: tell
-  the user which executable or interpreter needs access and wait for them to
-  grant it in System Settings. Do not automate or bypass the prompt.
-- Password or token entry (`show-token`, Manager login,
-  Node/adapter forms): the user performs the copy or entry. The agent never
-  reads a token aloud into chat.
-- Firewall or non-loopback decisions (`--host 0.0.0.0`,
-  `http://host.docker.internal:<port>`, remote-admin widening): explain the
-  exposure and wait for an explicit choice. Default to loopback.
-- ChatGPT or MCP client UI connection steps: give the user the exact click
-  path and wait. The agent cannot complete another app's UI.
-- Root mode, per component: a root-owned Node state managed as root runs the
-  Node as root with full Node filesystem authority; a root-owned adapter
-  state managed as root runs that adapter and its native agent as root.
-  Running the Node as root does not by itself make separately non-root
-  adapter services root. Proceed only on explicit request with a root-owned
-  state.
-
-Checkpoint after each service command: report installed/running state and
-the bounded health excerpt. On failure, stop and report; do not retry with
-escalated privilege.
-
-## Stage 5 — Manager registration (user/manual UI actions)
-
-The agent cannot log into the Manager for the user. Hand over with exact
-steps:
-
-1. User opens `http://127.0.0.1:8766/`, signs in as `admin` with temporary
-   password `admin`, and changes the password before using the Manager. If
-   they lose it later, `workspace-bridge reset-admin-password` is local recovery.
-2. User adds the Node URL plus `<node-token>`.
-3. User adds one workspace mapping per canonical Node-local root, enables
-   it, and sets write scope (`handoff` default).
-4. User adds each adapter instance on its Node with name, runtime type, the
-   Node-host-relative base URL, and `<adapter-token>`.
-5. User lists the live model catalog per adapter, then saves enabled models
-   plus default.
-6. User enables the exact `(workspace_id, adapter_id)` route and sets its
-   security binding.
-
-Checkpoint: ask the user to confirm each row (Node reachable, mapping
-enabled, adapter healthy, policy saved, route enabled) before continuing.
-
-## Stage 6 — tunnel and verification
-
-Tunnel secrets stay local. The agent prepares files; the user authorizes the
-client.
+For **each selected adapter**, substitute its approved state path:
 
 ```sh
-workspace-bridge doctor
-workspace-bridge doctor --json
-workspace-bridge doctor --offline
+workspace-bridge adapter --state "/path/to/selected-adapter-state" service install
+workspace-bridge adapter --state "/path/to/selected-adapter-state" service status
 ```
 
-For container Bridge:
+`service install` also starts the component: a per-user LaunchAgent on macOS,
+or a system unit running as the state owner on Linux. Run Linux commands as
+the owner; the backend requests `sudo` for narrow systemd operations. Approve
+those first and let the user handle password prompts. Never prepend `sudo`.
+
+For macOS privacy prompts, identify the executable or interpreter needing
+access; the user grants it in System Settings. Do not bypass TCC or broaden
+access automatically. Root mode requires an explicit request and root-owned
+state for each component; a root Node does not make non-root adapters root.
+See [Operations](OPERATIONS.md).
+
+Start exactly one Bridge path:
+
+### Path A: native evaluation
+
+```sh
+workspace-bridge --state "$HOME/.local/state/workspace-bridge" init \
+  --mcp-port 8765 --admin-port 8766
+workspace-bridge --state "$HOME/.local/state/workspace-bridge" serve
+```
+
+Keep `serve` attached; stopping it stops the Bridge. The CLI has no Bridge
+`service install`; see [Operations](OPERATIONS.md) for persistent service choices.
+
+### Path B: container Bridge
+
+Run from the approved checkout as the normal host user:
+
+```sh
+cd /path/to/workspace-bridge
+python3 scripts/configure_docker.py \
+  --state-dir "$HOME/.local/state/workspace-bridge-docker" \
+  --mcp-port 8875 --admin-port 8766
+```
+
+The helper creates private state and a credential-free `.env`, without
+starting Docker or overwriting `.env`. Have the user prepare Compose's local
+`tunnel-client.yaml` and `tunnel.env` privately using
+[Docker's tunnel setup](DOCKER.md#ports-and-the-single-tunnel).
+Start only the Bridge until step 7:
+
+```sh
+docker compose config --quiet
+docker compose up -d --build bridge
+docker compose ps bridge
+```
+
+The container initializes fresh Bridge state at `/state`; do not run native
+Bridge `init` for Path B. Keep the Node and adapters native.
+
+**Checkpoint:** report each component's service state and bounded health,
+plus the Manager URL. A running process does not prove route readiness.
+
+## 6. Register components in the Manager — user steps
+
+Hand the user these steps for the loopback Manager (for the example port,
+`http://127.0.0.1:8766/`):
+
+1. On fresh state, sign in as `admin` with temporary password `admin`, then
+   change it before configuring the Manager. Existing installs use their
+   current account; recovery is covered in [Operations](OPERATIONS.md).
+2. Reveal the Node token **locally** with
+   `workspace-bridge node --state <node-state> show-token`, then add its URL
+   and token in the Node form.
+3. Add one mapping per canonical Node-local workspace root, enable it, and
+   choose its write scope (`handoff` by default).
+4. Reveal each adapter token **locally** with
+   `workspace-bridge adapter --state <adapter-state> show-token`. On its
+   owning Node, register the instance name, runtime type, Node-host-relative
+   base URL, and token.
+5. Read each adapter's live model catalog, then save enabled selectors and
+   the default model.
+6. Enable each exact same-Node `(workspace_id, adapter_id)` route with its
+   security binding. Pi and Claude Code use a Bridge profile; Codex can use
+   a Bridge profile or its native configuration source.
+
+Write scope controls publication and mutation; route enablement controls
+runs. Neither grants the other. Runtime type never selects a destination.
+
+**Checkpoint:** obtain non-secret registration results: Node reachable,
+mapping enabled, adapters healthy, model policies saved, and routes enabled
+with security bindings.
+
+## 7. Connect the tunnel and client — user steps
+
+Follow [Setup's MCP connection steps](SETUP.md#8-mcp-tunnel-and-client-connection)
+and the official guides in [References](REFERENCES.md). Verify the current
+client UI before giving click instructions.
+
+The user creates or rotates the gateway credential in the Manager, saves it
+in the local tunnel environment (`0600`), authorizes the official client,
+and starts or restarts the approved tunnel process. Tunnel only `/mcp`;
+keep the Manager local and credentials out of chat and tool output.
+
+For Path B, the approved tunnel start is:
+
+```sh
+docker compose up -d mcp-tunnel
+```
+
+**Checkpoint:** have the user confirm tunnel authorization and client
+connection without sharing secrets. Local health checks do not prove this.
+
+## 8. Verify and hand over
+
+Run Doctor against the running Bridge's state and network context.
+For Path A:
+
+```sh
+workspace-bridge --state "$HOME/.local/state/workspace-bridge" doctor
+```
+
+For Path B:
 
 ```sh
 docker exec workspace-bridge workspace-bridge --state /state doctor
-docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
-Expected: overall pass and each intended route ready with its default model.
-Offline skips live checks; readiness depending on live freshness is unknown,
-never ready.
+Add `--json` for structured output or `--offline` to skip network and adapter
+calls. Offline readiness depending on live freshness is unknown, never ready.
+Fresh state can report `action_required` before gateway and route setup;
+report the actual result and remaining steps.
 
-Tunnel handover: the user creates or rotates the shared gateway credential
-in the Manager, saves it to the local tunnel environment (mode `0600`),
-restarts the tunnel process, and completes the client connection to `/mcp`
-only. The Manager is never tunnelled. Confirm the Platform tunnel
-permissions the official guide requires and that the ChatGPT account has
-developer-mode access, then hand over the current OpenAI documented flow
-(product UI may evolve; see [References](REFERENCES.md) and the official
-Secure MCP Tunnel guide): in ChatGPT Plugins, use the plus/create
-developer-mode app flow, choose `Tunnel` as the Connection, and select the
-associated tunnel or enter its `tunnel_id`. Never expose runtime API keys
-or tunnel secrets in this step.
+Expected after setup: overall `pass`, with every intended route ready and its
+configured default model. Have the user verify discovery and a small file
+read in a real client conversation using a nonsensitive sample project.
+See [Setup verification](SETUP.md#9-verify) for further acceptance checks.
+
+**Handover:** report selected components, non-secret paths and ports, command
+outcomes, Doctor results, client verification evidence, and unfinished user
+steps or blockers. Distinguish local checks from observed client behavior.
 
 ## Rollback and cleanup
 
-- `service uninstall` removes only the managed unit; state, tokens,
-  bindings, and logs remain. Use it to undo Stage 4 without losing data.
-- Deleting a state directory is destructive: back up stopped private state
-  and handoff folders first, preserving permissions and SQLite files.
-- `docker compose down` removes containers and network, not host bind
-  directories.
-- Never delete or modify ignored user-local scripts, tunnel credentials or
-  configs, `compose-prod.yaml`, or private config and state merely for
-  cleanup. Never commit, push, or publish.
-- If any step contradicts current `--help` output or package metadata, stop
-  and report the inconsistency instead of working around it.
+- With approval, `service uninstall` removes the selected Node or adapter's
+  managed service. State, tokens, bindings, and logs remain.
+- With approval, `docker compose down` removes containers and the network,
+  not host bind directories.
+- Deleting state is destructive. Back up stopped private state and workspace
+  handoff folders together first, preserving permissions and SQLite files.
+- Preserve ignored local scripts, tunnel files, `compose-prod.yaml`, and
+  private configuration. Never delete them merely for cleanup.

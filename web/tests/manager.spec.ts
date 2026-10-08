@@ -287,6 +287,9 @@ async function mockApi(
   page: Page,
   options: {
     zeroRoute?: boolean;
+    remoteWorkspace?: boolean;
+    remoteWorkspaceEnabled?: boolean;
+    remoteAdapter?: boolean;
     blockedDefault?: boolean;
     runSnapshot?: boolean;
     codexProfilesUnavailable?: boolean;
@@ -321,7 +324,7 @@ async function mockApi(
       "codex-private-token",
     ),
   ];
-  if (options.zeroRoute) {
+  if (options.zeroRoute || options.remoteAdapter) {
     adapters.push(
       adapter(
         REMOTE_PI,
@@ -351,6 +354,19 @@ async function mockApi(
   const workspacePayload = JSON.parse(
     JSON.stringify(workspace),
   ) as WorkspacePayload;
+  const workspacePayloads = [workspacePayload];
+  if (options.remoteWorkspace) {
+    workspacePayloads.push({
+      ...JSON.parse(JSON.stringify(workspacePayload)),
+      id: "ws_cccccccccccccccccccccccc",
+      name: "GPU archive",
+      root: "/Projects/gpu-archive",
+      node_id: GPU_NODE,
+      node_name: "GPU Server",
+      enabled: options.remoteWorkspaceEnabled ?? true,
+      routes: {},
+    });
+  }
   const diagnosticsPayload = JSON.parse(
     JSON.stringify(routeReport),
   ) as typeof routeReport;
@@ -448,6 +464,7 @@ async function mockApi(
     path: string;
     method: string;
     body?: Record<string, unknown>;
+    query?: Record<string, string>;
   }> = [];
   const starts: Array<Record<string, unknown>> = [];
   const tests: Array<Record<string, unknown>> = [];
@@ -468,7 +485,15 @@ async function mockApi(
       method === "GET"
         ? undefined
         : (request.postDataJSON() as Record<string, unknown>);
-    calls.push({ path, method, body });
+    calls.push({
+      path,
+      method,
+      body,
+      ...(path.startsWith("/api/adapters/") &&
+      (path.endsWith("/profiles") || path.endsWith("/models"))
+        ? { query: Object.fromEntries(url.searchParams.entries()) }
+        : {}),
+    });
 
     if (path === "/api/account") {
       await respond(route, { username: "admin", must_change_password: false });
@@ -490,7 +515,7 @@ async function mockApi(
       return;
     }
     if (path === "/api/workspaces") {
-      await respond(route, { workspaces: [workspacePayload] });
+      await respond(route, { workspaces: workspacePayloads });
       return;
     }
     if (path === "/api/events") {
@@ -609,6 +634,22 @@ async function mockApi(
         return;
       }
       if (leaf === "models" && method === "GET") {
+        const discoveryWorkspace = workspacePayloads.find(
+          (item) => item.id === url.searchParams.get("workspace_id"),
+        );
+        if (
+          !discoveryWorkspace?.enabled ||
+          discoveryWorkspace.node_id !== row.node_id
+        ) {
+          await respond(
+            route,
+            {
+              error: "Model discovery requires an enabled same-Node workspace",
+            },
+            400,
+          );
+          return;
+        }
         const model =
           id === LOCAL_PI
             ? {
@@ -616,10 +657,10 @@ async function mockApi(
                 displayName: "Local Pi model",
                 reasoningOptions: ["low", "high"],
               }
-            : id === GPU_PI
+            : id === GPU_PI || id === REMOTE_PI
               ? {
-                  selector: "pi-gpu-large",
-                  displayName: "GPU Pi model",
+                  selector: row.model_policy.default,
+                  displayName: `${row.name} model`,
                   reasoningOptions: ["low", "high"],
                 }
               : {
@@ -1018,6 +1059,209 @@ test("model and profile discovery use each adapter ID", async ({ page }) => {
       (call) => call.path === `/api/adapters/${LOCAL_PI}/profiles`,
     ),
   ).toBe(true);
+});
+
+test("model discovery and policy save use only enabled workspaces on the adapter Node", async ({
+  page,
+}) => {
+  const api = await mockApi(page, {
+    remoteAdapter: true,
+    remoteWorkspace: true,
+  });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+
+  for (const target of [
+    {
+      id: REMOTE_PI,
+      name: "GPU-only Pi",
+      workspaceId: "ws_cccccccccccccccccccccccc",
+      workspaceName: "GPU archive",
+    },
+    {
+      id: LOCAL_PI,
+      name: "Local Pi",
+      workspaceId: WS_ID,
+      workspaceName: "Alpine archive",
+    },
+  ]) {
+    await page
+      .locator(".adapter-card")
+      .filter({ hasText: `${target.name} · Pi` })
+      .getByRole("button", { name: "Models" })
+      .click();
+    const discovery = page.getByLabel("Discovery workspace");
+    await expect(discovery.locator("option")).toHaveCount(1);
+    await expect(discovery.locator("option")).toHaveText(target.workspaceName);
+    await expect(discovery).toHaveValue(target.workspaceId);
+    await expect(
+      page.getByRole("checkbox", { name: new RegExp(`${target.name} model`) }),
+    ).toBeVisible();
+    const modelCalls = api.calls.filter(
+      (call) => call.path === `/api/adapters/${target.id}/models`,
+    );
+    expect(modelCalls.length).toBeGreaterThan(0);
+    expect(
+      modelCalls.every(
+        (call) => call.query?.workspace_id === target.workspaceId,
+      ),
+    ).toBe(true);
+
+    await page.getByRole("button", { name: "Save model policy" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(
+      api.calls.find(
+        (call) =>
+          call.path === `/api/adapters/${target.id}/model-policy` &&
+          call.method === "POST",
+      )?.body,
+    ).toMatchObject({ workspace_id: target.workspaceId });
+  }
+});
+
+for (const disabledWorkspace of [false, true]) {
+  test(`model discovery stays empty when the adapter Node has ${disabledWorkspace ? "only a disabled workspace" : "no workspace"}`, async ({
+    page,
+  }) => {
+    const api = await mockApi(page, {
+      remoteAdapter: true,
+      remoteWorkspace: disabledWorkspace,
+      remoteWorkspaceEnabled: false,
+    });
+    await page.goto("./");
+    await navigate(page, "Adapters");
+    await page
+      .locator(".adapter-card")
+      .filter({ hasText: "GPU-only Pi · Pi" })
+      .getByRole("button", { name: "Models" })
+      .click();
+
+    await expect(
+      page.getByRole("heading", { name: "Enable a workspace on this Node" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("Discovery workspace")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Save model policy" }),
+    ).toBeDisabled();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    expect(
+      api.calls.filter(
+        (call) =>
+          call.path === `/api/adapters/${REMOTE_PI}/models` ||
+          (call.path === `/api/adapters/${REMOTE_PI}/model-policy` &&
+            call.method === "POST"),
+      ),
+    ).toEqual([]);
+  });
+}
+
+test("profile discovery switches to a workspace on the selected adapter Node", async ({
+  page,
+}) => {
+  const api = await mockApi(page, {
+    remoteAdapter: true,
+    remoteWorkspace: true,
+  });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+
+  const profileCalls = () =>
+    api.calls.filter(
+      (call) =>
+        call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
+        call.method === "GET",
+    );
+  const localCall = api.calls.find(
+    (call) =>
+      call.path === `/api/adapters/${LOCAL_PI}/profiles` &&
+      call.method === "GET",
+  );
+  expect(localCall?.query).toEqual({ workspace_id: WS_ID, fresh: "1" });
+
+  await page
+    .getByRole("group", { name: "Adapter" })
+    .getByRole("button", { name: "GPU-only Pi · Pi" })
+    .click();
+  await expect(page.getByRole("heading", { name: "read-only" })).toBeVisible();
+  await expect.poll(() => profileCalls().length).toBeGreaterThan(0);
+  expect(profileCalls().every((call) => call.query?.fresh === "1")).toBe(true);
+  expect(
+    profileCalls().every(
+      (call) =>
+        call.query?.workspace_id === "ws_cccccccccccccccccccccccc" &&
+        Object.keys(call.query).length === 2,
+    ),
+  ).toBe(true);
+});
+
+test("profile discovery omits workspace context when the adapter Node has no workspace", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { remoteAdapter: true });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page
+    .getByRole("group", { name: "Adapter" })
+    .getByRole("button", { name: "GPU-only Pi · Pi" })
+    .click();
+  await expect(page.getByRole("heading", { name: "read-only" })).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        api.calls.filter(
+          (call) =>
+            call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
+            call.method === "GET",
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  const remoteCall = api.calls.find(
+    (call) =>
+      call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
+      call.method === "GET",
+  );
+  expect(remoteCall?.query).toEqual({});
+  expect(
+    api.calls
+      .filter(
+        (call) =>
+          call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
+          call.method === "GET",
+      )
+      .every((call) => Object.keys(call.query || {}).length === 0),
+  ).toBe(true);
+});
+
+test("Codex native profile choices list only workspaces on its Node and allow no context", async ({
+  page,
+}) => {
+  const api = await mockApi(page, { remoteWorkspace: true });
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page
+    .getByRole("group", { name: "Adapter" })
+    .getByRole("button", { name: "Local Codex · Codex" })
+    .click();
+  await page.getByRole("button", { name: "Create from selected" }).click();
+
+  const context = page.getByLabel("Native profile choices");
+  await expect(context.locator("option")).toHaveCount(2);
+  await expect(context.locator("option").nth(0)).toHaveText(
+    "No workspace context",
+  );
+  await expect(context.locator("option").nth(1)).toHaveText("Alpine archive");
+  await context.selectOption("");
+  await expect
+    .poll(
+      () =>
+        api.calls.filter(
+          (call) =>
+            call.path === `/api/adapters/${LOCAL_CODEX}/profiles` &&
+            call.method === "GET" &&
+            Object.keys(call.query || {}).length === 0,
+        ).length,
+    )
+    .toBeGreaterThan(0);
 });
 
 test("Codex security dialog explains why Bridge profiles cannot be assigned", async ({

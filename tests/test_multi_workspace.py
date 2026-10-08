@@ -55,7 +55,7 @@ async def test_workspace_id_is_required_even_with_one_mapping(env):
     r = await request(env, "read_file", {"path": "README.md"})
     assert r.json()["error"]["code"] == -32602
     for name, (model, _, _, _) in TOOLS.items():
-        assert ("workspace_id" in model.model_json_schema().get("required", [])) == (name not in {"list_workspaces", "read_project_lead_skill"})
+        assert ("workspace_id" in model.model_json_schema().get("required", [])) == (name not in {"list_workspaces"})
 
 
 async def test_new_mapping_needs_no_reconnection_or_new_token(env):

@@ -7,7 +7,7 @@ from workspace_bridge.protocol import PREFIX, MODERN
 
 async def modern_call(env, method='server/discover', params=None, *, header_changes=None, body_changes=None):
     params = dict(params or {})
-    if method == 'tools/call' and params.get('name') not in ('list_workspaces', 'read_project_lead_skill'):
+    if method == 'tools/call' and params.get('name') not in ('list_workspaces',):
         params['arguments'] = {'workspace_id': env['id'], **params.get('arguments', {})}
     params = {**params, '_meta': {PREFIX+'protocolVersion': MODERN, PREFIX+'clientCapabilities': {}}}
     message = {'jsonrpc':'2.0', 'id':1, 'method': method, 'params':params}

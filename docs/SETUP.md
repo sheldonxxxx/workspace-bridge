@@ -330,20 +330,39 @@ old credential.
 
 ## 10. Updates
 
-There is no automatic or remote updater. Update each host locally, then
-explicitly restart the affected persistent services. A package upgrade never
-restarts anything by itself.
+There is no automatic or remote updater. Update each component locally on its
+host, then explicitly restart its service. A package upgrade never restarts
+anything by itself. The Manager System / Versions view shows component
+versions and compatibility as information only; it performs no installs.
+
+Bridge and Manager (Docker):
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+Node, Codex adapter, and Claude Code adapter (shared Python package):
 
 ```sh
 uv tool upgrade workspace-bridge
 workspace-bridge --version
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service restart
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service restart
+```
+
+Pi adapter (npm package):
+
+```sh
+npm install -g workspace-bridge-pi-host-adapter
 workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
 ```
 
-Update the Pi package with npm on its host, then restart that adapter
-service. The Manager System / Versions view shows component versions and
-compatibility as information only; it performs no installs.
+Restart only the adapters you installed. These steps do not update the native
+Codex, Claude Code, or Pi CLIs. Restarting a service interrupts any run in
+flight on it, so check for active runs first. See
+[Operations](OPERATIONS.md#manual-upgrades) for details.
 
 ## 11. Uninstall
 

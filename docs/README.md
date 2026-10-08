@@ -49,6 +49,11 @@ authority; prose never overrides them.
 ## Protocol and tool reference
 
 - [MCP tools](MCP_TOOLS.md) — exact tool names, arguments, and behavior.
+- [Run events](EVENTS.md) — ChatGPT event discovery, verified signed webhooks,
+  subscriptions, refresh, delivery recovery and a manual test workflow.
+- [Plugin skill packaging](PLUGIN_SKILL_PACKAGING.md) — build a skill snapshot
+  for an existing private/workspace MCP app using its technical ID and local
+  package identity/version state.
 - [Runtime Protocol](RUNTIME_PROTOCOL.md) — Runtime Protocol v1 contract
   between Bridge, Node, and adapters.
 - [File access](FILE_ACCESS.md) — read/write interface and write scopes.

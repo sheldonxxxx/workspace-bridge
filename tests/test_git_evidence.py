@@ -382,4 +382,4 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
             "params": {"name": "git_diff", "arguments": {"workspace_id": env["id"],
                                                                   "mode": "head", "ref": "HEAD~1"}}})
         assert invalid.json()["error"]["code"] == -32602
-    assert len(TOOLS) == 26
+    assert len(TOOLS) == 25

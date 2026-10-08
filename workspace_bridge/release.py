@@ -126,8 +126,6 @@ def _iter_core_inputs(base: Path) -> list[tuple[str, Path]]:
             continue
         if path.suffix == ".py":
             rows.append((rel, path))
-        elif rel.startswith("skills/") and path.name == "SKILL.md":
-            rows.append((rel, path))
         # All other runtime/generated noise (egg-info, logs, sqlite, dist
         # artifacts, OS metadata) is excluded so Manager identity stays
         # independently diagnosable.
@@ -136,12 +134,11 @@ def _iter_core_inputs(base: Path) -> list[tuple[str, Path]]:
 
 
 def python_core_build_id(*, refresh: bool = False) -> str:
-    """Deterministic ``sha256:`` ID over production Python/skill inputs.
+    """Deterministic ``sha256:`` ID over production Python inputs.
 
     Identical for Bridge, Node and Codex when they run the same Workspace
-    Bridge source/package; changes when production Python or embedded-skill
-    behavior changes. Excludes Manager compiled assets, bytecode and
-    runtime noise. No filesystem paths enter the public result.
+    Bridge source/package; changes when production Python changes. Excludes the bundled skill,
+    Manager compiled assets, bytecode and runtime noise. No filesystem paths enter the public result.
     """
     global _CACHED_CORE_BUILD_ID
     if _CACHED_CORE_BUILD_ID is not None and not refresh:

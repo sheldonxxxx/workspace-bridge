@@ -72,6 +72,8 @@ class AdapterRegistry:
     def client(self, adapter_id: str, *, require_enabled: bool = False,
                timeout: float = 30, workspace: dict | None = None) -> NodeRuntimeAdapterProxy:
         row = self.get(adapter_id, require_enabled=require_enabled)
+        if workspace is not None and workspace.get("node_id") != row["node_id"]:
+            raise BridgeError("Adapter belongs to another Node", "adapter_node_mismatch")
         node = self.service.node_registry.client(row["node_id"], timeout=timeout)
         return NodeRuntimeAdapterProxy(node, row, workspace, timeout=timeout)
 

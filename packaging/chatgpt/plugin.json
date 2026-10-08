@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "workspace-bridge",
+  "version": "0.0.0",
+  "description": "Plan in ChatGPT, build with local agents, and review real workspace evidence.",
+  "author": {"name": "Workspace Bridge contributors"},
+  "homepage": "https://github.com/sheldonxxxx/workspace-bridge",
+  "repository": "https://github.com/sheldonxxxx/workspace-bridge",
+  "license": "MIT",
+  "keywords": ["mcp", "coding", "workspace"],
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "displayName": "Workspace Bridge",
+        "shortDescription": "Plan, build, and review",
+        "longDescription": "Inspect workspace evidence, prepare bounded tasks for local agents, and review their changes.",
+        "developerName": "Workspace Bridge contributors",
+        "category": "Productivity",
+        "defaultPrompt": "Help me plan and review work in my workspace."
+      }
+    }
+  }
+}

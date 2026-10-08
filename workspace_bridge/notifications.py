@@ -470,6 +470,9 @@ class NotificationManager:
         event_id = row["id"]
         created = event_id == event.id
         if created:
+            broker = getattr(self.service, "event_broker", None)
+            if broker is not None:
+                broker.record_locked(event_id)
             for channel_id in self.channels:
                 self.service.db.execute(
                     "INSERT OR IGNORE INTO notification_deliveries(event_id,channel_id,status,updated) "
