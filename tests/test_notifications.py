@@ -219,23 +219,34 @@ def test_channel_delivery_never_runs_under_the_service_lock(env):
 
         def __init__(self):
             self.calls = 0
-            self.lock_was_owned = None
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.released = None
 
         def deliver(self, event):
             self.calls += 1
-            acquired = service.lock.acquire(blocking=False)
-            self.lock_was_owned = not acquired
-            if acquired:
-                service.lock.release()
+            self.entered.set()
+            self.released = self.release.wait(5)
             return NotificationResult("sent", 1)
 
     channel = LockCheckingChannel()
     manager = attach_channels(service, channel)
-    with service.lock:
-        manager.publish(make_event(run_id="run_lock"))
-        assert channel.calls == 0
+    try:
+        with service.lock:
+            manager.publish(make_event(run_id="run_lock"))
+            assert channel.calls == 0
+        assert channel.entered.wait(2), "worker did not enter the channel"
+        # Probe from a different thread while delivery is still in progress:
+        # the worker could reacquire its own RLock, and unrelated service
+        # threads may hold it briefly, so a nonblocking probe is misleading.
+        acquired = service.lock.acquire(timeout=2)
+        if acquired:
+            service.lock.release()
+        assert acquired, "channel delivery held the service lock"
+    finally:
+        channel.release.set()
     wait_for_drain(manager)
-    assert channel.calls == 1 and channel.lock_was_owned is False
+    assert channel.calls == 1 and channel.released is True
 
 
 def test_removed_channel_row_is_disabled_and_does_not_block_configured_delivery(env):
