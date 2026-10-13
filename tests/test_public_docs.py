@@ -42,9 +42,9 @@ MARKERS = (
     "Next milestone",
 )
 
-# `agent_enabled` / OpenCode history may survive only in code identifiers and
-# tests, never in public prose.
-PROSE_MARKERS = ("agent_enabled", "OpenCode", "opencode")
+# Obsolete workspace-wide execution policy stays out of public prose.
+# OpenCode v2 is now a supported adapter and belongs in the public docs.
+PROSE_MARKERS = ("agent_enabled",)
 
 
 def _public_texts() -> dict[Path, str]:

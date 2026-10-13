@@ -4,32 +4,35 @@ from __future__ import annotations
 import re
 import sqlite3
 
-_OLD_CHECK = "CHECK(runtime_type IN ('pi','codex'))"
-_NEW_CHECK = "CHECK(runtime_type IN ('pi','codex','claude'))"
+_OLD_CHECKS = ("CHECK(runtime_type IN ('pi','codex'))",
+               "CHECK(runtime_type IN ('pi','codex','claude'))")
+_NEW_CHECK = "CHECK(runtime_type IN ('pi','codex','claude','opencode'))"
 _TABLE_NAME_RE = re.compile(r"^[a-z_]{1,64}$")
 
 
 def widen_runtime_type_check(db: sqlite3.Connection, table: str) -> bool:
-    """Allow the ``claude`` runtime type in a table's ``runtime_type`` CHECK.
+    """Allow current runtime types in a table's ``runtime_type`` CHECK.
 
     SQLite cannot alter a CHECK constraint, so the table is rebuilt with the
     documented create/copy/drop/rename procedure inside one transaction with
     foreign-key enforcement suspended. Rows, indexes and references by name are
     preserved. Returns True only when a rebuild happened; a table that is
-    absent or already allows ``claude`` is left untouched.
+    absent or already allows ``opencode`` is left untouched.
     """
     if not _TABLE_NAME_RE.fullmatch(table):
         raise ValueError("Invalid table name")
     row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
                      (table,)).fetchone()
     sql = row[0] if row is not None else None
-    if not isinstance(sql, str) or _OLD_CHECK not in sql:
+    old_check = next((item for item in _OLD_CHECKS if isinstance(sql, str)
+                      and item in sql), None)
+    if old_check is None:
         return False
     indexes = [item[0] for item in db.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? "
         "AND sql IS NOT NULL", (table,))]
     temporary = table + "_upgrade"
-    create = sql.replace(_OLD_CHECK, _NEW_CHECK, 1).replace(
+    create = sql.replace(old_check, _NEW_CHECK, 1).replace(
         f"CREATE TABLE {table}", f"CREATE TABLE {temporary}", 1)
     if f"CREATE TABLE {temporary}" not in create:
         return False

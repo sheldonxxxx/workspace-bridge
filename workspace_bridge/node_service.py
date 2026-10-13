@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from .browse import Browser
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
-                    image_capabilities, read_image, selected_read_limit, sniff_image)
+                    decode_image_upload, image_capabilities, read_image,
+                    selected_read_limit, sniff_image, validate_image)
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        SafeRoot, allowed, digest, file_text, handoff_allowed,
                        parts, redact, require_write_path)
@@ -136,7 +137,7 @@ class NodeService:
               PRAGMA journal_mode=WAL;
               CREATE TABLE runtime_adapters (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude')),
+                runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude','opencode')),
                 base_url TEXT NOT NULL, token TEXT NOT NULL,
                 enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision TEXT NOT NULL,
                 created TEXT NOT NULL, updated TEXT NOT NULL);
@@ -332,6 +333,21 @@ class NodeService:
             return {"path": args["path"], "sha256": sha, "lines": selected,
                     "total_lines": len(lines), "next_line": next_line,
                     "redacted": redacted, "trust": "untrusted_project_content"}
+        if operation == "write_image":
+            args = body["arguments"]
+            path = args.get("path")
+            scope = workspace.get("write_scope", "none")
+            require_write_path(path, workspace.get("excludes", []), scope=scope)
+            if not handoff_allowed(path, workspace.get("excludes", [])):
+                raise BridgeError("Image uploads require an allowed handoff path", "policy_denied")
+            if args.get("mime_type") not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"}:
+                raise BridgeError("Unsupported image MIME type", "invalid_arguments")
+            data = decode_image_upload(args.get("data_base64"))
+            with self.safe_root(ws) as safe:
+                result = safe.write_image(path, data, args["mime_type"],
+                                          args.get("expected_sha256"), write_scope=scope)
+            return {**result, "absolute_path": str(Path(ws["root"]) / path), "write_scope": scope,
+                    "note": "Original image bytes were written. No command was executed or agent started."}
         if operation == "write_file":
             args = body["arguments"]
             scope = workspace.get("write_scope", "none")
@@ -388,13 +404,27 @@ class NodeService:
             return {"data": __import__("base64").b64encode(data).decode("ascii")}
         if operation == "hash_files":
             paths = body["arguments"].get("paths")
-            if not isinstance(paths, list) or len(paths) > 100:
+            attachments = body["arguments"].get("attachments", [])
+            if not isinstance(paths, list) or len(paths) > 100 or not isinstance(attachments, list) or len(attachments) > 20:
                 raise BridgeError("Invalid context file list", "invalid_arguments")
+            references = {}
+            for attachment in attachments:
+                if (not isinstance(attachment, dict) or set(attachment) != {"path", "description", "sha256"}
+                        or not isinstance(attachment["path"], str)
+                        or not isinstance(attachment["description"], str)
+                        or not 1 <= len(attachment["description"]) <= 2000
+                        or not isinstance(attachment["sha256"], str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"])
+                        or attachment["path"] in references):
+                    raise BridgeError("Invalid handoff attachment", "invalid_arguments")
+                references[attachment["path"]] = attachment
+            if any(not isinstance(path, str) for path in paths):
+                raise BridgeError("Invalid context file list", "invalid_arguments")
+            paths = list(dict.fromkeys([*paths, *references]))
             result, total = {}, 0
+            inspected = {}
             with self.safe_root(ws) as safe:
                 for path in paths:
-                    if not isinstance(path, str):
-                        raise BridgeError("Invalid context file list", "invalid_arguments")
                     try:
                         data, _ = safe.read(path, limit_selector=selected_read_limit)
                     except BridgeError:
@@ -402,10 +432,16 @@ class NodeService:
                                           "stale_context") from None
                     total += len(data)
                     if total > 64 * 1024 * 1024:
-                        raise BridgeError("Referenced context exceeds 64 MiB; use fewer context hashes",
+                        raise BridgeError("Referenced context exceeds 64 MiB; use fewer context files or attachments",
                                           "context_limit")
                     result[path] = digest(data)
-            return {"hashes": result}
+                    if path in references:
+                        reference = references[path]
+                        if result[path] != reference["sha256"]:
+                            raise BridgeError("An attachment changed; re-read before planning", "stale_context")
+                        metadata = validate_image(data, path, require_suffix=False)
+                        inspected[path] = {**reference, **metadata, "bytes": len(data)}
+            return {"hashes": result, "attachments": [inspected[a["path"]] for a in attachments]}
         if operation == "publish_handoff_artifacts":
             args = body["arguments"]
             files = args.get("files")
@@ -462,7 +498,7 @@ class NodeService:
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid adapter name", "invalid_arguments")
         runtime_type = payload.get("runtime_type", current["runtime_type"] if current else None)
-        if runtime_type not in {"pi", "codex", "claude"} or (current and runtime_type != current["runtime_type"]):
+        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (current and runtime_type != current["runtime_type"]):
             raise BridgeError("Adapter runtime type is immutable", "invalid_arguments")
         base_url = validate_base_url(payload.get("base_url", current["base_url"] if current else None))
         token = payload.get("token", "")
@@ -506,7 +542,7 @@ class NodeService:
         adapter_id = payload.get("adapter_id")
         saved = self.adapter(adapter_id) if adapter_id else None
         runtime_type = payload.get("runtime_type", saved["runtime_type"] if saved else None)
-        if runtime_type not in {"pi", "codex", "claude"} or (saved and runtime_type != saved["runtime_type"]):
+        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (saved and runtime_type != saved["runtime_type"]):
             raise BridgeError("Invalid or immutable runtime type", "invalid_arguments")
         base_url = validate_base_url(payload.get("base_url", saved["base_url"] if saved else None))
         token = payload.get("token", "")
@@ -535,7 +571,7 @@ class NodeService:
         allowed_ops = {"descriptor", "models", "profile_catalog", "profiles", "save_profile",
                        "delete_profile", "create_conversation", "conversation",
                        "rebind_conversation", "start_run",
-                       "find_run", "run", "cancel", "steer", "interactions", "resolve",
+                       "find_run", "run", "cancel", "steer", "queue", "interactions", "resolve",
                        "activities", "activity", "events", "usage_limits"}
         if operation not in allowed_ops or not isinstance(body, dict):
             raise BridgeError("Unknown runtime operation", "not_found")
@@ -612,11 +648,38 @@ class NodeService:
             return client.rebind_conversation(conv, binding)
         if operation == "create_conversation": return client.create_conversation(args["payload"])
         if operation == "conversation": return client.conversation(args["conversation_id"])
-        if operation == "start_run": return client.start_run(args["conversation_id"], args["payload"])
+        if operation == "start_run":
+            from .run_images import validate_images
+            payload = dict(args["payload"])
+            images = validate_images(payload.pop("images", None))
+            metadata = []
+            if images:
+                if workspace is None:
+                    raise BridgeError("Images require authoritative workspace context", "root_denied")
+                if not client.descriptor().supports("imageInput"):
+                    raise BridgeError("Adapter does not support images", "unsupported_input")
+                models = client.models(workspace["id"])
+                selected = next((m for m in models if m["selector"] == payload.get("model")), None) if payload.get("model") else next((m for m in models if m.get("default")), None)
+                if selected is None or "image" not in selected.get("inputModalities", []):
+                    raise BridgeError("Model image support is unavailable", "unsupported_input")
+                items = list(payload.get("input", []))
+                for image in images:
+                    decoded = self.workspace_call("read_file", {"workspace": workspace,
+                        "arguments": {**image, "representation": "image"}})
+                    metadata.append(decoded["metadata"])
+                    items.append({"type": "image", "data": decoded["data"], "mimeType": decoded["mime_type"], "source": decoded["metadata"]})
+                payload["input"] = items
+            result = client.start_run(args["conversation_id"], payload)
+            if images:
+                result = {**result, "inputImages": metadata}
+            return result
         if operation == "find_run": return client.find_run(args["conversation_id"], args["client_run_id"])
         if operation == "run": return client.run(args["run_id"])
         if operation == "cancel": return client.cancel(args["run_id"])
-        if operation == "steer": return client.steer(args["run_id"], args["input_items"])
+        if operation in {"steer", "queue"}:
+            if set(args) != {"run_id", "input_items", "request_id"}:
+                raise BridgeError("Invalid run input arguments", "invalid_arguments")
+            return getattr(client, operation)(args["run_id"], args["input_items"], args["request_id"])
         if operation == "interactions": return client.interactions(args["run_id"])
         if operation == "resolve": return client.resolve(args["interaction_id"], args["response"])
         if operation == "activities": return client.activities(args["run_id"])

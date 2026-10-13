@@ -15,15 +15,16 @@ from workspace_bridge.service import Service
 RETIRED = ('review_changes', 'read_change', 'record_audit')
 EXPECTED = {'list_workspaces', 'workspace_info',
             'list_dir', 'read_file', 'glob', 'grep_files',
-            'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'edit_file',
+            'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'write_image', 'edit_file',
             'list_agent_models', 'start_agent_run', 'list_agent_runs',
             'list_agent_adapters',
             'read_agent_run',
-            'cancel_agent_run', 'list_agent_executions', 'read_agent_execution',
+            'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
+            'list_agent_executions', 'read_agent_execution',
             'read_agent_interaction', 'respond_agent_interaction',
             'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff'}
-MUTATING = {'prepare_handoff', 'write_file', 'edit_file',
-            'start_agent_run', 'cancel_agent_run',
+MUTATING = {'prepare_handoff', 'write_file', 'write_image', 'edit_file',
+            'start_agent_run', 'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
             'respond_agent_interaction'}
 
 

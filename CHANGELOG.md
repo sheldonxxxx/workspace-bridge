@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+## 0.3.0
+
+- Add the OpenCode v2 host adapter with shared native storage, owned server
+  lifecycle, security profiles, approvals, native handoff, steering and queueing.
+- Accept Node-decoded workspace image references on agent run starts.
+- MCP image uploads: `write_image` saves validated raster images under Node-owned
+  handoff paths with create-only or hash-protected replacement. `prepare_handoff`
+  accepts image references with descriptions and original-file hashes in `CONTEXT.md`.
+- Live run updates: bounded adapter event readers reconcile authoritative
+  snapshots and notify the authenticated Manager through SSE, with polling
+  retained for recovery and adapters without events. Reconnects reload REST
+  state; streams contain only run IDs and respect session revocation.
+- Manager Run Inspector is split into UI, API loaders, feed helpers, state
+  hooks, and reusable event subscriptions. Refreshes coalesce bursts, preserve
+  older timeline pages, and discard requests from a closed or previous run.
+- Steering and follow-up queues are available through MCP and Manager for
+  supported Pi, Codex, Claude Code, and OpenCode routes, using exact adapter
+  capability checks and existing security bindings.
+- Pi records bounded, redacted tool intent and results durably, detects
+  interrupted work after crashes, and fails closed when audit persistence is
+  unavailable. Recovery never replays prompts, approvals, or tool effects.
+- MCP event subscriptions use verified signed webhooks with durable delivery
+  recovery. App-bound skill packaging builds a local snapshot for an existing
+  private or workspace MCP app.
+- Version `0.3.0` across the Python product, host adapters, Pi package, Manager,
+  OpenCode permission plugin, Docker image tag, and served release metadata.
+
 ## 0.2.0
 
 First release from the public repository.

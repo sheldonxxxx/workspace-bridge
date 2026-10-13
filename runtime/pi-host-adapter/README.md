@@ -59,6 +59,19 @@ security profile revision. A run starts only in an idle owned conversation.
 On adapter restart, an in-progress run is marked interrupted; the Bridge
 never replays the prompt or adopts an unrelated session.
 
+Tool audit records are stored privately under the isolated agent directory,
+bound to the native session, canonical workspace directory, and permission
+and extension revisions. The trusted tool hook persists bounded, credential
+redacted intent before allowing execution; updates, decisions, and completion
+records are persisted independently of Bridge polling. A storage failure
+blocks subsequent tool execution and approvals.
+
+After restart, committed tool completions remain visible and unfinished calls
+are marked interrupted. An interrupted record cannot establish whether a
+tool's external effect happened. Audit decisions do not restore permission
+waits or session grants. Each journal retains up to 500 current tool records;
+missing spans are reported as audit gaps. Compaction bounds each journal file.
+
 Native session retry uses a bounded budget with exponential backoff;
 quota and billing errors fail promptly without consuming it. Retry state is
 observable through sanitized records containing only safe scalar fields.

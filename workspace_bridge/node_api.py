@@ -6,11 +6,13 @@ import hmac
 import json
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .security import BridgeError, digest
+from .media import MAX_IMAGE_REQUEST_BYTES
 
 MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 20 * 1024 * 1024
@@ -68,7 +70,7 @@ def make_node_api(service, token_hash: str):
                     workspace_id, body.get("excludes"), body.get("write_scope")))
             if path.startswith("/v1/workspaces/") and request.method == "POST":
                 operation = path.rsplit("/", 1)[-1]
-                body = await _body(request)
+                body = await _body(request, MAX_IMAGE_REQUEST_BYTES if operation == "write_image" else MAX_REQUEST)
                 result = service.workspace_call(operation, body)
                 return _json(result)
             if path == "/v1/adapters" and request.method == "GET":
@@ -115,7 +117,13 @@ def make_node_api(service, token_hash: str):
                 if len(pieces) != 4:
                     return _json({"error": "Unknown runtime operation"}, 404)
                 body = await _body(request, 2 * 1024 * 1024)
-                result = service.runtime_call(pieces[2], pieces[3], body)
+                if pieces[3] == "events":
+                    # A native event long poll must not hold the Node's request
+                    # loop while status, configuration, or cancellation waits.
+                    result = await run_in_threadpool(
+                        service.runtime_call, pieces[2], pieces[3], body)
+                else:
+                    result = service.runtime_call(pieces[2], pieces[3], body)
                 return _json(result)
             return _json({"error": "Not found"}, 404)
         except BridgeError as exc:

@@ -1,7 +1,7 @@
 # Setup
 
 Single canonical human installation and configuration guide for Workspace
-Bridge `0.2.0`. Follow it top to bottom. For container detail see
+Bridge `0.3.0`. Follow it top to bottom. For container detail see
 [Docker](DOCKER.md); for daily operation see [Operations](OPERATIONS.md);
 for Pi/Codex/Claude Code specifics see [Runtimes](RUNTIMES.md).
 

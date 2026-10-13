@@ -87,6 +87,11 @@ def test_codex_http_adapter_contract(tmp_path):
         assert client.run(run["id"])["conversationId"] == conversation["id"]
         assert client.interactions(run["id"]) == []
         assert client.activities(run["id"]) == []
+        queued = client.queue(run["id"], [{"type": "text", "text": "Review next"}], "http-queue")
+        assert queued["inputMessages"] == [{"requestId": "http-queue", "mode": "queue", "status": "queued"}]
+        steered = client.steer(run["id"], [{"type": "text", "text": "Review now"}], "http-steer")
+        assert steered["inputMessages"][-1] == {"requestId": "http-steer", "mode": "steer", "status": "delivered"}
+        assert client.steer(run["id"], [{"type": "text", "text": "Review now"}], "http-steer")["inputMessages"] == steered["inputMessages"]
         native.rpc.status = "idle"
         runtime_config = catalog["runtimeConfig"]
         dynamic = client.create_conversation({

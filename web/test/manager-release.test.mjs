@@ -188,7 +188,7 @@ test("missing canonical product metadata fails instead of falling back", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
   // The checked-in canonical metadata resolves and validates.
-  assert.equal(readProductVersion(WEB_ROOT), "0.2.0");
+  assert.equal(readProductVersion(WEB_ROOT), "0.3.0");
   assert.deepEqual(
     validateManagerRelease(computeManagerRelease(WEB_ROOT)),
     computeManagerRelease(WEB_ROOT),

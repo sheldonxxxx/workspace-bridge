@@ -462,12 +462,12 @@ def main(argv: list[str] | None = None):
     node.add_argument("--state", dest="node_state", type=Path, default=default_node_state(),
                       help="Node state directory (separate from Bridge --state)")
     node.add_argument("node_argv", nargs=argparse.REMAINDER,
-                      help="Node command: init | serve | show-token | service ...")
+                      help="Node command: init | serve | open-session | reclaim-session | show-token | service ...")
     adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex/Claude adapter instance")
     adapter.add_argument("--state", dest="adapter_state", type=Path, required=True,
                          help="Adapter instance state directory (separate from Bridge --state and Node state)")
     adapter.add_argument("adapter_argv", nargs=argparse.REMAINDER,
-                         help="Adapter command: init | serve | show-token | service ...")
+                         help="Adapter command: init | serve | open-session | reclaim-session | show-token | service ...")
     support = sub.add_parser("support", help="Local support diagnostics (no upload)")
     support_sub = support.add_subparsers(dest="support_command", required=True)
     bundle = support_sub.add_parser("bundle", help="Create a sanitized support bundle ZIP (no upload)")

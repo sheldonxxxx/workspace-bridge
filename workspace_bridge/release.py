@@ -26,7 +26,7 @@ PRODUCT = "workspace-bridge"
 
 COMPONENTS = frozenset({
     "bridge", "node", "codex-host-adapter", "claude-host-adapter",
-    "pi-host-adapter", "manager",
+    "pi-host-adapter", "opencode-host-adapter", "manager",
 })
 
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$")
@@ -36,8 +36,9 @@ _RELEASE_KEYS = frozenset({
     "component", "component_version", "build_id",
 })
 
-CODEX_ADAPTER_VERSION = "0.2.0"
-CLAUDE_ADAPTER_VERSION = "0.2.0"
+CODEX_ADAPTER_VERSION = "0.3.0"
+CLAUDE_ADAPTER_VERSION = "0.3.0"
+OPENCODE_ADAPTER_VERSION = "0.3.0"
 
 
 class ReleaseError(ValueError):
@@ -124,7 +125,8 @@ def _iter_core_inputs(base: Path) -> list[tuple[str, Path]]:
             continue
         if rel.startswith("static/dist/") or rel == "static/dist":
             continue
-        if path.suffix == ".py":
+        if path.suffix == ".py" or (rel.startswith("opencode_permission_plugin/")
+                                   and path.suffix in {".mjs", ".json"}):
             rows.append((rel, path))
         # All other runtime/generated noise (egg-info, logs, sqlite, dist
         # artifacts, OS metadata) is excluded so Manager identity stays
@@ -134,10 +136,10 @@ def _iter_core_inputs(base: Path) -> list[tuple[str, Path]]:
 
 
 def python_core_build_id(*, refresh: bool = False) -> str:
-    """Deterministic ``sha256:`` ID over production Python inputs.
+    """Deterministic ``sha256:`` ID over Python and the packaged permission guard.
 
-    Identical for Bridge, Node and Codex when they run the same Workspace
-    Bridge source/package; changes when production Python changes. Excludes the bundled skill,
+    Identical for Python product components on the same Workspace Bridge
+    source/package; changes with production Python or the native guard. Excludes the bundled skill,
     Manager compiled assets, bytecode and runtime noise. No filesystem paths enter the public result.
     """
     global _CACHED_CORE_BUILD_ID
@@ -185,7 +187,7 @@ def codex_release() -> dict:
 
     The Python core is shared with Bridge/Node, so the build ID is the same
     Python-core ID. The component version stays the adapter contract version
-    (``0.2.0``); ``adapterVersion``/``nativeVersion`` remain separate fields.
+    (``0.3.0``); ``adapterVersion``/``nativeVersion`` remain separate fields.
     The descriptor ``adapterVersion`` reuses this constant so release identity
     cannot drift from the advertised descriptor.
     """
@@ -206,6 +208,13 @@ def claude_release() -> dict:
                         component_version=CLAUDE_ADAPTER_VERSION,
                         build_id=python_core_build_id(),
                         product_version=__version__)
+
+
+def opencode_release() -> dict:
+    """Identity of the Python host adapter and its packaged permission plugin."""
+    return make_release(component="opencode-host-adapter",
+                        component_version=OPENCODE_ADAPTER_VERSION,
+                        build_id=python_core_build_id(), product_version=__version__)
 
 
 def read_manager_release() -> dict | None:

@@ -90,6 +90,16 @@ import {
   quotaResetText,
   quotaWindowLabel,
 } from "@/lib/api";
+import type { ConfirmState, TextDetail } from "@/components/manager-types";
+import { RunInspector } from "@/features/runs/RunInspector";
+import { getRuns, getWorkspaceRuns } from "@/features/runs/api";
+import { useRunEvents } from "@/features/runs/useRunEvents";
+import { createRefreshQueue } from "@/features/runs/refresh-queue";
+import {
+  appendOlder,
+  mergeNewest,
+  newestPageHasGap,
+} from "@/features/runs/feed-state";
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
@@ -261,13 +271,6 @@ type Section =
   | "runs"
   | "versions"
   | "audit";
-type ConfirmState = {
-  title: string;
-  description: string;
-  action: () => Promise<void>;
-  destructive?: boolean;
-};
-type TextDetail = { title: string; description?: string; content: unknown };
 const sections: Array<{
   id: Section;
   title: string;
@@ -608,230 +611,6 @@ function RunCard({
         </Button>
       </div>
     </article>
-  );
-}
-
-type ExecutionRecord = {
-  execution_id: string;
-  sequence?: number;
-  tool?: string;
-  state?: string;
-  target_preview?: string;
-  input_preview?: string;
-  output_preview?: string;
-  output_truncated?: boolean;
-  started?: string;
-  duration_ms?: number;
-  is_error?: boolean;
-  truncated?: boolean;
-};
-type RunActivity = {
-  id: string;
-  kind: string;
-  status: string;
-  created?: string;
-  details?: Json;
-};
-type FeedCursor = { created: string; id: string };
-type ActivityPage = {
-  activities: RunActivity[];
-  next_cursor: FeedCursor | null;
-};
-type ExecutionPage = {
-  executions: ExecutionRecord[];
-  next_cursor: FeedCursor | null;
-};
-
-function mergeNewest<T>(
-  fresh: T[],
-  existing: T[],
-  key: (item: T) => string,
-): T[] {
-  const freshKeys = new Set(fresh.map(key));
-  return [...fresh, ...existing.filter((item) => !freshKeys.has(key(item)))];
-}
-
-function appendOlder<T>(
-  existing: T[],
-  older: T[],
-  key: (item: T) => string,
-): T[] {
-  const knownKeys = new Set(existing.map(key));
-  return [...existing, ...older.filter((item) => !knownKeys.has(key(item)))];
-}
-
-function objectValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function outputPreviewText(value: unknown, depth = 0): string {
-  if (depth > 5 || value == null) return "";
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (depth < 5 && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
-      try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        const readable = outputPreviewText(parsed, depth + 1);
-        if (readable) return readable;
-      } catch {
-        // Keep ordinary command output unchanged when it is not JSON.
-      }
-    }
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => outputPreviewText(item, depth + 1))
-      .filter(Boolean)
-      .join("\n");
-  }
-  if (typeof value !== "object") return String(value);
-
-  const record = value as Record<string, unknown>;
-  const previewKeys = [
-    "output_preview",
-    "outputPreview",
-    "aggregatedOutput",
-    "stdout",
-    "output",
-    "preview",
-    "message",
-    "text",
-    "status",
-    "content",
-  ];
-  for (const key of previewKeys) {
-    if (record[key] !== undefined && record[key] !== value) {
-      const preview = outputPreviewText(record[key], depth + 1);
-      if (preview) return preview;
-    }
-  }
-
-  const ignoredKeys = new Set([
-    "is_error",
-    "isError",
-    "truncated",
-    "output_bytes",
-    "outputBytes",
-    "preview_bytes",
-    "previewBytes",
-    "durationMs",
-    "duration_ms",
-  ]);
-  return Object.entries(record)
-    .filter(([key, item]) => !ignoredKeys.has(key) && item !== undefined)
-    .map(([key, item]) => {
-      const label = key
-        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-        .replace(/_/g, " ")
-        .replace(/\b\w/g, (char) => char.toUpperCase());
-      const text = outputPreviewText(item, depth + 1);
-      return text ? `${label}: ${text}` : "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function executionInputPreview(
-  execution: ExecutionRecord,
-  activityDetails?: Json,
-): string {
-  const input = objectValue(activityDetails?.input);
-  const details = objectValue(input.details);
-  const filtered = Object.fromEntries(
-    Object.entries(details).filter(
-      ([key, value]) =>
-        !/(?:_sha256|_bytes)$|^truncated$/i.test(key) && value !== undefined,
-    ),
-  );
-  if (typeof filtered.command === "string") {
-    const command = `$ ${filtered.command}`;
-    return command.length > 1200 ? `${command.slice(0, 1200)}\n…` : command;
-  }
-  if (Object.keys(filtered).length) {
-    const summary = JSON.stringify(filtered, null, 2);
-    return summary.length > 1200 ? `${summary.slice(0, 1200)}\n…` : summary;
-  }
-  if (execution.input_preview) return execution.input_preview;
-  return (
-    execution.target_preview ||
-    (typeof input.summary === "string" ? input.summary : "") ||
-    "Input not recorded"
-  );
-}
-
-function executionOutputPreview(
-  activityDetails?: Json,
-  execution?: ExecutionRecord,
-): {
-  text: string;
-  truncated: boolean;
-} {
-  const result = objectValue(activityDetails?.result);
-  const preview =
-    outputPreviewText(result) || outputPreviewText(execution?.output_preview);
-  return {
-    text: preview
-      ? preview.slice(0, 900)
-      : activityDetails
-        ? "No output captured"
-        : "Output preview unavailable",
-    truncated:
-      result.truncated === true ||
-      execution?.output_truncated === true ||
-      preview.length > 900,
-  };
-}
-
-function ExecutionStatus({
-  state,
-  isError,
-}: {
-  state?: string;
-  isError?: boolean;
-}) {
-  const normalized = (state || "recorded").toLowerCase();
-  let tone: "danger" | "success" | "warning" | "neutral" = "neutral";
-  if (isError || ["failed", "error"].includes(normalized)) tone = "danger";
-  else if (["completed", "succeeded", "success"].includes(normalized))
-    tone = "success";
-  else if (
-    [
-      "running",
-      "queued",
-      "starting",
-      "declined",
-      "interrupted",
-      "cancelled",
-      "paused",
-    ].includes(normalized)
-  ) {
-    tone = "warning";
-  }
-  const Icon =
-    tone === "danger"
-      ? X
-      : tone === "success"
-        ? Check
-        : ["running", "queued", "starting"].includes(normalized)
-          ? Activity
-          : ["declined", "interrupted", "cancelled", "paused"].includes(
-                normalized,
-              )
-            ? Pause
-            : CircleHelp;
-  const label = isError
-    ? "Failed"
-    : normalized === "recorded"
-      ? "Recorded"
-      : normalized.charAt(0).toUpperCase() + normalized.slice(1);
-  return (
-    <span className={`execution-status execution-status-${tone}`}>
-      <Icon size={13} strokeWidth={2.5} aria-hidden="true" />
-      {label}
-    </span>
   );
 }
 
@@ -1406,7 +1185,8 @@ function ModelDialog({
                     <div
                       className={
                         adapter?.runtime_type === "codex" ||
-                        adapter?.runtime_type === "claude"
+                        adapter?.runtime_type === "claude" ||
+                        adapter?.runtime_type === "opencode"
                           ? "model-option model-option-codex"
                           : "model-option"
                       }
@@ -1561,10 +1341,21 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [runImagePaths, setRunImagePaths] = useState("");
   const [startingHandoff, setStartingHandoff] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
+  const runsRequestRef = useRef(0);
+  const runsDataRef = useRef<Run[]>([]);
+  const runsOlderLoadedRef = useRef(false);
+  const selectedWorkspaceRef = useRef(selectedWorkspace);
+  useEffect(() => {
+    selectedWorkspaceRef.current = selectedWorkspace;
+  }, [selectedWorkspace]);
+  const liveRefreshRef = useRef<ReturnType<typeof createRefreshQueue> | null>(
+    null,
+  );
   const startRequestIds = useRef(new Map<string, string>());
   const notify = useCallback((text: string) => {
     setNotice(text);
@@ -1590,14 +1381,42 @@ export default function App() {
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
-  const loadRuns = useCallback(async (offset = 0) => {
-    const data = await api<{ runs: Run[]; next_offset: number | null }>(
-      `/api/runs?offset=${offset}&limit=${pageSize}`,
-    );
-    setRuns((old) => (offset ? [...old, ...data.runs] : data.runs));
-    setRunsNext(data.next_offset);
-    return data;
-  }, []);
+  const loadRuns = useCallback(
+    async (
+      offset = 0,
+      options?: { preservePages?: boolean; signal?: AbortSignal },
+    ) => {
+      const request = offset
+        ? runsRequestRef.current
+        : ++runsRequestRef.current;
+      const data = await getRuns(offset, pageSize, options?.signal);
+      if (options?.signal?.aborted || request !== runsRequestRef.current)
+        return data;
+      const previous = runsDataRef.current;
+      const resetPage =
+        !offset &&
+        (!options?.preservePages ||
+          newestPageHasGap(
+            data.runs,
+            previous,
+            (item) => item.run_id,
+            data.next_offset !== null,
+          ));
+      const next = offset
+        ? appendOlder(previous, data.runs, (item) => item.run_id)
+        : resetPage
+          ? data.runs
+          : mergeNewest(data.runs, previous, (item) => item.run_id);
+      runsDataRef.current = next;
+      setRuns(next);
+      if (offset) runsOlderLoadedRef.current = true;
+      else if (resetPage) runsOlderLoadedRef.current = false;
+      if (offset || !options?.preservePages || !runsOlderLoadedRef.current)
+        setRunsNext(data.next_offset);
+      return data;
+    },
+    [],
+  );
   const refresh = useCallback(
     async (options?: { silent?: boolean }) => {
       if (refreshingRef.current) return;
@@ -1646,7 +1465,7 @@ export default function App() {
         setStatus(currentStatus);
         setNodes(currentStatus.nodes || []);
         try {
-          await loadRuns();
+          await loadRuns(0, { preservePages: true });
         } catch (error) {
           if (!options?.silent) notify((error as Error).message);
         }
@@ -1663,11 +1482,49 @@ export default function App() {
   const loadWorkspaceDetails = useCallback(async (workspaceId: string) => {
     const [a, b] = await Promise.all([
       api<{ handoffs: Handoff[] }>(`/api/workspaces/${workspaceId}/jobs`),
-      api<{ runs: Run[] }>(`/api/workspaces/${workspaceId}/runs`),
+      getWorkspaceRuns(workspaceId),
     ]);
+    if (selectedWorkspaceRef.current !== workspaceId) return;
     setHandoffs(a.handoffs || []);
     setWorkspaceRuns(b.runs || []);
   }, []);
+  useEffect(() => {
+    if (auth !== "ready" || !autoRefresh) return;
+    let active = true;
+    const controller = new AbortController();
+    const queue = createRefreshQueue(async () => {
+      if (document.hidden) return;
+      await Promise.allSettled([
+        loadRuns(0, { preservePages: true, signal: controller.signal }),
+        section === "handoffs" && selectedWorkspace
+          ? getWorkspaceRuns(selectedWorkspace, controller.signal).then(
+              (page) => {
+                if (
+                  active &&
+                  selectedWorkspaceRef.current === selectedWorkspace
+                )
+                  setWorkspaceRuns(page.runs || []);
+              },
+            )
+          : Promise.resolve(),
+      ]);
+    });
+    liveRefreshRef.current = queue;
+    return () => {
+      active = false;
+      controller.abort();
+      queue.dispose();
+      if (liveRefreshRef.current === queue) liveRefreshRef.current = null;
+    };
+  }, [auth, autoRefresh, loadRuns, section, selectedWorkspace]);
+  const refreshLiveRuns = useCallback(() => {
+    if (!document.hidden) liveRefreshRef.current?.schedule();
+  }, []);
+  useRunEvents({
+    enabled: auth === "ready" && autoRefresh,
+    onChange: refreshLiveRuns,
+    onReset: refreshLiveRuns,
+  });
   useEffect(() => {
     void (async () => {
       try {
@@ -1792,7 +1649,11 @@ export default function App() {
     setDiagnosticsError(null);
     setWorkspaces([]);
     setEvents([]);
+    runsRequestRef.current++;
+    runsDataRef.current = [];
+    runsOlderLoadedRef.current = false;
     setRuns([]);
+    setRunsNext(null);
     setHandoffs([]);
     setRunInspect(null);
     setTextDetail(null);
@@ -1980,7 +1841,16 @@ export default function App() {
   }
   async function startPreparedHandoff(handoff: Handoff, route: RunnableRoute) {
     if (startingHandoff) return;
-    const key = `${selectedWorkspace}:${handoff.id}:${route.adapter_id}`;
+    const images = runImagePaths
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean)
+      .map((path) => ({ path }));
+    if (images.length > 4) {
+      notify("Choose at most four images.");
+      return;
+    }
+    const key = `${selectedWorkspace}:${handoff.id}:${route.adapter_id}:${JSON.stringify(images)}`;
     let requestId = startRequestIds.current.get(key);
     if (!requestId) {
       requestId = crypto.randomUUID();
@@ -1997,6 +1867,7 @@ export default function App() {
           body: JSON.stringify({
             adapter_id: route.adapter_id,
             request_id: requestId,
+            ...(images.length ? { images } : {}),
           }),
         },
       );
@@ -3236,6 +3107,22 @@ export default function App() {
                         </p>
                       )}
                     </div>
+                    <label className="field">
+                      <span>Run images (optional)</span>
+                      <textarea
+                        aria-label="Run image paths"
+                        value={runImagePaths}
+                        onChange={(event) =>
+                          setRunImagePaths(event.target.value)
+                        }
+                        placeholder="One workspace image path per line, up to four"
+                        rows={3}
+                      />
+                      <small>
+                        The owning Node reads previews. The selected adapter and
+                        model must support images.
+                      </small>
+                    </label>
                     {handoffs.length ? (
                       handoffs.map((h) => (
                         <div className="handoff-row" key={h.id}>
@@ -3264,8 +3151,9 @@ export default function App() {
                                 }
                               >
                                 <Play size={14} />
-                                {startingHandoff ===
-                                `${selectedWorkspace}:${h.id}:${selectedRoute?.adapter_id}`
+                                {startingHandoff?.startsWith(
+                                  `${selectedWorkspace}:${h.id}:${selectedRoute?.adapter_id}:`,
+                                )
                                   ? "Starting…"
                                   : "Start run"}
                               </Button>
@@ -3685,8 +3573,8 @@ export default function App() {
                 })}
                 {!adapters.length && (
                   <Empty title="No adapters configured">
-                    Add Local Pi, GPU Pi, Codex, or Claude Code as separate
-                    execution targets.
+                    Add Local Pi, GPU Pi, Codex, Claude Code, or OpenCode as
+                    separate execution targets.
                   </Empty>
                 )}
               </div>
@@ -4253,6 +4141,7 @@ export default function App() {
                     <option value="pi">Pi</option>
                     <option value="codex">Codex</option>
                     <option value="claude">Claude Code</option>
+                    <option value="opencode">OpenCode</option>
                   </select>
                 ) : (
                   <p className="form-readonly">
@@ -4439,776 +4328,5 @@ function Brand() {
         <small>local agent operations</small>
       </span>
     </div>
-  );
-}
-
-function RunInspector({
-  run,
-  onClose,
-  onNotice,
-  onRefresh,
-  onDetail,
-  onConfirm,
-}: {
-  run: Run | null;
-  onClose: () => void;
-  onNotice: (message: string) => void;
-  onRefresh: () => Promise<void>;
-  onDetail: (detail: TextDetail) => void;
-  onConfirm: (state: ConfirmState) => void;
-}) {
-  const [data, setData] = useState<Run | null>(run);
-  const [activity, setActivity] = useState<RunActivity[]>([]);
-  const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
-  const [activityCursor, setActivityCursor] = useState<FeedCursor | null>(null);
-  const [executionCursor, setExecutionCursor] = useState<FeedCursor | null>(
-    null,
-  );
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [tab, setTab] = useState<"summary" | "activity" | "executions">(
-    "summary",
-  );
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const loadOlderRef = useRef<HTMLDivElement | null>(null);
-  const loadingOlderRef = useRef(false);
-  const activityOlderLoadedRef = useRef(false);
-  const executionsOlderLoadedRef = useRef(false);
-  const pullStartY = useRef<number | null>(null);
-  const pullDistanceRef = useRef(0);
-  const pullRefreshingRef = useRef(false);
-  const [pullDistance, setPullDistance] = useState(0);
-  const [pullRefreshing, setPullRefreshing] = useState(false);
-  const load = useCallback(
-    async (id: string) => {
-      try {
-        const details = await api<Run>(`/api/runs/${id}`);
-        setData(details);
-        const [acts, execs] = await Promise.allSettled([
-          api<ActivityPage>(`/api/runs/${id}/activities?limit=50`),
-          api<ExecutionPage>(`/api/runs/${id}/executions?limit=50`),
-        ]);
-        if (acts.status === "fulfilled") {
-          setActivity((old) =>
-            mergeNewest(acts.value.activities || [], old, (item) => item.id),
-          );
-          if (!activityOlderLoadedRef.current) {
-            setActivityCursor(acts.value.next_cursor || null);
-          }
-        }
-        if (execs.status === "fulfilled") {
-          setExecutions((old) =>
-            mergeNewest(
-              execs.value.executions || [],
-              old,
-              (item) => item.execution_id,
-            ),
-          );
-          if (!executionsOlderLoadedRef.current) {
-            setExecutionCursor(execs.value.next_cursor || null);
-          }
-        }
-      } catch (error) {
-        onNotice((error as Error).message);
-      }
-    },
-    [onNotice],
-  );
-  const loadOlder = useCallback(
-    async (feed: "activity" | "executions") => {
-      const cursor = feed === "activity" ? activityCursor : executionCursor;
-      if (!run || !cursor || loadingOlderRef.current) return;
-      loadingOlderRef.current = true;
-      setLoadingOlder(true);
-      try {
-        const query = new URLSearchParams({
-          limit: "50",
-          before_created: cursor.created,
-          before_id: cursor.id,
-        });
-        if (feed === "activity") {
-          const page = await api<ActivityPage>(
-            `/api/runs/${run.run_id}/activities?${query}`,
-          );
-          setActivity((old) =>
-            appendOlder(old, page.activities || [], (item) => item.id),
-          );
-          setActivityCursor(page.next_cursor || null);
-          activityOlderLoadedRef.current = true;
-        } else {
-          const page = await api<ExecutionPage>(
-            `/api/runs/${run.run_id}/executions?${query}`,
-          );
-          setExecutions((old) =>
-            appendOlder(
-              old,
-              page.executions || [],
-              (item) => item.execution_id,
-            ),
-          );
-          setExecutionCursor(page.next_cursor || null);
-          executionsOlderLoadedRef.current = true;
-        }
-      } catch (error) {
-        onNotice((error as Error).message);
-      } finally {
-        loadingOlderRef.current = false;
-        setLoadingOlder(false);
-      }
-    },
-    [activityCursor, executionCursor, onNotice, run],
-  );
-  useEffect(() => {
-    if (run) void load(run.run_id);
-  }, [run, load]);
-  useEffect(() => {
-    const cursor = tab === "activity" ? activityCursor : executionCursor;
-    const target = loadOlderRef.current;
-    const root = panelRef.current;
-    if (
-      !cursor ||
-      loadingOlder ||
-      (tab !== "activity" && tab !== "executions") ||
-      !target ||
-      !root ||
-      typeof IntersectionObserver === "undefined"
-    ) {
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void loadOlder(tab);
-      },
-      { root, rootMargin: "180px 0px" },
-    );
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [activityCursor, executionCursor, loadOlder, loadingOlder, tab]);
-  const inspectRunId = run?.run_id;
-  useEffect(() => {
-    if (!inspectRunId) return;
-    const timer = window.setInterval(() => {
-      if (document.hidden || pullRefreshingRef.current) return;
-      void load(inspectRunId);
-    }, autoRefreshMs);
-    return () => window.clearInterval(timer);
-  }, [inspectRunId, load]);
-  useEffect(() => {
-    const panel = panelRef.current;
-    if (!panel || !run) return;
-
-    const resetPull = () => {
-      pullStartY.current = null;
-      pullDistanceRef.current = 0;
-      setPullDistance(0);
-    };
-    const handleTouchStart = (event: TouchEvent) => {
-      if (
-        event.touches.length !== 1 ||
-        panel.scrollTop > 0 ||
-        pullRefreshingRef.current
-      ) {
-        pullStartY.current = null;
-        return;
-      }
-      pullStartY.current = event.touches[0].clientY;
-    };
-    const handleTouchMove = (event: TouchEvent) => {
-      const startY = pullStartY.current;
-      if (startY === null) return;
-      if (event.touches.length !== 1 || panel.scrollTop > 0) {
-        resetPull();
-        return;
-      }
-      const distance = event.touches[0].clientY - startY;
-      if (distance <= 0) {
-        resetPull();
-        return;
-      }
-      if (distance > 6) event.preventDefault();
-      const nextDistance = Math.min(distance, 96);
-      pullDistanceRef.current = nextDistance;
-      setPullDistance(nextDistance);
-    };
-    const handleTouchEnd = () => {
-      pullStartY.current = null;
-      const shouldRefresh = pullDistanceRef.current >= 68;
-      pullDistanceRef.current = 0;
-      setPullDistance(0);
-      if (!shouldRefresh || pullRefreshingRef.current) return;
-
-      pullRefreshingRef.current = true;
-      setPullRefreshing(true);
-      void Promise.allSettled([load(run.run_id), onRefresh()])
-        .then(([, pageRefresh]) => {
-          if (pageRefresh.status === "rejected")
-            onNotice(
-              pageRefresh.reason instanceof Error
-                ? pageRefresh.reason.message
-                : "Unable to refresh page data.",
-            );
-        })
-        .finally(() => {
-          pullRefreshingRef.current = false;
-          setPullRefreshing(false);
-        });
-    };
-
-    panel.addEventListener("touchstart", handleTouchStart, { passive: true });
-    panel.addEventListener("touchmove", handleTouchMove, { passive: false });
-    panel.addEventListener("touchend", handleTouchEnd, { passive: true });
-    panel.addEventListener("touchcancel", resetPull, { passive: true });
-    return () => {
-      panel.removeEventListener("touchstart", handleTouchStart);
-      panel.removeEventListener("touchmove", handleTouchMove);
-      panel.removeEventListener("touchend", handleTouchEnd);
-      panel.removeEventListener("touchcancel", resetPull);
-    };
-  }, [load, onNotice, onRefresh, run?.run_id]);
-  async function replyInteraction(interactionId: string, body: Json) {
-    if (!run) return;
-    try {
-      await api(
-        `/api/runs/${run.run_id}/interactions/${interactionId}`,
-        "POST",
-        body,
-      );
-      onNotice("Request answered.");
-      await load(run.run_id);
-      await onRefresh();
-    } catch (error) {
-      onNotice((error as Error).message);
-    }
-  }
-  if (!run) return null;
-  const current = data || run;
-  const pending = (current.interactions || []).filter(
-    (i) => i.state === "pending",
-  );
-  return (
-    <Sheet open={Boolean(run)} onOpenChange={(value) => !value && onClose()}>
-      <SheetContent ref={panelRef} side="right" className="run-sheet">
-        <div
-          className="run-pull-indicator"
-          data-visible={pullRefreshing || pullDistance > 0}
-          aria-hidden={!pullRefreshing && pullDistance === 0}
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          <span>
-            <RefreshCw size={13} className={pullRefreshing ? "spinning" : ""} />
-            {pullRefreshing
-              ? "Refreshing run…"
-              : pullDistance >= 68
-                ? "Release to refresh"
-                : "Pull down to refresh"}
-          </span>
-        </div>
-        <SheetHeader>
-          <div className="inspector-state">
-            <StateBadge value={displayState(current)} />{" "}
-            <span>
-              {current.adapter_name || "Unknown adapter"} ·{" "}
-              {runtimeName(current.runtime_type || "unknown")}
-            </span>
-          </div>
-          <SheetTitle>
-            {current.handoff_title || current.job_id || "Agent run"}
-          </SheetTitle>
-          <SheetDescription>
-            {current.workspace_name || current.workspace_id || "Workspace"} ·
-            started {dateTime(current.created)}
-          </SheetDescription>
-        </SheetHeader>
-        <div className="inspector-tabs" role="tablist" aria-label="Run detail">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "summary"}
-            onClick={() => setTab("summary")}
-          >
-            Summary
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "activity"}
-            onClick={() => setTab("activity")}
-          >
-            Activities
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "executions"}
-            onClick={() => setTab("executions")}
-          >
-            Executions
-          </button>
-        </div>
-        <div className="inspector-body">
-          {tab === "summary" && (
-            <>
-              <div className="run-facts">
-                <div>
-                  <span>Model</span>
-                  <strong>
-                    {current.model || "Default"}
-                    {current.reasoning ? (
-                      <> · {thinkingEffortLabel(current.reasoning)}</>
-                    ) : null}
-                  </strong>
-                </div>
-                <div>
-                  <span>Conversation</span>
-                  <strong>{current.conversation_id || "—"}</strong>
-                </div>
-                <div>
-                  <span>Run ID</span>
-                  <strong>{current.run_id}</strong>
-                </div>
-                <div>
-                  <span>Node</span>
-                  <strong>
-                    {current.node_name || current.node_id || "Unknown"} · rev{" "}
-                    {current.node_revision || "—"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Adapter</span>
-                  <strong>
-                    {current.adapter_name || current.adapter_id || "Unknown"} ·
-                    rev {current.adapter_revision || "—"}
-                  </strong>
-                </div>
-              </div>
-              <section className="request-panel effective-security-panel">
-                <StateBadge
-                  value={
-                    current.effective_security?.source === "runtime-config"
-                      ? "Codex runtime config"
-                      : current.effective_security?.source === "profile"
-                        ? "Bridge profile"
-                        : "Security unavailable"
-                  }
-                />
-                <h3>Security used for this run</h3>
-                {current.effective_security?.source === "profile" ? (
-                  <p>
-                    Profile {current.effective_security.profile_id || "unknown"}{" "}
-                    · bound revision{" "}
-                    {current.effective_security.bound_revision || "unknown"} ·
-                    effective revision{" "}
-                    {current.effective_security.effective_revision || "unknown"}
-                  </p>
-                ) : current.effective_security?.source === "runtime-config" ? (
-                  <>
-                    <p>
-                      Bound revision{" "}
-                      {current.effective_security.bound_revision || "unknown"} ·
-                      effective revision{" "}
-                      {current.effective_security.effective_revision ||
-                        "unknown"}
-                    </p>
-                    <p>
-                      Active permission profile:{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.activePermissionProfile || "unknown",
-                      )}{" "}
-                      · approval{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalPolicy || "unknown",
-                      )}{" "}
-                      · reviewer{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalsReviewer || "unknown",
-                      )}
-                    </p>
-                  </>
-                ) : (
-                  <p>The immutable security snapshot was not available.</p>
-                )}
-              </section>
-              <section className="request-panel token-usage-panel">
-                <h3>Token usage</h3>
-                {current.token_usage ? (
-                  <div className="run-facts">
-                    <div>
-                      <span>Total</span>
-                      <strong>
-                        {current.token_usage.total_tokens ?? "Not reported"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Input</span>
-                      <strong>
-                        {current.token_usage.input_tokens ?? "Not reported"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Cached input</span>
-                      <strong>
-                        {current.token_usage.cached_input_tokens ??
-                          "Not reported"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Cache-write input</span>
-                      <strong>
-                        {current.token_usage.cache_write_input_tokens ??
-                          "Not reported"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Output</span>
-                      <strong>
-                        {current.token_usage.output_tokens ?? "Not reported"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Reasoning output</span>
-                      <strong>
-                        {current.token_usage.reasoning_output_tokens ??
-                          "Not reported"}
-                      </strong>
-                    </div>
-                  </div>
-                ) : (
-                  <p>Not reported</p>
-                )}
-              </section>
-              {pending.map((item) => (
-                <section className="request-panel" key={item.id}>
-                  <StateBadge value="Needs review" />
-                  <h3>{item.details?.title || item.kind}</h3>
-                  <p>{item.details?.resource || ""}</p>
-                  {item.details?.requested && (
-                    <pre>{jsonText(item.details.requested)}</pre>
-                  )}
-                  {(item.details?.choices || []).map((choice) => (
-                    <Button
-                      key={choice.id}
-                      variant={
-                        choice.semantic === "approve" ? "default" : "outline"
-                      }
-                      size="sm"
-                      onClick={() =>
-                        onConfirm({
-                          title: `Submit ${choice.label}?`,
-                          description:
-                            "This answers the live agent request and lets the same run continue.",
-                          action: () =>
-                            replyInteraction(item.id, { choiceId: choice.id }),
-                        })
-                      }
-                    >
-                      {choice.label}
-                    </Button>
-                  ))}
-                  {item.kind === "form" && (
-                    <>
-                      <div className="form-answers">
-                        {(item.details?.fields || [])
-                          .filter((f) => f.id)
-                          .map((field) => (
-                            <div className="form-field" key={field.id}>
-                              <Label htmlFor={`answer-${field.id}`}>
-                                {field.question || field.header || field.id}
-                              </Label>
-                              <Input
-                                id={`answer-${field.id}`}
-                                value={answers[field.id] || ""}
-                                onChange={(e) =>
-                                  setAnswers((old) => ({
-                                    ...old,
-                                    [field.id]: e.target.value,
-                                  }))
-                                }
-                              />
-                              {field.options?.length ? (
-                                <small>
-                                  Options:{" "}
-                                  {field.options.map((o) => o.label).join(", ")}
-                                </small>
-                              ) : null}
-                            </div>
-                          ))}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          const fields = (item.details?.fields || []).filter(
-                            (f) => f.id,
-                          );
-                          if (fields.some((f) => !answers[f.id]?.trim())) {
-                            onNotice(
-                              "Answer every question before submitting.",
-                            );
-                            return;
-                          }
-                          void replyInteraction(item.id, {
-                            answers: Object.fromEntries(
-                              fields.map((f) => [
-                                f.id,
-                                { answers: [answers[f.id].trim()] },
-                              ]),
-                            ),
-                          });
-                        }}
-                      >
-                        Submit answers
-                      </Button>
-                    </>
-                  )}
-                </section>
-              ))}
-              {!pending.length && (
-                <p className="muted-note">No live requests are waiting.</p>
-              )}
-              <div className="inspector-actions">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    onDetail({
-                      title: "Run details",
-                      description:
-                        "Run state, identifiers, timestamps, and recorded result metadata.",
-                      content: current,
-                    })
-                  }
-                >
-                  Run details
-                </Button>
-                {(current.phase === "active" || current.active) && (
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() =>
-                      onConfirm({
-                        title: "Stop this run?",
-                        description:
-                          "The active runtime conversation is cancelled. No arbitrary process is killed.",
-                        destructive: true,
-                        action: async () => {
-                          await api(`/api/runs/${run.run_id}/stop`, "POST");
-                          onNotice("Run stopped.");
-                          onClose();
-                        },
-                      })
-                    }
-                  >
-                    Stop run
-                  </Button>
-                )}
-              </div>
-            </>
-          )}
-          {tab === "activity" &&
-            (activity.length ? (
-              <>
-                <div className="execution-list">
-                  {activity.map((item) => {
-                    const details = item.details;
-                    const input = objectValue(details?.input);
-                    const result = objectValue(details?.result);
-                    const fullTitle = String(
-                      details?.title ||
-                        input.summary ||
-                        item.kind.replace(/_/g, " "),
-                    );
-                    const title =
-                      fullTitle.length > 120
-                        ? `${fullTitle.slice(0, 117)}…`
-                        : fullTitle;
-                    const activityRecord: ExecutionRecord = {
-                      execution_id: item.id,
-                      tool: title,
-                      state: item.status,
-                      started: item.created,
-                      target_preview:
-                        typeof input.summary === "string"
-                          ? input.summary
-                          : undefined,
-                    };
-                    const failed =
-                      ["failed", "error"].includes(item.status.toLowerCase()) ||
-                      result.is_error === true ||
-                      result.isError === true;
-                    const output = executionOutputPreview(
-                      details,
-                      activityRecord,
-                    );
-                    return (
-                      <article className="execution-card" key={item.id}>
-                        <header className="execution-card-head">
-                          <div className="execution-tool">
-                            <span className="execution-tool-icon">
-                              <Command size={15} aria-hidden="true" />
-                            </span>
-                            <div>
-                              <h3 title={fullTitle}>{title}</h3>
-                              <span>
-                                Activity · {item.kind.replace(/_/g, " ")}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="execution-meta">
-                            <ExecutionStatus
-                              state={item.status}
-                              isError={failed}
-                            />
-                            {item.created ? (
-                              <time dateTime={item.created}>
-                                Started {dateTime(item.created)}
-                              </time>
-                            ) : (
-                              <span>Start time unavailable</span>
-                            )}
-                          </div>
-                        </header>
-                        <div className="execution-terminal">
-                          <section className="execution-preview">
-                            <h4>Input</h4>
-                            <pre>
-                              {executionInputPreview(activityRecord, details)}
-                            </pre>
-                          </section>
-                          <section className="execution-preview">
-                            <h4>Output preview</h4>
-                            <pre>{output.text}</pre>
-                          </section>
-                        </div>
-                        <footer className="execution-card-footer">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() =>
-                              onDetail({
-                                title: `Activity ${item.id}`,
-                                content: details,
-                              })
-                            }
-                          >
-                            Full record <ArrowRight size={14} />
-                          </Button>
-                        </footer>
-                      </article>
-                    );
-                  })}
-                </div>
-                {activityCursor && (
-                  <div className="feed-older" ref={loadOlderRef}>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={loadingOlder}
-                      onClick={() => void loadOlder("activity")}
-                    >
-                      {loadingOlder
-                        ? "Loading older activities…"
-                        : "Load older activities"}
-                    </Button>
-                  </div>
-                )}
-              </>
-            ) : (
-              <Empty title="No activities recorded" />
-            ))}
-          {tab === "executions" &&
-            (executions.length ? (
-              <div className="execution-list">
-                {executions.map((ex) => {
-                  const recorded = activity.find(
-                    (item) => item.id === ex.execution_id,
-                  );
-                  const details = recorded?.details;
-                  const result = objectValue(details?.result);
-                  const failed = ex.is_error || result.is_error === true;
-                  const output = executionOutputPreview(details, ex);
-                  return (
-                    <article className="execution-card" key={ex.execution_id}>
-                      <header className="execution-card-head">
-                        <div className="execution-tool">
-                          <span className="execution-tool-icon">
-                            <Command size={15} aria-hidden="true" />
-                          </span>
-                          <div>
-                            <h3>{ex.tool || "Tool"}</h3>
-                            <span>Execution #{ex.sequence || "?"}</span>
-                          </div>
-                        </div>
-                        <div className="execution-meta">
-                          <ExecutionStatus state={ex.state} isError={failed} />
-                          {ex.started ? (
-                            <time dateTime={ex.started}>
-                              Started {dateTime(ex.started)}
-                            </time>
-                          ) : (
-                            <span>Start time unavailable</span>
-                          )}
-                        </div>
-                      </header>
-                      <div className="execution-terminal">
-                        <section className="execution-preview">
-                          <h4>Input</h4>
-                          <pre>{executionInputPreview(ex, details)}</pre>
-                        </section>
-                        <section className="execution-preview">
-                          <h4>Output preview</h4>
-                          <pre>{output.text}</pre>
-                        </section>
-                      </div>
-                      <footer className="execution-card-footer">
-                        {typeof ex.duration_ms === "number" && (
-                          <span>{(ex.duration_ms / 1000).toFixed(1)}s</span>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={async () => {
-                            try {
-                              const detail = await api(
-                                `/api/runs/${run.run_id}/executions/${encodeURIComponent(ex.execution_id)}`,
-                              );
-                              onDetail({
-                                title: `Execution ${ex.execution_id}`,
-                                content: detail,
-                              });
-                            } catch (error) {
-                              onNotice((error as Error).message);
-                            }
-                          }}
-                        >
-                          Full record <ArrowRight size={14} />
-                        </Button>
-                      </footer>
-                    </article>
-                  );
-                })}
-                {executionCursor && (
-                  <div className="feed-older" ref={loadOlderRef}>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={loadingOlder}
-                      onClick={() => void loadOlder("executions")}
-                    >
-                      {loadingOlder
-                        ? "Loading older executions…"
-                        : "Load older executions"}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <Empty title="No executions recorded" />
-            ))}
-        </div>
-      </SheetContent>
-    </Sheet>
   );
 }

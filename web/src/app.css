@@ -2337,6 +2337,23 @@ a {
   padding-top: 16px;
   display: flex;
 }
+.run-input-panel textarea {
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.run-input-receipts {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.run-input-receipts li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
 .feed-older {
   padding: 13px 0 4px;
   display: flex;

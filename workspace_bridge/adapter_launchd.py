@@ -338,7 +338,7 @@ def _read_manifest(paths: AdapterServicePaths) -> dict | None:
             or not isinstance(value.get("plist_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", value["plist_sha256"])
             or not isinstance(value.get("runtime_type"), str)
-            or value.get("runtime_type") not in {"pi", "codex", "claude"}
+            or value.get("runtime_type") not in {"pi", "codex", "claude", "opencode"}
             or not isinstance(value.get("service_id"), str)
             or not re.fullmatch(r"[0-9a-f]{12}", value["service_id"])):
         raise _state_error("LaunchAgent manifest is invalid",

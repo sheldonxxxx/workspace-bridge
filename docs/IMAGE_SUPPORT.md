@@ -9,7 +9,7 @@ read_file(workspace_id=actual_id, path="screenshots/settings.png",
           expected_sha256=source_hash_from_previous_read)
 ```
 
-No separate image tool or tunnel. `representation` defaults to `auto`: supported
+No separate image reader or tunnel. `representation` defaults to `auto`: supported
 raster bytes yield an image; other files keep the existing UTF-8 text behavior.
 Use `text` to explicitly select text or `image` to require a supported raster.
 Omit `offset` and `limit` for images; non-default text pagination is rejected.
@@ -47,6 +47,29 @@ Metadata decompression is also bounded. Invalid or oversized content returns a s
 error, not partial pixels or a fabricated text description. `workspace_info` exposes
 these capabilities under `image_reading`. No persistent image cache is written.
 
+## Upload handoff images
+
+`write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)`
+uploads original raster bytes through the Node to an allowed path inside
+`.workspace-handoff/`. It requires handoff or workspace write scope; workspace mode
+does not permit source-image uploads. Strict base64, MIME, filename extension and
+decoded format must agree. The existing bounded decoder validates the first frame
+before any new directory is created. Supported formats and 20 MiB/40MP limits match
+image reading. Uploads preserve original bytes and embedded metadata and do not
+redact pixels. Results contain original-file hashes, dimensions and format.
+
+Creation is exclusive by default; replacement needs the current original hash and
+a validated existing image. Re-read and reconcile conflicts or ambiguous outcomes.
+Only `write_image` has a larger JSON body budget (28,027,564 bytes); other MCP
+tools retain 1 MiB. `workspace_info.image_writing` exposes the upload limits.
+See [MCP tools](MCP_TOOLS.md#image-upload) for the exact schema.
+
+Upload to `.workspace-handoff/attachments/reference.png` before preparation,
+then include `path`, `description` and the returned `sha256` in
+`prepare_handoff.attachments`. Existing allowed workspace images can also be
+referenced. References are checked at publication and recorded in `CONTEXT.md`;
+they are not copies or snapshots. Verify current hashes before using them.
+
 ## Native response, not base64 text
 
 The HTTP adapter returns `content: [TextContent(metadata), ImageContent(...)]`.
@@ -76,7 +99,8 @@ briefly delay other calls. Avoid agents editing the image during review.
 
 Image reading works with write_scope `none`, `handoff` and `workspace`; it does not
 change any of them. `write_file` and `edit_file` still operate on UTF-8 text only.
-No binary writer, PDF/Office parser or retired snapshot-review system was added.
+`write_image` is limited to validated handoff rasters; no generic binary writer,
+PDF/Office parser or retired snapshot-review system is included.
 
 ## Validate your actual client
 
@@ -113,3 +137,18 @@ and never prints the image bytes. Do not paste tokens into ChatGPT.
 - Formats: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
 
 Protocol support is not proof of a specific client integration.
+
+## Images in agent runs
+
+`start_agent_run` accepts up to four `images` references, each with a workspace
+`path` and optional `expected_sha256`. The Manager prepared-handoff starter
+accepts one path per line. The owning Node resolves paths under its normal
+workspace policy, verifies hashes, strips metadata, and creates bounded image
+previews before sending them to the exact adapter. Both the adapter and selected
+model must advertise image input. Unsupported or uncertain support fails closed.
+OpenCode v2 accepts these previews as native prompt attachments. Run snapshots
+retain source/preview hashes and metadata, never image bytes. Pixel contents
+are not redacted. Steering and queueing remain text-only.
+
+Only image-bearing run starts have a 12 MiB request budget. Ordinary protocol
+requests and response budgets are unchanged.

@@ -148,6 +148,7 @@ export async function createIsolatedServices({ cwd, agentDir }) {
 export async function createSdkSession({
   cwd, agentDir, tools = null, excludeTools = null, extensionPaths = [],
   policy, uiContext, onEvent = null, onDiagnostic = null, resumeFile = null,
+  onToolIntent = null,
 }) {
   const { settingsManager, modelRuntime } = await createIsolatedServices({ cwd, agentDir });
   const extra = Array.isArray(extensionPaths)
@@ -166,7 +167,7 @@ export async function createSdkSession({
     extensionFactories: [
       {
         name: "trusted-permission",
-        factory: createTrustedPermissionExtension({ policy, cwd }),
+        factory: createTrustedPermissionExtension({ policy, cwd, onToolIntent }),
       },
     ],
   });

@@ -128,7 +128,7 @@ class EventBroker:
                        "run_id": {"type": "string", "pattern": "^run_[0-9a-f]{24}$",
                                   "description": "Optional exact Bridge run ID; omit to monitor all runs in the workspace."}}}
         base = {"workspace_id": {"type": "string"}, "run_id": {"type": "string"},
-                "adapter_id": {"type": "string"}, "runtime_type": {"enum": ["pi", "codex", "claude"]}}
+                "adapter_id": {"type": "string"}, "runtime_type": {"enum": ["pi", "codex", "claude", "opencode"]}}
         return {"events": [
             {"name": FINISHED, "description": "A run finished in the selected workspace. Read read_agent_run for its authoritative result and audit evidence.",
              "delivery": ["webhook"], "inputSchema": filters,
@@ -233,7 +233,7 @@ class EventBroker:
     def project(row) -> dict | None:
         if (not _identity(row["workspace_id"], "ws") or not _identity(row["run_id"], "run")
                 or not _identity(row["adapter_id"], "adapter") or not _identity(row["id"], "nev")
-                or row["runtime_type"] not in {"pi", "codex", "claude"}):
+                or row["runtime_type"] not in {"pi", "codex", "claude", "opencode"}):
             return None
         data = {"workspace_id": row["workspace_id"], "run_id": row["run_id"],
                 "adapter_id": row["adapter_id"], "runtime_type": row["runtime_type"]}

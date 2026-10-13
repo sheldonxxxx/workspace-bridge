@@ -15,7 +15,7 @@ PI_PKG = REPO / "runtime" / "pi-host-adapter" / "package.json"
 PI_LOCK = REPO / "runtime" / "pi-host-adapter" / "package-lock.json"
 
 EXPECTED_MJS = [
-    "adapter.mjs", "config.mjs", "executions.mjs", "extensions.mjs",
+    "adapter.mjs", "config.mjs", "execution-store.mjs", "executions.mjs", "extensions.mjs",
     "fingerprint.mjs", "logging.mjs", "login-path.mjs", "main.mjs",
     "paths.mjs", "pi-adapter.mjs", "policy.mjs", "release.mjs",
     "sdk-events.mjs", "sdk-transport.mjs", "server.mjs",
@@ -505,6 +505,10 @@ def test_python_wheel_exposes_adapter_commands():
     text = (REPO / "pyproject.toml").read_text()
     assert "workspace-bridge-codex-adapter" in text
     assert "workspace_bridge.codex_host_adapter:main" in text
+    assert "workspace-bridge-opencode-adapter" in text
+    assert "workspace_bridge.opencode_host_adapter:main" in text
+    assert '"opencode_permission_plugin/*.mjs"' in text
+    assert '"opencode_permission_plugin/package.json"' in text
 
 
 def test_release_workflow_uses_release_cli_and_packaging_smoke():
@@ -521,6 +525,9 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert "entry_points.txt" in text
     assert "workspace_bridge.cli:main" in text
     assert "workspace_bridge.node_cli:main" in text
+    assert "workspace_bridge.opencode_host_adapter:main" in text
+    assert "workspace_bridge/opencode_permission_plugin/index.mjs" in text
+    assert "workspace_bridge/opencode_permission_plugin/package.json" in text
     assert "workspace_bridge.codex_host_adapter:main" in text
     assert "uv pip install --python" in text
     assert '"$VENV/bin/workspace-bridge" --version' in text

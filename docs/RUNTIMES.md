@@ -1,12 +1,12 @@
 # Runtimes
 
-Consolidated Pi, Codex, and Claude Code runtime notes for Workspace Bridge `0.2.0`. For
+Consolidated Pi, Codex, Claude Code, and OpenCode runtime notes for Workspace Bridge `0.3.0`. For
 the wire contract see [Runtime Protocol](RUNTIME_PROTOCOL.md); for service
 commands see [Setup](SETUP.md) and [Operations](OPERATIONS.md).
 
 ## Concepts
 
-A `RuntimeType` (`pi`, `codex`, or `claude`) names the protocol family. An
+A `RuntimeType` (`pi`, `codex`, `claude`, or `opencode`) names the protocol family. An
 `AdapterInstance` is one Node-owned destination with its own name, endpoint,
 token, enabled state, and connection revision. A `WorkspaceRoute` binds one
 workspace to one exact same-Node adapter ID with a security binding. Two
@@ -16,12 +16,12 @@ the runtime type never selects a destination and there is no fallback.
 
 ## Installation surface
 
-| Item | Pi | Codex | Claude Code |
-|---|---|---|---|
-| Package | `workspace-bridge-pi-host-adapter` on npm, executable `workspace-bridge-pi-adapter` | Python product (`uv tool install workspace-bridge`), executable `workspace-bridge-codex-adapter` | Python product with the optional extra (`uv tool install 'workspace-bridge[claude]'`), executable `workspace-bridge-claude-adapter` |
-| Instance init | `workspace-bridge adapter --state <dir> init --runtime pi --projects-root <parent> --port 8780` | `workspace-bridge adapter --state <dir> init --runtime codex --projects-root <parent> --port 8772` | `workspace-bridge adapter --state <dir> init --runtime claude --projects-root <parent> --port 8774` |
-| Token | Printed once by `init`; reprint locally with `show-token`; register on the owning Node | Same lifecycle; stored in private Node SQLite | Same lifecycle; stored in private Node SQLite |
-| Health | `GET /health` unauthenticated; every `/v1/*` needs the runtime token header | Same | Every `/v1/*` needs the runtime token header; use `service status` (authenticated descriptor check) for readiness |
+| Item | Pi | Codex | Claude Code | OpenCode v2 |
+|---|---|---|---|---|
+| Package | `workspace-bridge-pi-host-adapter` on npm, executable `workspace-bridge-pi-adapter` | Python product (`uv tool install workspace-bridge`), executable `workspace-bridge-codex-adapter` | Python product with the optional extra (`uv tool install 'workspace-bridge[claude]'`), executable `workspace-bridge-claude-adapter` | Python product, executable `workspace-bridge-opencode-adapter`; requires an existing native v2 installation |
+| Instance init | `workspace-bridge adapter --state <dir> init --runtime pi --projects-root <parent> --port 8780` | `workspace-bridge adapter --state <dir> init --runtime codex --projects-root <parent> --port 8772` | `workspace-bridge adapter --state <dir> init --runtime claude --projects-root <parent> --port 8774` | `workspace-bridge adapter --state <dir> init --runtime opencode --projects-root <parent> --port 8776` |
+| Token | Printed once by `init`; reprint locally with `show-token`; register on the owning Node | Same lifecycle; stored in private Node SQLite | Same lifecycle; stored in private Node SQLite | Same lifecycle; stored in private Node SQLite |
+| Health | `GET /health` unauthenticated; every `/v1/*` needs the runtime token header | Same | Every `/v1/*` needs the runtime token header; use `service status` (authenticated descriptor check) for readiness | Same as Claude Code |
 
 Each adapter state owns exactly one instance. Service artifacts contain only
 the stable `workspace-bridge adapter --state <state> serve` launcher, never
@@ -68,9 +68,79 @@ adapter-created session for continuations, so idle conversations survive an
 adapter restart; runs that were active are marked interrupted and never
 replayed.
 
+The Pi adapter persists bounded tool audit records in its isolated agent
+directory before allowing each tool invocation and independently of Bridge
+polling. Records are bound to the exact native session, canonical workspace
+directory, and permission and extension revisions. Restart recovery imports
+committed completions and marks unfinished tool calls interrupted without
+executing them. Persisted approval decisions are evidence only: pending
+interactions and session grants are never restored. Storage failures block
+new tool execution and approvals; retained-history gaps remain
+explicit in the run activity. This does not change run admission or the
+Bridge's no-replay rule.
+
+## OpenCode v2
+
+The Python package includes `workspace-bridge-opencode-adapter`; no separate
+adapter package or SDK extra is needed. Use an existing OpenCode **v2**
+installation and the host user's existing provider login and configuration:
+
+```sh
+opencode2 --version
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-opencode" init --runtime opencode --projects-root "$HOME/projects" --port 8776 --opencode-binary opencode2
+```
+
+The adapter owns a private authenticated loopback `serve --stdio` process and
+uses the **same native OpenCode database** and configuration as the terminal.
+It does not copy credentials or create a private native database. A process
+configuration overlay adds the packaged permission plugin and disables native
+updates, sharing, and Git snapshots. Only the owned server is stopped.
+An unexpected owned-server exit terminates the adapter so its installed service
+supervisor can restart the unit and reconcile journalled state without replay.
+
+The trusted v2 plugin gates every tool and child-session call. Profiles expose
+`edits`, `shell`, `web`, and `extensions`, each `deny`, `ask`, or `allow`.
+File tools stay inside the workspace and protect Git internals, environment
+files, `.opencode`, `.agents`, and `opencode.json`/`opencode.jsonc` edits. An
+unknown tool fails closed. Approved shell commands and existing native plugins
+run with the host user's authority; this is not an OS sandbox. A missing or
+failed guard blocks admission. Native saved permissions cannot widen the guard.
+Content grep requires an explicit allowed file because native recursive grep
+cannot exclude protected environment files. Code Mode `execute` follows the
+`web` control because it includes HTTP fetch; nested tools retain their own gates.
+
+Runs journal native session/message IDs before submission. An ambiguous write
+is reconciled from native messages and durable logs; the Bridge never resends
+it. Native recovery in the shared database is observed only for owned sessions;
+unexpected input relinquishes ownership. Unconfirmed execution becomes
+interrupted or orphaned, with stale interactions. Steering, queueing, tools,
+forms, usage, and run events use the v2 protocol.
+
+For explicit native continuation, open an **idle** owned session locally:
+
+```sh
+RUNTIME_CONVERSATION_ID="conv_example" # Replace with the Manager runtime conversation ID.
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-opencode" open-session "$RUNTIME_CONVERSATION_ID"
+```
+
+The command passes the private server credential to OpenCode without printing
+it. Use the runtime conversation ID shown in the Manager Run Inspector.
+Handoff relinquishes Bridge control. To continue through the Bridge, explicitly
+reclaim it while the native session is idle:
+
+```sh
+workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-opencode" reclaim-session "$RUNTIME_CONVERSATION_ID"
+```
+
+This explicitly rebinds the stored named profile at its current revision. Opening the shared database from another OpenCode process does not grant
+that process a Bridge route or make its activity an owned Bridge run.
+After a crash, an unfinished transcript can prevent idle proof even after the
+owned server restarts. Resolve or explicitly resume that session in the ordinary
+OpenCode UI using the shared history, then reclaim it after the native turn is idle.
+
 ## Security-profile differences
 
-Pi, Codex, and Claude Code share the Runtime Protocol but enforce different native
+Pi, Codex, Claude Code, and OpenCode share the Runtime Protocol but enforce different native
 mechanisms. Never describe a profile as an OS sandbox unless that runtime
 provides that guarantee.
 
@@ -117,8 +187,10 @@ provides that guarantee.
   drop the project and local layers. Shell `allow` and `ask` approvals also
   run with the host user's authority and are not sandboxed; prefer `ask`.
   Prompts are sent verbatim, so `@path` expansion and slash commands are not
-  applied. Claude Code supports text input only, and the adapter does not
-  support steering. Account usage limits report the five-hour and seven-day
+  applied. Claude Code supports text input only. Steering interrupts the
+  active response, then sends the correction on the same native client ahead
+  of queued follow-ups. A correction accepted as the response settles becomes
+  the next response. Account usage limits report the five-hour and seven-day
   windows from the most recent rate-limit event of a run, so they are a
   last-observed snapshot that stays empty until the first run and drops a
   window once it has reset.
@@ -129,6 +201,12 @@ provides that guarantee.
   descriptor and diagnosed live like the other adapters.
 
 ## Continuation and rebind (conceptual)
+
+All four adapters support steer and queue controls through the MCP tools
+and the Manager run view. Steer changes active work; queue adds a FIFO follow-up
+after the current response succeeds. Inputs stay in the same logical run and
+security binding. Request IDs prevent duplicate delivery on retry. Pending
+input is discarded on cancellation, failure, or restart and is never replayed.
 
 A new run may continue a terminal run's conversation for a new prepared
 handoff in the same workspace. Ownership is proven live against the stored

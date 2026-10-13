@@ -6,15 +6,16 @@
 // cwd, immutable permission/extension snapshots, preflight correlation,
 // suspended permission state, and bounded execution journal. Sessions are
 // persistent (SessionManager files under the isolated profile), never
-// in-memory; there is no subprocess, no JSONL framing, and no frame-size
-// ceiling. Dispose/shutdown marks the session unavailable and every later
+// in-memory; there is no subprocess or transport frame-size ceiling.
+// Dispose/shutdown marks the session unavailable and every later
 // operation fails closed instead of silently creating a replacement.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { ADAPTER_VERSION } from "./config.mjs";
 import { isTrustedExtensionUsable, sdkToolLoadout, trustedExtensionPath } from "./config.mjs";
 import { READONLY_TOOLS } from "./config.mjs";
-import { ExecutionJournal, redactExtensionText, summaryRecord } from "./executions.mjs";
+import { ExecutionJournal, redactExtensionText, sanitizeExecutionSummary, summaryRecord } from "./executions.mjs";
+import { ExecutionStore } from "./execution-store.mjs";
 import {
   canonicalizeEnabledOrder,
   defaultExtensionPolicy,
@@ -76,6 +77,8 @@ function bounded(value, limit) {
   if (value === null || value === undefined) return "";
   return String(value).slice(0, limit);
 }
+
+const inputTextHash = (text) => createHash("sha256").update(text).digest("hex");
 
 function textFromContent(content) {
   // Concatenate visible text blocks only. Thinking/reasoning blocks,
@@ -322,6 +325,74 @@ export class PiAdapter {
     return this.sessions.size;
   }
 
+  _openExecutionJournal(binding, { requireExisting = false } = {}) {
+    const store = new ExecutionStore({ agentDir: this.agentDir, binding });
+    const snapshot = store.load();
+    if (requireExisting && !snapshot) throw new Error("Execution audit unavailable");
+    const journal = new ExecutionJournal({ snapshot,
+      onCommit: (value) => store.save(value) });
+    if (!snapshot) store.save(journal.snapshot());
+    // Recover evidence only. A started record cannot prove whether its
+    // external effect happened, and must never become a replay request.
+    journal.markInterrupted();
+    return journal;
+  }
+
+  _assertAuditAvailable(entry) {
+    try {
+      if (entry.auditUnavailable) throw new Error("Execution audit unavailable");
+      entry.journal.assertHealthy();
+    } catch {
+      throw new AdapterError("Pi execution audit is unavailable", 503, "execution_audit_unavailable");
+    }
+  }
+
+  _auditFailed(entry) {
+    entry.auditUnavailable = true;
+    try {
+      this.onLog?.("ERROR", "pi-adapter", "execution_audit_unavailable", {
+        session_id: String(entry.session.sessionId).slice(0, 200),
+      });
+    } catch { /* logging cannot affect enforcement */ }
+  }
+
+  _auditToolIntent(entry, event) {
+    if (!entry || entry.disposed) throw new Error("Execution audit unavailable");
+    this._assertAuditAvailable(entry);
+    const message = normalizeToolStart({ toolCallId: event?.toolCallId,
+      toolName: event?.toolName, args: event?.input });
+    if (!message) throw new Error("Execution audit unavailable");
+    const previous = entry.journal.records.get(message.toolCallId);
+    const safeInput = sanitizeExecutionSummary(message.auditInput, {
+      input: true, tool: message.toolName,
+    });
+    if (previous && (previous.state !== "started" || previous.tool !== message.toolName
+        || canonicalJson(previous.input_summary) !== canonicalJson(safeInput))) {
+      throw new Error("Execution audit identity changed");
+    }
+    // The trusted tool_call hook awaits this gate before it allows the
+    // exact invocation. Subscriber delivery alone is not that boundary.
+    this._onToolStart(entry, message);
+    this._assertAuditAvailable(entry);
+  }
+
+  executionBinding(directory, sessionId) {
+    const entry = this._permissionEntry(sessionId, directory);
+    this._assertAuditAvailable(entry);
+    return { ...entry.auditBinding };
+  }
+
+  recoverExecutions(binding) {
+    try {
+      if (!binding || resolveSessionDir(this.projectsRoot, binding.directory) !== binding.directory) {
+        throw new Error("Execution audit binding changed");
+      }
+      return this._openExecutionJournal(binding, { requireExisting: true }).snapshot();
+    } catch {
+      throw new AdapterError("Pi execution audit is unavailable", 503, "execution_audit_unavailable");
+    }
+  }
+
   _entry(sessionId) {
     return this.sessions.get(String(sessionId)) || null;
   }
@@ -545,6 +616,7 @@ export class PiAdapter {
         excludeTools,
         extensionPaths,
         policy: snapshot.legacy ? null : snapshot.policy,
+        onToolIntent: (event) => this._auditToolIntent(holder.entry, event),
         uiContext,
         onEvent: (event) => this._onSdkEvent(holder.entry || null, holder.sessionId || "", event),
         onDiagnostic: (record) => this._sdkDiagnostic(record),
@@ -563,6 +635,15 @@ export class PiAdapter {
         if (session && typeof session.dispose === "function") session.dispose();
       } catch { /* best effort */ }
       throw new AdapterError("Pi session binding failed", 502, "runtime_unavailable");
+    }
+    const auditBinding = { sessionId, directory: cwd,
+      policyRevision: snapshot.revision, extensionRevision: extSnapshot.revision };
+    let journal;
+    try {
+      journal = this._openExecutionJournal(auditBinding);
+    } catch {
+      try { session.dispose(); } catch { /* best effort */ }
+      throw new AdapterError("Pi execution audit is unavailable", 503, "execution_audit_unavailable");
     }
     const fingerprint = enforcementFingerprint();
     const entry = {
@@ -588,9 +669,14 @@ export class PiAdapter {
       preflights: new Map(),
       pendingByToolCall: new Map(),
       pendingByPermission: new Map(),
-      // Bounded monotonic execution journal for audit (3C1). Retained
-      // while the adapter session entry remains owned.
-      journal: new ExecutionJournal(),
+      // Native message-start evidence is matched by hash and request
+      // callback only. Prompt text never lives in adapter state.
+      inputTickets: [],
+      // Durable, bounded audit evidence. Neither permission waits nor
+      // session grants are restored from these records.
+      journal,
+      auditBinding,
+      auditUnavailable: false,
       enforcementFingerprint: fingerprint.fingerprint,
       // Exact tool loadout granted to the SDK transport (audit/debug via
       // tests; never exposed over HTTP).
@@ -670,6 +756,7 @@ export class PiAdapter {
   async promptAsync(directory, sessionId, text, model = null, thinkingLevel = null) {
     const entry = this._boundEntry(sessionId, directory);
     if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    this._assertAuditAvailable(entry);
     const message = bounded(text, 60000);
     if (!message) throw new AdapterError("text is required", 400, "rejected");
     const wanted = normalizeModelRef(model);
@@ -684,7 +771,18 @@ export class PiAdapter {
         }
         entry.session.setThinkingLevel(thinkingLevel);
       }
-      await this._promptAccepted(entry.session, message);
+      // The initial user message may start after prompt acceptance. Reserve
+      // its first message-start event so an identical queued text cannot be
+      // mistaken for a follow-up receipt.
+      this._closeInputTickets(entry);
+      const initialTicket = { kind: "initial" };
+      entry.inputTickets.push(initialTicket);
+      try {
+        await this._promptAccepted(entry.session, message);
+      } catch (error) {
+        entry.inputTickets = entry.inputTickets.filter((ticket) => ticket !== initialTicket);
+        throw error;
+      }
     } catch (error) {
       throw this._asAdapterError(error);
     }
@@ -698,7 +796,8 @@ export class PiAdapter {
   // rejection) while prompt() itself settles only after the full run.
   // Post-acceptance run failures surface through session events/messages,
   // never through this response.
-  _promptAccepted(session, message) {
+  _promptAccepted(session, message, streamingBehavior = undefined,
+                  onNativeAccepted = () => {}) {
     return new Promise((resolve, reject) => {
       let done = false;
       const finish = (fn) => (value) => {
@@ -713,8 +812,12 @@ export class PiAdapter {
       try {
         run = session.prompt(message, {
           source: "rpc",
+          ...(streamingBehavior ? { streamingBehavior } : {}),
           preflightResult: (ok) => {
-            if (ok) onAccept(true);
+            if (ok) {
+              onNativeAccepted();
+              onAccept(true);
+            }
             else onReject(new AdapterError("Pi prompt was rejected", 400, "rejected"));
           },
         });
@@ -726,6 +829,7 @@ export class PiAdapter {
         () => {
           // Defensive: a transport that settles without a preflight
           // callback still counts a resolved run as accepted.
+          onNativeAccepted();
           onAccept(true);
         },
         (error) => {
@@ -736,6 +840,96 @@ export class PiAdapter {
       // rejection once acceptance already resolved this promise.
       Promise.resolve(run).catch(() => {});
     });
+  }
+
+  // Pi 0.87.0 prompt() selects the active native queue at submission time;
+  // when the session has just settled it starts the next prompt instead.
+  // That decision inside Pi closes the streaming-to-idle race.
+  async submitInput(directory, sessionId, text, mode, isCurrent = () => true,
+                    onStatus = () => {}) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    this._assertAuditAvailable(entry);
+    if (typeof text !== "string" || !text || text.length > MAX_MESSAGE_TEXT
+        || !["steer", "queue"].includes(mode)) {
+      throw new AdapterError("Invalid run input", 400, "invalid_arguments");
+    }
+    const ticket = { kind: "input", mode, hash: inputTextHash(text),
+      nativeAccepted: false, onStatus };
+    entry.inputTickets.push(ticket);
+    try {
+      await this._promptAccepted(entry.session, text,
+        mode === "steer" ? "steer" : "followUp",
+        () => { ticket.nativeAccepted = true; });
+      if (!isCurrent()) {
+        const cleared = entry.session.clearQueue?.();
+        this._closeInputTickets(entry, cleared);
+        await entry.session.abort();
+        return { accepted: false };
+      }
+      return { accepted: true };
+    } catch (error) {
+      if (entry.inputTickets.includes(ticket)) {
+        entry.inputTickets = entry.inputTickets.filter((item) => item !== ticket);
+        try { onStatus("discarded"); } catch { /* receipt save is independent */ }
+      }
+      if (error instanceof AdapterError) throw error;
+      throw new AdapterError("Pi run input was rejected", 502, "runtime_unavailable");
+    }
+  }
+
+  _consumeInputTicket(entry, event) {
+    if (event.type !== "message_start" || event.message?.role !== "user") return;
+    const initial = entry.inputTickets.findIndex((item) => item.kind === "initial");
+    if (initial >= 0) {
+      entry.inputTickets.splice(initial, 1);
+      return;
+    }
+    const content = textFromContent(event.message.content);
+    if (!content) return;
+    const hash = inputTextHash(content);
+    // Pi drains steering before follow-ups, each in submission order.
+    let index = entry.inputTickets.findIndex((item) =>
+      item.kind === "input" && item.nativeAccepted
+        && item.mode === "steer" && item.hash === hash);
+    if (index < 0) index = entry.inputTickets.findIndex((item) =>
+      item.kind === "input" && item.nativeAccepted && item.hash === hash);
+    if (index < 0) return;
+    const [ticket] = entry.inputTickets.splice(index, 1);
+    try { ticket.onStatus("delivered"); } catch { /* do not interrupt Pi */ }
+  }
+
+  _closeInputTickets(entry, cleared = null) {
+    const counts = new Map();
+    for (const [mode, texts] of [["steer", cleared?.steering], ["queue", cleared?.followUp]]) {
+      if (!Array.isArray(texts)) continue;
+      for (const text of texts) {
+        if (typeof text !== "string") continue;
+        const key = `${mode}:${inputTextHash(text)}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    for (const ticket of entry.inputTickets) {
+      if (ticket.kind !== "input") continue;
+      const key = `${ticket.mode}:${ticket.hash}`;
+      const pending = counts.get(key) || 0;
+      if (pending) counts.set(key, pending - 1);
+      try { ticket.onStatus(pending ? "discarded" : "unknown"); }
+      catch { /* receipt save is independent */ }
+    }
+    entry.inputTickets = [];
+  }
+
+  finalizeInputTickets(directory, sessionId) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    this._closeInputTickets(entry);
+  }
+
+  pendingInputCount(directory, sessionId) {
+    const entry = this._boundEntry(sessionId, directory);
+    if (!entry) throw new AdapterError("Session not found", 404, "not_found");
+    return this._sdkState(entry, String(sessionId)).pendingMessageCount || 0;
   }
 
   async _switchModel(session, wanted) {
@@ -828,6 +1022,9 @@ export class PiAdapter {
     // extension select stays suspended, then aborts the session run.
     // Best effort; never blocks the abort.
     this._resolveOwnedPending(entry, undefined);
+    let cleared = null;
+    try { cleared = entry.session.clearQueue?.(); } catch { /* abort still proceeds */ }
+    this._closeInputTickets(entry, cleared);
     // Normal abort uses session abort and never disposes the session.
     try {
       await entry.session.abort();
@@ -986,6 +1183,18 @@ export class PiAdapter {
         this._logRetryEvent(sessionId, event);
       } catch { /* logging never affects sessions */ }
       return;
+    }
+    this._consumeInputTicket(entry, event);
+    // The pinned SDK can continue a queued follow-up after an assistant
+    // error. A final failed turn must discard that native queue instead.
+    if (event.type === "agent_end" && event.willRetry === false
+        && Array.isArray(event.messages)) {
+      const last = [...event.messages].reverse().find((message) => message?.role === "assistant");
+      if (last?.stopReason === "error" || last?.stopReason === "aborted") {
+        let cleared = null;
+        try { cleared = entry.session.clearQueue?.(); } catch { /* terminal refresh fails closed */ }
+        this._closeInputTickets(entry, cleared);
+      }
     }
     if (event.type === "tool_execution_start" || event.type === "tool_execution_end"
         || event.type === "agent_end") {
@@ -1156,7 +1365,7 @@ export class PiAdapter {
         pendingToolCount: this._pendingToolCount(entry),
         journalState: record?.state || "missing",
         journalUpdateSeq: record?.update_seq ?? null });
-    } catch { /* journal must never break correlation */ }
+    } catch { this._auditFailed(entry); }
   }
 
   _onToolUpdate(entry, message) {
@@ -1166,7 +1375,7 @@ export class PiAdapter {
       const preview = message.auditUpdate && typeof message.auditUpdate === "object"
         ? message.auditUpdate : null;
       if (preview) entry.journal.update({ toolCallId, resultPreview: preview });
-    } catch { /* never break the session */ }
+    } catch { this._auditFailed(entry); }
   }
 
   _onToolEnd(entry, message) {
@@ -1191,7 +1400,7 @@ export class PiAdapter {
         journalUpdateSeq: record?.update_seq ?? null,
         durationMs: record?.duration_ms ?? null,
       });
-    } catch { /* journal must never break correlation */ }
+    } catch { this._auditFailed(entry); }
   }
 
   // Token-authenticated exact-session execution journal read on the
@@ -1201,6 +1410,7 @@ export class PiAdapter {
   // silent completeness.
   async readExecutions(directory, sessionId, { after = 0, limit = 50 } = {}) {
     const entry = this._permissionEntry(sessionId, directory);
+    this._assertAuditAvailable(entry);
     const result = entry.journal.read({ after, limit });
     return {
       updates: result.updates,
@@ -1215,6 +1425,7 @@ export class PiAdapter {
 
   executionHead(directory, sessionId) {
     const entry = this._permissionEntry(sessionId, directory);
+    this._assertAuditAvailable(entry);
     return entry.journal.head;
   }
 
@@ -1305,14 +1516,21 @@ export class PiAdapter {
     if (response === "once") value = OPTION_ONCE;
     else if (response === "always") value = OPTION_ALWAYS;
     else value = undefined;
-    this._takePending(entry, record);
     // Link the permission decision to the execution journal by toolCallId
     // when positively known; never guess session-grant decisions (only
     // the exact call's once/always/reject is recorded here; the trusted
     // extension owns in-memory exact-grant short-circuits separately).
     try {
+      this._assertAuditAvailable(entry);
       entry.journal.setPermissionDecision(record.toolCallId, response);
-    } catch { /* best effort */ }
+    } catch {
+      this._auditFailed(entry);
+      this._takePending(entry, record);
+      try { record.resolve(undefined); } catch { /* reject, never approve */ }
+      if (response === "reject") return { ok: true, decision: "reject" };
+      throw new AdapterError("Pi execution audit is unavailable", 503, "execution_audit_unavailable");
+    }
+    this._takePending(entry, record);
     try {
       record.resolve(value);
     } catch { /* best effort */ }

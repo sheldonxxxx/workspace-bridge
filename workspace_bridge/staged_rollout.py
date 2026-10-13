@@ -188,7 +188,7 @@ def classify_component(
         if observation == "disabled":
             reason = ("adapter-disabled" if component in {
                 "pi-host-adapter", "codex-host-adapter", "claude-host-adapter",
-                "adapter"}
+                "opencode-host-adapter", "adapter"}
                 else "node-disabled" if component == "node"
                 else "unobserved")
             if component in ("bridge", "manager"):
@@ -202,7 +202,7 @@ def classify_component(
             return _final(state="unavailable", execution=False,
                           reason="node-unavailable")
         if component in ("pi-host-adapter", "codex-host-adapter",
-                         "claude-host-adapter", "adapter"):
+                         "claude-host-adapter", "opencode-host-adapter", "adapter"):
             return _final(state="unavailable", execution=False,
                           reason="adapter-unavailable")
         if component == "bridge":
@@ -394,7 +394,7 @@ def build_staged_status(
         runtime_type = obs.get("runtime_type")
         # Unknown runtime types never coerce: they are unavailable with a
         # bounded reason, never a fabricated Pi/Codex target.
-        if runtime_type not in ("pi", "codex", "claude"):
+        if runtime_type not in ("pi", "codex", "claude", "opencode"):
             adapters.append(classify_component(
                 component="adapter", instance=adapter_id,
                 current=obs.get("current"),
@@ -412,7 +412,8 @@ def build_staged_status(
         target_build_for = (None if runtime_type == "pi" else target_build)
         desired_component = {"pi": "pi-host-adapter",
                              "codex": "codex-host-adapter",
-                             "claude": "claude-host-adapter"}[runtime_type]
+                             "claude": "claude-host-adapter",
+                             "opencode": "opencode-host-adapter"}[runtime_type]
         adapters.append(classify_component(
             component=desired_component, instance=adapter_id,
             current=obs.get("current"),

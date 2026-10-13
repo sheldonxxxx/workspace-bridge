@@ -2,8 +2,9 @@
 
 Run this as a separate host process. The Bridge service contacts only its
 token-authenticated HTTP surface; it never imports SDK types. Each run drives
-one Claude Code CLI child per prompt through ``ClaudeSDKClient`` and resumes
-the adapter-created session for continuations, so idle conversations survive
+one Claude Code CLI child through ``ClaudeSDKClient``, including accepted live
+corrections and queued follow-ups, and resumes the adapter-created session for
+later runs, so idle conversations survive
 an adapter restart while active runs are marked interrupted and never replayed.
 
 Claude Code runs as it does in the terminal: user, project and local settings,
@@ -34,6 +35,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -52,6 +54,7 @@ from .security import redact
 
 
 _LOG = logging.getLogger(__name__)
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 
 RUNTIME_ID = "claude"
 DEFAULT_PORT = 8774
@@ -455,8 +458,16 @@ class _RunState:
         self.start_error: str | None = None
         self.cancel_requested = False
         self.done = threading.Event()
+        self.done_async = asyncio.Event()
         self.message_usage: dict[str, dict] = {}
         self.tool_names: dict[str, str] = {}
+        self.input_texts: dict[str, str] = {}
+        self.delivery_lock = threading.Lock()
+        self.steering = False
+        self.control_used = False
+        self.response_index = 0
+        self.in_response = False
+        self.usage_parts: list[dict] = []
 
 
 class ClaudeHostAdapter:
@@ -514,6 +525,12 @@ class ClaudeHostAdapter:
             summary TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}',
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
+          CREATE TABLE IF NOT EXISTS input_messages (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            run TEXT NOT NULL REFERENCES runs(id),
+            request_id TEXT NOT NULL, mode TEXT NOT NULL,
+            input_hash TEXT NOT NULL, status TEXT NOT NULL,
+            UNIQUE(run,request_id));
         """)
         os.chmod(self.state / "claude-adapter.sqlite3", 0o600)
         self.lock = threading.RLock()
@@ -530,6 +547,7 @@ class ClaudeHostAdapter:
         # A prior process cannot prove it still owns a native run, so any run
         # left active becomes interrupted. Sessions stay resumable.
         with self.lock, self.db:
+            self.db.execute("UPDATE input_messages SET status='discarded' WHERE status='queued'")
             self.db.execute(
                 "UPDATE runs SET phase='terminal',active_state=NULL,outcome='interrupted',"
                 "error='adapter_restarted',updated=? WHERE phase IN ('starting','active')",
@@ -639,7 +657,8 @@ class ClaudeHostAdapter:
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
-                             "securityRebind": 1, "usageLimits": 1},
+                             "securityRebind": 1, "usageLimits": 1,
+                             "steering": 1, "queueing": 1, "inputControls": 1},
                 "release": claude_release()}
 
     def usage_limits(self) -> dict:
@@ -1060,6 +1079,14 @@ class ClaudeHostAdapter:
         usage = _parse_stored_usage(run.get("usage"))
         if usage is not None:
             result["usage"] = usage
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT request_id,mode,status FROM input_messages WHERE run=? "
+                "ORDER BY sequence LIMIT 50", (run["id"],)).fetchall()
+        if rows:
+            result["inputMessages"] = [{"requestId": row["request_id"],
+                                        "mode": row["mode"], "status": row["status"]}
+                                       for row in rows]
         return result
 
     @staticmethod
@@ -1218,7 +1245,8 @@ class ClaudeHostAdapter:
 
     @staticmethod
     def _stderr_sink(line: str) -> None:
-        _LOG.debug("claude-cli: %s", sanitize_diagnostic(line, limit=300))
+        # Native stderr can echo user input. It is not a safe diagnostic channel.
+        _LOG.debug("claude-cli: diagnostic suppressed")
 
     async def _drive(self, state: _RunState, owned: dict, options: Any, prompt: str) -> None:
         sdk = self._sdk_module()
@@ -1228,15 +1256,90 @@ class ClaudeHostAdapter:
             state.client = client
             await client.connect()
             await client.query(prompt)
-            async for message in client.receive_response():
-                self._on_message(state, message)
-            self._finalize(state.run_id, "interrupted", "native_stream_ended")
+            with self.lock:
+                state.response_index += 1
+                state.in_response = True
+            while True:
+                with self.lock:
+                    state.message_usage.clear()
+                native_result = None
+                async for message in client.receive_response():
+                    if type(message).__name__ == "ResultMessage":
+                        native_result = message
+                    elif native_result is None:
+                        self._on_message(state, message)
+                with self.lock:
+                    state.in_response = False
+                if native_result is None:
+                    self._finalize(state.run_id, "interrupted", "native_stream_ended")
+                    break
+                outcome, error, usage, result = self._result_state(state, native_result)
+                if usage is not None:
+                    state.usage_parts.append(usage)
+                total_usage = _sum_usage(state.usage_parts)
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE runs SET result=?,usage=?,updated=? WHERE id=? AND phase='active'",
+                        (_clean(result, 20000) if result else self._run(state.run_id)["result"],
+                         json.dumps(total_usage, sort_keys=True) if total_usage else None,
+                         _now(), state.run_id))
+                    steering = state.steering
+                if state.cancel_requested:
+                    self._finalize(state.run_id, "cancelled", usage=total_usage)
+                    break
+                if outcome != "succeeded" and not (outcome == "interrupted" and steering):
+                    self._finalize(state.run_id, outcome, error, usage=total_usage)
+                    break
+                if outcome == "interrupted":
+                    self._clear_interactions(state.run_id)
+                with state.delivery_lock:
+                    with self.lock:
+                        next_row = self.db.execute(
+                            "SELECT request_id,mode FROM input_messages "
+                            "WHERE run=? AND status='queued' "
+                            "ORDER BY CASE mode WHEN 'steer' THEN 0 ELSE 1 END,sequence LIMIT 1",
+                            (state.run_id,)).fetchone()
+                        if next_row is None:
+                            self._finalize(state.run_id, outcome, error, usage=total_usage)
+                            break
+                        request_id = next_row["request_id"]
+                        live = self.db.execute("SELECT phase FROM runs WHERE id=?",
+                                               (state.run_id,)).fetchone()
+                        if state.cancel_requested or live is None or live["phase"] == "terminal":
+                            break
+                        next_prompt = state.input_texts.pop(request_id, None)
+                        if next_prompt is None:
+                            self._finalize(state.run_id, "failed", "queued_input_unavailable",
+                                           usage=total_usage)
+                            break
+                        with self.db:
+                            # A crash or ambiguous query error must never cause a replay.
+                            self.db.execute(
+                                "UPDATE input_messages SET status='unknown' "
+                                "WHERE run=? AND request_id=?", (state.run_id, request_id))
+                        state.response_index += 1
+                        state.in_response = True
+                    try:
+                        await client.query(next_prompt)
+                    except Exception:  # noqa: BLE001 - delivery is ambiguous; never retry
+                        self._control_activity(state, request_id, next_row["mode"], "failed")
+                        self._finalize(state.run_id, "failed", "native_control_delivery_failed",
+                                       usage=total_usage)
+                        break
+                    with self.lock, self.db:
+                        self.db.execute(
+                            "UPDATE input_messages SET status='delivered' "
+                            "WHERE run=? AND request_id=?", (state.run_id, request_id))
+                        if next_row["mode"] == "steer":
+                            state.steering = False
+                self._control_activity(state, request_id, next_row["mode"], "completed")
         except asyncio.CancelledError:
             self._finalize(state.run_id,
                            "cancelled" if state.cancel_requested else "interrupted",
                            "" if state.cancel_requested else "native_run_cancelled")
         except Exception as exc:  # noqa: BLE001 - every native failure is bounded below
-            detail = sanitize_diagnostic(str(exc) or type(exc).__name__, limit=300)
+            detail = ("native_error" if state.control_used else
+                      sanitize_diagnostic(str(exc) or type(exc).__name__, limit=300))
             _ensure_operational_stderr_handler()
             _LOG.warning("Claude run failed: %s", detail)
             if not state.started.is_set():
@@ -1253,10 +1356,12 @@ class ClaudeHostAdapter:
             self._finalize(state.run_id, "interrupted", "native_stream_ended")
             self._release_run(state)
             state.done.set()
+            state.done_async.set()
 
     def _release_run(self, state: _RunState) -> None:
         with self.lock:
             self._states.pop(state.run_id, None)
+            state.input_texts.clear()
             for interaction_id, entry in list(self.pending.items()):
                 if entry["public"]["runId"] == state.run_id:
                     self.pending.pop(interaction_id, None)
@@ -1299,6 +1404,9 @@ class ClaudeHostAdapter:
                                   (run_id,)).fetchone()
             if row is None or row["phase"] == "terminal":
                 return False
+            discarded = self.db.execute(
+                "SELECT request_id,mode FROM input_messages WHERE run=? AND status='queued'",
+                (run_id,)).fetchall()
             with self.db:
                 self.db.execute(
                     "UPDATE runs SET phase='terminal',active_state=NULL,outcome=?,error=?,"
@@ -1310,6 +1418,15 @@ class ClaudeHostAdapter:
                 if result is not None:
                     self.db.execute("UPDATE runs SET result=? WHERE id=?",
                                     (_clean(result, 20000), run_id))
+                self.db.execute(
+                    "UPDATE input_messages SET status='discarded' WHERE run=? AND status='queued'",
+                    (run_id,))
+            state = self._states.get(run_id)
+            if state is not None:
+                state.input_texts.clear()
+                for entry in discarded:
+                    self._control_activity(state, entry["request_id"], entry["mode"],
+                                           "failed")
             for interaction_id, entry in list(self.pending.items()):
                 if entry["public"]["runId"] == run_id:
                     self.pending.pop(interaction_id, None)
@@ -1345,7 +1462,7 @@ class ClaudeHostAdapter:
         elif kind == "UserMessage":
             self._on_user(state, message)
         elif kind == "ResultMessage":
-            self._on_result(state, message)
+            return  # The driver owns each response boundary.
         elif kind == "RateLimitEvent":
             try:
                 self._record_rate_limit(message)
@@ -1358,7 +1475,7 @@ class ClaudeHostAdapter:
         if not isinstance(message_id, str) or usage is None:
             return
         state.message_usage[message_id] = usage
-        total = _sum_usage(list(state.message_usage.values()))
+        total = _sum_usage(state.usage_parts + list(state.message_usage.values()))
         if total is not None:
             with self.lock, self.db:
                 self.db.execute("UPDATE runs SET usage=?,updated=? WHERE id=? AND phase='active'",
@@ -1421,7 +1538,7 @@ class ClaudeHostAdapter:
                  json.dumps(result), now, now, summary or ""))
             self._emit("activity." + status, state.conversation_id, state.run_id, activity_id)
 
-    def _on_result(self, state: _RunState, message: Any) -> None:
+    def _result_state(self, state: _RunState, message: Any) -> tuple[str, str, dict | None, str | None]:
         usage = _normalize_claude_usage(getattr(message, "usage", None))
         if usage is None:
             usage = _sum_usage(list(state.message_usage.values()))
@@ -1429,7 +1546,7 @@ class ClaudeHostAdapter:
         aborted = terminal_reason in ("aborted_streaming", "aborted_tools")
         failed = bool(getattr(message, "is_error", False)) or str(
             getattr(message, "subtype", "")).startswith("error")
-        if state.cancel_requested and (aborted or failed):
+        if state.cancel_requested:
             outcome, error = "cancelled", ""
         elif aborted:
             outcome, error = "interrupted", "native_run_aborted"
@@ -1439,14 +1556,15 @@ class ClaudeHostAdapter:
                       if isinstance(errors, list) else "")
             status = getattr(message, "api_error_status", None)
             outcome = "failed"
-            error = sanitize_diagnostic(detail or getattr(message, "result", "") or
-                                        (f"api_error_{status}" if status else "native_error"),
-                                        limit=300)
+            error = ("native_error" if state.control_used else sanitize_diagnostic(
+                detail or getattr(message, "result", "") or
+                (f"api_error_{status}" if status else "native_error"), limit=300))
         else:
             outcome, error = "succeeded", ""
         text = getattr(message, "result", None)
-        self._finalize(state.run_id, outcome, error, usage=usage,
-                       result=text if isinstance(text, str) and text else None)
+        return (outcome, error, usage,
+                text if isinstance(text, str) and text and
+                not (state.control_used and outcome == "failed") else None)
 
     # -- lifecycle control -------------------------------------------------
 
@@ -1484,7 +1602,8 @@ class ClaudeHostAdapter:
         if state is None:
             self._finalize(run_id, "interrupted", "native_run_lost")
             return self._run_public(self._run(run_id))
-        state.cancel_requested = True
+        with state.delivery_lock:
+            state.cancel_requested = True
         with self.lock:
             for interaction_id, entry in list(self.pending.items()):
                 if entry["public"]["runId"] == run_id:
@@ -1498,8 +1617,9 @@ class ClaudeHostAdapter:
                     await asyncio.wait_for(client.interrupt(), 10)
             except Exception:  # noqa: BLE001 - the watchdog below still ends the run
                 pass
-            await asyncio.sleep(15)
-            if not state.done.is_set():
+            try:
+                await asyncio.wait_for(state.done_async.wait(), 15)
+            except asyncio.TimeoutError:
                 self._cancel_driver(state)
 
         asyncio.run_coroutine_threadsafe(interrupt(), self._loop)
@@ -1508,7 +1628,102 @@ class ClaudeHostAdapter:
         return self._run_public(self._run(run_id))
 
     def steer(self, run_id: str, body: dict) -> dict:
-        raise AdapterFailure("Claude Code adapter does not support steering", 501, "unsupported")
+        return self._admit_input(run_id, body, "steer")
+
+    def queue(self, run_id: str, body: dict) -> dict:
+        return self._admit_input(run_id, body, "queue")
+
+    def _admit_input(self, run_id: str, body: dict, mode: str) -> dict:
+        if body.get("expectedRunId") != run_id:
+            raise AdapterFailure("Expected run id does not match", 409, "run_mismatch")
+        request_id = body.get("requestId")
+        if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
+            raise AdapterFailure("Invalid request id")
+        prompt = self._input(body.get("input"))
+        input_hash = sha256(json.dumps(body["input"], sort_keys=True,
+                                       separators=(",", ":")).encode()).hexdigest()
+        with self.lock:
+            state = self._states.get(run_id)
+        with (state.delivery_lock if mode == "steer" and state is not None
+              else nullcontext()):
+            with self.lock:
+                run = self._run(run_id)
+                prior = self.db.execute(
+                    "SELECT mode,input_hash FROM input_messages WHERE run=? AND request_id=?",
+                    (run_id, request_id)).fetchone()
+                if prior is not None:
+                    if prior["mode"] != mode or prior["input_hash"] != input_hash:
+                        raise AdapterFailure("Request id has different input", 409,
+                                             "idempotency_conflict")
+                    return self._run_public(run)
+                state = self._states.get(run_id)
+                if run["phase"] != "active" or state is None or state.cancel_requested:
+                    raise AdapterFailure("Run is no longer active", 409, "run_not_active")
+                count = self.db.execute(
+                    "SELECT COUNT(*) AS total,SUM(status='queued') AS pending "
+                    "FROM input_messages WHERE run=?", (run_id,)).fetchone()
+                if count["total"] >= 50 or (count["pending"] or 0) >= 20:
+                    raise AdapterFailure("Run input limit reached", 409, "input_limit")
+                if mode == "steer" and state.steering:
+                    raise AdapterFailure("A steering correction is already pending", 409,
+                                         "steering_busy")
+                with self.db:
+                    self.db.execute(
+                        "INSERT INTO input_messages(run,request_id,mode,input_hash,status) "
+                        "VALUES(?,?,?,?,'queued')", (run_id, request_id, mode, input_hash))
+                state.input_texts[request_id] = prompt
+                state.control_used = True
+                if mode == "steer":
+                    state.steering = True
+                    epoch = state.response_index
+                    in_response = state.in_response
+                    self._clear_interactions(run_id)
+                self._control_activity(state, request_id, mode, "running")
+                snapshot = self._run_public(self._run(run_id))
+        if mode == "steer" and in_response:
+            async def interrupt() -> None:
+                with self.lock:
+                    current = state.in_response and state.response_index == epoch
+                    live = not state.cancel_requested and state.steering
+                if not (current and live):
+                    return
+                try:
+                    await asyncio.wait_for(state.client.interrupt(), 10)
+                except Exception:  # noqa: BLE001 - ambiguous native control fails closed
+                    with self.lock:
+                        current = (state.in_response and state.response_index == epoch
+                                   and state.steering and not state.cancel_requested)
+                    if not current:
+                        return
+                    with self.lock, self.db:
+                        self.db.execute(
+                            "UPDATE input_messages SET status='unknown' "
+                            "WHERE run=? AND request_id=? AND status='queued'",
+                            (run_id, request_id))
+                    self._control_activity(state, request_id, mode, "failed")
+                    self._finalize(run_id, "failed", "steering_interrupt_failed")
+                    self._cancel_driver(state)
+
+            asyncio.run_coroutine_threadsafe(interrupt(), self._loop)
+        return snapshot
+
+    def _clear_interactions(self, run_id: str) -> None:
+        with self.lock:
+            for interaction_id, entry in list(self.pending.items()):
+                if entry["public"]["runId"] == run_id:
+                    self.pending.pop(interaction_id, None)
+                    self._settle(entry, deny=True, interrupt=True)
+            with self.db:
+                self.db.execute(
+                    "UPDATE runs SET active_state='running',updated=? "
+                    "WHERE id=? AND phase='active'", (_now(), run_id))
+
+    def _control_activity(self, state: _RunState, request_id: str, mode: str,
+                          status: str) -> None:
+        # Hash only the public request id; no prompt or prompt hash is published.
+        native_id = "input:" + sha256(request_id.encode()).hexdigest()[:24]
+        self._upsert_activity(state, native_id, "message", status,
+                              f"{mode} input", {})
 
     # -- interactions ------------------------------------------------------
 
@@ -1535,6 +1750,10 @@ class ClaudeHostAdapter:
                        "nativeRequestId": _clean(getattr(context, "tool_use_id", "") or "", 200),
                        "requestMethod": "tool/permission"}
         with self.lock:
+            run = self._run(state.run_id)
+            if run["phase"] != "active" or state.cancel_requested or state.steering:
+                return sdk.PermissionResultDeny(message="Run response is ending",
+                                                interrupt=True)
             self.pending[interaction_id] = {
                 "public": interaction, "future": future, "loop": loop,
                 "responses": {approve: sdk.PermissionResultAllow(),
@@ -1698,6 +1917,9 @@ def make_app(adapter: ClaudeHostAdapter, token: str) -> Starlette:
             elif (len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "steer"
                   and method == "POST"):
                 result = await run_in_threadpool(adapter.steer, parts[2], body)
+            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "queue"
+                  and method == "POST"):
+                result = await run_in_threadpool(adapter.queue, parts[2], body)
             elif (len(parts) == 4 and parts[:2] == ["v1", "runs"]
                   and parts[3] == "interactions" and method == "GET"):
                 result = await run_in_threadpool(adapter.interactions, parts[2])

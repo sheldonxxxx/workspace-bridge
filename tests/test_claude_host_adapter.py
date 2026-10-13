@@ -161,6 +161,7 @@ def make_sdk():
 
         async def query(self, prompt):
             self.prompt = prompt
+            self.prompts = getattr(self, "prompts", []) + [prompt]
 
         async def receive_response(self):
             async for message in sdk.scenario(self):
@@ -353,7 +354,8 @@ def test_descriptor_is_accepted_by_the_bridge_client(claude):
     assert parsed.release_status == "valid"
     assert parsed.release["component"] == "claude-host-adapter"
     assert descriptor["features"]["securityRebind"] == 1
-    assert "steering" not in descriptor["features"]
+    assert descriptor["features"]["steering"] == 1
+    assert descriptor["features"]["queueing"] == 1
     assert descriptor["features"]["usageLimits"] == 1
 
 
@@ -747,12 +749,20 @@ def test_restart_interrupts_active_runs_and_keeps_sessions(tmp_path):
     database.execute(
         "INSERT INTO runs(id,conversation,phase,active_state,result,error,created,updated) "
         "VALUES('run_orphan',?,'active','running','','','t','t')", (conversation["id"],))
+    database.execute(
+        "INSERT INTO input_messages(run,request_id,mode,input_hash,status) "
+        "VALUES('run_orphan','pending','queue','metadata-only','queued')")
+    database.execute(
+        "INSERT INTO input_messages(run,request_id,mode,input_hash,status) "
+        "VALUES('run_orphan','uncertain','steer','metadata-only','unknown')")
     database.commit()
     database.close()
     second = ClaudeHostAdapter(tmp_path / "state", root, sdk=sdk, _runtime_env={})
     try:
         orphan = second.run("run_orphan")
         assert orphan["phase"] == "terminal" and orphan["outcome"] == "interrupted"
+        assert [row["status"] for row in orphan["inputMessages"]] == [
+            "discarded", "unknown"]
         assert second.conversation(conversation["id"])["status"] == "idle"
         again = second.start_run(conversation["id"], {"input": _text("later")})
         _terminal(second, again["id"])
@@ -772,11 +782,213 @@ def test_state_is_exclusively_locked(tmp_path):
         first.close()
 
 
-def test_unsupported_optional_capabilities(claude):
+def test_input_requires_matching_run_and_request_id(claude):
     adapter, _, _ = claude
     with pytest.raises(AdapterFailure) as raised:
         adapter.steer("run_x", {})
-    assert raised.value.status == 501
+    assert raised.value.code == "run_mismatch"
+
+
+def _control(run_id, request_id, text):
+    return {"expectedRunId": run_id, "requestId": request_id, "input": _text(text)}
+
+
+def test_queue_drains_fifo_on_same_client_without_polling(claude):
+    adapter, workspace, sdk = claude
+    release = threading.Event()
+
+    async def scenario(client):
+        if client.prompt == "first":
+            session = client.options.session_id
+            sdk.sessions.add(session)
+            yield SystemMessage("init", {"session_id": session})
+            while not release.is_set():
+                await asyncio.sleep(.01)
+            yield ResultMessage(result="first answer", usage={
+                "input_tokens": 3, "output_tokens": 2})
+        else:
+            yield ResultMessage(result=client.prompt + " answer", usage={
+                "input_tokens": 5, "output_tokens": 4})
+
+    sdk.scenario = scenario
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    run_id = started["id"]
+    queued = adapter.queue(run_id, _control(run_id, "q1", "second"))
+    assert queued["inputMessages"] == [{"requestId": "q1", "mode": "queue",
+                                        "status": "queued"}]
+    adapter.queue(run_id, _control(run_id, "q2", "third"))
+    release.set()
+    done = _terminal(adapter, run_id)
+    wbrp.validate_run_state(done)
+    assert done["outcome"] == "succeeded" and done["result"] == "third answer"
+    assert done["usage"] == {"inputTokens": 13, "outputTokens": 10,
+                             "totalTokens": 23}
+    assert sdk.clients[0].prompts == ["first", "second", "third"]
+    assert len(sdk.clients) == 1
+    assert [row["status"] for row in done["inputMessages"]] == ["delivered", "delivered"]
+    assert "second" not in json.dumps(done["inputMessages"])
+
+
+def test_steer_interrupts_current_response_then_queries_correction(claude):
+    adapter, workspace, sdk = claude
+
+    async def scenario(client):
+        if client.prompt == "first":
+            session = client.options.session_id
+            sdk.sessions.add(session)
+            yield SystemMessage("init", {"session_id": session})
+            await client.interrupted.wait()
+            yield ResultMessage(subtype="error_during_execution", is_error=True,
+                                terminal_reason="aborted_streaming",
+                                usage={"input_tokens": 2, "output_tokens": 1})
+        else:
+            yield ResultMessage(result="corrected", usage={
+                "input_tokens": 4, "output_tokens": 3})
+
+    sdk.scenario = scenario
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    run_id = started["id"]
+    adapter.steer(run_id, _control(run_id, "s1", "correction"))
+    done = _terminal(adapter, run_id)
+    wbrp.validate_run_state(done)
+    assert done["outcome"] == "succeeded" and done["result"] == "corrected"
+    assert done["usage"] == {"inputTokens": 6, "outputTokens": 4,
+                             "totalTokens": 10}
+    assert sdk.clients[0].interrupted.is_set()
+    assert sdk.clients[0].prompts == ["first", "correction"]
+    assert done["inputMessages"][0]["status"] == "delivered"
+
+
+def test_control_idempotence_conflict_and_pending_bound(claude):
+    adapter, workspace, sdk = claude
+
+    async def blocked(client):
+        session = client.options.session_id
+        sdk.sessions.add(session)
+        yield SystemMessage("init", {"session_id": session})
+        await client.interrupted.wait()
+        yield ResultMessage(subtype="error_during_execution", is_error=True,
+                            terminal_reason="aborted_streaming")
+
+    sdk.scenario = blocked
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    run_id = started["id"]
+    for number in range(20):
+        adapter.queue(run_id, _control(run_id, f"q{number}", f"text {number}"))
+    assert len(adapter.run(run_id)["inputMessages"]) == 20
+    assert len(adapter.queue(run_id, _control(run_id, "q0", "text 0"))["inputMessages"]) == 20
+    with pytest.raises(AdapterFailure) as raised:
+        adapter.queue(run_id, _control(run_id, "q0", "different"))
+    assert raised.value.code == "idempotency_conflict"
+    with pytest.raises(AdapterFailure) as raised:
+        adapter.steer(run_id, _control(run_id, "q0", "text 0"))
+    assert raised.value.code == "idempotency_conflict"
+    with pytest.raises(AdapterFailure) as raised:
+        adapter.queue(run_id, _control(run_id, "q20", "overflow"))
+    assert raised.value.code == "input_limit"
+    adapter.cancel(run_id)
+    done = _terminal(adapter, run_id)
+    assert all(row["status"] == "discarded" for row in done["inputMessages"])
+    assert sdk.clients[0].prompts == ["first"]
+    assert adapter.queue(run_id, _control(run_id, "q0", "text 0"))["id"] == run_id
+
+
+def test_failed_response_drops_queue_without_delivery(claude):
+    adapter, workspace, sdk = claude
+    release = threading.Event()
+
+    async def failing(client):
+        session = client.options.session_id
+        sdk.sessions.add(session)
+        yield SystemMessage("init", {"session_id": session})
+        while not release.is_set():
+            await asyncio.sleep(.01)
+        yield ResultMessage(subtype="error_during_execution", is_error=True,
+                            errors=["native failed"], terminal_reason="model_error")
+
+    sdk.scenario = failing
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    run_id = started["id"]
+    adapter.queue(run_id, _control(run_id, "q1", "never send"))
+    release.set()
+    done = _terminal(adapter, run_id)
+    assert done["outcome"] == "failed"
+    assert done["inputMessages"][0]["status"] == "discarded"
+    assert sdk.clients[0].prompts == ["first"]
+
+
+def test_ambiguous_control_delivery_is_unknown_and_never_retried(claude):
+    adapter, workspace, sdk = claude
+    release = threading.Event()
+    original_query = sdk.ClaudeSDKClient.query
+
+    async def query(client, prompt):
+        if prompt == "private correction":
+            raise OSError("private correction")
+        await original_query(client, prompt)
+
+    sdk.ClaudeSDKClient.query = query
+
+    async def scenario(client):
+        session = client.options.session_id
+        sdk.sessions.add(session)
+        yield SystemMessage("init", {"session_id": session})
+        while not release.is_set():
+            await asyncio.sleep(.01)
+        yield ResultMessage(result="initial")
+
+    sdk.scenario = scenario
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("initial")})
+    run_id = started["id"]
+    adapter.queue(run_id, _control(run_id, "q1", "private correction"))
+    release.set()
+    done = _terminal(adapter, run_id)
+    assert done["outcome"] == "failed"
+    assert done["inputMessages"][0]["status"] == "unknown"
+    assert "private correction" not in json.dumps(done)
+    assert "private correction" not in json.dumps(adapter.activities(run_id))
+    assert b"private correction" not in (adapter.state / "claude-adapter.sqlite3").read_bytes()
+    assert sdk.clients[0].prompts == ["initial"]
+    assert adapter.queue(run_id, _control(run_id, "q1", "private correction"))[
+        "inputMessages"][0]["status"] == "unknown"
+
+
+def test_steer_stales_native_permission_before_correction(claude):
+    adapter, workspace, sdk = claude
+    permission = {}
+
+    async def scenario(client):
+        if client.prompt == "initial":
+            session = client.options.session_id
+            sdk.sessions.add(session)
+            yield SystemMessage("init", {"session_id": session})
+            context = types.SimpleNamespace(tool_use_id="tu-steer", title=None)
+            permission["result"] = await client.options.can_use_tool(
+                "Bash", {"command": "make test"}, context)
+            yield ResultMessage(subtype="error_during_execution", is_error=True,
+                                terminal_reason="aborted_tools")
+        else:
+            yield ResultMessage(result="corrected")
+
+    sdk.scenario = scenario
+    conversation = _conversation(adapter, workspace, "workspace-write-reviewed")
+    started = adapter.start_run(conversation["id"], {"input": _text("initial")})
+    run_id = started["id"]
+    pending = _wait(lambda: adapter.interactions(run_id)["interactions"])[0]
+    adapter.steer(run_id, _control(run_id, "s1", "correct"))
+    done = _terminal(adapter, run_id)
+    assert done["outcome"] == "succeeded"
+    assert permission["result"].behavior == "deny"
+    assert permission["result"].interrupt is True
+    assert adapter.interactions(run_id)["interactions"] == []
+    with pytest.raises(AdapterFailure) as raised:
+        adapter.resolve(pending["id"], {"choiceId": pending["choices"][0]["id"]})
+    assert raised.value.code == "interaction_stale"
 
 
 # -- usage limits ----------------------------------------------------------
@@ -906,6 +1118,44 @@ async def test_private_http_surface_requires_token(claude):
         assert limits.status_code == 200 and limits.json()["available"] is False
         unknown = await client.get("/v1/nope", headers=headers)
         assert unknown.status_code == 404
+
+
+async def test_http_queue_and_steer_routes_return_receipts(claude):
+    adapter, workspace, sdk = claude
+
+    async def scenario(client):
+        if client.prompt == "first":
+            session = client.options.session_id
+            sdk.sessions.add(session)
+            yield SystemMessage("init", {"session_id": session})
+            await client.interrupted.wait()
+            yield ResultMessage(subtype="error_during_execution", is_error=True,
+                                terminal_reason="aborted_streaming")
+        else:
+            yield ResultMessage(result=client.prompt)
+
+    sdk.scenario = scenario
+    conversation = _conversation(adapter, workspace)
+    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    run_id = started["id"]
+    app = make_app(adapter, "private-token")
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://127.0.0.1:8774") as client:
+        headers = {"X-Runtime-Token": "private-token"}
+        queued = await client.post(f"/v1/runs/{run_id}/queue", headers=headers,
+                                   json=_control(run_id, "q1", "queued"))
+        assert queued.status_code == 200
+        assert queued.json()["inputMessages"][0] == {
+            "requestId": "q1", "mode": "queue", "status": "queued"}
+        mismatch = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
+                                     json=_control("wrong", "s1", "correct"))
+        assert mismatch.status_code == 409 and mismatch.json()["code"] == "run_mismatch"
+        steered = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
+                                    json=_control(run_id, "s1", "correct"))
+        assert steered.status_code == 200
+    done = _terminal(adapter, run_id)
+    assert done["outcome"] == "succeeded"
+    assert sdk.clients[0].prompts == ["first", "correct", "queued"]
 
 
 def test_make_app_requires_a_token(claude):

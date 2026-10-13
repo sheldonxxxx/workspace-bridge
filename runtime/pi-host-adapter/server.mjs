@@ -166,6 +166,9 @@ export function createPiAdapterServer({ adapter, token, adapterVersion, instance
             && req.method === "GET") {
           result = await protocol.run(key(2));
         } else if (segments.length === 4 && segments[1] === "runs"
+            && ["steer", "queue"].includes(segments[3]) && req.method === "POST") {
+          result = await protocol.submitInput(key(2), segments[3], await readBody(req, bodyLimit));
+        } else if (segments.length === 4 && segments[1] === "runs"
             && segments[3] === "cancel" && req.method === "POST") {
           result = await protocol.cancel(key(2));
         } else if (segments.length === 4 && segments[1] === "runs"

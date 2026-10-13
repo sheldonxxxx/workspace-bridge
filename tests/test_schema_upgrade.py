@@ -68,7 +68,7 @@ def test_node_state_created_before_claude_is_upgraded_on_open(tmp_path):
     # Rewrite the table as an older release created it.
     db.executescript(f"""
       ALTER TABLE runtime_adapters RENAME TO legacy_adapters;
-      {sql.replace("'pi','codex','claude'", "'pi','codex'").replace(
+      {sql.replace("'pi','codex','claude','opencode'", "'pi','codex'").replace(
           "CREATE TABLE runtime_adapters", "CREATE TABLE runtime_adapters")};
       INSERT INTO runtime_adapters SELECT * FROM legacy_adapters;
       DROP TABLE legacy_adapters;
@@ -82,3 +82,17 @@ def test_node_state_created_before_claude_is_upgraded_on_open(tmp_path):
         assert "'claude'" in sql
     finally:
         reopened.close()
+
+
+def test_three_runtime_database_upgrades_to_opencode(tmp_path):
+    db=sqlite3.connect(tmp_path/'three.sqlite3')
+    db.executescript(OLD_NODE_ADAPTERS.replace("('pi','codex')", "('pi','codex','claude')"))
+    db.execute("INSERT INTO node_adapters VALUES('claude1','Claude','claude','t')")
+    db.execute("INSERT INTO refs VALUES('claude1')")
+    db.commit()
+    assert widen_runtime_type_check(db,'node_adapters')
+    db.execute("INSERT INTO node_adapters VALUES('oc1','OpenCode','opencode','t')")
+    assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
+    assert db.execute('SELECT adapter_id FROM refs').fetchone()==('claude1',)
+    assert not widen_runtime_type_check(db,'node_adapters')
+    db.close()

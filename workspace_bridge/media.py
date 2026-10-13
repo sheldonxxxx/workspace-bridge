@@ -16,6 +16,44 @@ from .security import BridgeError, MAX_FILE, MAX_OUTPUT, digest
 MAX_IMAGE_RESPONSE_BYTES = 3 * 1024 * 1024
 IMAGE_TIMEOUT_SECONDS = 10
 SUPPORTED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".jpe", ".webp", ".gif", ".bmp", ".tif", ".tiff"})
+MAX_IMAGE_BASE64_CHARS = 4 * ((MAX_INPUT_BYTES + 2) // 3)
+MAX_IMAGE_REQUEST_BYTES = MAX_IMAGE_BASE64_CHARS + 64 * 1024
+IMAGE_MIME_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp",
+                    "GIF": "image/gif", "BMP": "image/bmp", "TIFF": "image/tiff"}
+IMAGE_SUFFIXES = {"PNG": {".png"}, "JPEG": {".jpg", ".jpeg", ".jpe"},
+                  "WEBP": {".webp"}, "GIF": {".gif"}, "BMP": {".bmp"}, "TIFF": {".tif", ".tiff"}}
+
+
+def decode_image_upload(data_base64: str) -> bytes:
+    """Strict, bounded base64 only; no URLs, data-URL prefixes or whitespace."""
+    if not isinstance(data_base64, str) or not data_base64:
+        raise BridgeError("Non-empty base64 image data is required", "invalid_arguments")
+    if len(data_base64) > MAX_IMAGE_BASE64_CHARS:
+        raise BridgeError("Image exceeds the 20 MiB input limit", "too_large")
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (ValueError, TypeError):
+        raise BridgeError("Invalid base64 image data", "invalid_arguments") from None
+    if not data or len(data) > MAX_INPUT_BYTES:
+        raise BridgeError("Image exceeds the 20 MiB input limit or is empty", "too_large")
+    return data
+
+
+def validate_image(data: bytes, path: str, mime_type: str | None = None,
+                   *, require_suffix: bool = True) -> dict:
+    """Validate with the fixed decoder; retain original bytes for uploads."""
+    detected = sniff_image(data[:32])
+    if detected is None:
+        raise BridgeError("Supported raster image signature not found", "unsupported_image")
+    if mime_type is not None and mime_type != IMAGE_MIME_TYPES[detected]:
+        raise BridgeError("Image MIME type does not match its bytes", "invalid_image")
+    if require_suffix and Path(path).suffix.casefold() not in IMAGE_SUFFIXES[detected]:
+        raise BridgeError("Image filename extension does not match its bytes", "invalid_image")
+    result = read_image(data, path, digest(data), 256)
+    metadata = result.metadata
+    return {"mime_type": IMAGE_MIME_TYPES[metadata["source_format"]],
+            "source_format": metadata["source_format"], "width": metadata["source_width"],
+            "height": metadata["source_height"]}
 
 
 def sniff_image(prefix: bytes) -> str | None:
@@ -70,9 +108,18 @@ def image_capabilities() -> dict:
             "max_input_bytes": MAX_INPUT_BYTES, "max_pixels": MAX_PIXELS,
             "default_max_dimension": DEFAULT_DIMENSION, "max_dimension": MAX_DIMENSION,
             "max_preview_bytes": MAX_PREVIEW_BYTES, "max_response_bytes": MAX_IMAGE_RESPONSE_BYTES,
-            "frame_policy": "first_frame_only", "writes": "text_only",
+            "frame_policy": "first_frame_only", "writes": "write_image_handoff_only",
             "privacy": "Metadata removed; visible secrets in pixels are NOT detected or redacted.",
             "delivery": "Native MCP image content; exact client/tunnel model visibility requires live validation."}
+
+
+def image_write_capabilities() -> dict:
+    return {"tool": "write_image", "formats": list(SUPPORTED_FORMATS),
+            "mime_types": list(IMAGE_MIME_TYPES.values()), "path_prefix": ".workspace-handoff/",
+            "encoding": "base64", "max_input_bytes": MAX_INPUT_BYTES,
+            "max_base64_chars": MAX_IMAGE_BASE64_CHARS, "max_request_bytes": MAX_IMAGE_REQUEST_BYTES,
+            "max_pixels": MAX_PIXELS, "bytes": "original", "embedded_metadata": "preserved",
+            "validation": "first_frame_only", "pixel_redaction": "none"}
 
 
 def read_image(data: bytes, path: str, sha256: str, dimension: int) -> ImageReadResult:

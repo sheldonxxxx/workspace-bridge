@@ -1,14 +1,14 @@
 {
   "name": "web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:e2e": "playwright test",
-    "format:check": "prettier --check src/App.tsx src/app.css src/lib/api.ts src/lib/manager-identity.ts vite.config.ts manager-release.mjs manager-release.d.mts playwright.config.ts tests/manager.spec.ts tests/release.spec.ts test/manager-release.test.mjs",
+    "format:check": "prettier --check src/App.tsx src/app.css src/lib/api.ts src/lib/manager-identity.ts vite.config.ts manager-release.mjs manager-release.d.mts playwright.config.ts tests/manager.spec.ts tests/release.spec.ts test/manager-release.test.mjs src/components/manager-types.ts \"src/features/runs/**/*.{ts,tsx}\" tests/live-runs.spec.ts",
     "preview": "vite preview"
   },
   "dependencies": {

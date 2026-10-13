@@ -12,7 +12,7 @@ const GPU_NODE = "node_bbbbbbbbbbbbbbbbbbbbbbbb";
 type AdapterRow = {
   id: string;
   name: string;
-  runtime_type: "pi" | "codex";
+  runtime_type: "pi" | "codex" | "claude" | "opencode";
   base_url: string;
   enabled: boolean;
   revision: string;
@@ -30,7 +30,7 @@ type AdapterRow = {
 function adapter(
   id: string,
   name: string,
-  runtime_type: "pi" | "codex",
+  runtime_type: "pi" | "codex" | "claude" | "opencode",
   base_url: string,
   model: string,
   savedToken: string,
@@ -292,6 +292,8 @@ async function mockApi(
     remoteAdapter?: boolean;
     blockedDefault?: boolean;
     runSnapshot?: boolean;
+    inputControls?: boolean;
+    inputFailureOnce?: boolean;
     codexProfilesUnavailable?: boolean;
     codexQuota?:
       "ok" | "empty" | "error" | "ordinary-unavailable" | "same-duration";
@@ -344,7 +346,7 @@ async function mockApi(
     available_adapters?: Array<{
       adapter_id: string;
       name: string;
-      runtime_type: "pi" | "codex";
+      runtime_type: "pi" | "codex" | "claude" | "opencode";
       enabled: boolean;
       node_id: string;
       route_enabled?: boolean;
@@ -407,8 +409,17 @@ async function mockApi(
     node_revision: "node-run-rev",
     adapter_revision: "adapter-run-rev",
     runtime_type: "pi",
-    phase: "terminal",
-    outcome: "succeeded",
+    phase: options.inputControls ? "active" : "terminal",
+    outcome: options.inputControls ? null : "succeeded",
+    input_capabilities: {
+      steer: Boolean(options.inputControls),
+      queue: Boolean(options.inputControls),
+    },
+    input_messages: [] as Array<{
+      requestId: string;
+      mode: string;
+      status: string;
+    }>,
     workspace_id: WS_ID,
     workspace_name: workspace.name,
     job_id: JOB_ID,
@@ -534,6 +545,36 @@ async function mockApi(
       return;
     }
     if (
+      method === "POST" &&
+      (path === `/api/runs/${snapshotRun.run_id}/steer` ||
+        path === `/api/runs/${snapshotRun.run_id}/queue`)
+    ) {
+      const mode = path.endsWith("/queue") ? "queue" : "steer";
+      const receipt = {
+        requestId: String(body?.request_id),
+        mode,
+        status: mode === "queue" ? "queued" : "delivered",
+      };
+      if (
+        !snapshotRun.input_messages.some(
+          (item) => item.requestId === receipt.requestId,
+        )
+      ) {
+        snapshotRun.input_messages.push(receipt);
+      }
+      if (options.inputFailureOnce) {
+        options.inputFailureOnce = false;
+        await respond(
+          route,
+          { error: "Receipt response was lost. Retry to confirm." },
+          502,
+        );
+      } else {
+        await respond(route, { ...snapshotRun, input_message: receipt });
+      }
+      return;
+    }
+    if (
       path.startsWith(`/api/runs/${snapshotRun.run_id}/activities`) ||
       path.startsWith(`/api/runs/${snapshotRun.run_id}/executions`)
     ) {
@@ -591,7 +632,13 @@ async function mockApi(
       const created = adapter(
         "adapter_444444444444444444444444",
         String(body?.name),
-        body?.runtime_type === "codex" ? "codex" : "pi",
+        body?.runtime_type === "opencode"
+          ? "opencode"
+          : body?.runtime_type === "claude"
+            ? "claude"
+            : body?.runtime_type === "codex"
+              ? "codex"
+              : "pi",
         String(body?.base_url),
         "new-default",
         String(body?.token),
@@ -1711,6 +1758,41 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
 });
 
+test("run message controls retain request IDs on retry and show receipts", async ({
+  page,
+}) => {
+  const mock = await mockApi(page, {
+    runSnapshot: true,
+    inputControls: true,
+    inputFailureOnce: true,
+  });
+  await page.goto("./");
+  await navigate(page, "Runs");
+  await page.getByRole("button", { name: "Open run" }).click();
+  const text = page.getByLabel("Correction or follow-up");
+  await expect(
+    page.getByRole("button", { name: "Steer", exact: true }),
+  ).toBeDisabled();
+  await text.fill("Review the tests after this response.");
+  await page.getByRole("button", { name: "Queue", exact: true }).click();
+  await expect(
+    page.getByText("Receipt response was lost. Retry to confirm."),
+  ).toBeVisible();
+  await expect(text).toHaveValue("Review the tests after this response.");
+  await page.getByRole("button", { name: "Queue", exact: true }).click();
+  await expect(text).toHaveValue("");
+  await expect(page.locator(".run-input-receipts")).toContainText("queued");
+  const queued = mock.calls.filter((call) => call.path.endsWith("/queue"));
+  expect(queued).toHaveLength(2);
+  expect(queued[0].body).toEqual(queued[1].body);
+  await text.fill("Keep the current public API.");
+  await page.getByRole("button", { name: "Steer", exact: true }).click();
+  await expect(text).toHaveValue("");
+  await expect(page.locator(".run-input-receipts")).toContainText("delivered");
+  const steered = mock.calls.find((call) => call.path.endsWith("/steer"));
+  expect(steered?.body?.request_id).not.toEqual(queued[0].body?.request_id);
+});
+
 test("admin login requires a password change and supports later changes", async ({
   page,
 }) => {
@@ -1834,4 +1916,62 @@ test("admin login requires a password change and supports later changes", async 
   await expect(
     page.getByRole("button", { name: "Change password", exact: true }),
   ).toBeVisible();
+});
+
+test("OpenCode can be registered as an exact native adapter", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page.getByRole("button", { name: "Add adapter" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Local OpenCode");
+  await page
+    .getByLabel("Runtime type", { exact: true })
+    .selectOption("opencode");
+  await page
+    .getByLabel("Base URL", { exact: true })
+    .fill("http://127.0.0.1:8776");
+  await page
+    .getByLabel("Adapter token", { exact: true })
+    .fill("private-test-token");
+  await page.getByRole("button", { name: "Test connection" }).click();
+  expect(api.tests.at(-1)?.runtime_type).toBe("opencode");
+  await page
+    .getByRole("button", { name: "Add adapter", exact: true })
+    .last()
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Local OpenCode · OpenCode" }),
+  ).toBeVisible();
+  expect(
+    api.calls.find((c) => c.path === "/api/adapters" && c.method === "POST")
+      ?.body,
+  ).toMatchObject({
+    runtime_type: "opencode",
+    base_url: "http://127.0.0.1:8776",
+  });
+  await expect(
+    page.getByText("private-test-token", { exact: true }),
+  ).toHaveCount(0);
+});
+
+test("handoff image paths are forwarded to the exact selected adapter", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Handoffs");
+  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
+  await page
+    .getByLabel("Execution target", { exact: true })
+    .selectOption(GPU_PI);
+  await page
+    .getByLabel("Run image paths")
+    .fill("reference.png\nassets/detail.jpg");
+  await page.getByRole("button", { name: "Start run" }).click();
+  expect(api.starts.at(-1)).toMatchObject({
+    adapter_id: GPU_PI,
+    images: [{ path: "reference.png" }, { path: "assets/detail.jpg" }],
+  });
 });

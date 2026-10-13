@@ -61,7 +61,7 @@ docker exec workspace-bridge workspace-bridge --state /state doctor --offline
 ```
 
 To use the published Bridge image, set `services.bridge.image` to
-`ghcr.io/sheldonxxxx/workspace-bridge:v0.2.0` and remove its `build` block in a
+`ghcr.io/sheldonxxxx/workspace-bridge:v0.3.0` and remove its `build` block in a
 local copy of the Compose file. Keep the state mount, loopback port bindings, non-root
 user, and tunnel sidecar configuration. The release workflow publishes this
 multiarch tag only after its full CI and native image checks pass.
@@ -392,7 +392,9 @@ use a dedicated Node identity and mount only intended projects. Network egress i
 not disabled. Do not attach untrusted containers to this service's Compose network.
 
 Text/image reading, metadata stripping, preview limits and image-secret caveats
-are unchanged. Write/edit remain text-only. No snapshot-review engine is restored.
+are unchanged. `write_file`/`edit_file` remain text-only; `write_image` uploads
+validated raster bytes to Node-owned handoff paths under the current write scope.
+Uploads retain metadata and do not redact pixels. No snapshot-review engine is restored.
 
 ### Node-side filesystem hardening
 

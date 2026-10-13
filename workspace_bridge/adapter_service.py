@@ -29,15 +29,16 @@ TOKEN_NAME = "runtime-token"
 RUNTIME_DIR_NAME = "runtime"
 LOG_DIR_NAME = "logs"
 
-RUNTIME_TYPES = frozenset({"pi", "codex", "claude"})
+RUNTIME_TYPES = frozenset({"pi", "codex", "claude", "opencode"})
 LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 DEFAULT_PI_PORT = 8780
 DEFAULT_CODEX_PORT = 8772
 DEFAULT_CLAUDE_PORT = 8774
+DEFAULT_OPENCODE_PORT = 8776
 
 _SERVICE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
-_LABEL_RE = re.compile(r"^com\.workspace-bridge\.adapter\.(pi|codex|claude)\.[0-9a-f]{12}$")
-_UNIT_RE = re.compile(r"^workspace-bridge-adapter-(pi|codex|claude)-[0-9a-f]{12}\.service$")
+_LABEL_RE = re.compile(r"^com\.workspace-bridge\.adapter\.(pi|codex|claude|opencode)\.[0-9a-f]{12}$")
+_UNIT_RE = re.compile(r"^workspace-bridge-adapter-(pi|codex|claude|opencode)-[0-9a-f]{12}\.service$")
 
 _HEALTH_TIMEOUT = 3
 _MAX_HEALTH_RESPONSE = 64 * 1024
@@ -57,7 +58,7 @@ def _absolute_path(value: str | os.PathLike[str]) -> Path:
 
 def validate_runtime_type(value: object) -> str:
     if not isinstance(value, str) or value not in RUNTIME_TYPES:
-        raise _state_error("Adapter runtime type must be 'pi', 'codex' or 'claude'",
+        raise _state_error("Adapter runtime type must be pi, codex, claude or opencode",
                            "adapter_config_invalid")
     return value
 
@@ -201,6 +202,8 @@ def default_executable_name(runtime_type: str) -> str:
         return "workspace-bridge-pi-adapter"
     if runtime_type == "claude":
         return "workspace-bridge-claude-adapter"
+    if runtime_type == "opencode":
+        return "workspace-bridge-opencode-adapter"
     return "workspace-bridge-codex-adapter"
 
 
@@ -327,7 +330,7 @@ def _validate_config_dict(config: object, state: Path) -> dict:
     # Exact allowlist: no secrets, no arbitrary env, no Bridge/Node state.
     allowed = {"schema_version", "runtime_type", "projects_root", "port",
                "executable", "service_id", "pi_binary", "agent_dir",
-               "claude_binary", "claude_setting_sources", "log_level"}
+               "claude_binary", "claude_setting_sources", "opencode_binary", "log_level"}
     if set(config) - allowed:
         raise _state_error("Adapter configuration has unexpected fields",
                            "adapter_config_invalid")
@@ -337,6 +340,10 @@ def _validate_config_dict(config: object, state: Path) -> dict:
                             require_exists=False)
     validate_port(config.get("port"))
     _validate_lexical_executable(config.get("executable"))
+    if "opencode_binary" in config:
+        if runtime_type != "opencode":
+            raise _state_error("opencode_binary applies only to OpenCode", "adapter_config_invalid")
+        _validate_native_binary(config["opencode_binary"], "OpenCode")
     if "pi_binary" in config:
         if runtime_type != "pi":
             raise _state_error("pi_binary applies only to the Pi runtime",
@@ -470,6 +477,7 @@ def initialize_adapter(state: str | os.PathLike[str], *,
                        executable: str | os.PathLike[str] | None = None,
                        pi_binary: str | None = None,
                        claude_binary: str | None = None,
+                       opencode_binary: str | None = None,
                        claude_setting_sources: str | None = None,
                        agent_dir: str | None = None,
                        log_level: str | None = None) -> tuple[dict, str]:
@@ -482,7 +490,8 @@ def initialize_adapter(state: str | os.PathLike[str], *,
     """
     runtime_type = validate_runtime_type(runtime_type)
     if port is None:
-        port = {"pi": DEFAULT_PI_PORT, "claude": DEFAULT_CLAUDE_PORT}.get(
+        port = {"pi": DEFAULT_PI_PORT, "claude": DEFAULT_CLAUDE_PORT,
+                "opencode": DEFAULT_OPENCODE_PORT}.get(
             runtime_type, DEFAULT_CODEX_PORT)
     port = validate_port(port)
     state_path = _absolute_path(state)
@@ -497,6 +506,10 @@ def initialize_adapter(state: str | os.PathLike[str], *,
         "executable": exe_lexical,
         "service_id": secrets.token_hex(6),
     }
+    if opencode_binary is not None:
+        if runtime_type != "opencode":
+            raise _state_error("opencode_binary applies only to OpenCode", "adapter_config_invalid")
+        config["opencode_binary"] = _validate_native_binary(opencode_binary, "OpenCode")
     if pi_binary is not None:
         if runtime_type != "pi":
             raise _state_error("pi_binary applies only to the Pi runtime",
@@ -651,10 +664,13 @@ _PI_ENV = ("WB_PI_PROJECTS_DIR", "WB_PI_ADAPTER_PORT", "WB_PI_BINARY", "PI_CODIN
 _CLAUDE_ENV = ("WB_CLAUDE_PROJECTS_ROOT", "WB_CLAUDE_ADAPTER_PORT",
                "WB_CLAUDE_ADAPTER_STATE", "WB_CLAUDE_BINARY",
                "WB_CLAUDE_SETTING_SOURCES")
+_OPENCODE_ENV = ("WB_OPENCODE_PROJECTS_ROOT", "WB_OPENCODE_ADAPTER_PORT",
+                 "WB_OPENCODE_ADAPTER_STATE", "WB_OPENCODE_BINARY")
 # Never leak another runtime's names into a runtime child.
-_OTHER_RUNTIME_ENV = {"pi": _CODEX_ENV + _CLAUDE_ENV,
-                      "codex": _PI_ENV + _CLAUDE_ENV,
-                      "claude": _PI_ENV + _CODEX_ENV}
+_OTHER_RUNTIME_ENV = {"pi": _CODEX_ENV + _CLAUDE_ENV + _OPENCODE_ENV,
+                      "codex": _PI_ENV + _CLAUDE_ENV + _OPENCODE_ENV,
+                      "claude": _PI_ENV + _CODEX_ENV + _OPENCODE_ENV,
+                      "opencode": _PI_ENV + _CODEX_ENV + _CLAUDE_ENV}
 
 
 def build_adapter_env(
@@ -715,6 +731,19 @@ def build_adapter_env(
         if "log_level" in config:
             env["WB_LOG_LEVEL"] = str(config["log_level"])
         for stale in _OTHER_RUNTIME_ENV["claude"]:
+            env.pop(stale, None)
+    elif runtime_type == "opencode":
+        env["WB_RUNTIME_TOKEN"] = token
+        env["WB_OPENCODE_PROJECTS_ROOT"] = projects_root
+        env["WB_OPENCODE_ADAPTER_PORT"] = str(port)
+        env["WB_OPENCODE_ADAPTER_STATE"] = str(_absolute_path(state) / RUNTIME_DIR_NAME)
+        if "opencode_binary" in config:
+            env["WB_OPENCODE_BINARY"] = config["opencode_binary"]
+        else:
+            env.pop("WB_OPENCODE_BINARY", None)
+        if "log_level" in config:
+            env["WB_LOG_LEVEL"] = str(config["log_level"])
+        for stale in _OTHER_RUNTIME_ENV["opencode"]:
             env.pop(stale, None)
     else:
         state_path = _absolute_path(state)

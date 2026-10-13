@@ -97,6 +97,14 @@ class DirectAdapter:
     def cancel(self, ident):
         return self.native.cancel(ident)
 
+    def steer(self, ident, input_items, request_id):
+        return self.native.steer(ident, {"expectedRunId": ident, "input": input_items,
+                                         "requestId": request_id})
+
+    def queue(self, ident, input_items, request_id):
+        return self.native.queue(ident, {"expectedRunId": ident, "input": input_items,
+                                         "requestId": request_id})
+
 
 class PiDirectAdapter(DirectAdapter):
     """Use the scripted native host contract to exercise a Pi family identity."""

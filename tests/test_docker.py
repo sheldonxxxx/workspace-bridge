@@ -401,10 +401,10 @@ def test_health_unavailable(monkeypatch):
     assert not container_health.check()
 
 
-def test_no_skill_or_remote_schema_expansion():
+def test_remote_tool_count_and_embedded_skill_version():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==25 and SKILL_VERSION=='3.3.0'
+    assert len(TOOLS)==28 and SKILL_VERSION=='3.4.0'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
 
 

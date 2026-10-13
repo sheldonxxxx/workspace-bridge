@@ -329,7 +329,23 @@ class SafeRoot:
 
 
     def write_file(self, path: str, data: bytes, expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:
-        """Bounded policy-scoped text writes; no in-place truncation or link following.
+        return self._write_file(path, data, expected_sha256, write_scope=write_scope,
+                                validator=file_text, max_bytes=MAX_WRITE)[0]
+
+    def write_image(self, path: str, data: bytes, mime_type: str,
+                    expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:
+        from .media import MAX_INPUT_BYTES, validate_image
+        if not handoff_allowed(path, self.extra):
+            raise BridgeError("Image uploads require an allowed handoff path", "policy_denied")
+        result, metadata = self._write_file(
+            path, data, expected_sha256, write_scope=write_scope,
+            validator=lambda raw: validate_image(raw, path, mime_type), max_bytes=MAX_INPUT_BYTES)
+        return {**result, **metadata, "embedded_metadata": "preserved", "pixel_redaction": "none",
+                "validation": "first_frame_only"}
+
+    def _write_file(self, path: str, data: bytes, expected_sha256: str | None, *,
+                    write_scope: str, validator: Callable[[bytes], object], max_bytes: int) -> tuple[dict, object]:
+        """Bounded policy-scoped typed writes; no in-place truncation or link following.
 
         The service lock serializes bridge calls. Hash checks detect ordinary stale
         local edits, but no portable compare-and-rename can lock out a hostile same-
@@ -338,7 +354,9 @@ class SafeRoot:
         require_write_path(path, self.extra, scope=write_scope)
         if expected_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
             raise BridgeError("Invalid expected_sha256", "invalid_arguments")
-        file_text(data)  # Validate before creating even a parent directory.
+        if len(data) > max_bytes:
+            raise BridgeError("File exceeds the configured write limit", "too_large")
+        validation = validator(data)  # Validate before creating even a parent directory.
         ps = parts(path)
         def signature(st):
             return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
@@ -355,10 +373,10 @@ class SafeRoot:
                     raise BridgeError("Only single-link regular files may be replaced")
                 if expected_sha256 is None:
                     raise BridgeError("File exists; read it and supply expected_sha256 to replace it", "conflict")
-                previous, observed = self.read(path, limit=MAX_WRITE)
+                previous, observed = self.read(path, limit=max_bytes)
                 if signature(before) != signature(observed) or digest(previous) != expected_sha256:
                     raise BridgeError("File changed; re-read before writing", "stale_evidence")
-                file_text(previous)  # Never overwrite a redacted or binary local file.
+                validator(previous)  # Never replace a file of another content type.
             temporary = ".wb-write-" + secrets.token_hex(16)
             staged = False
             try:
@@ -386,7 +404,7 @@ class SafeRoot:
                     if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
                         raise BridgeError("Parent directory changed; re-read before writing", "stale_evidence")
                     if before is not None:
-                        previous, observed = self.read(path, limit=MAX_WRITE)
+                        previous, observed = self.read(path, limit=max_bytes)
                         if signature(before) != signature(observed) or digest(previous) != expected_sha256:
                             raise BridgeError("File changed during write; re-read", "stale_evidence")
                         try:
@@ -419,4 +437,4 @@ class SafeRoot:
                     except FileNotFoundError:
                         pass
         return {"path": path, "sha256": digest(data), "bytes": len(data),
-                "created": before is None, "previous_sha256": expected_sha256}
+                "created": before is None, "previous_sha256": expected_sha256}, validation

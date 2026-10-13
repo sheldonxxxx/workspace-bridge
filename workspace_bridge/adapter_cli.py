@@ -83,21 +83,23 @@ def _serve(state: Path) -> None:
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
-        description="Manage one native Pi/Codex/Claude adapter instance")
+        description="Manage one native Pi/Codex/Claude/OpenCode adapter instance")
     parser.add_argument("--state", type=Path, required=True,
                         help="Adapter instance state directory")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="Initialize one adapter instance state")
-    init.add_argument("--runtime", required=True, choices=["pi", "codex", "claude"],
+    init.add_argument("--runtime", required=True, choices=["pi", "codex", "claude", "opencode"],
                       help="Runtime type for this instance")
     init.add_argument("--projects-root", required=True,
                       help="Canonical existing projects parent")
     init.add_argument("--port", type=int, default=None,
-                      help="Loopback port (default 8780 for pi, 8772 for codex, 8774 for claude)")
+                      help="Loopback port (pi 8780, codex 8772, claude 8774, opencode 8776)")
     init.add_argument("--executable", type=Path, default=None,
                       help="Explicit absolute adapter executable (development/tests only)")
     init.add_argument("--pi-binary", default=None,
                       help="Pi executable override (pi runtime only)")
+    init.add_argument("--opencode-binary", default=None,
+                      help="OpenCode v2 executable override (opencode runtime only)")
     init.add_argument("--claude-binary", default=None,
                       help="Claude Code executable override (claude runtime only; "
                            "default is the CLI bundled with the Claude Agent SDK)")
@@ -110,6 +112,8 @@ def main(argv: list[str] | None = None):
                       help="WB_LOG_LEVEL for the adapter child")
     sub.add_parser("serve", help="Launch the configured adapter (service entrypoint)")
     sub.add_parser("show-token", help="Print the instance token once for Node registration")
+    open_session = sub.add_parser("open-session", help="Open an owned idle OpenCode session in its native terminal")
+    open_session.add_argument("conversation_id", help="Adapter conversation ID from the run")
     service = sub.add_parser("service", help="Manage the adapter service (macOS launchd or Linux systemd)")
     service_sub = service.add_subparsers(dest="service_command", required=True)
     service_sub.add_parser("install", help="Install and start the managed service")
@@ -136,6 +140,7 @@ def main(argv: list[str] | None = None):
                 executable=args.executable,
                 pi_binary=args.pi_binary,
                 claude_binary=args.claude_binary,
+                opencode_binary=args.opencode_binary,
                 claude_setting_sources=args.claude_setting_sources,
                 agent_dir=str(args.agent_dir) if args.agent_dir is not None else None,
                 log_level=args.log_level,
@@ -147,6 +152,14 @@ def main(argv: list[str] | None = None):
             return
         if args.command == "serve":
             _serve(state)
+            return
+        if args.command == "reclaim-session":
+            from .opencode_host_adapter import reclaim_session
+            reclaim_session(state, args.conversation_id)
+            return
+        if args.command == "open-session":
+            from .opencode_host_adapter import open_session
+            open_session(state, args.conversation_id)
             return
         if args.command == "show-token":
             # Validate config ownership before revealing the token.

@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { AdapterError, sanitizeModels } from "./adapter.mjs";
 import { ADAPTER_VERSION } from "./config.mjs";
 import { enforcementFingerprint } from "./fingerprint.mjs";
+import { publicRecord } from "./executions.mjs";
 import { policyRevision, safeDefaultPolicy, validatePolicy } from "./policy.mjs";
 import { piRelease } from "./release.mjs";
 import { SDK_VERSION } from "./sdk-transport.mjs";
@@ -16,6 +17,7 @@ const id = (prefix) => prefix + randomUUID();
 const bounded = (value, limit = 200) => String(value ?? "").slice(0, limit);
 
 const PROFILE_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const INPUT_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
 const RUN_USAGE_FIELDS = new Set(["inputTokens", "cachedInputTokens",
   "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens",
@@ -108,6 +110,8 @@ export class PiRuntimeProtocol {
     this.runs = new Map();
     this.activities = new Map();
     this.pending = new Map();
+    this.inputSubmitting = new Map();
+    this.cancelling = new Set();
     this._load();
   }
 
@@ -126,13 +130,41 @@ export class PiRuntimeProtocol {
       if (row && row.securityRebindPending) continue;
       this.conversations.set(row.id, row);
     }
+    for (const row of data.activities) this.activities.set(row.id, row);
     for (const row of data.runs) {
+      if (!Array.isArray(row.inputMessages)) row.inputMessages = [];
+      // Only metadata is durable. An unacknowledged submission cannot be
+      // replayed after restart, and its outcome is unknowable.
+      for (const item of row.inputMessages) {
+        if (item.status === "queued") item.status = "unknown";
+      }
       if (row.phase === "starting" || row.phase === "active") {
         row.phase = "terminal";
         row.activeState = null;
         row.outcome = "interrupted";
         row.error = "adapter_restarted";
         row.updatedAt = now();
+        if (row.auditBinding && typeof this.adapter.recoverExecutions === "function") {
+          try {
+            const conversation = this.conversations.get(row.conversationId);
+            if (!conversation || row.auditBinding.sessionId !== row.nativeId
+                || row.auditBinding.directory !== conversation.directory
+                || !Number.isSafeInteger(row.executionFloor) || row.executionFloor < 0
+                || !Number.isSafeInteger(row.executionCursor) || row.executionCursor < row.executionFloor) {
+              throw new Error("Execution audit binding changed");
+            }
+            const snapshot = this.adapter.recoverExecutions(row.auditBinding);
+            this._importExecutions(row, {
+              updates: snapshot.records.filter((record) => record.update_seq > row.executionCursor)
+                .map((record) => publicRecord(record)),
+              audit_gap: row.executionCursor < snapshot.evictedThrough,
+            });
+            row.executionCursor = snapshot.updateSeq;
+          } catch {
+            this._importExecutions(row, { updates: [], audit_gap: true });
+            row.error = "execution_audit_unavailable";
+          }
+        }
       }
       // Restart retains already-consumed run-scoped usage; malformed
       // persisted usage is dropped so reconciliation never serves it.
@@ -146,7 +178,6 @@ export class PiRuntimeProtocol {
       }
       this.runs.set(row.id, row);
     }
-    for (const row of data.activities) this.activities.set(row.id, row);
     this._save();
   }
 
@@ -191,7 +222,8 @@ export class PiRuntimeProtocol {
       id: "pi", displayName: "Pi", adapterVersion: ADAPTER_VERSION,
       nativeVersion: bounded(this.adapter.piVersion, 80), instanceId: this.instanceId,
     }, features: { models: 1, conversations: 1, runs: 1,
-      activities: 1, interactions: 1, securityRebind: 1 } };
+      activities: 1, interactions: 1, securityRebind: 1,
+      steering: 1, queueing: 1, inputControls: 1 } };
     try {
       value.release = piRelease();
     } catch {
@@ -790,17 +822,15 @@ export class PiRuntimeProtocol {
     // reuses the same AgentSession: only model calls at or after this
     // baseline belong to the new Bridge run.
     const usageBase = runMessageBaseline(this.adapter, row.directory, row.sessionId);
-    let executionCursor = 0;
-    try {
-      executionCursor = this.adapter.executionHead(row.directory, row.sessionId);
-    } catch {
-      executionCursor = 0;
-    }
+    const executionCursor = this.adapter.executionHead(row.directory, row.sessionId);
+    const auditBinding = typeof this.adapter.executionBinding === "function"
+      ? this.adapter.executionBinding(row.directory, row.sessionId) : null;
     const run = { id: id("run_"), conversationId, nativeId: row.sessionId,
       clientRunId: clientRunId || null, inputHash,
+      inputMessages: [],
       phase: "starting", activeState: null, outcome: null, result: "", error: "",
       model: bounded(body.model, 260), reasoning: thinkingLevel,
-      executionCursor, usageBase,
+      executionCursor, executionFloor: executionCursor, auditBinding, usageBase,
       createdAt: now(), updatedAt: now() };
     this.runs.set(run.id, run);
     this._save();
@@ -822,12 +852,81 @@ export class PiRuntimeProtocol {
   }
 
   _publicRun(run) {
-    const { executionCursor, model, inputHash, usageBase, ...publicRun } = run;
+    const { executionCursor, executionFloor, auditBinding, model, inputHash, usageBase, ...publicRun } = run;
+    publicRun.inputMessages = (run.inputMessages || []).map(({ requestId, mode, status }) =>
+      ({ requestId, mode, status }));
     if (run.usage !== undefined) {
       const sanitized = sanitizeRunUsage(run.usage);
       if (sanitized) publicRun.usage = sanitized;
     }
     return publicRun;
+  }
+
+  async submitInput(runId, mode, body) {
+    const run = this._run(runId);
+    if (!["steer", "queue"].includes(mode)
+        || !body || body.expectedRunId !== runId
+        || typeof body.requestId !== "string"
+        || !INPUT_REQUEST_ID_RE.test(body.requestId)
+        || !Array.isArray(body.input) || body.input.length !== 1
+        || body.input[0]?.type !== "text"
+        || typeof body.input[0].text !== "string"
+        || !body.input[0].text || body.input[0].text.length > 8000) {
+      throw new AdapterError("Invalid run input", 400, "invalid_arguments");
+    }
+    const hash = createHash("sha256").update(JSON.stringify(body.input)).digest("hex");
+    const messages = run.inputMessages || (run.inputMessages = []);
+    const previous = messages.find((item) => item.requestId === body.requestId);
+    if (previous) {
+      if (previous.mode !== mode || previous.inputHash !== hash) {
+        throw new AdapterError("Request id has different input", 409, "idempotency_conflict");
+      }
+      return this._publicRun(run);
+    }
+    if (run.phase !== "active" || this.cancelling.has(runId)) {
+      throw new AdapterError("Run is not active", 409, "run_not_active");
+    }
+    if (messages.length >= 50) {
+      throw new AdapterError("Run input history is full", 409, "input_limit");
+    }
+    const row = this._conversation(run.conversationId);
+    const submitting = this.inputSubmitting.get(runId) || 0;
+    if (submitting + (this.adapter.pendingInputCount?.(row.directory, row.sessionId) || 0) >= 20) {
+      throw new AdapterError("Run input queue is full", 409, "queue_full");
+    }
+    const item = { requestId: body.requestId, mode, inputHash: hash, status: "queued" };
+    messages.push(item);
+    this.inputSubmitting.set(runId, submitting + 1);
+    try {
+      this._save();
+    } catch (error) {
+      messages.pop();
+      if (submitting) this.inputSubmitting.set(runId, submitting);
+      else this.inputSubmitting.delete(runId);
+      throw error;
+    }
+    const onStatus = (status) => {
+      if (item.status !== "queued") return;
+      item.status = status;
+      run.updatedAt = now();
+      this._save();
+    };
+    try {
+      const result = await this.adapter.submitInput(row.directory, row.sessionId,
+        body.input[0].text, mode,
+        () => run.phase === "active" && !this.cancelling.has(runId), onStatus);
+      if (!result?.accepted && item.status === "queued") item.status = "unknown";
+    } catch (error) {
+      if (item.status === "queued") item.status = "unknown";
+      throw error;
+    } finally {
+      const remaining = (this.inputSubmitting.get(runId) || 1) - 1;
+      if (remaining) this.inputSubmitting.set(runId, remaining);
+      else this.inputSubmitting.delete(runId);
+      run.updatedAt = now();
+      this._save();
+    }
+    return this._publicRun(run);
   }
 
   async findRun(conversationId, clientRunId) {
@@ -836,6 +935,37 @@ export class PiRuntimeProtocol {
       item.conversationId === conversationId && item.clientRunId === clientRunId);
     if (!run) throw new AdapterError("Run not found", 404, "not_found");
     return this.run(run.id);
+  }
+
+  _importExecutions(run, result) {
+    if (result.audit_gap || result.cursor_too_old) {
+      const auditId = `act_${createHash("sha256").update(`${run.id}:audit-gap`)
+        .digest("hex").slice(0, 24)}`;
+      this.activities.set(auditId, { id: auditId, runId: run.id,
+        nativeId: "audit-gap", kind: "audit_gap", status: "failed",
+        input: { summary: "Pi execution journal has a missing span" },
+        result: { auditGap: true }, createdAt: now(), updatedAt: now() });
+    }
+    for (const item of result.updates) {
+      // A later update to an older call never transfers that call to a
+      // continuation run. Ownership is its immutable start cursor.
+      if (Number.isSafeInteger(run.executionFloor) && item.start_seq <= run.executionFloor) continue;
+      const stable = createHash("sha256").update(`${run.id}:${item.tool_call_id}`)
+        .digest("hex").slice(0, 24);
+      const activityId = `act_${stable}`;
+      const kind = item.tool === "bash" ? "command"
+        : ["edit", "write"].includes(item.tool) ? "file_change" : "tool_call";
+      this.activities.set(activityId, { id: activityId, runId: run.id,
+        nativeId: bounded(item.tool_call_id, 200), kind,
+        status: item.state === "completed" ? (item.is_error ? "failed" : "completed")
+          : item.state === "interrupted" ? "interrupted" : "running",
+        input: { summary: bounded(item.tool, 80),
+          details: item.input_summary || {},
+          permissionEffect: bounded(item.permission_effect, 40),
+          permissionDecision: bounded(item.permission_decision, 40) },
+        result: item.result_summary || {},
+        createdAt: item.started_at || now(), updatedAt: now() });
+    }
   }
 
   async _refresh(run) {
@@ -849,32 +979,7 @@ export class PiRuntimeProtocol {
     for (let page = 0; page < 20; page += 1) {
       const result = await this.adapter.readExecutions(row.directory, row.sessionId,
         { after: cursor, limit: 100 });
-      if (result.audit_gap || result.cursor_too_old) {
-        const auditId = `act_${createHash("sha256").update(`${run.id}:audit-gap`)
-          .digest("hex").slice(0, 24)}`;
-        this.activities.set(auditId, { id: auditId, runId: run.id,
-          nativeId: "audit-gap", kind: "audit_gap", status: "failed",
-          input: { summary: "Pi execution journal has a missing span" },
-          result: { auditGap: true }, createdAt: now(), updatedAt: now() });
-      }
-      for (const item of result.updates) {
-        const stable = createHash("sha256").update(`${run.id}:${item.tool_call_id}`)
-          .digest("hex").slice(0, 24);
-        const activityId = `act_${stable}`;
-        const kind = item.tool === "bash" ? "command"
-          : ["edit", "write"].includes(item.tool) ? "file_change" : "tool_call";
-        const activity = { id: activityId, runId: run.id,
-          nativeId: bounded(item.tool_call_id, 200), kind,
-          status: item.state === "completed" ? (item.is_error ? "failed" : "completed")
-            : item.state === "interrupted" ? "interrupted" : "running",
-          input: { summary: bounded(item.tool, 80),
-            details: item.input_summary || {},
-            permissionEffect: bounded(item.permission_effect, 40),
-            permissionDecision: bounded(item.permission_decision, 40) },
-          result: item.result_summary || {},
-          createdAt: item.created || now(), updatedAt: now() };
-        this.activities.set(activityId, activity);
-      }
+      this._importExecutions(run, result);
       cursor = result.next;
       if (cursor >= result.head || !result.updates.length) break;
     }
@@ -890,9 +995,27 @@ export class PiRuntimeProtocol {
     // isStreaming || isRetrying), so a transient 429 assistant error
     // during native retry backoff stays active/running here and is never
     // terminal-failed. No Bridge-level prompt/run replay is introduced.
-    if (status === "idle" && !pending.length) {
+    if (status === "idle" && !pending.length
+        && !this.inputSubmitting.get(run.id)
+        && !(this.adapter.pendingInputCount?.(row.directory, row.sessionId) || 0)
+        && !this.cancelling.has(run.id)) {
       const messages = await this.adapter.messages(row.directory, row.sessionId, 20);
+      // messages() is asynchronous; an input or cancellation can enter in
+      // that gap. Confirm idle again before committing a terminal outcome.
+      const settledStatus = await this.adapter.sessionStatus(row.directory, row.sessionId);
+      if (run.phase !== "active" || this.cancelling.has(run.id)
+          || this.inputSubmitting.get(run.id)
+          || (this.adapter.pendingInputCount?.(row.directory, row.sessionId) || 0)
+          || settledStatus !== "idle") {
+        run.updatedAt = now();
+        this._save();
+        return;
+      }
       const last = [...messages].reverse().find((message) => message.role === "assistant");
+      this.adapter.finalizeInputTickets?.(row.directory, row.sessionId);
+      for (const item of run.inputMessages || []) {
+        if (item.status === "queued") item.status = "unknown";
+      }
       run.phase = "terminal";
       run.activeState = null;
       run.outcome = last?.completed ? "succeeded" : "failed";
@@ -915,8 +1038,13 @@ export class PiRuntimeProtocol {
   async cancel(runId) {
     const run = this._run(runId);
     if (run.phase === "terminal") return this._publicRun(run);
+    this.cancelling.add(runId);
     const row = this._conversation(run.conversationId);
-    await this.adapter.abortSession(row.directory, row.sessionId);
+    try {
+      await this.adapter.abortSession(row.directory, row.sessionId);
+    } finally {
+      this.cancelling.delete(runId);
+    }
     // Preserve already-consumed native usage on cancelled runs.
     const consumed = collectRunUsage(this.adapter, row.directory, row.sessionId,
       run.usageBase);
@@ -924,6 +1052,9 @@ export class PiRuntimeProtocol {
     run.phase = "terminal";
     run.activeState = null;
     run.outcome = "cancelled";
+    for (const item of run.inputMessages || []) {
+      if (item.status === "queued") item.status = "unknown";
+    }
     run.updatedAt = now();
     this._save();
     return this._publicRun(run);

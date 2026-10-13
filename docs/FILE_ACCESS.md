@@ -7,6 +7,7 @@ read_file(workspace_id, path, offset=1, limit=200, expected_sha256=null,
           representation="auto", max_image_dimension=null)
 write_file(workspace_id, path, content, expected_sha256=null)
 edit_file(workspace_id, path, old_text, new_text, expected_sha256)
+write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)
 ```
 
 All paths are relative to the selected workspace, never the handoff folder itself.
@@ -24,7 +25,7 @@ that workspace or bypass exclusions. `read_scope` remains `workspace` in all mod
 |---|---|
 | `none` | None, including new handoffs or handoff edits |
 | `handoff` | Only allowed paths inside `.workspace-handoff/`; the default |
-| `workspace` | Allowed source and handoff text files inside the selected mapping |
+| `workspace` | Allowed source and handoff text files; image uploads remain inside `.workspace-handoff/` |
 
 Each new mapping starts disabled and handoff-only. Only the
 local manager, authenticated with the admin account, can change permission.
@@ -82,12 +83,15 @@ those hints are not the access-control mechanism.
 
 `read_file` now returns native MCP image previews for supported raster images,
 under the same read permissions. See [image support](IMAGE_SUPPORT.md). Text reads
-still have a 512 KiB cap. The following limits describe **writing**, which remains
-UTF-8 text-only; image previews cannot be written back with these APIs.
+still have a 512 KiB cap. `write_file` and `edit_file` remain UTF-8 text-only.
+`write_image` accepts validated raster uploads under `.workspace-handoff/`, subject
+to the current write scope and exclusions. Original bytes are preserved, including
+embedded metadata; previews remain transformed. See [image upload](MCP_TOOLS.md#image-upload)
+for its 20 MiB/40MP bounds, matching MIME/suffix checks and hash-protected replacement.
 
 ## Bounds and limits
 
-UTF-8 text only, at most 256 KiB before and after writing; request JSON up to 1 MiB.
+Text writes accept UTF-8 only, at most 256 KiB before and after writing; request JSON up to 1 MiB.
 Built-in and administrator exclusions, secret-like/binary/control rejection,
 no-follow paths, single-link regular-file requirements, root pinning and device
 checks apply in every mode. Internal `.wb-write-*` staging files are never exposed.

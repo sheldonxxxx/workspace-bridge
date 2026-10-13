@@ -34,6 +34,7 @@ from .security import redact
 
 
 _LOG = logging.getLogger(__name__)
+_MESSAGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 
 
 def _ensure_operational_stderr_handler() -> None:
@@ -504,6 +505,16 @@ class CodexHostAdapter:
             summary TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}',
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
+          CREATE TABLE IF NOT EXISTS input_messages (
+            run TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            request_id TEXT NOT NULL,
+            mode TEXT NOT NULL, input_hash TEXT NOT NULL, status TEXT NOT NULL,
+            ordinal INTEGER NOT NULL, PRIMARY KEY(run,request_id),
+            UNIQUE(run,ordinal));
+          CREATE TABLE IF NOT EXISTS run_turns (
+            run TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            turn TEXT NOT NULL,
+            ordinal INTEGER NOT NULL, PRIMARY KEY(run,turn));
         """)
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(runs)")}
         if "client_run" not in columns:
@@ -538,6 +549,8 @@ class CodexHostAdapter:
                 "ALTER TABLE conversations ADD COLUMN approval_revision TEXT NOT NULL DEFAULT ''")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_client_run "
                         "ON runs(conversation,client_run) WHERE client_run IS NOT NULL")
+        self.db.execute("INSERT OR IGNORE INTO run_turns(run,turn,ordinal) "
+                        "SELECT id,turn,0 FROM runs WHERE turn IS NOT NULL")
         os.chmod(self.state / "codex-adapter.sqlite3", 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
@@ -550,10 +563,16 @@ class CodexHostAdapter:
         self._early_requests: list[tuple[int | str, str, dict]] = []
         self._profile_context_cache: dict[tuple[str, str], tuple[float, dict]] = {}
         self._settings_updates: dict[str, dict[str, Any]] = {}
+        self._queued_inputs: dict[str, list[tuple[str, list[dict]]]] = {}
+        self._turn_settings: dict[str, dict] = {}
+        self._next_turn_start: set[str] = set()
+        self._cancel_requested: set[str] = set()
+        self._delivery_locks: dict[str, threading.Lock] = {}
         self._migrate_legacy_profile_rows()
         # A pending server callback is process-local. A prior instance cannot
         # prove it still owns that callback after restart.
         with self.lock, self.db:
+            self.db.execute("UPDATE input_messages SET status='discarded' WHERE status='queued'")
             self.db.execute(
                 "UPDATE runs SET phase='terminal',active_state=NULL,outcome='interrupted',"
                 "error='adapter_restarted',updated=? WHERE phase IN ('starting','active')",
@@ -694,7 +713,8 @@ class CodexHostAdapter:
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
-                             "steering": 1, "securityRebind": 1, "usageLimits": 1},
+                             "steering": 1, "queueing": 1, "inputControls": 1, "securityRebind": 1,
+                             "usageLimits": 1},
                 "release": codex_release()}
 
     def usage_limits(self) -> dict:
@@ -1760,6 +1780,14 @@ class CodexHostAdapter:
         usage = _parse_stored_codex_usage(run.get("usage"))
         if usage is not None:
             result["usage"] = usage
+        with self.lock:
+            messages = self.db.execute(
+                "SELECT request_id,mode,status FROM input_messages WHERE run=? "
+                "ORDER BY ordinal LIMIT 51", (run["id"],)).fetchall()
+        if messages:
+            result["inputMessages"] = [
+                {"requestId": row["request_id"], "mode": row["mode"],
+                 "status": row["status"]} for row in messages[:50]]
         return result
 
     def _predecessor_cumulative(self, conversation_id: str,
@@ -2153,6 +2181,13 @@ class CodexHostAdapter:
                 self.db.execute(
                     "UPDATE runs SET turn=?,phase='active',active_state='running',updated=? WHERE id=?",
                     (turn, _now(), run_id))
+                self.db.execute("INSERT INTO run_turns(run,turn,ordinal) VALUES(?,?,0)",
+                                (run_id, turn))
+                self._turn_settings[run_id] = {
+                    "threadId": owned["thread"],
+                    **({"model": params["model"]} if "model" in params else {}),
+                    **({"effort": params["effort"]} if "effort" in params else {})}
+                self._delivery_locks[run_id] = threading.Lock()
                 self._emit("run.started", conversation_id, run_id)
                 def _early_turn(params: dict) -> str | None:
                     raw = params.get("turn")
@@ -2193,10 +2228,7 @@ class CodexHostAdapter:
         if run["phase"] == "active" and run["turn"]:
             if getattr(self.rpc, "alive", True) is False:
                 with self.lock, self.db:
-                    self.db.execute(
-                        "UPDATE runs SET phase='terminal',active_state=NULL,"
-                        "outcome='interrupted',error='native_server_exited',updated=? WHERE id=?",
-                        (_now(), run_id))
+                    self._finish_run(run, "interrupted", "native_server_exited")
             else:
                 owned = self._conversation(run["conversation"])
                 if self._is_invalidated(owned):
@@ -2237,41 +2269,270 @@ class CodexHostAdapter:
                         age = time.time() - datetime.fromisoformat(run["created"]).timestamp()
                         if status == "idle" and age > 30:
                             with self.lock, self.db:
-                                self.db.execute(
-                                    "UPDATE runs SET phase='terminal',active_state=NULL,"
-                                    "outcome='orphaned',error='native_turn_missing',updated=? "
-                                    "WHERE id=? AND phase='active'",
-                                    (_now(), run_id))
+                                latest = self._run(run_id)
+                                if latest["phase"] == "active" and latest["turn"] == run["turn"]:
+                                    self._finish_run(latest, "orphaned", "native_turn_missing")
         return self._run_public(self._run(run_id))
 
     def cancel(self, run_id: str) -> dict:
-        run = self._run(run_id)
-        if run["phase"] == "terminal":
-            return self._run_public(run)
-        owned = self._conversation(run["conversation"])
-        if not run["turn"]:
-            raise AdapterFailure("Native run identity is not confirmed", 409, "run_starting")
+        delivery = self._delivery_lock(run_id)
+        with delivery:
+            with self.lock, self.db:
+                run = self._run(run_id)
+                if run["phase"] == "terminal":
+                    return self._run_public(run)
+                self._cancel_requested.add(run_id)
+                self._discard_queued(run_id)
+                owned = self._conversation(run["conversation"])
+                turn = run["turn"]
+                if not turn and run_id in self._next_turn_start:
+                    self._finish_run(run, "interrupted", "cancelled")
+                    return self._run_public(self._run(run_id))
+        if not turn:
+            return self._run_public(self._run(run_id))
         try:
             self.rpc.call("turn/interrupt", {"threadId": owned["thread"],
-                                             "turnId": run["turn"]})
-        except CodexRpcError as exc:
-            raise AdapterFailure(_clean(str(exc), 300), 502, "runtime_unavailable") from None
+                                             "turnId": turn})
+        except CodexRpcError:
+            raise AdapterFailure("Codex cancellation was not confirmed", 502,
+                                 "runtime_unavailable") from None
         # The completion notification decides the terminal outcome. A request
         # acknowledgement is not evidence that the turn has stopped.
         return self._run_public(self._run(run_id))
 
     def steer(self, run_id: str, body: dict) -> dict:
-        run = self._run(run_id)
-        if run["phase"] != "active" or body.get("expectedRunId") != run_id:
-            raise AdapterFailure("Expected run is not active", 409, "run_mismatch")
-        owned = self._conversation(run["conversation"])
-        try:
-            self.rpc.call("turn/steer", {"threadId": owned["thread"],
-                                         "expectedTurnId": run["turn"],
-                                         "input": self._input(body.get("input"))})
-        except CodexRpcError as exc:
-            raise AdapterFailure(_clean(str(exc), 300), 409, "steer_rejected") from None
+        request_id, input_items, input_hash = self._message_body(run_id, body)
+        delivery = self._delivery_lock(run_id)
+        with delivery:
+            with self.lock, self.db:
+                previous = self._message_retry(run_id, request_id, "steer", input_hash)
+                if previous:
+                    return self._run_public(self._run(run_id))
+                run = self._run(run_id)
+                if (run["phase"] != "active" or not run["turn"]
+                        or run_id in self._cancel_requested):
+                    raise AdapterFailure("Expected run is not active", 409, "run_mismatch")
+                owned = self._conversation(run["conversation"])
+                self._insert_message(run_id, request_id, "steer", input_hash, "unknown")
+                turn = run["turn"]
+            try:
+                self.rpc.call("turn/steer", {"threadId": owned["thread"],
+                                             "expectedTurnId": turn,
+                                             "input": input_items})
+            except CodexRpcError:
+                raise AdapterFailure("Codex steer delivery is unknown", 409,
+                                     "steer_rejected") from None
+            with self.lock, self.db:
+                current = self._run(run_id)
+                if current["phase"] == "active" and current["turn"] == turn:
+                    self.db.execute("UPDATE input_messages SET status='delivered' "
+                                    "WHERE run=? AND request_id=? AND status='unknown'",
+                                    (run_id, request_id))
+                    self._input_activity(run_id, request_id, "steer", "delivered")
         return self._run_public(self._run(run_id))
+
+    def _delivery_lock(self, run_id: str) -> threading.Lock:
+        with self.lock:
+            return self._delivery_locks.setdefault(run_id, threading.Lock())
+
+    def queue(self, run_id: str, body: dict) -> dict:
+        request_id, input_items, input_hash = self._message_body(run_id, body)
+        with self.lock, self.db:
+            previous = self._message_retry(run_id, request_id, "queue", input_hash)
+            if previous:
+                return self._run_public(self._run(run_id))
+            run = self._run(run_id)
+            if run["phase"] != "active" or run_id in self._cancel_requested:
+                raise AdapterFailure("Expected run is not active", 409, "run_mismatch")
+            if run_id not in self._turn_settings:
+                raise AdapterFailure("Run settings are unavailable", 409, "run_mismatch")
+            pending = self.db.execute("SELECT count(*) FROM input_messages "
+                "WHERE run=? AND status='queued'", (run_id,)).fetchone()[0]
+            if pending >= 20:
+                raise AdapterFailure("Too many pending input messages", 409, "queue_full")
+            self._insert_message(run_id, request_id, "queue", input_hash, "queued")
+            self._queued_inputs.setdefault(run_id, []).append((request_id, input_items))
+            self._input_activity(run_id, request_id, "queue", "queued")
+            return self._run_public(self._run(run_id))
+
+    def _message_body(self, run_id: str, body: dict) -> tuple[str, list[dict], str]:
+        if body.get("expectedRunId") != run_id:
+            raise AdapterFailure("Expected run differs", 409, "run_mismatch")
+        request_id = body.get("requestId")
+        if not isinstance(request_id, str) or not _MESSAGE_ID.fullmatch(request_id):
+            raise AdapterFailure("Invalid request id")
+        input_items = self._input(body.get("input"))
+        input_hash = sha256(json.dumps(input_items, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+        return request_id, input_items, input_hash
+
+    def _message_retry(self, run_id: str, request_id: str, mode: str,
+                       input_hash: str) -> bool:
+        self._run(run_id)
+        row = self.db.execute("SELECT mode,input_hash FROM input_messages "
+                              "WHERE run=? AND request_id=?",
+                              (run_id, request_id)).fetchone()
+        if row is None:
+            return False
+        if row["mode"] != mode or row["input_hash"] != input_hash:
+            raise AdapterFailure("Request id has different input", 409,
+                                 "idempotency_conflict")
+        return True
+
+    def _insert_message(self, run_id: str, request_id: str, mode: str,
+                        input_hash: str, status: str) -> None:
+        count = self.db.execute("SELECT count(*) FROM input_messages WHERE run=?",
+                                (run_id,)).fetchone()[0]
+        if count >= 50:
+            raise AdapterFailure("Too many input messages", 409, "message_limit")
+        self.db.execute("INSERT INTO input_messages "
+                        "(run,request_id,mode,input_hash,status,ordinal) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (run_id, request_id, mode, input_hash, status, count))
+
+    def _input_activity(self, run_id: str, request_id: str, mode: str,
+                        status: str) -> None:
+        run = self._run(run_id)
+        native_id = "input:" + request_id
+        activity_id = "act_" + sha256((run_id + ":" + native_id).encode()).hexdigest()[:24]
+        now = _now()
+        self.db.execute("INSERT INTO activities "
+            "(id,run,native_id,kind,status,summary,result,created,updated) "
+            "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run,native_id) DO UPDATE SET "
+            "status=excluded.status,summary=excluded.summary,updated=excluded.updated",
+            (activity_id, run_id, native_id, "other", "completed",
+             mode + " input " + status, "{}", now, now))
+        self._emit("activity.completed", run["conversation"], run_id, activity_id)
+
+    def _discard_queued(self, run_id: str) -> None:
+        self._queued_inputs.pop(run_id, None)
+        self.db.execute("UPDATE input_messages SET status='discarded' "
+                        "WHERE run=? AND status='queued'", (run_id,))
+
+    def _finish_run(self, run: dict, outcome: str, error: str = "") -> None:
+        self._discard_queued(run["id"])
+        self._turn_settings.pop(run["id"], None)
+        self._next_turn_start.discard(run["id"])
+        self._cancel_requested.discard(run["id"])
+        self._delivery_locks.pop(run["id"], None)
+        self.db.execute("UPDATE runs SET phase='terminal',active_state=NULL,"
+                        "outcome=?,error=?,updated=? WHERE id=? AND phase='active'",
+                        (outcome, _clean(error, 300), _now(), run["id"]))
+        for interaction_id, entry in list(self.pending.items()):
+            if entry["public"]["runId"] == run["id"]:
+                self.pending.pop(interaction_id, None)
+        self._emit("run.completed", run["conversation"], run["id"])
+
+    def _start_queued_turn(self, run_id: str, prior_turn: str) -> None:
+        """Start the next turn away from the native RPC reader callback."""
+        delivery = self._delivery_lock(run_id)
+        with delivery:
+            try:
+                self._start_queued_turn_locked(run_id, prior_turn)
+            except Exception:
+                # A worker must never leave the logical run active without a
+                # confirmed native turn, even for an unexpected local error.
+                _LOG.warning("Codex queued turn worker failed")
+                self._fail_queued_start(run_id)
+
+    def _fail_queued_start(self, run_id: str) -> None:
+        orphan_requests = []
+        with self.lock, self.db:
+            run = self._run(run_id)
+            thread = self._conversation(run["conversation"])["thread"]
+            self._early_notifications = [entry for entry in self._early_notifications
+                if entry[1].get("threadId") != thread]
+            orphan_requests = [entry for entry in self._early_requests
+                if entry[2].get("threadId") == thread]
+            self._early_requests = [entry for entry in self._early_requests
+                if entry[2].get("threadId") != thread]
+            if run["phase"] == "active":
+                self._finish_run(run, "failed", "queued_turn_start_unconfirmed")
+        for rpc_id, _method, _params in orphan_requests:
+            try:
+                self.rpc.respond(rpc_id, error={"code": -32602,
+                    "message": "Native run start was not confirmed"})
+            except CodexRpcError:
+                pass
+
+    def _start_queued_turn_locked(self, run_id: str, prior_turn: str) -> None:
+        with self.lock, self.db:
+            run = self._run(run_id)
+            if (run["phase"] != "active" or run_id in self._cancel_requested
+                    or run_id not in self._next_turn_start):
+                return
+            entries = self._queued_inputs.get(run_id) or []
+            settings = self._turn_settings.get(run_id)
+            if not entries or settings is None:
+                self._finish_run(run, "failed", "queued_input_unavailable")
+                return
+            request_id, input_items = entries.pop(0)
+            self.db.execute("UPDATE input_messages SET status='unknown' "
+                            "WHERE run=? AND request_id=? AND status='queued'",
+                            (run_id, request_id))
+            params = {**settings, "input": input_items}
+        try:
+            result = self.rpc.call("turn/start", params, timeout=45)
+            turn = (result.get("turn") or {}).get("id")
+            if not isinstance(turn, str) or not turn or turn == prior_turn:
+                raise CodexRpcError("New turn identity was not confirmed")
+        except (CodexRpcError, TypeError, AttributeError):
+            self._fail_queued_start(run_id)
+            return
+        with self.lock, self.db:
+            run = self._run(run_id)
+            if run["phase"] != "active":
+                return
+            self.db.execute("UPDATE runs SET turn=?,active_state='running',updated=? "
+                            "WHERE id=? AND phase='active'", (turn, _now(), run_id))
+            ordinal = self.db.execute("SELECT coalesce(max(ordinal),-1)+1 "
+                "FROM run_turns WHERE run=?", (run_id,)).fetchone()[0]
+            self.db.execute("INSERT INTO run_turns(run,turn,ordinal) VALUES(?,?,?)",
+                            (run_id, turn, ordinal))
+            self._next_turn_start.discard(run_id)
+            self.db.execute("UPDATE input_messages SET status='delivered' "
+                            "WHERE run=? AND request_id=? AND status='unknown'",
+                            (run_id, request_id))
+            self._input_activity(run_id, request_id, "queue", "delivered")
+            early_notifications = [entry for entry in self._early_notifications
+                if entry[1].get("threadId") == params["threadId"] and
+                ((entry[1].get("turn") or {}).get("id") or
+                 entry[1].get("turnId") or
+                 (entry[1].get("tokenUsage") or {}).get("turnId")) == turn]
+            self._early_notifications = [entry for entry in self._early_notifications
+                if entry[1].get("threadId") != params["threadId"]]
+            early_requests = [entry for entry in self._early_requests
+                if entry[2].get("threadId") == params["threadId"]
+                and entry[2].get("turnId") == turn]
+            rejected_requests = [entry for entry in self._early_requests
+                if entry[2].get("threadId") == params["threadId"]
+                and entry not in early_requests]
+            self._early_requests = [entry for entry in self._early_requests
+                if entry[2].get("threadId") != params["threadId"]]
+            cancel = run_id in self._cancel_requested
+        for method, event in early_notifications:
+            self._notification(method, event)
+        for rpc_id, method, event in early_requests:
+            self._request(rpc_id, method, event)
+        for rpc_id, _method, _event in rejected_requests:
+            try:
+                self.rpc.respond(rpc_id, error={"code": -32602,
+                    "message": "Unowned native interaction"})
+            except CodexRpcError:
+                pass
+        if cancel:
+            with self.lock:
+                current = self._run(run_id)
+                still_active = current["phase"] == "active" and current["turn"] == turn
+            if still_active:
+                try:
+                    self.rpc.call("turn/interrupt", {"threadId": params["threadId"],
+                                                     "turnId": turn})
+                except CodexRpcError:
+                    with self.lock, self.db:
+                        current = self._run(run_id)
+                        if current["phase"] == "active" and current["turn"] == turn:
+                            self._finish_run(current, "interrupted", "cancel_unconfirmed")
 
     def _notification_token_usage(self, params: dict) -> None:
         """Aggregate the owned turn from cumulative ``tokenUsage.total``.
@@ -2318,14 +2579,18 @@ class CodexHostAdapter:
         with self.lock:
             row = self.db.execute(
                 "SELECT runs.* FROM runs JOIN conversations "
-                "ON runs.conversation=conversations.id WHERE conversations.thread=? "
-                "AND runs.turn=?", (thread, turn)).fetchone()
+                "ON runs.conversation=conversations.id JOIN run_turns "
+                "ON run_turns.run=runs.id WHERE conversations.thread=? "
+                "AND run_turns.turn=?", (thread, turn)).fetchone()
             if row is None:
                 starting = self.db.execute(
                     "SELECT 1 FROM runs JOIN conversations ON runs.conversation=conversations.id "
                     "WHERE conversations.thread=? AND runs.phase='starting'",
                     (thread,)).fetchone()
-                if starting and len(self._early_notifications) < 100:
+                queued_start = any(settings.get("threadId") == thread
+                    and run_id in self._next_turn_start
+                    for run_id, settings in self._turn_settings.items())
+                if (starting or queued_start) and len(self._early_notifications) < 100:
                     self._early_notifications.append(("thread/tokenUsage/updated", params))
                 return
             current = dict(row)
@@ -2493,13 +2758,16 @@ class CodexHostAdapter:
             row = self.db.execute(
                 "SELECT runs.*, conversations.thread FROM runs JOIN conversations "
                 "ON runs.conversation=conversations.id WHERE conversations.thread=? "
-                "AND runs.turn=?", (thread, turn)).fetchone()
+                "AND runs.turn=? AND runs.phase='active'", (thread, turn)).fetchone()
             if row is None:
                 starting = self.db.execute(
                     "SELECT 1 FROM runs JOIN conversations ON runs.conversation=conversations.id "
                     "WHERE conversations.thread=? AND runs.phase='starting'",
                     (thread,)).fetchone()
-                if starting and len(self._early_notifications) < 100:
+                queued_start = any(settings.get("threadId") == thread
+                    and run_id in self._next_turn_start
+                    for run_id, settings in self._turn_settings.items())
+                if (starting or queued_start) and len(self._early_notifications) < 100:
                     self._early_notifications.append((method, params))
                 return
             run = dict(row)
@@ -2511,15 +2779,22 @@ class CodexHostAdapter:
                 if isinstance(native_error, dict):
                     native_error = native_error.get("message")
                 with self.db:
-                    self.db.execute(
-                        "UPDATE runs SET phase='terminal',active_state=NULL,outcome=?,"
-                        "error=?,updated=? "
-                        "WHERE id=? AND phase='active'",
-                        (outcome, _clean(native_error, 300), _now(), run["id"]))
-                for interaction_id, entry in list(self.pending.items()):
-                    if entry["public"]["runId"] == run["id"]:
-                        self.pending.pop(interaction_id, None)
-                self._emit("run.completed", run["conversation"], run["id"])
+                    if (outcome == "succeeded" and run["id"] not in self._cancel_requested
+                            and self._queued_inputs.get(run["id"])
+                            and run["id"] not in self._next_turn_start):
+                        self._next_turn_start.add(run["id"])
+                        self.db.execute("UPDATE runs SET turn=NULL,active_state='running',"
+                                        "updated=? WHERE id=? AND phase='active'",
+                                        (_now(), run["id"]))
+                        for interaction_id, entry in list(self.pending.items()):
+                            if entry["public"]["runId"] == run["id"]:
+                                self.pending.pop(interaction_id, None)
+                        threading.Thread(target=self._start_queued_turn,
+                            args=(run["id"], turn), daemon=True).start()
+                    else:
+                        if run["id"] in self._cancel_requested and outcome == "succeeded":
+                            outcome = "interrupted"
+                        self._finish_run(run, outcome, native_error or "")
                 return
             if method not in ("item/started", "item/completed"):
                 return
@@ -2584,7 +2859,10 @@ class CodexHostAdapter:
                     "SELECT 1 FROM runs JOIN conversations ON runs.conversation=conversations.id "
                     "WHERE conversations.thread=? AND runs.phase='starting'",
                     (thread,)).fetchone()
-                if starting and len(self._early_requests) < 100:
+                queued_start = any(settings.get("threadId") == thread
+                    and run_id in self._next_turn_start
+                    for run_id, settings in self._turn_settings.items())
+                if (starting or queued_start) and len(self._early_requests) < 100:
                     self._early_requests.append((request_id, method, params))
                     return
                 self.rpc.respond(request_id, error={"code": -32602,
@@ -2844,6 +3122,8 @@ def make_app(adapter: CodexHostAdapter, token: str) -> Starlette:
                 result = await run_in_threadpool(adapter.cancel, parts[2])
             elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "steer" and request.method == "POST":
                 result = await run_in_threadpool(adapter.steer, parts[2], body)
+            elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "queue" and request.method == "POST":
+                result = await run_in_threadpool(adapter.queue, parts[2], body)
             elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "interactions" and request.method == "GET":
                 result = await run_in_threadpool(adapter.interactions, parts[2])
             elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "activities" and request.method == "GET":

@@ -81,7 +81,9 @@ class NodeClient:
         # transport serializer.
         raw_body = None if body is None else json.dumps(
             body, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        if raw_body is not None and len(raw_body) > 2 * 1024 * 1024:
+        from .media import MAX_IMAGE_REQUEST_BYTES
+        request_limit = MAX_IMAGE_REQUEST_BYTES if path == "/v1/workspaces/write_image" else 2 * 1024 * 1024
+        if raw_body is not None and len(raw_body) > request_limit:
             raise BridgeError("Node request exceeds the payload limit", "too_large")
         request = urllib.request.Request(self.base_url + path, data=raw_body,
             headers={"Accept": "application/json", "X-Node-Token": self.token,
@@ -136,7 +138,7 @@ class NodeClient:
                              {"excludes": excludes, "write_scope": write_scope})
 
     def workspace(self, operation: str, workspace: dict, arguments: dict):
-        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file",
+        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file", "write_image",
                    "edit_file", "git_status", "git_diff", "read_handoff_artifact",
                    "hash_files", "publish_handoff_artifacts"}
         if operation not in allowed:
@@ -297,8 +299,11 @@ class NodeRuntimeAdapterProxy:
     def cancel(self, run_id: str) -> dict:
         return self._call("cancel", run_id=run_id)
 
-    def steer(self, run_id: str, input_items: list[dict]) -> dict:
-        return self._call("steer", run_id=run_id, input_items=input_items)
+    def steer(self, run_id: str, input_items: list[dict], request_id: str) -> dict:
+        return self._call("steer", run_id=run_id, input_items=input_items, request_id=request_id)
+
+    def queue(self, run_id: str, input_items: list[dict], request_id: str) -> dict:
+        return self._call("queue", run_id=run_id, input_items=input_items, request_id=request_id)
 
     def interactions(self, run_id: str) -> list[dict]:
         return self._call("interactions", run_id=run_id)

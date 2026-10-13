@@ -80,8 +80,10 @@ Source returned through the tunnel reaches ChatGPT. The tunnel removes a public 
 | Search hits | Up to 100 matching lines per page; continuation within files |
 | Regex matching | 20 ms timeout per line; overall search budget |
 | Tool response | 24,000 serialized result characters before MCP envelope; browse pages budget UTF-8 bytes conservatively |
-| HTTP request body | MCP: 1 MiB; local management: 96,000 bytes; 10-second body timeout |
+| HTTP request body | MCP: 1 MiB except `write_image` (28,027,564 bytes); local management: 96,000 bytes; 10-second body timeout |
 | Handoff text mutation | 256 KiB final/previous file; JSON escaping also counts against the HTTP budget |
+| Handoff image upload | 20 MiB original raster bytes, 40MP; matching MIME/suffix, first-frame decoder validation; original metadata retained, pixels not redacted |
+| Handoff image references | Up to 20 unique paths; context and attachments share a 64 MiB publication-time read budget |
 | Source / artifact page | Up to 400 / 200 lines respectively |
 | Handoffs | 100 per workspace |
 | Private-state quota gate | 512 MiB estimated SQLite allocation |

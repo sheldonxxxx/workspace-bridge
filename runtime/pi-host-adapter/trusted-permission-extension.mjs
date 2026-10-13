@@ -76,7 +76,7 @@ function markerTitle(toolCallId) {
 // concurrent sessions with different policies never collide, and the
 // evaluator always sees the exact session workspace (never the adapter
 // process cwd). Semantics are identical to the default export below.
-export function createTrustedPermissionExtension({ policy: rawPolicy, cwd }) {
+export function createTrustedPermissionExtension({ policy: rawPolicy, cwd, onToolIntent = null }) {
   let policy = null;
   try {
     policy = rawPolicy && typeof rawPolicy === "object" ? validatePolicy(rawPolicy) : null;
@@ -85,7 +85,7 @@ export function createTrustedPermissionExtension({ policy: rawPolicy, cwd }) {
   }
   const sessionCwd = typeof cwd === "string" && cwd ? cwd : process.cwd();
   return (pi) => {
-    bindToolCall(pi, policy, sessionCwd);
+    bindToolCall(pi, policy, sessionCwd, onToolIntent);
   };
 }
 
@@ -95,7 +95,7 @@ export default function (pi) {
   bindToolCall(pi, policy, sessionCwd);
 }
 
-function bindToolCall(pi, policy, sessionCwd) {
+function bindToolCall(pi, policy, sessionCwd, onToolIntent = null) {
   // Exact in-memory grants for this session only: grantKey strings from
   // the shared evaluator (file tools "<tool>\n<target>"; bash
   // "bash\n<commandHash>\n<timeoutMs>").
@@ -111,6 +111,13 @@ function bindToolCall(pi, policy, sessionCwd) {
       }
       if (!toolCallId) {
         return { block: true, reason: "Permission correlation unavailable; failing closed" };
+      }
+      if (typeof onToolIntent === "function") {
+        try {
+          await onToolIntent(event);
+        } catch {
+          return { block: true, reason: "Execution audit unavailable; failing closed" };
+        }
       }
       if (!MANAGED_TOOLS.includes(toolName)) {
         // Explicitly enabled third-party extension capability: trusted

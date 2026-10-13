@@ -57,7 +57,7 @@ export function redactExtensionText(value) {
   out = out.replace(/\bBearer\s+[A-Za-z0-9\-._~+/=]+/g, "Bearer [redacted]");
   out = out.replace(/\bBasic\s+[A-Za-z0-9+/=]+/g, "Basic [redacted]");
   // Obvious key=value / key: value credential patterns.
-  out = out.replace(/\b(password|passwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s"'{},;]+)/gi,
+  out = out.replace(/\b(password|passwd|secret|token|session|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s"'{},;&#]+)/gi,
     "$1$2[redacted]");
   return out;
 }
@@ -384,6 +384,166 @@ export function summarizeResult(tool, result, isError) {
   }
 }
 
+const INPUT_SUMMARY_KEYS = new Set([
+  "command", "command_sha256", "command_bytes", "timeout_ms", "truncated",
+  "target", "range", "offset", "limit", "encoding", "query", "options", "recursive",
+  "old_bytes", "old_sha256", "new_bytes", "new_sha256", "content_bytes", "content_lines", "content_sha256",
+  "args_sha256", "args_bytes", "top_keys", ...EXTENSION_SELECTOR_FIELDS,
+  "error",
+]);
+const RESULT_SUMMARY_KEYS = new Set([
+  "is_error", "exit_code", "cancelled", "truncated", "output_preview", "output_bytes",
+  "count", "bytes", "status", "preview", "message", "preview_bytes",
+]);
+const INPUT_STRING_KEYS = new Set(["command", "command_sha256", "target", "range", "encoding", "query", "options", "old_sha256", "new_sha256", "content_sha256", "args_sha256", ...EXTENSION_SELECTOR_FIELDS, "error"]);
+const INPUT_NUMBER_KEYS = new Set(["command_bytes", "timeout_ms", "offset", "limit", "old_bytes", "new_bytes", "content_bytes", "content_lines", "args_bytes"]);
+const RESULT_STRING_KEYS = new Set(["output_preview", "status", "preview", "message"]);
+const RESULT_NUMBER_KEYS = new Set(["exit_code", "output_bytes", "count", "bytes", "preview_bytes"]);
+
+function cloneSummary(value, allowed, { input = false, tool = "" } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid execution summary");
+  const out = {};
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) continue;
+    const v = value[key];
+    if ((input ? INPUT_STRING_KEYS : RESULT_STRING_KEYS).has(key) && typeof v === "string") {
+      const max = input
+        ? ({ command: MAX_COMMAND_CHARS, target: MAX_TARGET_CHARS, range: 200, encoding: 40,
+          query: MAX_QUERY_CHARS, options: 500, error: 80, command_sha256: 64,
+          old_sha256: 64, new_sha256: 64, content_sha256: 64, args_sha256: 64,
+          ...Object.fromEntries(EXTENSION_SELECTOR_FIELDS.map((k) => [k, MAX_EXTENSION_SELECTOR_CHARS])) })[key] ?? 500
+        : key === "output_preview" ? MAX_OUTPUT_CHARS
+          : key === "preview" ? tool === "edit" ? MAX_EDIT_PREVIEW_CHARS
+            : ["grep", "find", "ls"].includes(tool) ? MAX_LIST_PREVIEW_CHARS : MAX_EXTENSION_PREVIEW_CHARS
+            : key === "message" ? 500 : key === "status" ? 80 : 500;
+      out[key] = redactExtensionText(v).slice(0, max);
+    } else if (["truncated", "recursive", "is_error", "cancelled"].includes(key) && typeof v === "boolean") out[key] = v;
+    else if ((input ? INPUT_NUMBER_KEYS : RESULT_NUMBER_KEYS).has(key)
+      && typeof v === "number" && Number.isSafeInteger(v)
+      && (key === "exit_code" || v >= 0)) out[key] = v;
+    else if (input && key === "top_keys" && Array.isArray(v)
+      && v.every((x) => typeof x === "string")) {
+      out[key] = v.slice(0, MAX_EXTENSION_KEYS).filter((x) => typeof x === "string")
+        .map((x) => redactExtensionText(x).slice(0, MAX_EXTENSION_KEY_CHARS));
+    } else {
+      throw new Error("invalid execution summary field");
+    }
+  }
+  return out;
+}
+
+function hasOnlyKeys(value, allowed) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).every((key) => allowed.has(key));
+}
+
+const EXECUTION_RECORD_FIELDS = new Set([
+  "seq", "start_seq", "start_order", "update_seq", "tool_call_id", "tool", "state",
+  "started_at", "ended_at", "duration_ms", "input_summary", "result_summary", "is_error",
+  "permission_effect", "permission_decision", "truncated",
+]);
+
+export function sanitizeExecutionSummary(value, { input = false, tool = "" } = {}) {
+  return cloneSummary(value ?? {}, input ? INPUT_SUMMARY_KEYS : RESULT_SUMMARY_KEYS, { input, tool });
+}
+
+export function normalizeExecutionRecord(record) {
+  if (!hasOnlyKeys(record, EXECUTION_RECORD_FIELDS) || Object.keys(record).length !== EXECUTION_RECORD_FIELDS.size
+    || !hasOnlyKeys(record.input_summary, INPUT_SUMMARY_KEYS)
+    || !hasOnlyKeys(record.result_summary, RESULT_SUMMARY_KEYS)
+    || typeof record.tool_call_id !== "string" || !record.tool_call_id || record.tool_call_id.length > 200
+    || typeof record.tool !== "string" || !record.tool || record.tool.length > 120
+    || !["started", "completed", "interrupted"].includes(record.state)
+    || !Number.isSafeInteger(record.start_seq) || record.start_seq < 1
+    || !Number.isSafeInteger(record.update_seq) || record.update_seq < record.start_seq
+    || !Number.isSafeInteger(record.start_order) || record.start_order < 1
+    || typeof record.started_at !== "string" || !Number.isFinite(Date.parse(record.started_at))
+    || (record.ended_at !== null && (typeof record.ended_at !== "string" || !Number.isFinite(Date.parse(record.ended_at))))
+    || (record.duration_ms !== null && (!Number.isSafeInteger(record.duration_ms) || record.duration_ms < 0))
+    || !["", "once", "always", "reject"].includes(record.permission_decision)
+    || typeof record.permission_effect !== "string" || record.permission_effect.length > 80
+    || typeof record.is_error !== "boolean" || typeof record.truncated !== "boolean"
+    || (record.state === "started" && (record.ended_at !== null || record.duration_ms !== null))
+    || (record.state !== "started" && record.ended_at === null)) {
+    throw new Error("invalid execution record");
+  }
+  if (record.seq !== record.update_seq) throw new Error("invalid execution record");
+  const inputSummary = sanitizeExecutionSummary(record.input_summary, { input: true, tool: record.tool });
+  const resultSummary = sanitizeExecutionSummary(record.result_summary, { tool: record.tool });
+  return {
+    seq: record.update_seq,
+    start_seq: record.start_seq,
+    start_order: record.start_order,
+    update_seq: record.update_seq,
+    tool_call_id: record.tool_call_id,
+    tool: record.tool,
+    state: record.state,
+    started_at: record.started_at,
+    ended_at: record.ended_at,
+    duration_ms: record.duration_ms,
+    input_summary: inputSummary,
+    result_summary: resultSummary,
+    is_error: record.is_error,
+    permission_effect: record.permission_effect,
+    permission_decision: record.permission_decision,
+    truncated: record.truncated,
+  };
+}
+
+export function normalizeExecutionSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)
+    || Object.keys(snapshot).length !== 6
+    || snapshot.version !== 1 || !Number.isSafeInteger(snapshot.maxRecords)
+    || snapshot.maxRecords < 1 || snapshot.maxRecords > MAX_JOURNAL_RECORDS
+    || !Number.isSafeInteger(snapshot.startOrder) || snapshot.startOrder < 0
+    || !Number.isSafeInteger(snapshot.updateSeq) || snapshot.updateSeq < 0
+    || !Number.isSafeInteger(snapshot.evictedThrough) || snapshot.evictedThrough < 0
+    || snapshot.evictedThrough > snapshot.updateSeq
+    || !Array.isArray(snapshot.records) || snapshot.records.length > snapshot.maxRecords) {
+    throw new Error("invalid execution journal snapshot");
+  }
+  const ids = new Set();
+  const updateSeqs = new Set();
+  const startSeqs = new Set();
+  const startOrders = new Set();
+  const records = snapshot.records.map((raw) => {
+    const record = normalizeExecutionRecord(raw);
+    if (ids.has(record.tool_call_id) || updateSeqs.has(record.update_seq)
+      || startSeqs.has(record.start_seq) || startOrders.has(record.start_order)
+      || record.update_seq > snapshot.updateSeq || record.start_order > snapshot.startOrder) {
+      throw new Error("invalid execution journal snapshot");
+    }
+    ids.add(record.tool_call_id);
+    updateSeqs.add(record.update_seq);
+    startSeqs.add(record.start_seq);
+    startOrders.add(record.start_order);
+    return record;
+  });
+  return { version: 1, maxRecords: snapshot.maxRecords, startOrder: snapshot.startOrder,
+    updateSeq: snapshot.updateSeq, evictedThrough: snapshot.evictedThrough, records };
+}
+
+function cloneRecord(record) {
+  return {
+    seq: record.update_seq,
+    start_seq: record.start_seq,
+    start_order: record.start_order,
+    update_seq: record.update_seq,
+    tool_call_id: record.tool_call_id,
+    tool: record.tool,
+    state: record.state,
+    started_at: record.started_at,
+    ended_at: record.ended_at,
+    duration_ms: record.duration_ms,
+    input_summary: sanitizeExecutionSummary(record.input_summary, { input: true, tool: record.tool }),
+    result_summary: sanitizeExecutionSummary(record.result_summary, { tool: record.tool }),
+    is_error: Boolean(record.is_error),
+    permission_effect: String(record.permission_effect || "").slice(0, 80),
+    permission_decision: ["once", "always", "reject"].includes(record.permission_decision) ? record.permission_decision : "",
+    truncated: Boolean(record.truncated),
+  };
+}
+
 // Bounded per-session monotonic execution journal with ONE comparable
 // sequence space (the global update cursor).
 //
@@ -406,19 +566,60 @@ export function summarizeResult(tool, result, isError) {
 // history reports audit_gap instead of silent completeness. Bounded
 // record memory.
 export class ExecutionJournal {
-  constructor({ maxRecords = MAX_JOURNAL_RECORDS } = {}) {
-    this.maxRecords = Math.max(1, Math.min(maxRecords, 2000));
+  constructor({ maxRecords = MAX_JOURNAL_RECORDS, snapshot = null, onCommit = null } = {}) {
+    this.maxRecords = Math.max(1, Math.min(maxRecords, MAX_JOURNAL_RECORDS));
     this.startOrder = 0;
     this.updateSeq = 0;
     this.records = new Map();
     this.evictedThrough = 0;
+    this.onCommit = typeof onCommit === "function" ? onCommit : null;
+    this.failed = false;
+    if (snapshot !== null) this._restore(snapshot);
+  }
+
+  _restore(snapshot) {
+    const safe = normalizeExecutionSnapshot(snapshot);
+    this.maxRecords = safe.maxRecords;
+    this.startOrder = safe.startOrder;
+    this.updateSeq = safe.updateSeq;
+    this.evictedThrough = safe.evictedThrough;
+    this.records = new Map(safe.records.map((record) => [record.tool_call_id, record]));
+  }
+
+  assertHealthy() {
+    if (this.failed) throw new Error("execution journal unavailable");
+  }
+
+  _commit() {
+    this.assertHealthy();
+    if (!this.onCommit) return;
+    try {
+      this.onCommit(this.snapshot());
+    } catch {
+      this.failed = true;
+      throw new Error("execution journal unavailable");
+    }
+  }
+
+  snapshot() {
+    this.assertHealthy();
+    return normalizeExecutionSnapshot({
+      version: 1,
+      maxRecords: this.maxRecords,
+      startOrder: this.startOrder,
+      updateSeq: this.updateSeq,
+      evictedThrough: this.evictedThrough,
+      records: [...this.records.values()].map(cloneRecord),
+    });
   }
 
   get head() {
+    this.assertHealthy();
     return this.updateSeq;
   }
 
   get oldest() {
+    this.assertHealthy();
     if (!this.records.size) return this.updateSeq + 1;
     let min = Infinity;
     for (const record of this.records.values()) {
@@ -448,9 +649,12 @@ export class ExecutionJournal {
   }
 
   start({ toolCallId, tool, inputSummary, permissionEffect }) {
+    this.assertHealthy();
     const id = String(toolCallId || "").slice(0, 200);
     if (!id || !tool) return null;
     if (this.records.has(id)) return this.records.get(id);
+    const toolName = String(tool).slice(0, 120);
+    const safeInput = sanitizeExecutionSummary(inputSummary, { input: true, tool: toolName });
     this.startOrder += 1;
     const cursor = this._bump();
     const record = {
@@ -459,12 +663,12 @@ export class ExecutionJournal {
       start_order: this.startOrder,
       update_seq: cursor,
       tool_call_id: id,
-      tool: String(tool).slice(0, 40),
+      tool: toolName,
       state: "started",
       started_at: new Date().toISOString(),
       ended_at: null,
       duration_ms: null,
-      input_summary: inputSummary && typeof inputSummary === "object" ? inputSummary : {},
+      input_summary: safeInput,
       result_summary: {},
       is_error: false,
       permission_effect: String(permissionEffect || ""),
@@ -473,48 +677,62 @@ export class ExecutionJournal {
     };
     this.records.set(id, record);
     this._evict();
+    this._commit();
     return record;
   }
 
   update({ toolCallId, resultPreview }) {
+    this.assertHealthy();
     const record = this.records.get(String(toolCallId || ""));
     if (!record || record.state !== "started") return null;
     if (resultPreview && typeof resultPreview === "object") {
-      record.result_summary = { ...record.result_summary, ...resultPreview };
+      record.result_summary = sanitizeExecutionSummary({ ...record.result_summary, ...resultPreview }, { tool: record.tool });
     }
     record.update_seq = this._bump();
+    this._commit();
     return record;
   }
 
   end({ toolCallId, resultSummary, isError }) {
+    this.assertHealthy();
     const record = this.records.get(String(toolCallId || ""));
     if (!record) return null;
+    if (record.state !== "started") return record;
+    const safeResult = sanitizeExecutionSummary(resultSummary, { tool: record.tool });
     record.state = "completed";
     this._finishTiming(record);
-    record.result_summary = resultSummary && typeof resultSummary === "object" ? resultSummary : {};
+    record.result_summary = safeResult;
     record.is_error = Boolean(isError);
     record.truncated = Boolean(
       record.input_summary?.truncated || record.result_summary?.truncated);
     record.update_seq = this._bump();
+    this._commit();
     return record;
   }
 
   markInterrupted() {
+    this.assertHealthy();
+    let changed = false;
     for (const record of this.records.values()) {
       if (record.state === "started") {
         record.state = "interrupted";
         this._finishTiming(record);
         record.update_seq = this._bump();
+        changed = true;
       }
     }
+    if (changed) this._commit();
   }
 
   setPermissionDecision(toolCallId, decision) {
+    this.assertHealthy();
     const record = this.records.get(String(toolCallId || ""));
     if (!record) return;
     if (["once", "always", "reject"].includes(decision)) {
+      if (record.state !== "started" || record.permission_decision === decision) return;
       record.permission_decision = decision;
       record.update_seq = this._bump();
+      this._commit();
     }
   }
 
@@ -543,6 +761,7 @@ export class ExecutionJournal {
   // audit_gap, cursor_too_old}. Evicted update history is reported
   // explicitly via evicted coverage, never as silent completeness.
   read({ after = 0, limit = 50 } = {}) {
+    this.assertHealthy();
     const afterSeq = Math.max(0, Math.floor(Number(after) || 0));
     const boundedLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 50), MAX_READ_LIMIT));
     const head = this.updateSeq;
@@ -592,9 +811,9 @@ export function publicRecord(record, { includeResult = true } = {}) {
     permission_effect: record.permission_effect,
     permission_decision: record.permission_decision,
     truncated: Boolean(record.truncated),
-    input_summary: record.input_summary,
+    input_summary: sanitizeExecutionSummary(record.input_summary, { input: true, tool: record.tool }),
   };
-  if (includeResult) base.result_summary = record.result_summary;
+  if (includeResult) base.result_summary = sanitizeExecutionSummary(record.result_summary, { tool: record.tool });
   return base;
 }
 

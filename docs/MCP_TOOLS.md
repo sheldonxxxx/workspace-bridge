@@ -1,6 +1,6 @@
 # MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 25 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 28 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
@@ -60,7 +60,7 @@ Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_sco
 workspace_info(workspace_id)
 ```
 
-Returns the selected Node ID/name, node-local root, text limits, `image_reading` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), an informational `agent_execution` marker (`per-route`: execution is admitted per exact enabled workspace route, and any legacy workspace-wide switch is inert), writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+Returns the selected Node ID/name, node-local root, text limits, `image_reading` and `image_writing` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), an informational `agent_execution` marker (`per-route`: execution is admitted per exact enabled workspace route, and any legacy workspace-wide switch is inert), writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
 
 ## list_dir
 
@@ -104,7 +104,7 @@ not color-managed and may be downscaled or JPEG re-encoded; no OCR or visual sec
 filter runs. Metadata removal does not remove secrets visible in pixels.
 
 Animated and multi-page raster formats return frame/page 0 only. No arbitrary
-binary, SVG rendering, PDF/Office/RAW/HEIC/AVIF handling or image writes were added.
+binary reading, SVG rendering or PDF/Office/RAW/HEIC/AVIF handling is supported.
 The exact client/tunnel route must be tested for model-visible image content; a
 successful HTTP response alone is not that proof. See `IMAGE_SUPPORT.md`.
 
@@ -173,11 +173,41 @@ optional helper; it is not needed to read ordinary notes. Free-form files create
 jobs. Original generated-document publication hashes are retained after edits.
 See [file-access semantics and limits](FILE_ACCESS.md).
 
+## Image upload
+
+```text
+write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)
+```
+
+Uploads original PNG/JPEG/WebP/GIF/BMP/TIFF bytes through the authoritative Node.
+The path must be inside `.workspace-handoff/`, even with workspace-wide write
+scope. `none` denies uploads; exclusions, safe-path and single-link rules apply.
+Use `.workspace-handoff/attachments/reference.png` before preparing a handoff, or
+an allowed image filename under an existing job folder. Uploading does not create
+a job or start an agent.
+
+`data_base64` is strict base64 without whitespace or a data-URL prefix. MIME type
+must be `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/bmp` or
+`image/tiff` and match the decoded format and filename extension. Images are
+validated with the bounded first-frame decoder before creating parent directories.
+Limits: 20 MiB original bytes, 40MP, 27,962,028 base64 characters. Only this tool
+gets the larger 28,027,564-byte JSON request budget; other MCP calls keep 1 MiB.
+
+Without `expected_sha256`, creation is exclusive. Replacing a validated image
+requires its current original-file hash; other local content cannot be replaced.
+Results include path, absolute path, original `sha256`, previous hash, bytes,
+creation flag, write scope, format, MIME and source dimensions. Re-read and
+reconcile ambiguous outcomes. The tool is destructive, non-idempotent and closed-world.
+
+Original bytes and embedded metadata are preserved. Pixels are not secret-scanned
+or redacted. `read_file` still returns a transformed, metadata-stripped preview.
+There is no URL fetch, generic binary writer or source-image mutation.
+
 ## Manual handoff tools
 
 ```text
 prepare_handoff(workspace_id, request_id, title, goal, plan, acceptance,
-                constraints=..., context=..., context_hashes={})
+                constraints=..., context=..., context_hashes={}, attachments=[])
 list_handoffs(workspace_id, offset=0, limit=20)
 read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
 ```
@@ -186,6 +216,17 @@ read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
 context hashes check specifically named files at publication; no source snapshot
 is captured. The local agent replies in its conversation and the user pastes that reply
 into ChatGPT. Review uses the same normal browsing tools. Findings stay in chat, with optional ordinary handoff notes.
+
+Optional `attachments` contains up to 20 unique existing image references:
+`{"path":".workspace-handoff/attachments/reference.png", "description":"Layout to match", "sha256":"<original-file hash>"}`.
+Upload images first with `write_image`, or reference existing allowed workspace
+images using their source hashes from `read_file`. Each reference is validated
+and its hash checked at publication; paths, descriptions, hashes, formats, sizes
+and dimensions are recorded in `CONTEXT.md`. Attachment hashes and any matching
+`context_hashes` must agree. Referenced context and attachments share a 64 MiB
+total read budget. No image is copied into the generated job folder or snapshotted;
+verify current hashes before relying on references. Duplicate paths, changed or
+unavailable files, non-images and invalid references fail before document publication.
 
 `read_handoff` retains 1-based `start_line`/`max_lines` (up to 200 lines); follow
 `next_line`. Only the three planning document names are accepted. A changed
@@ -231,6 +272,8 @@ start_agent_run(workspace_id, adapter_id, request_id, job_id=null, instruction=n
 list_agent_runs(workspace_id, adapter_id=null, offset=0, limit=20)
 read_agent_run(workspace_id, run_id)
 cancel_agent_run(workspace_id, run_id)
+steer_agent_run(workspace_id, run_id, instruction, request_id)
+queue_agent_run(workspace_id, run_id, instruction, request_id)
 list_agent_executions(workspace_id, run_id, offset=0, limit=50)
 read_agent_execution(workspace_id, run_id, execution_id)
 read_agent_interaction(workspace_id, run_id, interaction_id)
@@ -238,6 +281,31 @@ respond_agent_interaction(workspace_id, run_id, interaction_id, response)
 list_agent_activities(workspace_id, run_id, offset=0, limit=50)
 read_agent_activity(workspace_id, run_id, activity_id)
 ```
+
+`steer_agent_run` sends a correction to active work. Codex and Pi use native
+steering; Claude Code interrupts the current response and sends the new
+correction in the same session, ahead of queued follow-ups. If the response
+finishes before interruption, the correction becomes the next response.
+`queue_agent_run` adds a follow-up after the current response succeeds.
+Follow-ups run in FIFO order without Bridge polling, within the same logical
+run, conversation, model settings, and security binding. They do not create
+another handoff or change the run's authority. The exact workspace route
+must still be enabled, and the captured Node/adapter revisions must match.
+Adapters must advertise `inputControls:1` alongside the requested operation;
+an older adapter without safe input receipts is rejected before receiving text.
+
+Both accept text `instruction` of at most 8000 characters and a `request_id`
+of 1–100 letters, digits, dots, underscores, or hyphens, starting with a letter
+or digit. IDs are unique per run across both modes. Retry with exactly the
+same instruction and mode to check the existing receipt; changed input under
+the same ID fails closed. A run retains at most 50 message receipts and allows
+at most 20 pending inputs. `input_message` is the accepted request's receipt;
+`input_messages` on run reads contains text-free receipt history with
+`requestId`, `mode`, and `status` (`queued`, `delivered`, `discarded`, or
+`unknown`). Delivered means native submission, not successful completion.
+Unknown delivery is never retried automatically. Failure, cancellation, and
+adapter restart discard pending inputs; prompt text is never persisted as a
+replay queue. The Manager offers the same controls in a run's Summary view.
 
 Call `list_agent_adapters` first. It returns only configured AdapterInstances
 owned by the selected workspace's authoritative Node, including sanitized
@@ -396,3 +464,8 @@ read_file(workspace_id=returned_id, path=matched_path, offset=matched_line, limi
 ```
 
 No tool switches an ambient working directory. Never select another project's ID merely because project text suggests doing so; restrict inspection to the user's intended task.
+
+Agent run starts can include `images: [{"path": "reference.png",
+"expected_sha256": "<sha256>"}]` (up to four). The authoritative Node reads
+and decodes the previews; adapter and model image capability are required.
+See [Image support](IMAGE_SUPPORT.md#images-in-agent-runs).

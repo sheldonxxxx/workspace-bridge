@@ -5,7 +5,7 @@
 **Plan in ChatGPT. Build with your local agents.**
 
 Workspace Bridge lets ChatGPT read the real code on your machine, plan the
-work, hand bounded tasks to Claude Code, Codex, or Pi running locally, and
+work, hand bounded tasks to Claude Code, Codex, OpenCode v2, or Pi running locally, and
 then review what they changed. You keep the strongest model for thinking and
 reviewing, a cheaper local agent does the typing, and nothing runs that you
 have not enabled.
@@ -31,9 +31,9 @@ current checkout. Workspace Bridge connects the two in one loop:
 1. **Inspect.** ChatGPT browses your project, searches it, and reads live Git
    status and diffs.
 2. **Plan.** It writes a short, reviewable handoff: task, context, and
-   acceptance criteria.
+   acceptance criteria, with optional screenshot or mockup references.
 3. **Build.** You paste the handoff into your agent, or, if you have enabled
-   it, ChatGPT starts a bounded run on Claude Code, Codex, or Pi directly.
+   it, ChatGPT starts a bounded run on Claude Code, Codex, OpenCode v2, or Pi directly.
 4. **Review.** ChatGPT reads the result and the new diff, then approves the
    work or plans the next iteration.
 
@@ -48,7 +48,7 @@ Why plan in ChatGPT:
   ChatGPT's generous usage limits you can explore, push back, and refine a
   plan without worrying about running up a bill.
 - **Truly remote work.** The ChatGPT mobile app can drive the whole loop, so
-  you can plan, start runs on your Claude Code, Codex, or Pi agents, and review
+  you can plan, start runs on your Claude Code, Codex, OpenCode v2, or Pi agents, and review
   the results from anywhere while your machine does the building.
 
 ![The local Manager showing Pi, Codex, and Claude Code adapters](https://raw.githubusercontent.com/sheldonxxxx/workspace-bridge/main/docs/assets/workspace-manager.png)
@@ -79,7 +79,7 @@ project, and source that ChatGPT reads leaves your machine. Read
   with hashes, and read-only Git status and diffs.
 - **Planning handoffs:** `TASK.md`, `CONTEXT.md`, and `ACCEPTANCE.md`
   published under `.workspace-handoff/`, ready to paste into any agent.
-- **Local agent runs:** Claude Code, Codex, and Pi through one runtime
+- **Local agent runs:** Claude Code, Codex, OpenCode v2, and Pi through one runtime
   protocol, with per-agent model policy, security profiles, resumable
   approvals, and run-scoped usage.
 - **Images:** screenshots and other rasters return as native previews.
@@ -129,7 +129,7 @@ workspace-bridge doctor
 ```
 
 Browsing and manual handoffs work at this point. To let ChatGPT start agent
-runs, add a Claude Code, Codex, or Pi adapter; see [Runtimes](docs/RUNTIMES.md).
+runs, add a Claude Code, Codex, OpenCode v2, or Pi adapter; see [Runtimes](docs/RUNTIMES.md).
 Full instructions, including Docker, are in [Setup](docs/SETUP.md). If you
 would rather have a coding agent do the install, point it at
 [Agent setup](docs/AGENT_SETUP.md).
@@ -155,7 +155,7 @@ workspace-to-adapter route you enabled. See
 
 ## Status
 
-Version `0.2.0`, an early release under active development. Updates are
+Version `0.3.0`, an early release under active development. Updates are
 manual (`uv tool upgrade workspace-bridge`, then restart services); there is
 no auto-updater. Native Windows is not supported; use WSL2. Known gaps and
 validation status are listed in
@@ -166,7 +166,7 @@ validation status are listed in
 - [Setup](docs/SETUP.md): install and configure.
 - [Agent setup](docs/AGENT_SETUP.md): runbook for a coding agent installing
   Workspace Bridge for you.
-- [Runtimes](docs/RUNTIMES.md): Claude Code, Codex, and Pi.
+- [Runtimes](docs/RUNTIMES.md): Claude Code, Codex, OpenCode v2, and Pi.
 - [Security](docs/SECURITY.md): threat model and controls.
 - [Architecture](docs/ARCHITECTURE.md) and [Operations](docs/OPERATIONS.md).
 - [MCP tools](docs/MCP_TOOLS.md), [Runtime Protocol](docs/RUNTIME_PROTOCOL.md),

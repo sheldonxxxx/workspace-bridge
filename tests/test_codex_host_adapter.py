@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -203,6 +205,265 @@ def finish_fake_run(adapter, rpc, conversation, run):
         "threadId": conversation["nativeId"],
         "turn": {"id": run["nativeId"], "status": "completed"}})
     rpc.status = "idle"
+
+
+def wait_for_queued_turn(adapter, run_id, expected_turn):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        row = adapter._run(run_id)
+        if row["turn"] == expected_turn or row["phase"] == "terminal":
+            return row
+        time.sleep(0.01)
+    pytest.fail("queued turn did not advance without a read")
+
+
+def input_message(run_id, request_id, text, mode="queue"):
+    return {"expectedRunId": run_id, "requestId": request_id,
+            "input": [{"type": "text", "text": text}]}
+
+
+def test_steer_is_idempotent_and_bound_to_current_turn(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    body = input_message(run["id"], "steer.1", "Change course")
+    result = adapter.steer(run["id"], body)
+    assert result["inputMessages"] == [
+        {"requestId": "steer.1", "mode": "steer", "status": "delivered"}]
+    assert rpc.calls[-1] == ("turn/steer", {"threadId": conversation["nativeId"],
+        "expectedTurnId": run["nativeId"], "input": body["input"]})
+    adapter.steer(run["id"], body)
+    assert len([call for call in rpc.calls if call[0] == "turn/steer"]) == 1
+    with pytest.raises(AdapterFailure) as conflict:
+        adapter.steer(run["id"], input_message(run["id"], "steer.1", "Other"))
+    assert conflict.value.code == "idempotency_conflict"
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert adapter.steer(run["id"], body)["phase"] == "terminal"
+    assert "Change course" not in json.dumps(adapter.run(run["id"]))
+
+
+def test_fifo_queue_advances_same_run_without_polling(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {
+        "input": [{"type": "text", "text": "Start"}], "model": "gpt-test"})
+    first = input_message(run["id"], "q1", "One")
+    second = input_message(run["id"], "q2", "Two")
+    assert adapter.queue(run["id"], first)["inputMessages"][0]["status"] == "queued"
+    adapter.queue(run["id"], second)
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-2")["phase"] == "active"
+    assert adapter._run(run["id"])["outcome"] is None
+    adapter._notification("turn/completed", {"threadId": conversation["nativeId"],
+        "turn": {"id": "native-turn-2", "status": "completed"}})
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-3")["phase"] == "active"
+    adapter._notification("turn/completed", {"threadId": conversation["nativeId"],
+        "turn": {"id": "native-turn-3", "status": "completed"}})
+    result = adapter.run(run["id"])
+    assert result["outcome"] == "succeeded"
+    assert [item["status"] for item in result["inputMessages"]] == ["delivered", "delivered"]
+    assert [item["input"]["summary"] for item in adapter.activities(run["id"])["activities"]
+            if item["nativeId"].startswith("input:")] == [
+                "queue input delivered", "queue input delivered"]
+    assert [params["input"] for method, params in rpc.calls if method == "turn/start"] == [
+        [{"type": "text", "text": "Start"}], first["input"], second["input"]]
+    assert all(params["threadId"] == conversation["nativeId"]
+        for method, params in rpc.calls if method == "turn/start")
+    assert len([event for event in adapter.events_buffer if event["type"] == "run.completed"]) == 1
+
+
+def test_queue_bounds_cancel_and_restart_drop_prompts(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    for index in range(20):
+        adapter.queue(run["id"], input_message(run["id"], f"q{index}", f"private-{index}"))
+    with pytest.raises(AdapterFailure) as full:
+        adapter.queue(run["id"], input_message(run["id"], "q20", "overflow"))
+    assert full.value.code == "queue_full"
+    adapter.cancel(run["id"])
+    assert all(item["status"] == "discarded"
+        for item in adapter._run_public(adapter._run(run["id"]))["inputMessages"])
+    adapter._notification("turn/completed", {"threadId": conversation["nativeId"],
+        "turn": {"id": run["nativeId"], "status": "interrupted"}})
+    assert len([call for call in rpc.calls if call[0] == "turn/start"]) == 1
+    assert "private-" not in (adapter.state / "codex-adapter.sqlite3").read_bytes().decode(
+        "utf-8", errors="ignore")
+    adapter.close()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=FakeCodexRpc())
+    try:
+        assert all(item["status"] == "discarded"
+            for item in restarted.run(run["id"])["inputMessages"])
+    finally:
+        restarted.close()
+
+
+def test_queue_start_failure_fails_closed_and_discards_remaining(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    adapter.queue(run["id"], input_message(run["id"], "q1", "One"))
+    adapter.queue(run["id"], input_message(run["id"], "q2", "Two"))
+    original_call = rpc.call
+
+    def fail_queued_start(method, params, timeout=30):
+        if method == "turn/start":
+            raise CodexRpcError("could contain private prompt: One")
+        return original_call(method, params, timeout)
+
+    rpc.call = fail_queued_start
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-2")["outcome"] == "failed"
+    result = adapter.run(run["id"])
+    assert [item["status"] for item in result["inputMessages"]] == ["unknown", "discarded"]
+    assert "One" not in result["error"]
+    assert len([event for event in adapter.events_buffer if event["type"] == "run.completed"]) == 1
+
+
+def test_queue_restart_never_replays_pending_input(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    body = input_message(run["id"], "q1", "secret queued prompt")
+    adapter.queue(run["id"], body)
+    adapter.close()
+    new_rpc = FakeCodexRpc()
+    restarted = CodexHostAdapter(adapter.state, workspace.parent, rpc=new_rpc)
+    try:
+        result = restarted.run(run["id"])
+        assert result["outcome"] == "interrupted"
+        assert result["inputMessages"] == [
+            {"requestId": "q1", "mode": "queue", "status": "discarded"}]
+        assert restarted.queue(run["id"], body)["inputMessages"] == result["inputMessages"]
+        assert not [call for call in new_rpc.calls if call[0] == "turn/start"]
+    finally:
+        restarted.close()
+
+
+def test_queue_rejects_wrong_run_and_ignores_late_turn_items(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    wrong = input_message("run_wrong", "q1", "One")
+    with pytest.raises(AdapterFailure) as mismatch:
+        adapter.queue(run["id"], wrong)
+    assert mismatch.value.code == "run_mismatch"
+    adapter.queue(run["id"], input_message(run["id"], "q1", "One"))
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-2")["phase"] == "active"
+    adapter._notification("item/completed", {"threadId": conversation["nativeId"],
+        "turnId": "native-turn-1", "item": {"id": "late", "type": "agentMessage",
+                                          "text": "wrong previous answer"}})
+    assert "wrong previous answer" not in adapter.run(run["id"])["result"]
+    adapter._notification("turn/completed", {"threadId": "wrong-thread",
+        "turn": {"id": "native-turn-2", "status": "failed"}})
+    assert adapter._run(run["id"])["phase"] == "active"
+
+
+def test_queue_usage_accumulates_across_owned_turns(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    adapter.queue(run["id"], input_message(run["id"], "q1", "Continue"))
+    adapter._notification("thread/tokenUsage/updated", {
+        "threadId": conversation["nativeId"], "turnId": "native-turn-1",
+        "tokenUsage": {"total": {"inputTokens": 5, "outputTokens": 3}}})
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-2")["phase"] == "active"
+    adapter._notification("thread/tokenUsage/updated", {
+        "threadId": conversation["nativeId"], "turnId": "native-turn-2",
+        "tokenUsage": {"total": {"inputTokens": 11, "outputTokens": 7}}})
+    adapter._notification("turn/completed", {"threadId": conversation["nativeId"],
+        "turn": {"id": "native-turn-2", "status": "completed"}})
+    assert adapter.run(run["id"])["usage"] == {"inputTokens": 11, "outputTokens": 7}
+
+
+def test_cancel_wins_before_steer_submission(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    entered = threading.Event()
+    release = threading.Event()
+    original_body = adapter._message_body
+    errors = []
+
+    def delayed_body(run_id, body):
+        parsed = original_body(run_id, body)
+        entered.set()
+        assert release.wait(2)
+        return parsed
+
+    adapter._message_body = delayed_body
+
+    def submit():
+        try:
+            adapter.steer(run["id"], input_message(run["id"], "s1", "late steer"))
+        except AdapterFailure as exc:
+            errors.append(exc.code)
+
+    worker = threading.Thread(target=submit)
+    worker.start()
+    assert entered.wait(2)
+    adapter.cancel(run["id"])
+    release.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert errors == ["run_mismatch"]
+    assert not [call for call in rpc.calls if call[0] == "turn/steer"]
+
+
+def test_cancel_wins_before_queued_start_submission(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    adapter.queue(run["id"], input_message(run["id"], "q1", "late queue"))
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_start = adapter._start_queued_turn
+
+    def delayed_start(run_id, prior_turn):
+        entered.set()
+        try:
+            assert release.wait(2)
+            original_start(run_id, prior_turn)
+        finally:
+            finished.set()
+
+    adapter._start_queued_turn = delayed_start
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert entered.wait(2)
+    assert adapter.cancel(run["id"])["outcome"] == "interrupted"
+    release.set()
+    assert finished.wait(2)
+    assert len([call for call in rpc.calls if call[0] == "turn/start"]) == 1
+    assert adapter.run(run["id"])["inputMessages"][0]["status"] == "discarded"
+
+
+def test_unconfirmed_queued_start_clears_buffered_callbacks(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {"input": [{"type": "text", "text": "Start"}]})
+    adapter.queue(run["id"], input_message(run["id"], "q1", "Continue"))
+    original_call = rpc.call
+
+    def fail_after_callbacks(method, params, timeout=30):
+        if method == "turn/start":
+            adapter._notification("item/started", {
+                "threadId": conversation["nativeId"], "turnId": "unconfirmed",
+                "item": {"id": "early", "type": "agentMessage", "text": "private"}})
+            adapter._request(777, "item/tool/requestUserInput", {
+                "threadId": conversation["nativeId"], "turnId": "unconfirmed"})
+            raise RuntimeError("unexpected failure")
+        return original_call(method, params, timeout)
+
+    rpc.call = fail_after_callbacks
+    finish_fake_run(adapter, rpc, conversation, run)
+    assert wait_for_queued_turn(adapter, run["id"], "native-turn-2")["outcome"] == "failed"
+    assert adapter._early_notifications == []
+    assert adapter._early_requests == []
+    assert rpc.responses[-1] == (777, None, {"code": -32602,
+        "message": "Native run start was not confirmed"})
 
 
 def test_owned_conversation_idle_only_runs_and_opaque_model(codex_adapter):

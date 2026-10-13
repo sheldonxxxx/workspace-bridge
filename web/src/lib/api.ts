@@ -3,7 +3,7 @@ export type Json = Record<string, unknown>;
 export interface WorkspaceRoute {
   adapter_id: string;
   name: string;
-  runtime_type: "pi" | "codex" | "claude";
+  runtime_type: "pi" | "codex" | "claude" | "opencode";
   node_id?: string;
   node_name?: string;
   adapter_enabled: boolean;
@@ -44,7 +44,7 @@ export interface WorkspaceRoute {
 export interface AvailableAdapter {
   adapter_id: string;
   name: string;
-  runtime_type: "pi" | "codex" | "claude";
+  runtime_type: "pi" | "codex" | "claude" | "opencode";
   enabled: boolean;
   node_id: string;
   route_enabled?: boolean;
@@ -93,7 +93,7 @@ export interface AdapterInfo {
   node_id?: string;
   node_name?: string;
   name: string;
-  runtime_type: "pi" | "codex" | "claude";
+  runtime_type: "pi" | "codex" | "claude" | "opencode";
   base_url: string;
   enabled: boolean;
   revision: string;
@@ -255,11 +255,16 @@ export interface Run {
   model?: string;
   reasoning?: string | null;
   token_usage?: TokenUsage | null;
+  input_capabilities?: { steer: boolean; queue: boolean };
+  input_messages?: RunInputReceipt[];
+  input_message?: RunInputReceipt;
   created?: string;
   started?: string;
   finished?: string;
   duration_seconds?: number;
   conversation_id?: string;
+  runtime_conversation_id?: string | null;
+  images?: Array<{ path: string; sha256?: string; preview_sha256?: string }>;
   updated?: string;
   continue_from_run_id?: string;
   parent_run_id?: string;
@@ -271,6 +276,11 @@ export interface Run {
     effective_revision?: string | null;
     resolved_summary?: Record<string, unknown>;
   };
+}
+export interface RunInputReceipt {
+  requestId: string;
+  mode: "steer" | "queue";
+  status: "queued" | "delivered" | "discarded" | "unknown";
 }
 export interface Interaction {
   id: string;
@@ -285,6 +295,7 @@ export interface Interaction {
       id: string;
       question?: string;
       header?: string;
+      required?: boolean;
       options?: Array<{ label: string }>;
     }>;
   };
@@ -388,7 +399,9 @@ export function runtimeName(id: string): string {
       ? "Codex"
       : id === "claude"
         ? "Claude Code"
-        : id;
+        : id === "opencode"
+          ? "OpenCode"
+          : id;
 }
 export function adapterName(
   adapter?: Pick<AdapterInfo, "name" | "runtime_type">,

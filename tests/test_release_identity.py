@@ -64,6 +64,8 @@ def test_python_core_build_id_is_deterministic_and_excludes_noise(tmp_path):
     assert all(not rel.endswith((".pyc", ".pyo")) for rel in inputs)
     assert any(rel.endswith(".py") for rel in inputs)
     assert all(not rel.startswith("skills/") for rel in inputs)
+    assert "opencode_permission_plugin/index.mjs" in inputs
+    assert "opencode_permission_plugin/package.json" in inputs
     # Changing a production input changes the ID (framing is unambiguous).
     import hashlib
     hasher = hashlib.sha256()
@@ -76,6 +78,7 @@ def test_python_core_build_id_is_deterministic_and_excludes_noise(tmp_path):
 
 
 def test_bridge_node_codex_share_python_core_build_id():
+    from workspace_bridge.release import opencode_release
     bridge = bridge_release()
     node = node_release()
     codex = codex_release()
@@ -85,7 +88,10 @@ def test_bridge_node_codex_share_python_core_build_id():
     assert node["component"] == "node"
     assert codex["component"] == "codex-host-adapter"
     # Codex keeps its adapter contract version separate from adapterVersion fields.
-    assert codex["component_version"] == "0.2.0"
+    assert codex["component_version"] == "0.3.0"
+    opencode = opencode_release()
+    assert opencode["build_id"] == bridge["build_id"]
+    assert opencode["component"] == "opencode-host-adapter"
 
 
 def _legacy_descriptor_payload(runtime="pi"):
@@ -155,12 +161,12 @@ def test_node_status_and_codex_descriptor_expose_release():
     native = CodexHostAdapter(tmp / "codex-adapter", projects, rpc=FakeCodexRpc())
     try:
         descriptor = native.descriptor()
-        assert descriptor["runtime"]["adapterVersion"] == "0.2.0"
+        assert descriptor["runtime"]["adapterVersion"] == "0.3.0"
         assert "adapterVersion" in descriptor["runtime"]
         assert "nativeVersion" in descriptor["runtime"]
         release = validate_release(descriptor["release"])
         assert release["component"] == "codex-host-adapter"
-        assert release["component_version"] == "0.2.0"
+        assert release["component_version"] == "0.3.0"
         assert release["product_version"] == __version__
         assert release["build_id"] == bridge_release()["build_id"]
     finally:

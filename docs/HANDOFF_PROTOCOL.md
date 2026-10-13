@@ -24,6 +24,17 @@ the project or save old source. Handoff hashes allow `read_handoff` to indicate 
 locally modified planning document with `matches_published=false`. This is a
 planning integrity signal, not an automated code-review gate.
 
+For visual context, upload a raster image with `write_image` under
+`.workspace-handoff/attachments/`, then include its workspace-relative `path`,
+`description` and returned original-file `sha256` in `prepare_handoff.attachments`.
+Existing allowed workspace images can also be referenced using the source hash
+from `read_file`. Up to 20 unique references are validated and checked at publication,
+and recorded in `CONTEXT.md` with their formats, sizes and dimensions. Context and
+attachments share a 64 MiB total read budget. Images remain at their referenced
+paths; publication does not copy or snapshot them. Verify current hashes before
+using them, and stop an implementer before replacing a dispatched reference.
+Uploading an image alone does not publish a job or start an agent.
+
 ## Optional document writing
 
 `write_file` and `edit_file` are general tools whose default write scope limits

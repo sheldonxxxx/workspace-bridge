@@ -368,7 +368,8 @@ export function ProfileManager({
                         {selectedConfig
                           ? runtimeType === "pi"
                             ? `Files outside workspace: ${(selectedConfig as unknown as PiConfig).external_access?.default_mode || "deny"}`
-                            : runtimeType === "claude"
+                            : runtimeType === "claude" ||
+                                runtimeType === "opencode"
                               ? `Edits ${(selectedConfig as unknown as ClaudeConfig).edits || "deny"} · shell ${(selectedConfig as unknown as ClaudeConfig).shell || "deny"} · web ${(selectedConfig as unknown as ClaudeConfig).web || "deny"} · extensions ${(selectedConfig as unknown as ClaudeConfig).extensions || "deny"}`
                               : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
                           : "Controls unavailable from the installed adapter"}
@@ -664,14 +665,23 @@ export function ProfileManager({
                         </div>
                       </section>
                     </>
-                  ) : runtimeType === "claude" ? (
+                  ) : runtimeType === "claude" || runtimeType === "opencode" ? (
                     <section className="profile-section">
-                      <h3>Claude Code security profile</h3>
+                      <h3>{runtimeName(runtimeType)} security profile</h3>
                       <small>
                         Reading inside the workspace is always allowed. Git
                         internals, <code>.env</code> files, and paths outside
                         the workspace are always denied, and edits never reach{" "}
-                        <code>.claude</code> or <code>.mcp.json</code>.
+                        {runtimeType === "opencode" ? (
+                          <>
+                            <code>.opencode</code>, <code>.agents</code>, or{" "}
+                            <code>opencode.json</code>.
+                          </>
+                        ) : (
+                          <>
+                            <code>.claude</code> or <code>.mcp.json</code>.
+                          </>
+                        )}
                       </small>
                       <SelectField
                         id="profile-claude-edits"

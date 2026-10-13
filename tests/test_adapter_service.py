@@ -616,3 +616,18 @@ def test_claude_default_executable_name_and_cli_choice(tmp_path, capsys):
                   "--claude-binary", "claude"])
     assert "Initialized claude adapter" in capsys.readouterr().out
     assert load_adapter_config(state)["claude_binary"] == "claude"
+
+
+def test_opencode_instance_lifecycle_environment(tmp_path):
+    root=tmp_path/'projects';root.mkdir()
+    executable=_fake_executable(tmp_path,'workspace-bridge-opencode-adapter')
+    config,token=initialize_adapter(tmp_path/'opencode',runtime_type='opencode',projects_root=str(root),
+        executable=str(executable),opencode_binary='/usr/local/bin/opencode2')
+    assert config['port']==8776
+    loaded=load_adapter_config(tmp_path/'opencode')
+    env=build_adapter_env(loaded,token,tmp_path/'opencode',base_env={'PATH':'/bin','WB_CODEX_PROJECTS_ROOT':'stale'})
+    assert env['WB_OPENCODE_BINARY']=='/usr/local/bin/opencode2'
+    assert env['WB_OPENCODE_PROJECTS_ROOT']==str(root)
+    assert 'WB_CODEX_PROJECTS_ROOT' not in env
+    assert adapter_label('opencode',config['service_id']).startswith('com.workspace-bridge.adapter.opencode.')
+    assert adapter_unit('opencode',config['service_id']).startswith('workspace-bridge-adapter-opencode-')

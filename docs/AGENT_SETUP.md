@@ -73,6 +73,7 @@ These are generic examples, not detected settings:
 | Native Node | `$HOME/.local/state/workspace-bridge-node` | `8770` |
 | Pi instance | `$HOME/.local/state/workspace-bridge-adapter-pi` | `8780` |
 | Codex instance | `$HOME/.local/state/workspace-bridge-adapter-codex` | `8772` |
+| OpenCode v2 instance | `$HOME/.local/state/workspace-bridge-adapter-opencode` | `8776` |
 | Claude Code instance | `$HOME/.local/state/workspace-bridge-adapter-claude` | `8774` |
 
 Use distinct available ports in `1024–65535` for listeners on the same host.
@@ -106,8 +107,8 @@ uv tool install workspace-bridge
 uv tool install 'workspace-bridge[claude]'
 ```
 
-The Python package provides Bridge, Node, Codex adapter, and Claude Code
-adapter commands. Native Codex is separate. If adding the Claude extra to an
+The Python package provides Bridge, Node, Codex, Claude Code, and OpenCode v2
+adapter commands. OpenCode v2 is a separate existing native installation. Native Codex is separate. If adding the Claude extra to an
 existing installation requires `--force`, include the replacement in the plan.
 
 Only on hosts selected for Pi:
@@ -247,7 +248,7 @@ Hand the user these steps for the loopback Manager (for the example port,
 5. Read each adapter's live model catalog, then save enabled selectors and
    the default model.
 6. Enable each exact same-Node `(workspace_id, adapter_id)` route with its
-   security binding. Pi and Claude Code use a Bridge profile; Codex can use
+   security binding. Pi, Claude Code, and OpenCode use a Bridge profile; Codex can use
    a Bridge profile or its native configuration source.
 
 Write scope controls publication and mutation; route enablement controls

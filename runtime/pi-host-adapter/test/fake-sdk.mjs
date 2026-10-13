@@ -21,6 +21,9 @@ export class FakeSdkSession {
     this.promptCalls = [];
     this.promptImpl = null;
     this.abortCalls = 0;
+    this.clearQueueCalls = 0;
+    this.queuedSteering = [];
+    this.queuedFollowUp = [];
     this.setModelCalls = [];
     this.disposeCalls = 0;
     this.disposed = false;
@@ -98,6 +101,15 @@ export class FakeSdkSession {
 
   async abort() {
     this.abortCalls += 1;
+  }
+
+  clearQueue() {
+    this.clearQueueCalls += 1;
+    this._pendingMessageCount = 0;
+    const result = { steering: [...this.queuedSteering], followUp: [...this.queuedFollowUp] };
+    this.queuedSteering = [];
+    this.queuedFollowUp = [];
+    return result;
   }
 
   async setModel(model) {

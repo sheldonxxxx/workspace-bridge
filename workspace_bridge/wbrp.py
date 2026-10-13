@@ -19,7 +19,7 @@ from .security import BridgeError, redact
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
-OPTIONAL_FEATURES = frozenset({"events", "steering", "imageInput", "securityRebind",
+OPTIONAL_FEATURES = frozenset({"events", "steering", "queueing", "inputControls", "imageInput", "securityRebind",
                                "usageLimits"})
 ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
@@ -73,7 +73,30 @@ def validate_run_state(value: dict) -> dict:
             value.get("securityBinding"))}
     if "usage" in value:
         value = {**value, "usage": _validate_run_usage(value.get("usage"))}
+    if "inputMessages" in value:
+        value = {**value, "inputMessages": validate_input_messages(value["inputMessages"])}
     return value
+
+
+def validate_input_messages(value: Any) -> list[dict]:
+    """Keep only bounded, text-free input receipts at the runtime boundary."""
+    if not isinstance(value, list) or len(value) > 50:
+        raise RuntimeUnavailable("Runtime input receipts are invalid")
+    result = []
+    seen = set()
+    for row in value:
+        if (not isinstance(row, dict)
+                or not isinstance(row.get("requestId"), str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", row["requestId"]) is None
+                or row["requestId"] in seen
+                or not isinstance(row.get("mode"), str)
+                or row["mode"] not in {"steer", "queue"}
+                or not isinstance(row.get("status"), str)
+                or row["status"] not in {"queued", "delivered", "discarded", "unknown"}):
+            raise RuntimeUnavailable("Runtime input receipts are invalid")
+        seen.add(row["requestId"])
+        result.append({key: row[key] for key in ("requestId", "mode", "status")})
+    return result
 
 
 def _validate_run_usage(value: Any) -> dict:
@@ -374,7 +397,7 @@ class HttpRuntimeAdapter:
         if (not isinstance(adapter_id, str)
                 or not re.fullmatch(r"adapter_[0-9a-f]{24}", adapter_id)):
             raise BridgeError("Invalid adapter id", "invalid_arguments")
-        if runtime_type not in {"pi", "codex", "claude"}:
+        if runtime_type not in {"pi", "codex", "claude", "opencode"}:
             raise BridgeError("Invalid runtime type", "invalid_arguments")
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
@@ -407,7 +430,7 @@ class HttpRuntimeAdapter:
             url += "?" + urllib.parse.urlencode({k: v for k, v in query.items()
                                                    if v is not None})
         raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        if raw_body is not None and len(raw_body) > 512 * 1024:
+        if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
             raise BridgeError("Adapter request is too large", "invalid_arguments")
         headers = {"Accept": "application/json", "X-Runtime-Token": self.token}
         if raw_body is not None:
@@ -654,11 +677,29 @@ class HttpRuntimeAdapter:
     def cancel(self, run_id: str) -> dict:
         return self._request("POST", f"/v1/runs/{_identifier(run_id, 'run id')}/cancel", body={})
 
-    def steer(self, run_id: str, input_items: list[dict]) -> dict:
-        if not self.descriptor().supports("steering"):
-            raise RuntimeUnsupported("Runtime does not support steering")
-        return self._request("POST", f"/v1/runs/{_identifier(run_id, 'run id')}/steer",
-                             body={"expectedRunId": run_id, "input": input_items})
+    def _run_input(self, mode: str, run_id: str, input_items: list[dict], request_id: str) -> dict:
+        ident = _identifier(run_id, "run id")
+        if (not isinstance(request_id, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", request_id) is None
+                or not isinstance(input_items, list) or not 1 <= len(input_items) <= 10
+                or any(not isinstance(item, dict) or set(item) != {"type", "text"}
+                       or item.get("type") != "text" or not isinstance(item.get("text"), str)
+                       or not item["text"].strip() or len(item["text"]) > 60000
+                       for item in input_items)
+                or sum(len(item["text"]) for item in input_items) > 60000):
+            raise BridgeError("Invalid run input", "invalid_arguments")
+        feature = "steering" if mode == "steer" else "queueing"
+        descriptor = self.descriptor()
+        if not descriptor.supports(feature) or not descriptor.supports("inputControls"):
+            raise RuntimeUnsupported(f"Runtime does not support {feature}")
+        return validate_run_state(self._request("POST", f"/v1/runs/{ident}/{mode}",
+            body={"expectedRunId": ident, "requestId": request_id, "input": input_items}))
+
+    def steer(self, run_id: str, input_items: list[dict], request_id: str) -> dict:
+        return self._run_input("steer", run_id, input_items, request_id)
+
+    def queue(self, run_id: str, input_items: list[dict], request_id: str) -> dict:
+        return self._run_input("queue", run_id, input_items, request_id)
 
     def interactions(self, run_id: str) -> list[dict]:
         value = self._request("GET", f"/v1/runs/{_identifier(run_id, 'run id')}/interactions")

@@ -1,6 +1,6 @@
 # Architecture
 
-Source-accurate reference for Workspace Bridge `0.2.0`: Bridge control plane
+Source-accurate reference for Workspace Bridge `0.3.0`: Bridge control plane
 plus local Manager, authoritative Nodes, Node-owned adapter instances
 (Pi/Codex/Claude Code), exact workspace routes, Runtime Protocol v1, optional secure MCP
 tunnel, native services on macOS and Linux, manual package updates, and
@@ -47,6 +47,12 @@ Component responsibilities:
 - `git_evidence.py`: bounded read-only Git status and diff collection.
 - `run_coordinator.py`: adapter-ID-keyed conversations, runs, interactions,
   and activity persistence plus reconciliation for Runtime Protocol v1.
+- `adapter_events.py`: bounded event readers keyed by exact Node/adapter
+  authority. Native events trigger snapshot reconciliation, with periodic
+  polling retained for recovery and adapters without event support.
+- `manager_events.py`: bounded, process-local Manager SSE hints containing
+  run IDs. Reconnects and queue overflow request a REST snapshot refresh;
+  this stream has no durable event replay or runtime content.
 - `wbrp.py`: validated bounded private HTTP client for adapters.
 - `codex_host_adapter.py` / `codex_rpc.py`: Codex app-server host adapter
   with native thread ownership.
@@ -73,7 +79,9 @@ Component responsibilities:
 - `embedded_skill.py` plus `skills/project-lead/SKILL.md`: packaged
   project-lead guidance served through the MCP skills extension.
 - `web/` plus `static/dist/`: Manager source and compiled assets served by
-  Starlette on the same loopback listener.
+  Starlette on the same loopback listener. `web/src/features/runs/` separates
+  the Run Inspector, API loaders, feed presentation, state hooks, and SSE
+  subscriptions from the main Manager shell.
 
 ## Authority and data path
 
@@ -180,6 +188,17 @@ ownership proof (exists, same workspace, idle on the current same-Node
 adapter). Bridge never replays a prompt or approval on recovery; unconfirmed
 operations become interrupted or orphaned with stale interactions.
 
+Adapters that advertise events have their native hints read through the Node.
+The coordinator validates instance/cursor and conversation/run bindings before
+refreshing authoritative snapshots. Committed projection changes notify the
+Manager through an authenticated, bounded SSE connection; unchanged snapshots
+emit no refresh hint. The UI reloads run details, interactions, activity, and
+execution projections through REST, coalesces bursts, and retains periodic
+refresh plus refresh on returning to the visible page. REST continues to own
+all control operations. Loaded history stays available while the newest page
+overlaps it; a disjoint page after a large burst restarts pagination so records
+between the pages remain reachable. See [Runtime Protocol recovery](RUNTIME_PROTOCOL.md#recovery).
+
 ## Native versus container control plane
 
 ```mermaid
@@ -252,7 +271,7 @@ is loopback-only in both modes and is never tunnelled.
 ## Release identity and skew
 
 Every deployed component exposes a bounded content-addressed identity with
-product `workspace-bridge`, product version `0.2.0`, component name and
+product `workspace-bridge`, product version `0.3.0`, component name and
 version, and a deterministic build ID over production inputs only. The
 product version is the release; the component version is that component's
 own version; adapter and native semantic versions stay separate fields.

@@ -4,12 +4,12 @@ Workspace Bridge owns workspace authorization, handoffs, model policy, run
 records, and audit. An authoritative Node owns the workspace filesystem/Git/
 handoff data plane and runtime adapter registry/secrets. A runtime adapter owns
 its native process or SDK, session files, model syntax, and security enforcement.
-Pi, Codex, and Claude Code adapters implement the same resource contract; Bridge never sends a
+Pi, Codex, Claude Code, and OpenCode adapters implement the same resource contract; Bridge never sends a
 vendor RPC directly to an adapter.
 
 ## Bridge routing identities
 
-`RuntimeType` is the protocol family (`pi`, `codex`, or `claude`) in the native descriptor.
+`RuntimeType` is the protocol family (`pi`, `codex`, `claude`, or `opencode`) in the native descriptor.
 It describes behavior and does not identify a destination. `AdapterInstance` is
 one Node-owned destination with an opaque `adapter_id`, unique display name,
 runtime type, Node-local/reachable base URL, Node-held per-instance token,
@@ -31,7 +31,7 @@ shared Bridge environment variable.
 | Resource | Meaning |
 | --- | --- |
 | Conversation | Bridge-owned native context bound to one workspace, exact same-Node `adapter_id`, Node/adapter connection revisions, descriptive `runtime_type`, security source, and applied security revision. |
-| Run | One accepted operation on one AdapterInstance in a conversation, with immutable Node/adapter revision and effective-security evidence. Pi: one prompt through native idle and a terminal assistant message. Codex: one turn. Claude Code: one prompt through the terminal result message. |
+| Run | One accepted logical operation on one AdapterInstance in a conversation, with immutable Node/adapter revision and effective-security evidence. It includes the initial prompt and any explicitly admitted corrections or queued follow-ups, through native settlement. |
 | Activity | One command, file change, tool call, search, subagent action, or other observable action within a run. |
 | Interaction | One live blocking request with exact adapter-provided response options or form fields. |
 
@@ -51,6 +51,7 @@ GET    /v1/conversations/{id}/runs/{clientRunId}
 GET    /v1/runs/{id}
 POST   /v1/runs/{id}/cancel
 POST   /v1/runs/{id}/steer
+POST   /v1/runs/{id}/queue
 GET    /v1/runs/{id}/interactions
 POST   /v1/interactions/{id}/resolve
 GET    /v1/runs/{id}/activities
@@ -63,7 +64,7 @@ GET    /v1/usage-limits          (optional `usageLimits` feature)
 adapter/native versions, an instance ID, and a map of feature names to positive
 integer contract versions. Missing features mean unsupported. The required v1
 features are `models`, `conversations`, `runs`, `activities`, and
-`interactions`; `events`, `steering`, `imageInput`, `securityRebind`, and
+`interactions`; `events`, `steering`, `queueing`, `inputControls`, `imageInput`, `securityRebind`, and
 `usageLimits` are optional. A feature
 may be advertised only when its full contract is implemented.
 Unknown optional feature names and higher optional feature versions are
@@ -87,8 +88,8 @@ fieldwise delta of the stable cumulative `tokenUsage.total` snapshots
 (`total - baseline`, where the baseline is the predecessor's cumulative
 thread total captured at admission and persisted for restart); `tokenUsage.last`
 carries only the newest model response and is never used alone as the run
-total. Claude Code reports the terminal result's run total, with per-message
-sums as the interim value while the run is active. Pi aggregates provider-reported assistant/model-call usage for that
+total. Claude Code sums confirmed result usage across responses, with
+per-message usage for the active response added to the interim value. Pi aggregates provider-reported assistant/model-call usage for that
 run's tool loop (never streaming snapshots or previous conversation turns).
 Duplicate `tokenUsage.total` notifications are idempotent snapshots (never
 summed), and decreasing/reset or malformed cumulatives are dropped fieldwise
@@ -121,7 +122,7 @@ unhealthiness, and quota is never part of `/api/status`.
 
 `POST /conversations/{id}/runs` is **idle-only**. It must either accept exactly
 one new run or return `409 conversation_busy`; it must never queue or steer.
-Steering requires a separate request with the exact expected active run ID.
+Steering and queueing require separate requests with the exact expected active run ID.
 Bridge supplies a unique `clientRunId` on admission. The adapter stores it
 before asking its native engine to start and returns the same run for a repeat
 with identical input. After a lost response or Bridge restart, the lookup above
@@ -130,6 +131,35 @@ The adapter refuses conversations it did not create and refuses a workspace or
 profile mismatch. A model selector is an opaque string returned by the adapter
 and is passed back unchanged. Model changes do not alter the conversation's
 security binding.
+
+`POST /runs/{id}/steer` and `/queue` accept
+`{expectedRunId, requestId, input:[{type:"text", text:"..."}]}`. The Bridge
+sends one bounded text instruction. Each adapter advertises contract version 1
+of `steering` and `queueing` only when supported. The additional `inputControls:1`
+feature confirms the request-ID and receipt contract below; the Bridge requires
+it before sending either operation, so older steering-only adapters fail before
+receiving input. A request ID is unique per
+run across both modes; exact retries return the stored receipt without
+resubmission, including after a terminal outcome or restart. Conflicting input
+or mode returns `409 idempotency_conflict`. New input requires an active owned
+run; admission is serialized against native completion and cancellation.
+
+Queueing follows the current successful response in FIFO order, within the
+same run and native conversation under its captured settings. The adapter
+advances queued work without Bridge reads. Codex starts additional owned native
+turns; Pi uses its native follow-up queue; Claude uses successive queries on the
+same client. Steering uses Codex/Pi native steering or Claude's native
+interrupt followed by a new correction. It never replays the original prompt.
+The run stays active until all admitted work settles; its usage includes those
+responses and its result is the last response.
+
+Snapshots may contain `inputMessages`, up to 50 text-free receipts
+`{requestId, mode, status}`. Status is `queued`, `delivered` (native submission),
+`discarded`, or `unknown` (delivery unconfirmed). There may be at most 20
+pending inputs. Adapters persist metadata and input hashes for idempotency,
+while pending text exists only in the live native/adapter process. Cancellation,
+terminal failure, and restart clear pending input without resubmission.
+Ambiguous delivery is retained as unknown and never retried automatically.
 
 The local Manager discovers and edits security profiles through the selected
 Node-owned AdapterInstance. `GET /profiles` returns each profile's opaque config, revision, and mutable flag
@@ -225,12 +255,27 @@ advertise `imageInput`; the current Pi, Codex, and Claude Code adapters advertis
 
 When an adapter advertises events, they have an instance ID and monotonic
 cursor. They are latency hints; conversation, run, interaction, and activity
-snapshots are the source of truth. Bridge currently polls active run snapshots
-and does not rely on an event cursor. On restart it reconciles those records;
+snapshots are the source of truth. Bridge reads events for active runs on the
+exact Node/adapter authority and reconciles bound snapshots after matching
+hints. A page's envelope cursor can be ahead of its delivered events; readers
+advance to the final delivered cursor, detect gaps and instance changes, and
+refresh snapshots on reconnection. Event cursors are process-local and never
+authorize a state transition. A periodic snapshot sweep remains available for
+adapters without events, lost hints, and failed event reads. On restart Bridge
+reconciles those records;
 it may rebind a live run or interaction only when the adapter positively
 identifies the same native operation/request. Otherwise the run becomes
 `interrupted` or `orphaned` and its interactions become stale. It never replays
 a prompt or approval on recovery.
+
+The authenticated local Manager receives separate SSE invalidation hints at
+`GET /api/run-events`, optionally filtered by `run_id`. `run.changed` contains
+only a Bridge run ID; `reset` tells the UI to reload its REST projections.
+Every connection and reconnection starts with a reset, including when the
+client supplies `Last-Event-ID`; there is no durable SSE replay. Slow clients
+receive a reset when bounded queues overflow. Session expiry, logout, or
+password changes terminate existing streams. This Manager transport is
+independent of [MCP run events](EVENTS.md) and their signed webhook outbox.
 
 The adapter may resume a conversation it created. It must never adopt a Pi TUI
 session, Codex Desktop/TUI thread, a Claude Code terminal session, or another
@@ -252,3 +297,8 @@ Events are optional and consumed only by adapters that advertise them.
 Adapter-specific management (credentials, packages, process restart) stays
 outside this protocol. Profile configuration is an explicit local-admin
 operation through Bridge and the private adapter surface, never an MCP tool.
+
+OpenCode v2 is a first-party Python host adapter using native v2 sessions,
+messages, inbox delivery, permissions, forms, and durable logs. Its native
+storage is shared with the terminal; exact adapter-owned IDs govern recovery,
+not database isolation. See [Runtimes](RUNTIMES.md#opencode-v2).
