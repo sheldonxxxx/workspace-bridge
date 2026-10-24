@@ -794,21 +794,6 @@ function WorkspaceCard({
                     {blockers[0]?.check?.remediation && (
                       <small>{blockers[0].check.remediation}</small>
                     )}
-                    <Button
-                      variant="link"
-                      size="sm"
-                      className="inline-action"
-                      onClick={() =>
-                        onNavigate(
-                          diagnosticDestination(
-                            blockers[0]?.check,
-                            blockers[0]?.code,
-                          ),
-                        )
-                      }
-                    >
-                      View blockers
-                    </Button>
                   </div>
                 )}
                 <div className="target-actions">
