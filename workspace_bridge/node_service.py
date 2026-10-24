@@ -16,6 +16,7 @@ import threading
 from datetime import datetime, timezone
 
 from .browse import Browser
+from .checkpoint_store import CheckpointStore
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
                     decode_image_upload, image_capabilities, read_image,
@@ -27,6 +28,15 @@ from .wbrp import HttpRuntimeAdapter
 from .adapter_registry import validate_base_url
 from .schema_upgrade import widen_runtime_type_check
 from . import __version__
+
+
+CHECKPOINT_OPERATIONS = {
+    "checkpoint_capture": frozenset({"checkpoint_id", "budget_ms", "max_files", "max_bytes"}),
+    "checkpoint_changes": frozenset({"from_id", "to_id", "offset", "limit"}),
+    "checkpoint_diff": frozenset({"from_id", "to_id", "path", "offset", "max_bytes"}),
+    "checkpoint_purge": frozenset({"checkpoint_ids", "everything"}),
+    "checkpoint_stats": frozenset(),
+}
 
 
 def _now() -> str:
@@ -155,6 +165,16 @@ class NodeService:
         elif not read_only:
             widen_runtime_type_check(self.db, "runtime_adapters")
         self.browser = Browser(self)
+        self._checkpoints = None
+
+    @property
+    def checkpoints(self) -> CheckpointStore:
+        if self.read_only:
+            raise BridgeError("Checkpoints are unavailable in read-only mode", "checkpoint_storage")
+        with self.lock:
+            if self._checkpoints is None:
+                self._checkpoints = CheckpointStore(self.state, self.db, self.lock)
+            return self._checkpoints
 
     def close(self) -> None:
         self.db.close()
@@ -263,7 +283,7 @@ class NodeService:
         # no package-manager commands.
         return {"status": "ok", "protocol": 1, "node_version": __version__,
                 "release": node_release(), "capabilities": [
-            "files", "search", "git", "handoff-artifacts", "runtime-adapters"],
+            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
@@ -394,6 +414,21 @@ class NodeService:
         if operation == "git_diff":
             with self.safe_root(ws) as safe:
                 return GitEvidence.diff(safe, ws, **body["arguments"])
+        if operation in CHECKPOINT_OPERATIONS:
+            args = body.get("arguments")
+            if not isinstance(args, dict) or not set(args) <= CHECKPOINT_OPERATIONS[operation]:
+                raise BridgeError("Invalid checkpoint arguments", "invalid_arguments")
+            store = self.checkpoints
+            if operation == "checkpoint_capture":
+                with self.safe_root(ws) as safe:
+                    return store.capture(safe, ws, **args)
+            if operation == "checkpoint_changes":
+                return store.changes(ws, **args)
+            if operation == "checkpoint_diff":
+                return store.diff(ws, **args)
+            if operation == "checkpoint_purge":
+                return store.purge(ws, **args)
+            return store.stats(ws)
         if operation == "read_handoff_artifact":
             args = body["arguments"]
             path = args["path"]

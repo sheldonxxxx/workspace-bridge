@@ -272,3 +272,21 @@ def test_invalid_identifiers_fail_closed(setup):
             setup["store"].capture(safe, setup["ws"], "../escape")
         with pytest.raises(BridgeError):
             setup["store"].capture(safe, {**setup["ws"], "id": "../ws"}, "ckp_" + "1" * 24)
+
+
+def test_node_protocol_operations_round_trip(env):
+    client = env["service"].node_registry.client(env["node_id"])
+    ws = env["service"].workspace(env["id"])
+    first = client.workspace("checkpoint_capture", ws, {"checkpoint_id": "ckp_" + "1" * 24})
+    (env["root"] / "README.md").write_text("# Alpha\nChanged\n")
+    second = client.workspace("checkpoint_capture", ws, {"checkpoint_id": "ckp_" + "2" * 24})
+    ids = {"from_id": first["checkpoint_id"], "to_id": second["checkpoint_id"]}
+    changes = client.workspace("checkpoint_changes", ws, ids)
+    assert changes["changes"] == [{"path": "README.md", "status": "modified"}]
+    assert "+Changed" in client.workspace("checkpoint_diff", ws, ids)["patch"]
+    assert client.workspace("checkpoint_stats", ws, {})["checkpoints"] == 2
+    with pytest.raises(BridgeError) as exc:
+        client.workspace("checkpoint_diff", ws, {**ids, "unexpected": True})
+    assert exc.value.code == "invalid_arguments"
+    assert client.workspace("checkpoint_purge", ws, {"everything": True})["removed"] == 2
+    assert "checkpoints" in client.status()["capabilities"]
