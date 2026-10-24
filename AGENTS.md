@@ -34,7 +34,7 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Tokens stay out of APIs, diagnostics, logs, errors, events, docs, and
   chat. One-time token output stays local.
 - No shell, Git mutation, per-chat ACL, automatic updater, or automatic
-  support upload. The Manager stays loopback-only and is never tunnelled.
+  support upload.
 
 ## Inspect before edits
 
