@@ -865,7 +865,12 @@ class Service:
 
     def git_diff(self, ws: dict, *, mode: str, path: str | None = None,
                  offset: int = 0, max_bytes: int = 3000,
-                 expected_status_sha256: str | None = None) -> dict:
+                 expected_status_sha256: str | None = None, run_id: str | None = None) -> dict:
+        if mode == "run":
+            if run_id is None or expected_status_sha256 is not None:
+                raise BridgeError("Run diffs need run_id and no status hash", "invalid_arguments")
+            return self.run_coordinator.checkpoints.diff(ws, run_id, path=path, offset=offset,
+                                                          max_bytes=max_bytes)
         return self.node_registry.client(ws["node_id"]).workspace("git_diff", ws, {
             "mode": mode, "path": path, "offset": offset, "max_bytes": max_bytes,
             "expected_status_sha256": expected_status_sha256})

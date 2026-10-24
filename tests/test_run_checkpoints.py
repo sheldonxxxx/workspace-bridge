@@ -209,3 +209,27 @@ def test_overlapping_runs_in_one_workspace_are_reported(modern_env, payload):
     assert created < "9000"
     assert _read(service, ws_id, token, first)["checkpoint"]["overlapping_runs"] == [second]
     assert _read(service, ws_id, token, second)["checkpoint"]["overlapping_runs"] == [first]
+
+
+def test_mcp_git_diff_run_mode_schema_and_dispatch(modern_env):
+    from pydantic import ValidationError
+
+    from workspace_bridge.api import TOOLS
+    service, ws_id, token, job, native, _ = modern_env
+    run = _start(service, ws_id, token, job)
+    model = TOOLS["git_diff"][0]
+    arguments = model.model_validate({"workspace_id": ws_id, "mode": "run",
+                                      "run_id": run["run_id"]}).model_dump()
+    arguments.pop("workspace_id")
+    with pytest.raises(BridgeError) as exc:
+        service.call(ws_id, token, "git_diff", arguments)
+    assert exc.value.code == "checkpoint_pending"
+    (_root(service, ws_id) / "feature.py").write_text("VALUE = 1\n")
+    _finish_test_run(service, native, ws_id, run["run_id"])
+    service.run_coordinator.checkpoints.process_pending()
+    result = service.call(ws_id, token, "git_diff", arguments)
+    assert "+VALUE = 1" in result["patch"] and result["mode"] == "run"
+    for invalid in ({"mode": "run"}, {"mode": "head", "run_id": run["run_id"]},
+                    {"mode": "run", "run_id": run["run_id"], "expected_status_sha256": "0" * 64}):
+        with pytest.raises(ValidationError):
+            model.model_validate({"workspace_id": ws_id, **invalid})
