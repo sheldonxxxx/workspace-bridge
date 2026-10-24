@@ -26,7 +26,11 @@ untouched; use a fresh state path for them. Back up state before upgrading.
 Stop the service before a plain filesystem copy; preserve SQLite WAL/SHM
 files alongside the database. Alternatively use an explicitly managed SQLite
 online backup procedure. Do not copy only a live database file and assume it
-is consistent. No automatic backup or pruning is configured.
+is consistent. No automatic backup or pruning is configured, except that run
+checkpoints in the Node's `checkpoints/` directory are pruned after 14 days or
+when a workspace's store exceeds 1 GiB. That directory holds copies of
+workspace source; backups may exclude it, which only loses old run diffs.
+Workspace settings in the Manager show checkpoint storage and can clear it.
 
 Keep package installs and tunnel profiles outside mapped projects. Bridge
 state cannot overlap a project. `--state` is a global CLI option placed

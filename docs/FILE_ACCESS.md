@@ -114,5 +114,7 @@ or job record. Edited generated plans retain original publication hashes;
 `matches_published=false` can be an intentional revision, not an audit failure.
 Replaying a handoff does not restore old documents. Never rewrite an active plan
 or move acceptance criteria after implementation. The user pastes the agent's normal
-reply into ChatGPT, which audits current source with general tools. No snapshots,
-review IDs, required result files or server-verified verdicts are restored.
+reply into ChatGPT, which audits current source with general tools. Automated
+runs add Node-held [run checkpoints](MCP_TOOLS.md#run-checkpoints) for a
+run-window diff. No review IDs, required result files or server-verified
+verdicts are restored.

@@ -45,6 +45,12 @@ Component responsibilities:
 - `diagnostics.py`: sole server-side evaluator for the canonical diagnostic
   report and runnable-route model, shared by Doctor and the admin API.
 - `git_evidence.py`: bounded read-only Git status and diff collection.
+- `checkpoint_store.py`: Node-owned shadow Git store per workspace for run
+  checkpoints, filled through SafeRoot reads; never writes the workspace or its
+  `.git`.
+- `run_checkpoints.py`: Bridge pre/post capture hooks, durable post-capture
+  worker, retention, and run-diff reads. Stores IDs, statuses and bounded
+  change summaries only.
 - `run_coordinator.py`: adapter-ID-keyed conversations, runs, interactions,
   and activity persistence plus reconciliation for Runtime Protocol v1.
 - `adapter_events.py`: bounded event readers keyed by exact Node/adapter
@@ -112,8 +118,9 @@ Node, host ceiling check, bounded untrusted source with pagination. The
 Bridge never opens a workspace root itself and never falls back to a local
 checkout. Writes flow through the same route plus the mapping's current
 write scope (`none`, `handoff`, `workspace`), loaded per call. Git evidence
-is fixed-function status and diff output; it creates no snapshots and proves
-no authorship.
+is fixed-function status and diff output and proves no authorship. Run
+checkpoints are the one stored copy of source: the owning Node keeps them in
+its private state, and the Bridge receives only IDs, statuses and paged diffs.
 
 ## Credentials and trust boundaries
 
