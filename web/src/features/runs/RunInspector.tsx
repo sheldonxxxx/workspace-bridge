@@ -29,6 +29,7 @@ import {
   executionOutputPreview,
 } from "./feed-preview";
 import { ExecutionStatus } from "./ExecutionStatus";
+import { RunChanges } from "./RunChanges";
 import { useRunInspector } from "./useRunInspector";
 
 function StateBadge({ value }: { value: string }) {
@@ -498,6 +499,13 @@ export function RunInspector({
                   <p>Not reported</p>
                 )}
               </section>
+              {current.checkpoint && (
+                <RunChanges
+                  key={current.run_id}
+                  runId={current.run_id}
+                  checkpoint={current.checkpoint}
+                />
+              )}
               {pending.map((item) => (
                 <section className="request-panel" key={item.id}>
                   <StateBadge value="Needs review" />

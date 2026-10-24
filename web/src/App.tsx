@@ -92,6 +92,7 @@ import {
 } from "@/lib/api";
 import type { ConfirmState, TextDetail } from "@/components/manager-types";
 import { RunInspector } from "@/features/runs/RunInspector";
+import { WorkspaceCheckpoints } from "@/features/runs/WorkspaceCheckpoints";
 import { getRuns, getWorkspaceRuns } from "@/features/runs/api";
 import { useRunEvents } from "@/features/runs/useRunEvents";
 import { createRefreshQueue } from "@/features/runs/refresh-queue";
@@ -977,6 +978,11 @@ function WorkspaceCard({
           >
             Save settings
           </Button>
+          <WorkspaceCheckpoints
+            workspaceId={ws.id}
+            onConfirm={onConfirm}
+            onNotice={onNotice}
+          />
         </div>
       )}
     </article>

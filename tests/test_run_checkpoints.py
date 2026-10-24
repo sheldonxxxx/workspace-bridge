@@ -233,3 +233,38 @@ def test_mcp_git_diff_run_mode_schema_and_dispatch(modern_env):
                     {"mode": "run", "run_id": run["run_id"], "expected_status_sha256": "0" * 64}):
         with pytest.raises(ValidationError):
             model.model_validate({"workspace_id": ws_id, **invalid})
+
+
+async def test_manager_and_mcp_http_surfaces(modern_env):
+    import httpx
+
+    from admin_helpers import admin_cookie
+    from workspace_bridge.api import make_admin, make_mcp
+    service, ws_id, token, job, native, _ = modern_env
+    run = _start(service, ws_id, token, job)
+    (_root(service, ws_id) / "feature.py").write_text("VALUE = 2\n")
+    _finish_test_run(service, native, ws_id, run["run_id"])
+    service.run_coordinator.checkpoints.process_pending()
+    app = make_admin(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766",
+                                 headers={"Cookie": admin_cookie(app)}) as client:
+        detail = (await client.get(f"/api/runs/{run['run_id']}")).json()
+        assert detail["checkpoint"]["status"] == "complete"
+        diff = await client.get(f"/api/runs/{run['run_id']}/diff", params={"path": "feature.py"})
+        assert diff.status_code == 200 and "+VALUE = 2" in diff.json()["patch"]
+        stats = (await client.get(f"/api/workspaces/{ws_id}/checkpoints")).json()
+        assert stats["checkpoints"] == 2 and stats["store_bytes"] > 0
+        purged = await client.delete(f"/api/workspaces/{ws_id}/checkpoints")
+        assert purged.status_code == 200 and purged.json()["removed"] == 2
+        expired = await client.get(f"/api/runs/{run['run_id']}/diff")
+        assert expired.status_code == 400
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(service)),
+                                 base_url="http://127.0.0.1:8765",
+                                 headers={"X-Bridge-Token": token,
+                                          "Accept": "application/json, text/event-stream"}) as client:
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "git_diff", "arguments": {
+                "workspace_id": ws_id, "mode": "run", "run_id": run["run_id"]}}})
+        result = response.json()["result"]
+        assert result["isError"] is True and "checkpoint_expired" in result["content"][0]["text"]

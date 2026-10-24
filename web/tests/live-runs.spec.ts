@@ -119,6 +119,7 @@ async function mockApi(page: Page) {
     [ALPHA, { executions: [], next_cursor: null }],
     [BETA, { executions: [], next_cursor: null }],
   ]);
+  const diffs = new Map<string, unknown>();
   const olderActivities = new Map<string, FeedPage>();
   const olderExecutions = new Map<string, FeedPage>();
   const calls: URL[] = [];
@@ -199,6 +200,15 @@ async function mockApi(page: Page) {
       return respond(route, {
         runs: list.first.map((id) => snapshots.get(id)),
       });
+    const diff = path.match(/^\/api\/runs\/([^/]+)\/diff$/);
+    if (diff) {
+      const key = `${diff[1]}:${url.searchParams.get("path") || ""}:${url.searchParams.get("offset")}`;
+      return respond(
+        route,
+        diffs.get(key) || { error: "No diff" },
+        diffs.has(key) ? 200 : 400,
+      );
+    }
     const match = path.match(
       /^\/api\/runs\/([^/]+)(?:\/(activities|executions))?$/,
     );
@@ -226,6 +236,7 @@ async function mockApi(page: Page) {
   });
   return {
     snapshots,
+    diffs,
     activities,
     executions,
     olderActivities,
@@ -743,4 +754,53 @@ test("a full page of new runs restarts list pagination and preserves pages on re
       .at(-1)
       ?.searchParams.get("offset"),
   ).toBe("25");
+});
+
+test("run changes panel lists changed paths and pages a run diff", async ({
+  page,
+}) => {
+  const mock = await mockApi(page);
+  mock.snapshots.set(ALPHA, {
+    ...run(ALPHA, "Alpha"),
+    phase: "terminal",
+    active_state: "",
+    outcome: "succeeded",
+    checkpoint: {
+      status: "partial",
+      pre: { status: "complete", captured_at: created },
+      post: { status: "partial", captured_at: created },
+      late: false,
+      changed_paths: 2,
+      changes: [
+        { path: "src/app.py", status: "modified" },
+        { path: "assets/big.bin", status: "added", not_captured: "too_large" },
+      ],
+      overlapping_runs: [BETA],
+    },
+  } as TestRun);
+  mock.diffs.set(`${ALPHA}:src/app.py:0`, {
+    patch: "@@ -1 +1 @@\n-old line\n+new line\n",
+    offset: 0,
+    next_offset: 30,
+    total_bytes: 60,
+    redacted: false,
+  });
+  mock.diffs.set(`${ALPHA}:src/app.py:30`, {
+    patch: "+second page\n",
+    offset: 30,
+    next_offset: null,
+    total_bytes: 60,
+    redacted: false,
+  });
+  await openAlpha(page);
+  const panel = page.locator(".run-changes-panel");
+  await expect(panel.getByText("Changes during this run")).toBeVisible();
+  await expect(panel.getByText("not captured: too large")).toBeVisible();
+  await expect(panel.getByText(BETA, { exact: false })).toBeVisible();
+  await panel.getByRole("button", { name: /src\/app\.py/ }).click();
+  await expect(panel.locator(".run-diff")).toContainText("+new line");
+  await panel.getByRole("button", { name: "Load more" }).click();
+  await expect(panel.locator(".run-diff")).toContainText("+second page");
+  await expect(panel.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  await panel.screenshot({ path: "test-results/run-changes-panel.png" });
 });

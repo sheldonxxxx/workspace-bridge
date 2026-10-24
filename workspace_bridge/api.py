@@ -1256,6 +1256,16 @@ def make_admin(service: Service, port: int = 8766, *,
                 if len(parts) == 5 and parts[3] == "executions":
                     return JSONResponse(await run_in_threadpool(
                         service.admin_read_agent_execution, run_id, parts[4]))
+                if len(parts) == 4 and parts[3] == "diff":
+                    try:
+                        offset = max(0, int(request.query_params.get("offset", "0")))
+                    except ValueError:
+                        offset = 0
+                    ws = await run_in_threadpool(service._admin_run_workspace, run_id)
+                    return JSONResponse(await run_in_threadpool(
+                        lambda: service.run_coordinator.checkpoints.diff(
+                            ws, run_id, path=request.query_params.get("path") or None,
+                            offset=offset)))
                 if len(parts) == 3:
                     return JSONResponse(await run_in_threadpool(service.admin_read_agent_run, run_id))
                 return JSONResponse({"error": "Unknown run route"}, 404)
@@ -1311,6 +1321,13 @@ def make_admin(service: Service, port: int = 8766, *,
                 with service.lock:
                     ws = service.workspace(ws_id, False)
                     return JSONResponse(service.list_handoffs(ws, 0, 40))
+            if path.endswith("/checkpoints"):
+                with service.lock:
+                    ws = service.workspace(ws_id, False)
+                checkpoints = service.run_coordinator.checkpoints
+                if request.method == "DELETE":
+                    return JSONResponse(await run_in_threadpool(checkpoints.purge_workspace, ws))
+                return JSONResponse(await run_in_threadpool(checkpoints.stats, ws))
             if path.endswith("/document"):
                 document = Artifact.model_validate(dict(request.query_params))
                 with service.lock:
@@ -1368,6 +1385,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/runs/{run_id}/activities", api),
         Route("/api/runs/{run_id}/executions", api),
         Route("/api/runs/{run_id}/executions/{execution_id}", api),
+        Route("/api/runs/{run_id}/diff", api),
         Route("/api/bridge", api, methods=["GET", "POST"]),
         Route("/api/workspaces", api, methods=["GET", "POST"]),
         Route("/api/workspaces/{workspace}/jobs/{job_id}/runs", api, methods=["POST"]),
@@ -1375,6 +1393,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/workspaces/{workspace}/runs", api),
         Route("/api/workspaces/{workspace}/document", api),
         Route("/api/workspaces/{workspace}/routes", api, methods=["GET"]),
+        Route("/api/workspaces/{workspace}/checkpoints", api, methods=["GET", "DELETE"]),
         Route("/api/workspaces/{workspace}/routes/default", api, methods=["POST", "DELETE"]),
         Route("/api/workspaces/{workspace}/routes/{adapter_id}", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}", api, methods=["POST"])])

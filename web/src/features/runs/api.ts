@@ -87,3 +87,31 @@ function feedPath(runId: string, feed: string, cursor: FeedCursor) {
   });
   return `/api/runs/${encodeURIComponent(runId)}/${feed}?${query}`;
 }
+
+export type RunDiffPage = {
+  patch: string;
+  offset: number;
+  next_offset: number | null;
+  total_bytes: number;
+  redacted: boolean;
+};
+export function getRunDiff(
+  runId: string,
+  path: string | null,
+  offset: number,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ offset: String(offset) });
+  if (path) query.set("path", path);
+  return read<RunDiffPage>(
+    `/api/runs/${encodeURIComponent(runId)}/diff?${query}`,
+    signal,
+  );
+}
+export type CheckpointStats = { checkpoints: number; store_bytes: number };
+export function getCheckpointStats(workspaceId: string, signal?: AbortSignal) {
+  return read<CheckpointStats>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/checkpoints`,
+    signal,
+  );
+}

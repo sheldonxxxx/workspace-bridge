@@ -234,6 +234,25 @@ export interface TokenUsage {
   reasoning_output_tokens?: number;
   total_tokens?: number;
 }
+export interface RunCheckpointChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  not_captured?: string;
+}
+export interface RunCheckpointPhase {
+  status: string;
+  captured_at?: string | null;
+  error?: string;
+}
+export interface RunCheckpoint {
+  status: "pending" | "complete" | "partial" | "unavailable" | "expired";
+  pre: RunCheckpointPhase;
+  post: RunCheckpointPhase;
+  late: boolean;
+  changed_paths?: number;
+  changes?: RunCheckpointChange[];
+  overlapping_runs: string[];
+}
 export interface Run {
   run_id: string;
   adapter_id?: string;
@@ -255,6 +274,7 @@ export interface Run {
   model?: string;
   reasoning?: string | null;
   token_usage?: TokenUsage | null;
+  checkpoint?: RunCheckpoint;
   input_capabilities?: { steer: boolean; queue: boolean };
   input_messages?: RunInputReceipt[];
   input_message?: RunInputReceipt;

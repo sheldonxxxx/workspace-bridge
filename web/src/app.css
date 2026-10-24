@@ -3371,3 +3371,42 @@ a {
   max-width: none;
   font-size: clamp(36px, 4.6vw, 68px);
 }
+.run-changes-list {
+  gap: 2px;
+  margin: 9px 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+}
+.run-changes-list button {
+  text-align: left;
+  border-radius: 3px;
+  grid-template-columns: 68px minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 11px;
+  display: grid;
+}
+.run-changes-list button:hover,
+.run-changes-list button.selected {
+  background: var(--muted);
+}
+.run-changes-list .change-path {
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+.run-changes-list .change-note,
+.run-changes-list .change-modified {
+  color: var(--quiet);
+}
+.run-changes-list .change-added {
+  color: var(--success);
+}
+.run-changes-list .change-deleted {
+  color: var(--danger);
+}
+.run-diff {
+  max-height: 420px;
+  overflow: auto;
+}
