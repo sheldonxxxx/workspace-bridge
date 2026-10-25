@@ -551,14 +551,15 @@ def test_queued_mcp_mutation_reauthenticates_after_gateway_token_rotation(modern
         except Exception as exc:
             errors.append(exc)
 
-    service._runtime_mutation_lock.acquire()
+    queue = service.run_coordinator.admission_lock(ws_id, ADAPTER_ID)
+    queue.__enter__()
     thread = threading.Thread(target=mutation)
     thread.start()
     try:
         assert attempted.wait(1)
         service.manage_bridge("rotate_token")
     finally:
-        service._runtime_mutation_lock.release()
+        queue.__exit__(None, None, None)
         thread.join(2)
     assert not thread.is_alive() and calls == []
     assert len(errors) == 1 and isinstance(errors[0], BridgeError)

@@ -94,8 +94,8 @@ No OCR, model inference, remote conversion or external-resource fetch runs local
 The fixed decoder subprocess uses authorized bytes only. It is resource-bounded,
 not a security sandbox against a decoder exploit; it retains the service's OS
 identity. Keep Pillow patched and use OS/container isolation for hostile inputs.
-The serialized service lock remains held during decoding, so a slow image can
-briefly delay other calls. Avoid agents editing the image during review.
+Decoding runs on the Node outside any Bridge-wide lock, so a slow image delays
+only its own call. Avoid agents editing the image during review.
 
 Image reading works with write_scope `none`, `handoff` and `workspace`; it does not
 change any of them. `write_file` and `edit_file` still operate on UTF-8 text only.

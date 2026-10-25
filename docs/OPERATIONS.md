@@ -42,8 +42,9 @@ credential when it may have leaked; save the new secret in the local tunnel
 environment and restart the tunnel process. Old credentials stop authorizing
 new operations across every mapping. Pausing the shared gateway rejects all
 MCP requests without changing individual mappings; re-enabling restores
-access to them. A current operation can finish before a serialized
-management change takes effect.
+access to them. An operation already in progress can finish after a
+management change; writes and run mutations still queued authenticate and
+reload policy when their turn comes, so they see the change.
 
 Shared-token rotation is available in the local Manager while serving, or
 via `workspace-bridge rotate-bridge-token` while stopped. It generates a new

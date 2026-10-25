@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from .adapter_registry import AdapterRegistry
 from .schema_upgrade import add_node_transports, widen_runtime_type_check
 from .node_gateway import NodeGateway, create_pairing
 from .node_registry import NodeRegistry
+from .keyed_locks import KeyedLocks
 from . import pairing as node_pairing
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        WRITE_SCOPES, allowed, handoff_allowed, file_text, digest,
@@ -80,10 +82,12 @@ class Service:
         self.state = state.resolve()
         self.config = config
         self.read_only = read_only
+        # The database lock guards the shared SQLite connection: it is held
+        # only around statements and transactions, never across Node or
+        # adapter I/O. Longer steps serialize on keyed locks (per workspace,
+        # per Node mapping), always acquired before the database lock.
         self.lock = threading.RLock()
-        # Native run mutations remain serialized, with admission checked
-        # after queuing, without retaining the database lock during I/O.
-        self._runtime_mutation_lock = threading.RLock()
+        self.keyed_locks = KeyedLocks(inner=self.lock)
         database = self.state / "bridge.sqlite3"
         if read_only:
             self.db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True,
@@ -363,11 +367,9 @@ class Service:
         """Run-admission body (normal runtime/security gates only)."""
         self.require_workspace_route(ws, adapter_id)
         if instruction:
-            # Same serialization as an MCP prepare_handoff call: the shared
-            # connection's handoff transaction must not interleave with others.
-            with self.lock:
-                job_id = self._direct_instruction_handoff(
-                    ws, adapter_id, request_id, instruction)["id"]
+            # prepare_handoff serializes on the workspace lock.
+            job_id = self._direct_instruction_handoff(
+                ws, adapter_id, request_id, instruction)["id"]
         return self.run_coordinator.start(
             ws, adapter_id, job_id, request_id, model, parent_run_id,
             continue_from_run_id, images=images)
@@ -942,23 +944,25 @@ class Service:
         return [self.public_workspace(row) for row in rows]
     def add_workspace(self, name: str, root: str, excludes: list[str],
                       node_id: str | None = None) -> dict:
-        with self.lock:
-            if node_id is None:
-                enabled_nodes = [row for row in self.node_registry.rows() if row["enabled"]]
-                if len(enabled_nodes) != 1:
-                    raise BridgeError("Select an authoritative Node", "node_required")
-                node_id = enabled_nodes[0]["id"]
-            node = self.node_registry.get(node_id)
-            path = Path(root)
-            if (not isinstance(root, str) or not path.is_absolute()
-                    or os.path.normpath(root) != root or len(path.parts) < 3):
-                raise BridgeError("Enter a canonical absolute Node-local project path", "invalid_arguments")
-            if not node["enabled"]:
-                raise BridgeError("Workspace Node is disabled", "node_disabled")
-            if not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
-                raise BridgeError("Invalid workspace name")
-            if len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
-                raise BridgeError("Invalid exclusion patterns")
+        if node_id is None:
+            enabled_nodes = [row for row in self.node_registry.rows() if row["enabled"]]
+            if len(enabled_nodes) != 1:
+                raise BridgeError("Select an authoritative Node", "node_required")
+            node_id = enabled_nodes[0]["id"]
+        node = self.node_registry.get(node_id)
+        path = Path(root)
+        if (not isinstance(root, str) or not path.is_absolute()
+                or os.path.normpath(root) != root or len(path.parts) < 3):
+            raise BridgeError("Enter a canonical absolute Node-local project path", "invalid_arguments")
+        if not node["enabled"]:
+            raise BridgeError("Workspace Node is disabled", "node_disabled")
+        if not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
+            raise BridgeError("Invalid workspace name")
+        if len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
+            raise BridgeError("Invalid exclusion patterns")
+        # The overlap check and the insert are one step per Node; the
+        # database lock is taken only around the statements themselves.
+        with self.keyed_locks.hold(("node-mappings", node_id)):
             self.node_registry.client(node_id, timeout=5).validate_root(root, excludes)
             for existing in self.list_workspaces():
                 if existing["node_id"] != node_id:
@@ -966,67 +970,67 @@ class Service:
                 old = Path(existing["root"])
                 if within(path, old) or within(old, path):
                     raise BridgeError("Overlapping mappings are forbidden, including disabled mappings")
-            if not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
-                raise BridgeError("Invalid workspace name")
-            if len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
-                raise BridgeError("Invalid exclusion patterns")
             ident = uid("ws_")
             self.node_registry.client(node_id, timeout=5).register_workspace({
                 "id": ident, "root": str(path), "excludes": excludes,
                 "write_scope": "handoff"})
-            with self.db:
+            with self.lock, self.db:
                 self.db.execute("INSERT INTO workspaces (id,name,node_id,root,enabled,token_hash,excludes,created) VALUES(?,?,?,?,0,?,?,?)",
                     (ident, name.strip(), node_id, str(path), "", encoded(excludes).decode(), now()))
-            self.event(ident, "workspace_registered")
-            return {"workspace": self.public_workspace(self.workspace(ident, False)),
-                    "note": "Mapping starts disabled. The selected Node remains authoritative for files and Git."}
+        self.event(ident, "workspace_registered")
+        return {"workspace": self.public_workspace(self.workspace(ident, False)),
+                "note": "Mapping starts disabled. The selected Node remains authoritative for files and Git."}
+
+    def workspace_lock(self, ident: str):
+        """Serialize writes and policy changes for one workspace only."""
+        return self.keyed_locks.hold(("workspace", ident))
+
     def manage_workspace(self, ident: str, operation: str, excludes: list[str] | None = None,
                          write_scope: str | None = None, agent_enabled: bool | None = None) -> dict:
-        with self.lock:
+        with self.workspace_lock(ident):
             ws = self.workspace(ident, False)
             if write_scope is not None and operation not in ("set_write_scope", "set_settings"):
                 raise BridgeError("write_scope requires set_write_scope or set_settings", "invalid_arguments")
             if agent_enabled is not None and operation != "set_agent_enabled":
                 raise BridgeError("agent_enabled requires set_agent_enabled", "invalid_arguments")
-            result = {}
+            if operation in {"set_write_scope", "set_settings"} and write_scope not in WRITE_SCOPES:
+                raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
+            if operation in {"set_settings", "set_excludes"} and (
+                    excludes is None or len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes)):
+                raise BridgeError("Invalid exclusions")
+            if operation == "set_agent_enabled" and not isinstance(agent_enabled, bool):
+                raise BridgeError("agent_enabled must be a boolean", "invalid_arguments")
+            if operation not in {"enable", "disable", "set_write_scope", "set_settings",
+                                 "set_agent_enabled", "set_excludes"}:
+                raise BridgeError("Unknown management operation")
+            # Node calls happen before, never inside, the database transaction.
             if operation in {"set_write_scope", "set_settings", "set_excludes"}:
                 next_scope = write_scope if operation in {"set_write_scope", "set_settings"} else ws["write_scope"]
                 next_excludes = excludes if operation in {"set_settings", "set_excludes"} else json.loads(ws["excludes"])
                 self.node_registry.client(ws["node_id"], timeout=5).configure_workspace(
                     ws["id"], next_excludes, next_scope)
-            with self.db:
-                if operation == "enable":
-                    self.node_registry.client(ws["node_id"], timeout=5).validate_root(
-                        ws["root"], json.loads(ws["excludes"]))
-                    self.db.execute("UPDATE workspaces SET enabled=1 WHERE id=?", (ident,))
-                elif operation == "disable":
-                    self.db.execute("UPDATE workspaces SET enabled=0 WHERE id=?", (ident,))
-                elif operation == "set_write_scope":
-                    if write_scope not in WRITE_SCOPES:
-                        raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
-                    self.db.execute("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident))
-                elif operation == "set_settings":
-                    if write_scope not in WRITE_SCOPES:
-                        raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
-                    if excludes is None or len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
-                        raise BridgeError("Invalid exclusions")
-                    self.db.execute("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
-                                    (write_scope, encoded(excludes).decode(), ident))
-                elif operation == "set_agent_enabled":
-                    if not isinstance(agent_enabled, bool):
-                        raise BridgeError("agent_enabled must be a boolean", "invalid_arguments")
-                    self.db.execute("UPDATE workspaces SET agent_enabled=? WHERE id=?",
-                                    (1 if agent_enabled else 0, ident))
-                elif operation == "set_excludes":
-                    if excludes is None or len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
-                        raise BridgeError("Invalid exclusions")
-                    self.db.execute("UPDATE workspaces SET excludes=? WHERE id=?", (encoded(excludes).decode(), ident))
-                else:
-                    raise BridgeError("Unknown management operation")
-            self.event(ident, operation, write_scope if operation == "set_write_scope" else "ok")
-            return {**result, "workspace": self.public_workspace(self.workspace(ident, False))}
+            if operation == "enable":
+                self.node_registry.client(ws["node_id"], timeout=5).validate_root(
+                    ws["root"], json.loads(ws["excludes"]))
+            statements = {
+                "enable": ("UPDATE workspaces SET enabled=1 WHERE id=?", (ident,)),
+                "disable": ("UPDATE workspaces SET enabled=0 WHERE id=?", (ident,)),
+                "set_write_scope": ("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident)),
+                "set_settings": ("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
+                                 (write_scope, encoded(excludes or []).decode(), ident)),
+                "set_agent_enabled": ("UPDATE workspaces SET agent_enabled=? WHERE id=?",
+                                      (1 if agent_enabled else 0, ident)),
+                "set_excludes": ("UPDATE workspaces SET excludes=? WHERE id=?",
+                                 (encoded(excludes or []).decode(), ident)),
+            }
+            sql, params = statements[operation]
+            with self.lock, self.db:
+                self.db.execute(sql, params)
+        self.event(ident, operation, write_scope if operation == "set_write_scope" else "ok")
+        return {"workspace": self.public_workspace(self.workspace(ident, False))}
     def check_storage(self, additional: int = 0):
-        allocated = self.db.execute("PRAGMA page_count").fetchone()[0] * self.db.execute("PRAGMA page_size").fetchone()[0]
+        with self.lock:
+            allocated = self.db.execute("PRAGMA page_count").fetchone()[0] * self.db.execute("PRAGMA page_size").fetchone()[0]
         if allocated + additional * 2 > 512 * 1024 * 1024:
             raise BridgeError("512 MiB state quota reached; archive the service state before continuing", "storage_limit")
     def info(self, ws: dict) -> dict:
@@ -1106,6 +1110,12 @@ class Service:
                     "unless the handoff explicitly permits the source-control or project changes. Stop when complete."
                 )}
     def prepare_handoff(self, ws: dict, payload: dict) -> dict:
+        # The request_id check and the insert must not interleave with
+        # another publication in the same workspace.
+        with self.workspace_lock(ws["id"]):
+            return self._prepare_handoff_locked(ws, payload)
+
+    def _prepare_handoff_locked(self, ws: dict, payload: dict) -> dict:
         # Apply the same administrator write policy before creating central
         # job metadata or asking the Node to create artifact directories.
         if self.access_policy(ws)["write_scope"] == "none":
@@ -1115,14 +1125,16 @@ class Service:
         if not request_payload.get("attachments"):
             request_payload.pop("attachments", None)
         request_hash = digest(encoded(request_payload))
-        existing = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE workspace=? AND request_id=?", (ws["id"], payload["request_id"])).fetchone()
+        with self.lock:
+            existing = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE workspace=? AND request_id=?", (ws["id"], payload["request_id"])).fetchone()
+            count = self.db.execute("SELECT count(*) FROM jobs WHERE workspace=?", (ws["id"],)).fetchone()[0]
         if existing:
             if existing["request_hash"] != request_hash:
                 raise BridgeError("request_id already used with different content", "conflict")
             if existing["state"] == "failed":
                 raise BridgeError("Previous publication failed; inspect local artifacts and use a new request_id", "conflict")
             return self.handoff_summary(ws, dict(existing))
-        if len(self.db.execute("SELECT id FROM jobs WHERE workspace=?", (ws["id"],)).fetchall()) >= 100:
+        if count >= 100:
             raise BridgeError("100-handoff workspace quota reached; export/archive state manually", "storage_limit")
         references = self.node_registry.client(ws["node_id"]).workspace(
             "hash_files", ws, {"paths": list(payload["context_hashes"]),
@@ -1154,23 +1166,24 @@ class Service:
                 "not permission to expand scope.\n```json\n"
                 + json.dumps(references["attachments"], indent=2) + "\n```\n")
         self.check_storage(sum(len(text.encode()) for text in docs.values()))
-        with self.db:
+        with self.lock, self.db:
             self.db.execute("INSERT INTO jobs (id,workspace,request_id,request_hash,title,state,created,documents) VALUES(?,?,?,?,?,?,?,?)",
                 (ident, ws["id"], payload["request_id"], request_hash, payload["title"], "publishing", created, "{}"))
         try:
             result = self.node_registry.client(ws["node_id"]).workspace(
                 "publish_handoff_artifacts", ws, {"base": base, "files": docs})
             published_hashes = result["hashes"]
-            with self.db:
+            with self.lock, self.db:
                 self.db.execute("UPDATE jobs SET state='prepared',documents=? WHERE id=?",
                                 (encoded(published_hashes).decode(), ident))
         except Exception:
-            with self.db:
+            with self.lock, self.db:
                 self.db.execute("UPDATE jobs SET state='failed' WHERE id=?", (ident,))
             raise
         return self.handoff_summary(ws, self.job(ws, ident))
     def list_handoffs(self, ws: dict, offset: int, limit: int) -> dict:
-        jobs = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE workspace=? ORDER BY created DESC LIMIT ? OFFSET ?", (ws["id"], limit + 1, offset)).fetchall()
+        with self.lock:
+            jobs = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE workspace=? ORDER BY created DESC LIMIT ? OFFSET ?", (ws["id"], limit + 1, offset)).fetchall()
         return {"handoffs": [self.handoff_summary(ws, dict(j)) for j in jobs[:limit]],
                 "next_offset": offset + limit if len(jobs) > limit else None}
     def read_handoff(self, ws: dict, job_id: str, document: str, start_line: int, max_lines: int) -> dict:
@@ -1201,57 +1214,33 @@ class Service:
             # channel I/O after acquiring durable pending work.
             self.notification_manager.wake()
 
+    # Tools that change workspace files serialize per workspace, so a
+    # checked write never interleaves with another write or a policy change.
+    WORKSPACE_WRITES = frozenset({"write_file", "write_image", "edit_file", "prepare_handoff"})
+    RUN_INPUTS = frozenset({"steer_agent_run", "queue_agent_run", "respond_agent_interaction"})
+
+    def _tool_queue(self, ws_id: str | None, name: str, args: dict):
+        """The keyed lock a tool call waits on; none for reads and cancel."""
+        if not isinstance(ws_id, str) or not isinstance(args, dict):
+            return contextlib.nullcontext()
+        if name == "start_agent_run" and isinstance(args.get("adapter_id"), str):
+            return self.run_coordinator.admission_lock(ws_id, args["adapter_id"])
+        if name in self.RUN_INPUTS and isinstance(args.get("run_id"), str):
+            return self.run_coordinator.input_lock(args["run_id"])
+        if name in self.WORKSPACE_WRITES:
+            return self.workspace_lock(ws_id)
+        return contextlib.nullcontext()
+
     def _call_impl(self, ws_id: str | None, token: str, name: str, args: dict) -> dict | ImageReadResult:
-        runtime_mutations = {
-            "start_agent_run": self.start_agent_run,
-            "cancel_agent_run": self.cancel_agent_run,
-            "steer_agent_run": self.steer_agent_run,
-            "queue_agent_run": self.queue_agent_run,
-            "respond_agent_interaction": self.respond_agent_interaction,
-        }
-        if name in runtime_mutations:
-            # Acquire the mutation queue before the database lock. Runtime
-            # reconciliation uses a run lock then the database lock, so the
-            # inverse order would deadlock a mutation against a live read.
-            with self._runtime_mutation_lock:
-                with self.lock:
-                    self.authenticate_bridge(token)
-                    ws = self.workspace(ws_id)
-                try:
-                    result = runtime_mutations[name](ws, **args)
-                except BridgeError as exc:
-                    with self.lock:
-                        self.event(ws_id, name, exc.code)
-                    raise
-                with self.lock:
-                    self.event(ws_id, name)
-                return {"workspace_id": ws_id, **result}
-        # Remote snapshot reads can wait for an adapter timeout. Keep those
-        # calls outside the shared database lock so one slow host cannot
-        # freeze local admin and browsing requests.
-        remote_reads = {
-            "list_agent_adapters": self.list_agent_adapters,
-            "list_agent_models": self.list_agent_models,
-            "list_agent_runs": self.list_agent_runs,
-            "read_agent_run": self.read_agent_run,
-            "read_agent_interaction": self.read_agent_interaction,
-            "list_agent_activities": self.list_agent_activities,
-            "read_agent_activity": self.read_agent_activity,
-        }
-        if name in remote_reads:
-            with self.lock:
-                self.authenticate_bridge(token)
-                ws = self.workspace(ws_id)
-            try:
-                result = remote_reads[name](ws, **args)
-            except BridgeError as exc:
-                with self.lock:
-                    self.event(ws_id, name, exc.code)
-                raise
-            with self.lock:
-                self.event(ws_id, name)
-            return {"workspace_id": ws_id, **result}
-        # Re-authenticate inside the serialized operation, not only before queued work.
+        # A queued mutation authenticates only after it reaches the front of
+        # its own queue, so a rotated token still stops it. Authentication
+        # and the workspace lookup are database reads; every Node and adapter
+        # call runs without the database lock, so one slow Node or adapter
+        # only delays work for its own workspace, route or run.
+        with self._tool_queue(ws_id, name, args):
+            return self._call_queued(ws_id, token, name, args)
+
+    def _call_queued(self, ws_id: str | None, token: str, name: str, args: dict) -> dict | ImageReadResult:
         with self.lock:
             self.authenticate_bridge(token)
             if name == "list_workspaces":
@@ -1259,42 +1248,40 @@ class Service:
                 self.event(None, name)
                 return result
             ws = self.workspace(ws_id)
-            methods = {
-                "workspace_info": self.info, "read_file": self.read_file,
-                "list_dir": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("list_dir", workspace, arguments),
-                "glob": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("glob", workspace, arguments),
-                "grep_files": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("grep_files", workspace, arguments),
-                "list_handoffs": self.list_handoffs,
-                "read_handoff": self.read_handoff,
-                "write_file": self.write_file, "write_image": self.write_image, "edit_file": self.edit_file,
-                "list_agent_adapters": self.list_agent_adapters,
-                "list_agent_models": self.list_agent_models,
-                "start_agent_run": self.start_agent_run,
-                "list_agent_runs": self.list_agent_runs,
-                "read_agent_run": self.read_agent_run,
-                "cancel_agent_run": self.cancel_agent_run,
-                "steer_agent_run": self.steer_agent_run,
-                "queue_agent_run": self.queue_agent_run,
-                "list_agent_executions": self.list_agent_executions,
-                "read_agent_execution": self.read_agent_execution,
-                "read_agent_interaction": self.read_agent_interaction,
-                "respond_agent_interaction": self.respond_agent_interaction,
-                "list_agent_activities": self.list_agent_activities,
-                "read_agent_activity": self.read_agent_activity,
-                "git_status": self.git_status,
-                "git_diff": self.git_diff,
-            }
-            if name not in methods and name != "prepare_handoff":
-                raise BridgeError("Unknown tool", "unknown_tool")
-            try:
-                if name == "prepare_handoff":
-                    result = self.prepare_handoff(ws, args)
-                else:
-                    result = methods[name](ws, **args)
-                self.event(ws_id, name)
-                if isinstance(result, ImageReadResult):
-                    return result.with_workspace(ws_id)
-                return {"workspace_id": ws_id, **result}
-            except BridgeError as exc:
-                self.event(ws_id, name, exc.code)
-                raise
+        methods = {
+            "workspace_info": self.info, "read_file": self.read_file,
+            "list_dir": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("list_dir", workspace, arguments),
+            "glob": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("glob", workspace, arguments),
+            "grep_files": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("grep_files", workspace, arguments),
+            "list_handoffs": self.list_handoffs,
+            "read_handoff": self.read_handoff,
+            "write_file": self.write_file, "write_image": self.write_image, "edit_file": self.edit_file,
+            "prepare_handoff": lambda workspace, **arguments: self.prepare_handoff(workspace, arguments),
+            "list_agent_adapters": self.list_agent_adapters,
+            "list_agent_models": self.list_agent_models,
+            "start_agent_run": self.start_agent_run,
+            "list_agent_runs": self.list_agent_runs,
+            "read_agent_run": self.read_agent_run,
+            "cancel_agent_run": self.cancel_agent_run,
+            "steer_agent_run": self.steer_agent_run,
+            "queue_agent_run": self.queue_agent_run,
+            "list_agent_executions": self.list_agent_executions,
+            "read_agent_execution": self.read_agent_execution,
+            "read_agent_interaction": self.read_agent_interaction,
+            "respond_agent_interaction": self.respond_agent_interaction,
+            "list_agent_activities": self.list_agent_activities,
+            "read_agent_activity": self.read_agent_activity,
+            "git_status": self.git_status,
+            "git_diff": self.git_diff,
+        }
+        if name not in methods:
+            raise BridgeError("Unknown tool", "unknown_tool")
+        try:
+            result = methods[name](ws, **args)
+        except BridgeError as exc:
+            self.event(ws_id, name, exc.code)
+            raise
+        self.event(ws_id, name)
+        if isinstance(result, ImageReadResult):
+            return result.with_workspace(ws_id)
+        return {"workspace_id": ws_id, **result}

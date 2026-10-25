@@ -37,8 +37,8 @@ In the local manager, expand the project's **Exclusions & policy**, choose
 **Write permission → Workspace-wide — allowed text files**, then **Save write
 permission** and confirm. No new tunnel, client schema or restart is needed for a
 subsequent policy change. Select Handoff only or Read-only to reduce access again.
-A change affects subsequent calls, including queued calls before they begin their
-serialized operation; it cannot undo a completed write.
+A change affects subsequent calls, including writes queued behind it for the same
+workspace; it cannot undo a completed write or stop one already in progress.
 
 Workspace-wide grants source-edit capability to every authorized chat using the
 shared connection. It is not a request to edit arbitrary source. The project-lead
@@ -101,7 +101,8 @@ Handoff replacements use 0600. ACLs, extended attributes and ownership are not
 preserved by inode replacement; do not use this tool for files requiring those.
 
 Complete content is staged and published without truncating the original inode.
-Identity/hash rechecks and serialized bridge calls detect tested ordinary races,
+Identity/hash rechecks and per-workspace write serialization (on the Bridge and
+on the Node) detect tested ordinary races,
 not arbitrary hostile local writers. This is not an OS sandbox, portable atomic
 compare-and-swap, multi-file transaction, complete secret detector or per-chat ACL.
 No aggregate storage quota, history, automatic cleanup, delete or rename is added.

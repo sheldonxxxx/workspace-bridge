@@ -177,7 +177,8 @@ def test_queued_call_uses_current_policy_not_old_discovery(env):
         entered.set()
         return call(env,'write_file',path='queued.md',content='no')
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with svc.lock:
+        # The write waits in its workspace queue while the policy changes.
+        with svc.workspace_lock(env['id']):
             future=pool.submit(queued);assert entered.wait(2)
             scope(env,'handoff')
         with pytest.raises(BridgeError):future.result(timeout=3)

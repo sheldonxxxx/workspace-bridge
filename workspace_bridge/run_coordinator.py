@@ -20,6 +20,7 @@ from .notifications import codex_quota_summary
 from .wbrp import validate_run_state
 from .adapter_events import AdapterEventReader
 from .manager_events import RunEventHub
+from .keyed_locks import KeyedLocks
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -168,11 +169,12 @@ class RunCoordinator:
         self._thread: threading.Thread | None = None
         self._sweep_failures: set[str] = set()
         self.run_events = RunEventHub()
-        # Striped reentrant locks serialize snapshots without retaining one
-        # lock for every historical run. The Service lock is never held over
-        # network I/O.
-        self._run_locks = tuple(threading.RLock() for _ in range(64))
-        self._start_lock = threading.RLock()
+        # Snapshots serialize per run, admission per route and run input per
+        # run, so a slow adapter only delays work on the same key. Cancel
+        # takes none of them. The Service lock is never held over network I/O.
+        self._run_locks = KeyedLocks(inner=service.lock)
+        self._start_locks = KeyedLocks(inner=service.lock)
+        self._input_locks = KeyedLocks(inner=service.lock)
         self._event_readers: dict[tuple[str, str, str, str], AdapterEventReader] = {}
         self._retired_readers: list[AdapterEventReader] = []
         self._reader_lock = threading.Lock()
@@ -403,7 +405,7 @@ class RunCoordinator:
             candidates = [row["id"] for row in self.service.db.execute(sql, params)]
         interrupted = []
         for candidate in candidates:
-            with self._run_locks[hash(candidate) % len(self._run_locks)]:
+            with self._run_locks.hold(candidate):
                 with self.service.lock, self.service.db:
                     if self._stop.is_set():
                         return interrupted
@@ -422,7 +424,7 @@ class RunCoordinator:
 
     def abandon(self, ws: dict, run_id: str) -> dict:
         """Local-admin escape hatch: stop tracking a run without contacting its runtime."""
-        with self._run_locks[hash(run_id) % len(self._run_locks)]:
+        with self._run_locks.hold(run_id):
             run = self._run_row(ws, run_id)
             if run["phase"] != "terminal":
                 with self.service.lock, self.service.db:
@@ -823,12 +825,21 @@ class RunCoordinator:
             raise BridgeError("Conversation record is missing", "internal_error")
         return dict(row)
 
+    def admission_lock(self, workspace_id: str, adapter_id: str):
+        """Queue for run admission on one workspace route."""
+        return self._start_locks.hold((workspace_id, adapter_id))
+
+    def input_lock(self, run_id: str):
+        """Queue for interaction answers and steer/queue input on one run."""
+        return self._input_locks.hold(run_id)
+
     def start(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
               model: str | None = None, parent_run_id: str | None = None,
               continue_from_run_id: str | None = None, images: list[dict] | None = None) -> dict:
         # Both Manager and MCP admission must observe the same idempotency
         # and idle-conversation selection before submitting a native run.
-        with self._start_lock:
+        # Both are scoped to one workspace route.
+        with self.admission_lock(ws["id"], adapter_id):
             return self._start_locked(ws, adapter_id, job_id, request_id,
                                       model, parent_run_id, continue_from_run_id, images)
 
@@ -1120,7 +1131,7 @@ class RunCoordinator:
         # Reserve the run lock before publishing its starting row. Reads
         # can recover an admitted submission only after its native start and
         # initial snapshot are complete; the Service lock stays off the wire.
-        with self._run_locks[hash(bridge_run_id) % len(self._run_locks)]:
+        with self._run_locks.hold(bridge_run_id):
             timestamp = _now()
             effective_security = _effective_security(binding, node_id=node_info["id"],
                 node_revision=node_info["revision"], adapter_id=adapter_id,
@@ -1404,7 +1415,7 @@ class RunCoordinator:
 
     def _persist_snapshot(self, run: dict, native: dict,
                           interactions: list[dict], activities: list[dict]) -> None:
-        with self._run_locks[hash(run["id"]) % len(self._run_locks)]:
+        with self._run_locks.hold(run["id"]):
             self._persist_snapshot_locked(run, native, interactions, activities)
 
     def _snapshot_signature_locked(self, run_id: str) -> tuple:
@@ -1550,7 +1561,7 @@ class RunCoordinator:
             self.run_events.publish(run["id"])
 
     def reconcile(self, ws: dict, run_id: str) -> dict:
-        with self._run_locks[hash(run_id) % len(self._run_locks)]:
+        with self._run_locks.hold(run_id):
             return self._reconcile_locked(ws, run_id)
 
     def _reconcile_locked(self, ws: dict, run_id: str) -> dict:
@@ -1694,6 +1705,13 @@ class RunCoordinator:
 
     def resolve(self, ws: dict, run_id: str, interaction_id: str,
                 response: dict) -> dict:
+        # Two answers to one interaction must not both reach the runtime.
+        with self.input_lock(run_id):
+            self._resolve_locked(ws, run_id, interaction_id, response)
+        return self.read(ws, run_id)
+
+    def _resolve_locked(self, ws: dict, run_id: str, interaction_id: str,
+                        response: dict) -> None:
         run = self._run_row(ws, run_id)
         interaction = self.interaction(ws, run_id, interaction_id)
         if interaction["state"] != "pending" or run["phase"] != "active":
@@ -1717,7 +1735,6 @@ class RunCoordinator:
                 "UPDATE agent_interactions SET state='resolved',response=?,updated=? WHERE id=?",
                 (_safe_payload(response), _now(), interaction_id))
         self.run_events.publish(run_id)
-        return self.read(ws, run_id)
 
     def cancel(self, ws: dict, run_id: str) -> dict:
         run = self._run_row(ws, run_id)
@@ -1729,6 +1746,11 @@ class RunCoordinator:
     def input(self, ws: dict, run_id: str, instruction: str,
               request_id: str, mode: str) -> dict:
         """Send one bounded instruction to the positively identified owned run."""
+        with self.input_lock(run_id):
+            return self._input_locked(ws, run_id, instruction, request_id, mode)
+
+    def _input_locked(self, ws: dict, run_id: str, instruction: str,
+                      request_id: str, mode: str) -> dict:
         if (mode not in {"steer", "queue"} or not isinstance(instruction, str)
                 or not instruction.strip() or len(instruction) > 8000
                 or not isinstance(request_id, str)

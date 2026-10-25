@@ -1311,17 +1311,16 @@ def make_admin(service: Service, port: int = 8766, *,
                         route.is_default))
                 return JSONResponse({"error": "Method not allowed here"}, 405)
             if path.endswith("/jobs"):
-                with service.lock:
-                    ws = service.workspace(ws_id, False)
-                    return JSONResponse(service.list_handoffs(ws, 0, 40))
+                return JSONResponse(await run_in_threadpool(
+                    lambda: service.list_handoffs(service.workspace(ws_id, False), 0, 40)))
             if path.endswith("/document"):
                 document = Artifact.model_validate(dict(request.query_params))
 
                 def read_document() -> dict:
-                    # Reads through the Node; keep it off the event loop.
-                    with service.lock:
-                        ws = service.workspace(ws_id, False)
-                        return service.read_handoff(ws, **document.model_dump())
+                    # Reads through the Node: off the event loop and never
+                    # under the database lock.
+                    ws = service.workspace(ws_id, False)
+                    return service.read_handoff(ws, **document.model_dump())
                 return JSONResponse(await run_in_threadpool(read_document))
             if path.endswith("/runs"):
                 try:
@@ -1329,10 +1328,9 @@ def make_admin(service: Service, port: int = 8766, *,
                     limit = max(1, min(int(request.query_params.get("limit", "20")), 40))
                 except ValueError:
                     offset, limit = 0, 20
-                with service.lock:
-                    ws = service.workspace(ws_id, False)
-                    # Intentional cross-runtime project view.
-                    return JSONResponse(service.list_agent_runs(ws, offset, limit))
+                # Intentional cross-runtime project view.
+                return JSONResponse(await run_in_threadpool(
+                    lambda: service.list_agent_runs(service.workspace(ws_id, False), offset, limit)))
             model = ManageWorkspace.model_validate(await body_json(request))
             return JSONResponse(await run_in_threadpool(service.manage_workspace, ws_id, **model.model_dump()))
         except ValidationError:

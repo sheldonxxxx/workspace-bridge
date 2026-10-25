@@ -16,6 +16,7 @@ import threading
 from datetime import datetime, timezone
 
 from .browse import Browser
+from .keyed_locks import KeyedLocks
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
                     decode_image_upload, image_capabilities, read_image,
@@ -107,6 +108,8 @@ class NodeService:
         self.allowed_roots = [Path(root).expanduser().resolve(strict=not read_only)
                               for root in config["allowed_roots"]]
         self.lock = threading.RLock()
+        # Checked writes (expected_sha256, then write) serialize per workspace.
+        self.write_locks = KeyedLocks()
         db_path = self.state / "node.sqlite3"
         if read_only:
             # An immutable connection avoids SQLite creating a shared-memory
@@ -268,7 +271,18 @@ class NodeService:
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
+    WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file",
+                                  "publish_handoff_artifacts"})
+
     def workspace_call(self, operation: str, body: dict):
+        if operation in self.WRITE_OPERATIONS:
+            supplied = body.get("workspace")
+            key = supplied.get("id") if isinstance(supplied, dict) else None
+            with self.write_locks.hold(key):
+                return self._workspace_call(operation, body)
+        return self._workspace_call(operation, body)
+
+    def _workspace_call(self, operation: str, body: dict):
         supplied_workspace = body.get("workspace")
         if not isinstance(supplied_workspace, dict):
             raise BridgeError("Workspace authority context is required", "invalid_arguments")

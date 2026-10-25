@@ -252,6 +252,13 @@ is loopback-only in both modes and is never tunnelled.
   restarts the whole unit instead of leaving a permanently degraded HTTP
   surface. Active runs are marked interrupted, never replayed; idle persisted
   conversations remain resumable.
+- A slow or hung Node or adapter delays only work on the same key. The
+  Bridge's database lock covers SQLite statements only and is never held
+  across Node or adapter I/O. File writes and handoff publication serialize
+  per workspace, run starts per workspace route, and steer, queue and
+  interaction answers per run. Reads, cancels, the Manager and other
+  workspaces keep working. The MCP endpoint accepts up to 4 concurrent tool
+  calls, so several hung calls can still fill it until their timeouts.
 - Notification channel failure never changes run state. Delivery is
   at-least-once across the crash window between remote acceptance and
   persisted confirmation, so one duplicate is possible after restart.

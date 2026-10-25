@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- One slow Node or adapter no longer stalls the whole Bridge. The global
+  service lock was held across Node file and Git calls, and every MCP run
+  mutation queued behind one global lock. Now the database lock covers only
+  SQLite statements. Writes and handoff publication serialize per workspace,
+  run starts per workspace route, and steer, queue and interaction answers
+  per run. A cancel reaches the runtime without waiting in any of these
+  queues. Queued calls still authenticate when their turn comes. The Node also serializes checked writes per workspace.
+
 - `workspace-bridge service install|status|start|stop|restart|uninstall`
   runs the Bridge itself as a LaunchAgent (`com.workspace-bridge.bridge`) or
   systemd unit (`workspace-bridge.service`), reusing the Node's hardened
