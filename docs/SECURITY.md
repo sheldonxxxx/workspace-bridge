@@ -6,6 +6,20 @@ Restrict a remote ChatGPT tool connection to explicitly enabled project mappings
 
 Not covered: a hostile local user/process with the service user's permissions; root/admin compromise; malicious browser extensions; compromised Python dependencies or tunnel-client; vulnerabilities in the host OS; comprehensive secret detection; prevention of every prompt-injection attempt; or ensuring that the local coding agent obeys a handoff. A prompt cannot substitute for the local agent's sandbox.
 
+## Paired Node gateway
+
+Paired Nodes dial the Bridge's Node gateway over TLS 1.2+ and pin its
+self-signed certificate by SHA-256 fingerprint (no CA, no hostname check).
+Each connection answers a fresh challenge with an Ed25519 signature that also
+binds the certificate fingerprint; only the Node's public key is stored on
+the Bridge, and its private key stays in the Node state (`0600`). Pairing
+codes are 128-bit, single use, expire after 10 minutes, and are stored only
+as hashes. Requests carrying a browser `Origin` are refused, and repeated
+authentication failures are throttled. The gateway binds loopback unless
+`WB_NODE_GATEWAY_HOST` is set; expose it only on a private network or VPN.
+A paired Node trusts its Bridge fully, exactly as an HTTP Node trusts the
+holder of its token.
+
 ## Shared credential scope
 
 One gateway credential authorizes every enabled mapping. Each project call requires `workspace_id`, and each path/job is checked inside that selected workspace. This prevents accidental identifier mixing but is **not per-chat or per-user authorization**: a chat with the shared connection may deliberately select another enabled project. Restrict tunnel/app sharing, disable unnecessary mappings, and use global pause or shared-token rotation when needed. No OAuth identity or per-client ACL is implemented.

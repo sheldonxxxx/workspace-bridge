@@ -39,6 +39,7 @@ class NodeRegistry:
                 "enabled": bool(row["enabled"]), "revision": row["revision"],
                 "created": row["created"], "updated": row["updated"],
                 "has_token": bool(row["token"]), "health": row.get("health", "unknown"),
+                "transport": row.get("transport", "http"),
                 "protocol": row.get("protocol"), "capabilities": row.get("capabilities", [])}
         release = row.get("release")
         if isinstance(release, dict):
@@ -51,7 +52,13 @@ class NodeRegistry:
 
     def client(self, node_id: str, *, timeout: float = 30) -> NodeClient:
         row = self.get(node_id)
-        transport = getattr(self.service, "_node_transport", {}).get(node_id)
+        kind = row.get("transport", "http")
+        if kind == "paired":
+            transport = self.service.node_gateway.transport(node_id, timeout=timeout)
+        elif kind == "local":
+            transport = self.service.local_node_transport(node_id)
+        else:
+            transport = getattr(self.service, "_node_transport", {}).get(node_id)
         return NodeClient(row, timeout=timeout, transport=transport)
 
     def list_public(self, *, probe: bool = False) -> list[dict]:
@@ -118,10 +125,14 @@ class NodeRegistry:
                 "name", "base_url", "token", "enabled"}:
             raise BridgeError("Unexpected Node fields", "invalid_arguments")
         row = self.get(node_id)
+        if row.get("transport", "http") != "http" and (payload.get("base_url") or payload.get("token")):
+            raise BridgeError("A paired or local Node has no URL or token; re-pair it instead",
+                              "invalid_arguments")
         name = payload.get("name", row["name"])
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid Node name", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", row["base_url"]))
+        base_url = (row["base_url"] if row.get("transport", "http") != "http"
+                    else validate_base_url(payload.get("base_url", row["base_url"])))
         token = payload.get("token", "")
         if not isinstance(token, str) or len(token) > 4096:
             raise BridgeError("Invalid Node token", "invalid_arguments")
@@ -165,6 +176,15 @@ class NodeRegistry:
         if not isinstance(payload, dict) or set(payload) - {
                 "node_id", "name", "base_url", "token", "enabled"}:
             raise BridgeError("Unexpected Node test fields", "invalid_arguments")
+        if payload.get("node_id") and self.get(payload["node_id"]).get("transport", "http") != "http":
+            try:
+                status = self.client(payload["node_id"], timeout=5).status()
+            except BridgeError as exc:
+                return {"success": False, "code": exc.code,
+                        "message": "Node connection could not be verified."}
+            return {"success": True, "protocol": status.get("protocol"),
+                    "capabilities": status.get("capabilities", []),
+                    "allowed_root_count": len(status.get("allowed_roots", []))}
         if payload.get("node_id"):
             row = self.get(payload["node_id"])
             token = payload.get("token") or row["token"]

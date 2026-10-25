@@ -292,7 +292,10 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         healthy = False
         observed: dict | None = None
         release_error: str | None = None
-        if node["enabled"] and not offline:
+        # A paired Node's connection lives in the running Bridge process; a
+        # separate Doctor process cannot observe it.
+        unobservable = bool(getattr(service, "read_only", False)) and node.get("transport") == "paired"
+        if node["enabled"] and not offline and not unobservable:
             try:
                 state = service.node_registry.client(node["id"], timeout=3).status()
                 healthy = True
@@ -309,18 +312,24 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         node_health[node["id"]] = healthy
         node_releases[node["id"]] = observed
         out.release_data["nodes"][node["id"]] = observed
-        out.add("node.reachable", "nodes",
-                "pass" if healthy else ("unknown" if offline and node["enabled"] else
-                                         "action_required" if not node["enabled"] else "failed"),
-                "Authoritative Node is reachable." if healthy else
-                ("Node reachability was not checked offline." if offline and node["enabled"] else
-                 "Authoritative Node is disabled or unavailable."),
-                remediation=None if healthy else "Check the Node endpoint, credential and Node service.")
+        if unobservable and node["enabled"] and not offline:
+            out.add("node.reachable", "nodes", "unknown",
+                    "Paired Node connections are visible only to the running Bridge; "
+                    "check this Node in the Manager.")
+        else:
+            out.add("node.reachable", "nodes",
+                    "pass" if healthy else ("unknown" if offline and node["enabled"] else
+                                             "action_required" if not node["enabled"] else "failed"),
+                    "Authoritative Node is reachable." if healthy else
+                    ("Node reachability was not checked offline." if offline and node["enabled"] else
+                     "Authoritative Node is disabled or unavailable."),
+                    remediation=None if healthy else "Check the Node endpoint, credential and Node service.")
         # Release compatibility never blocks routes; protocol/security/model
         # readiness remains the execution authority.
-        if offline and node["enabled"]:
+        if (offline or unobservable) and node["enabled"]:
             out.add("release.node_identity", "release", "unknown",
-                    "Node release identity was not checked offline.")
+                    "Node release identity was not checked offline." if offline else
+                    "Node release identity is visible only to the running Bridge.")
         elif not node["enabled"]:
             out.add("release.node_identity", "release", "unknown",
                     "Node release identity is unobserved while disabled.")

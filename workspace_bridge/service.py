@@ -16,8 +16,10 @@ from .notifications import (NotificationChannel, NotificationManager,
                             notification_manager_from_environment, _safe_label)
 from .run_coordinator import RunCoordinator
 from .adapter_registry import AdapterRegistry
-from .schema_upgrade import widen_runtime_type_check
+from .schema_upgrade import add_node_transports, widen_runtime_type_check
+from .node_gateway import NodeGateway, create_pairing
 from .node_registry import NodeRegistry
+from . import pairing as node_pairing
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        WRITE_SCOPES, allowed, handoff_allowed, file_text, digest,
                        redact, require_write_path)
@@ -173,6 +175,7 @@ class Service:
                 widen_runtime_type_check(self.db, "node_adapters")
         if not read_only:
             self.db.execute("PRAGMA journal_mode=WAL")
+            add_node_transports(self.db)
         if read_only:
             channels = notification_channels
             if channels is None:
@@ -184,6 +187,7 @@ class Service:
             channels = notification_channels if notification_channels is not None else [notifier]
             self.notification_manager = NotificationManager(self, channels)
         self.event_broker = None if read_only else EventBroker(self)
+        self.node_gateway = NodeGateway(self)
         self.node_registry = NodeRegistry(self)
         self.adapter_registry = AdapterRegistry(self)
         if not read_only:
@@ -203,6 +207,46 @@ class Service:
         if not read_only:
             self.notification_manager.start()
             self.event_broker.start()
+
+    LOCAL_NODE_DIR = "local-node"
+
+    def local_node_transport(self, node_id: str):
+        """In-process transport for the Node embedded in this Bridge."""
+        from types import SimpleNamespace
+        from .node_api import handle
+        from .node_cli import load_node_config
+        from .node_service import NodeService
+        with self.lock:
+            if getattr(self, "_local_node", None) is None:
+                state = self.state / self.LOCAL_NODE_DIR
+                self._local_node = NodeService(state, load_node_config(state),
+                                               read_only=self.read_only)
+            node_service = self._local_node
+
+        class LocalTransport:
+            def request(self, method, path, content=None, headers=None):
+                status, raw = handle(node_service, method, path, content or b"")
+                return SimpleNamespace(status_code=status, content=raw)
+
+        return LocalTransport()
+
+    def gateway_settings(self) -> dict:
+        """Where paired Nodes reach this Bridge; see cli.gateway_settings."""
+        from .cli import gateway_settings
+        return gateway_settings(self.config)
+
+    def create_node_pairing(self, name: str, replace: bool = False) -> dict:
+        """Issue one single-use pairing string for a Node that will dial in."""
+        settings = self.gateway_settings()
+        fingerprint = node_pairing.gateway_fingerprint(self.state)
+        with self.lock:
+            code, expires = create_pairing(self.db, name, replace=replace)
+        self.event(None, "node_pairing_created", "replace" if replace else "new")
+        return {"pairing": node_pairing.format_pairing(settings["url"], fingerprint, code),
+                "name": name.strip(), "expires": expires,
+                "note": "Single use, valid for 10 minutes. Run it on the Node with "
+                        "workspace-bridge node --state <node state> pair '<pairing>'. "
+                        "Keep it out of chat."}
 
     def adapter_diagnostics(self) -> dict:
         """Sanitized health observations keyed by AdapterInstance ID."""
@@ -769,6 +813,9 @@ class Service:
         except Exception:  # noqa: BLE001 - shutdown must always close the database
             pass
         with self.lock:
+            local_node = getattr(self, "_local_node", None)
+            if local_node is not None:
+                local_node.close()
             self.db.close()
     def setting(self, key: str) -> str | None:
         with self.lock:

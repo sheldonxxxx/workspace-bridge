@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Paired Nodes: a Node can dial the Bridge instead of listening. The Bridge
+  runs a TLS Node gateway (default port 8767, loopback unless
+  `WB_NODE_GATEWAY_HOST` is set) and issues single-use pairing strings with
+  `workspace-bridge pairing create` or `POST /api/nodes/pairings`; the Node
+  redeems one with `workspace-bridge node pair`. Nodes pin the gateway
+  certificate and authenticate with an Ed25519 key; no inbound port or Node
+  token is needed, and reconnecting keeps runs alive.
+- `workspace-bridge local-node enable --allow-root <path>` runs the Bridge
+  host's Node inside the Bridge process, so one machine needs one service.
+- Every Node request now runs in a worker thread through one shared handler,
+  so a slow adapter or filesystem call no longer blocks the Node.
+- New dependencies: `websockets` and `cryptography`.
 - Runs no longer stay active forever after a Node or adapter URL or token
   changes. They are marked `interrupted` (`runtime_authority_changed`) with
   stale interactions, without contacting the replacement endpoint. The

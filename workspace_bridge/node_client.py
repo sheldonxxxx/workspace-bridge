@@ -85,10 +85,6 @@ class NodeClient:
         request_limit = MAX_IMAGE_REQUEST_BYTES if path == "/v1/workspaces/write_image" else 2 * 1024 * 1024
         if raw_body is not None and len(raw_body) > request_limit:
             raise BridgeError("Node request exceeds the payload limit", "too_large")
-        request = urllib.request.Request(self.base_url + path, data=raw_body,
-            headers={"Accept": "application/json", "X-Node-Token": self.token,
-                     **({"Content-Type": "application/json"} if raw_body is not None else {})},
-            method=method)
         try:
             if self.transport is not None:
                 response = self.transport.request(method, path, content=raw_body,
@@ -100,6 +96,10 @@ class NodeClient:
                 if response.status_code >= 400:
                     raise _node_http_error(response.status_code, raw, self.token)
             else:
+                request = urllib.request.Request(self.base_url + path, data=raw_body,
+                    headers={"Accept": "application/json", "X-Node-Token": self.token,
+                             **({"Content-Type": "application/json"} if raw_body is not None else {})},
+                    method=method)
                 with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                     raw = response.read(MAX_RESPONSE + 1)
                     if len(raw) > MAX_RESPONSE:

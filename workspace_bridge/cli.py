@@ -5,8 +5,13 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import ipaddress
+import re
 import secrets
+import sqlite3
 import sys
+import threading
+from datetime import datetime, timezone
 
 import uvicorn
 from . import __version__
@@ -23,6 +28,43 @@ DEFAULT_STATE = Path.home() / ".local" / "state" / "workspace-bridge"
 
 ADMIN_ALLOWED_HOSTS_ENV = "WB_ADMIN_ALLOWED_HOSTS"
 MAX_ADMIN_ALLOWED_HOSTS = 20
+GATEWAY_HOST_ENV = "WB_NODE_GATEWAY_HOST"
+GATEWAY_URL_ENV = "WB_NODE_GATEWAY_URL"
+DEFAULT_GATEWAY_PORT = 8767
+_GATEWAY_HOSTNAME = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+
+
+def gateway_settings(config: dict, environ: dict | None = None) -> dict:
+    """Bind address, port and advertised URL of the Node gateway.
+
+    Paired Nodes dial this listener. It binds loopback unless
+    WB_NODE_GATEWAY_HOST names another address, normally a VPN interface.
+    WB_NODE_GATEWAY_URL overrides the URL put into pairing strings, for
+    example a VPN hostname; the certificate is pinned, so any name works.
+    """
+    from .pairing import GATEWAY_PATH, gateway_url
+    env = environ if environ is not None else os.environ
+    port = config.get("gateway_port", DEFAULT_GATEWAY_PORT)
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise BridgeError("Invalid Node gateway port in config.json")
+    if port in (config.get("mcp_port"), config.get("admin_port")):
+        raise BridgeError("The Node gateway port must differ from the MCP and Manager ports")
+    host = (env.get(GATEWAY_HOST_ENV) or "127.0.0.1").strip()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+        if not _GATEWAY_HOSTNAME.fullmatch(host):
+            raise BridgeError(f"{GATEWAY_HOST_ENV} must be an IP address or hostname")
+    url = (env.get(GATEWAY_URL_ENV) or "").strip()
+    if not url:
+        if address is not None and address.is_unspecified:
+            raise BridgeError(f"Set {GATEWAY_URL_ENV} when {GATEWAY_HOST_ENV} is a wildcard address")
+        url = gateway_url(host, port)
+    if (not url.startswith("wss://") or not url.endswith(GATEWAY_PATH) or len(url) > 2048
+            or any(ord(char) < 33 for char in url)):
+        raise BridgeError(f"{GATEWAY_URL_ENV} must be a wss:// URL ending in {GATEWAY_PATH}")
+    return {"host": host, "port": port, "url": url}
 
 
 def parse_admin_allowed_hosts(raw: str) -> tuple[str, ...]:
@@ -73,8 +115,10 @@ def resolve_bind_hosts(container_mode: bool, extra_admin_hosts: tuple[str, ...])
     return mcp_bind, admin_bind
 
 
-def initialize(state: Path, mcp_port: int, admin_port: int) -> dict:
-    if not 1024 <= mcp_port <= 65535 or not 1024 <= admin_port <= 65535 or mcp_port == admin_port:
+def initialize(state: Path, mcp_port: int, admin_port: int,
+               gateway_port: int = DEFAULT_GATEWAY_PORT) -> dict:
+    ports = (mcp_port, admin_port, gateway_port)
+    if any(not 1024 <= port <= 65535 for port in ports) or len(set(ports)) != 3:
         raise BridgeError("Choose distinct unprivileged TCP ports")
     state = state.expanduser().resolve()
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -83,7 +127,8 @@ def initialize(state: Path, mcp_port: int, admin_port: int) -> dict:
     os.chmod(state, 0o700)
     cursor_secret = secrets.token_urlsafe(32)
     config = {"schema_version": 1, "mcp_port": mcp_port,
-              "admin_port": admin_port, "cursor_secret": cursor_secret}
+              "admin_port": admin_port, "gateway_port": gateway_port,
+              "cursor_secret": cursor_secret}
     for filename, text in (("config.json", json.dumps(config, indent=2)),):
         fd = os.open(state / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as out:
@@ -91,7 +136,60 @@ def initialize(state: Path, mcp_port: int, admin_port: int) -> dict:
             out.flush()
             os.fsync(out.fileno())
     AdminAccount(state).ensure()
+    from .pairing import ensure_gateway_certificate
+    ensure_gateway_certificate(state)
     return config
+
+
+def enable_local_node(state: Path, roots: list[str], name: str = "This machine") -> dict:
+    """Create the Node embedded in this Bridge and register it; no Node service needed."""
+    from .node_cli import initialize_node
+    from .schema_upgrade import add_node_transports
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
+        raise BridgeError("Node name must contain 1 to 80 characters")
+    db = sqlite3.connect(state / "bridge.sqlite3", timeout=10)
+    db.row_factory = sqlite3.Row
+    try:
+        if db.execute("SELECT name FROM sqlite_master WHERE name='nodes'").fetchone() is None:
+            raise BridgeError("Start the Bridge once before enabling the local Node")
+        add_node_transports(db)
+        if db.execute("SELECT 1 FROM nodes WHERE transport='local'").fetchone():
+            raise BridgeError("This Bridge already has a local Node")
+        if db.execute("SELECT 1 FROM nodes WHERE name=? COLLATE NOCASE", (name.strip(),)).fetchone():
+            raise BridgeError("Node name is already in use")
+        initialize_node(state / Service.LOCAL_NODE_DIR, roots, "127.0.0.1", 8770)
+        node_id = "node_" + secrets.token_hex(12)
+        stamp = datetime.now(timezone.utc).isoformat()
+        with db:
+            db.execute("INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated,"
+                       "transport,public_key) VALUES(?,?,'','',1,?,?,?,'local','')",
+                       (node_id, name.strip(), "rev_" + secrets.token_hex(16), stamp, stamp))
+    finally:
+        db.close()
+    return {"node_id": node_id, "name": name.strip()}
+
+
+def create_pairing_offline(state: Path, config: dict, name: str, replace: bool) -> dict:
+    """Issue a pairing string from the CLI, safely beside a running Bridge.
+
+    Uses its own short SQLite connection rather than a Service, so no second
+    set of background workers starts.
+    """
+    from .node_gateway import create_pairing
+    from .pairing import format_pairing, gateway_fingerprint
+    from .schema_upgrade import add_node_transports
+    settings = gateway_settings(config)
+    fingerprint = gateway_fingerprint(state)
+    db = sqlite3.connect(state / "bridge.sqlite3", timeout=10)
+    db.row_factory = sqlite3.Row
+    try:
+        if db.execute("SELECT name FROM sqlite_master WHERE name='nodes'").fetchone() is None:
+            raise BridgeError("Start the Bridge once before pairing a Node")
+        add_node_transports(db)
+        code, expires = create_pairing(db, name, replace=replace)
+    finally:
+        db.close()
+    return {"pairing": format_pairing(settings["url"], fingerprint, code), "expires": expires}
 
 
 def load_config(state: Path) -> dict:
@@ -374,6 +472,7 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
     if extra_admin_hosts is None:
         extra_admin_hosts = admin_allowed_hosts_from_env()
     mcp_bind, admin_bind = resolve_bind_hosts(container_mode, extra_admin_hosts)
+    gateway = gateway_settings(config)
     # Operational logs use the configured WB_LOG_LEVEL; Uvicorn's own access
     # logs stay disabled and its internal level stays warning (no noisy
     # request logs just to create output).
@@ -400,13 +499,29 @@ async def serve(service: Service, config: dict, *, container_mode: bool = False,
                        access_log=False, proxy_headers=False, log_level="warning"),
     ]
     servers = [uvicorn.Server(c) for c in configs]
+    # The Node gateway runs on its own loop and thread: worker threads wait on
+    # it for Node replies, sometimes holding the service lock, so it must not
+    # share a loop with request handlers that take that lock.
+    from .node_gateway import MAX_FRAME
+    from .pairing import ensure_gateway_certificate
+    cert, key = ensure_gateway_certificate(service.state)
+    gateway_server = uvicorn.Server(uvicorn.Config(
+        service.node_gateway.app(), host=gateway["host"], port=gateway["port"],
+        ssl_certfile=str(cert), ssl_keyfile=str(key), ws_max_size=MAX_FRAME,
+        ws_ping_interval=20, ws_ping_timeout=20, lifespan="off",
+        access_log=False, proxy_headers=False, log_level="warning"))
+    gateway_thread = threading.Thread(target=gateway_server.run, name="node-gateway",
+                                      daemon=True)
+    gateway_thread.start()
     tasks = [asyncio.create_task(s.serve()) for s in servers]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         for server in servers:
             server.should_exit = True
+        gateway_server.should_exit = True
         await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(gateway_thread.join, 10)
 
 
 def _emit_serve_startup_error(exc: BaseException) -> None:
@@ -437,6 +552,8 @@ def main(argv: list[str] | None = None):
     init = sub.add_parser("init", help="Initialize private Bridge control-plane state")
     init.add_argument("--mcp-port", type=int, default=8765)
     init.add_argument("--admin-port", type=int, default=8766)
+    init.add_argument("--gateway-port", type=int, default=DEFAULT_GATEWAY_PORT,
+                      help="TLS port paired Nodes dial (bind address from WB_NODE_GATEWAY_HOST)")
     run = sub.add_parser("serve", help="Start both loopback listeners, single process only")
     run.add_argument("--container", action="store_true",
                      help="Bind 0.0.0.0 INSIDE an isolated container; requires loopback-only published host ports")
@@ -450,6 +567,18 @@ def main(argv: list[str] | None = None):
     doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
     doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
     sub.add_parser("reset-admin-password", help="Reset admin to the temporary bootstrap password; invalidates all sessions")
+    local_node = sub.add_parser("local-node", help="Run a Node inside this Bridge process for this machine's projects")
+    local_node_sub = local_node.add_subparsers(dest="local_node_command", required=True)
+    local_enable = local_node_sub.add_parser("enable", help="Create the embedded Node (restart serve afterwards)")
+    local_enable.add_argument("--allow-root", action="append", required=True,
+                              help="Project root this Node may expose (repeatable)")
+    local_enable.add_argument("--name", default="This machine", help="Node display name")
+    pairing_parser = sub.add_parser("pairing", help="Issue one-time pairing strings for Nodes that dial this Bridge")
+    pairing_sub = pairing_parser.add_subparsers(dest="pairing_command", required=True)
+    pairing_create = pairing_sub.add_parser("create", help="Create a single-use pairing string (valid 10 minutes)")
+    pairing_create.add_argument("--name", required=True, help="Node display name")
+    pairing_create.add_argument("--replace", action="store_true",
+                                help="Re-pair the existing paired Node with this name (new key; its runs stop)")
     release = sub.add_parser("release", help="Deterministic release bundle build and validation (release engineering)")
     release_sub = release.add_subparsers(dest="release_command", required=True)
     release_build = release_sub.add_parser("build", help="Build deterministic release bundle")
@@ -462,7 +591,7 @@ def main(argv: list[str] | None = None):
     node.add_argument("--state", dest="node_state", type=Path, default=default_node_state(),
                       help="Node state directory (separate from Bridge --state)")
     node.add_argument("node_argv", nargs=argparse.REMAINDER,
-                      help="Node command: init | serve | open-session | reclaim-session | show-token | service ...")
+                      help="Node command: init | pair | serve | show-token | service ...")
     adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex/Claude adapter instance")
     adapter.add_argument("--state", dest="adapter_state", type=Path, required=True,
                          help="Adapter instance state directory (separate from Bridge --state and Node state)")
@@ -503,7 +632,7 @@ def main(argv: list[str] | None = None):
         # re-resolves it when listeners start.
         configure_operational_logging()
         if args.command == "init":
-            config = initialize(state, args.mcp_port, args.admin_port)
+            config = initialize(state, args.mcp_port, args.admin_port, args.gateway_port)
             print(f"Initialized {state}\nLocal management: http://127.0.0.1:{config['admin_port']}/")
             print("Run workspace-bridge serve. Sign in as admin with temporary password admin; change it on first login.")
             return
@@ -567,6 +696,18 @@ def main(argv: list[str] | None = None):
                 return
             parser.error("Unknown release subcommand")
         config = load_config(state)
+        if args.command == "local-node":
+            result = enable_local_node(state, args.allow_root, args.name)
+            print(f"Local Node {result['name']} ({result['node_id']}) enabled. "
+                  "Restart workspace-bridge serve, then add workspaces on it in the Manager.")
+            return
+        if args.command == "pairing":
+            result = create_pairing_offline(state, config, args.name, args.replace)
+            print(result["pairing"])
+            print(f"Single use, expires {result['expires']}. On the Node run: "
+                  "workspace-bridge node --state <node state> pair '<pairing>'. Keep it out of chat.",
+                  file=sys.stderr)
+            return
         if args.command == "reset-admin-password":
             AdminAccount(state).reset()
             print("Admin password reset. Sign in as admin with temporary password admin; change it on first login.")

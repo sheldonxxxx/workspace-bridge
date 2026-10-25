@@ -75,6 +75,13 @@ but no longer authenticate the Manager. Complete the first-login password
 change promptly. Passwords are stored only as salted scrypt hashes; normal
 APIs never return them. Failed sign-ins are limited to five per minute.
 
+Paired Nodes have no token. Disable one in the Manager to refuse its
+connection, or re-pair it with `workspace-bridge pairing create --name <name>
+--replace` to rotate its key; the old key is refused immediately and runs
+started under it become interrupted. The gateway certificate and key live in
+the Bridge state folder (`gateway-cert.pem`, `gateway-key.pem`); back them up
+with that folder, because a new certificate means pairing every Node again.
+
 ## Root replacement and moving projects
 
 Mappings authorize a canonical path. The same configured path stays usable

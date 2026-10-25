@@ -83,6 +83,18 @@ Component responsibilities:
   the Run Inspector, API loaders, feed presentation, state hooks, and SSE
   subscriptions from the main Manager shell.
 
+## Node transports
+
+The Bridge sends the same `/v1/...` Node requests over one of three
+transports. `http` Nodes listen and check a Node token. `paired` Nodes dial
+the Bridge's TLS Node gateway, authenticate with an Ed25519 key, and answer
+requests over that outbound socket. The `local` Node runs inside the Bridge
+process. All three call one request handler (`node_api.handle`) on the Node,
+always from a worker thread. The gateway runs on its own event loop and
+thread, because Bridge worker threads wait on it for replies while sometimes
+holding the service lock. A paired Node's connection revision derives from
+its public key, so reconnecting never strands runs; re-pairing does.
+
 ## Authority and data path
 
 ```mermaid

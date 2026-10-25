@@ -687,6 +687,11 @@ class NodeCreate(Input):
     enabled: bool = True
 
 
+class NodePairingCreate(Input):
+    name: str = Field(min_length=1, max_length=80)
+    replace: bool = Field(default=False, description="Re-pair the existing paired Node with this name.")
+
+
 class NodeUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -1030,6 +1035,10 @@ def make_admin(service: Service, port: int = 8766, *,
                     return JSONResponse(await run_in_threadpool(
                         service.node_registry.create, model.model_dump()), 201)
                 return JSONResponse({"error": "Method not allowed"}, 405)
+            if path == "/api/nodes/pairings" and request.method == "POST":
+                model = NodePairingCreate.model_validate(await body_json(request))
+                return JSONResponse(await run_in_threadpool(
+                    service.create_node_pairing, model.name, model.replace), 201)
             if path == "/api/nodes/test" and request.method == "POST":
                 model = NodeTest.model_validate(await body_json(request))
                 return JSONResponse(await run_in_threadpool(
@@ -1346,6 +1355,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/run-events", api),
         Route("/api/nodes", api, methods=["GET", "POST"]),
         Route("/api/nodes/test", api, methods=["POST"]),
+        Route("/api/nodes/pairings", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/test", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/adapters", api, methods=["GET", "POST"]),
         Route("/api/nodes/{node_id}", api, methods=["GET", "PATCH", "DELETE"]),

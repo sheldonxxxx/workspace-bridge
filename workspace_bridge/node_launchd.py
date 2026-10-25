@@ -674,6 +674,10 @@ def _root_status(value: dict) -> dict:
 
 def probe_node_status(config: dict, token: str) -> dict:
     """Probe the authenticated local Node endpoint without returning credentials."""
+    if config.get("bridge"):
+        # A paired Node dials its Bridge and has no local listener to probe;
+        # its connection is visible in the Bridge Manager.
+        return {"status": "not_probed", "code": "paired_node"}
     request = urllib.request.Request(
         _health_url(config["host"], config["port"]),
         headers={"Accept": "application/json", "X-Node-Token": token},

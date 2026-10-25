@@ -57,3 +57,26 @@ def widen_runtime_type_check(db: sqlite3.Connection, table: str) -> bool:
     finally:
         db.execute("PRAGMA foreign_keys=ON")
     return True
+
+
+NODE_PAIRINGS_SQL = """
+CREATE TABLE IF NOT EXISTS node_pairings (
+  id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+  replace_node TEXT, created TEXT NOT NULL, expires TEXT NOT NULL,
+  used TEXT, node_id TEXT)"""
+
+
+def add_node_transports(db: sqlite3.Connection) -> None:
+    """Add Node transport and key columns plus the pairing table, if missing.
+
+    Purely additive: existing Nodes keep the ``http`` transport and their
+    token, so an upgraded Bridge keeps working with unchanged Nodes.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(nodes)")}
+    with db:
+        if "transport" not in columns:
+            db.execute("ALTER TABLE nodes ADD COLUMN transport TEXT NOT NULL DEFAULT 'http' "
+                       "CHECK(transport IN ('http','paired','local'))")
+        if "public_key" not in columns:
+            db.execute("ALTER TABLE nodes ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
+        db.execute(NODE_PAIRINGS_SQL)

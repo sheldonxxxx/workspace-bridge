@@ -68,6 +68,16 @@ def load_node_config(state: Path) -> dict:
 
 async def serve_node(state: Path, config: dict):
     service = NodeService(state, config)
+    if config.get("bridge"):
+        # Paired: dial the Bridge and answer its requests; no listener at all.
+        from .node_link import run_link
+        from .oplog import configure_operational_logging
+        configure_operational_logging()
+        try:
+            await run_link(service, config, state)
+        finally:
+            service.close()
+        return
     try:
         server = uvicorn.Server(uvicorn.Config(
             make_node_api(service, config["node_token_hash"]),
@@ -108,6 +118,8 @@ def main(argv: list[str] | None = None):
     init.add_argument("--port", type=int, default=8770)
     sub.add_parser("serve", help="Run the private Node API")
     sub.add_parser("show-token", help="Print the Node token once for Bridge configuration")
+    pair_parser = sub.add_parser("pair", help="Pair with a Bridge using a one-time pairing string; the Node then dials out")
+    pair_parser.add_argument("pairing", help="wbpair1:... string from the Bridge (keep it out of chat)")
     service = sub.add_parser("service", help="Manage the Node service (macOS launchd or Linux systemd system service)")
     service_sub = service.add_subparsers(dest="service_command", required=True)
     service_sub.add_parser("install", help="Install and start the managed system service")
@@ -170,6 +182,12 @@ def main(argv: list[str] | None = None):
             if path.is_symlink() or path.stat().st_mode & 0o077:
                 raise BridgeError("Unsafe Node token file")
             print(path.read_text().strip())
+            return
+        if args.command == "pair":
+            from .node_link import pair
+            bridge = asyncio.run(pair(state, config, args.pairing))
+            print(f"Paired as {bridge['name'] or bridge['node_id']}. Restart the Node service "
+                  "(or run serve) so it connects to the Bridge; it no longer listens for inbound requests.")
             return
         if args.command == "serve":
             # Managed LaunchAgents carry WB_NATIVE_LOG_GUARD=1 on Darwin;

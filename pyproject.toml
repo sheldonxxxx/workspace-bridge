@@ -23,7 +23,15 @@ classifiers = [
     "Topic :: Software Development",
     "Topic :: Software Development :: Code Generators",
 ]
-dependencies = ["starlette>=0.50,<1", "uvicorn>=0.35,<1", "pydantic>=2.12,<3", "regex>=2025.7.34,<2027", "Pillow>=12.3,<13"]
+dependencies = [
+    "starlette>=0.50,<1",
+    "uvicorn>=0.35,<1",
+    "pydantic>=2.12,<3",
+    "regex>=2025.7.34,<2027",
+    "Pillow>=12.3,<13",
+    "websockets>=15,<17",
+    "cryptography>=44,<47",
+]
 license = "MIT"
 license-files = ["LICENSE"]
 

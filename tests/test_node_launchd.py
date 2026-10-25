@@ -716,3 +716,13 @@ def test_install_idempotent_when_loaded_non_running_performs_no_mutation(tmp_pat
     payload = json.dumps(again, sort_keys=True)
     assert token not in payload
     assert "node-token" not in payload
+
+
+def test_paired_node_status_is_not_probed_over_http(monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("a paired Node has no local listener to probe")
+
+    monkeypatch.setattr("urllib.request.urlopen", unexpected)
+    result = probe_node_status({"host": "127.0.0.1", "port": 8770,
+                                "bridge": {"node_id": "node_" + "0" * 24}}, "")
+    assert result == {"status": "not_probed", "code": "paired_node"}

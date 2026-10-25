@@ -112,6 +112,43 @@ section 6. Keep this terminal attached; stopping it stops the Bridge unless
 you install the Bridge as a persistent service per your OS policy (see
 [Operations](OPERATIONS.md)).
 
+### Embedded Node and paired remote Nodes
+
+Instead of a separate Node service on the Bridge host, the Bridge can run
+that machine's Node in its own process:
+
+```sh
+workspace-bridge local-node enable --allow-root "$HOME/Projects"
+```
+
+Restart `workspace-bridge serve` afterwards. The local Node appears in the
+Manager with transport `local` and needs no URL or token.
+
+A Node on another machine can dial the Bridge instead of listening for it.
+The Bridge's Node gateway (TLS, default port 8767) binds `127.0.0.1` unless
+`WB_NODE_GATEWAY_HOST` names another address, normally the Bridge's VPN
+(for example Tailscale) IP. Set `WB_NODE_GATEWAY_URL` when Nodes should use a
+hostname, such as `wss://bridge.example.ts.net:8767/v1/node-gateway`. Then
+issue a single-use pairing string on the Bridge host (or with
+`POST /api/nodes/pairings` in the Manager API) and redeem it on the Node:
+
+```sh
+# Bridge host: valid for 10 minutes, shown once
+workspace-bridge pairing create --name laptop
+# Node host, after node init with its allowed roots:
+NODE_STATE="$HOME/.local/state/workspace-bridge-node"
+workspace-bridge node --state "$NODE_STATE" pair 'wbpair1:...'
+workspace-bridge node --state "$NODE_STATE" service restart
+```
+
+The pairing string carries the gateway certificate fingerprint, so the first
+connection is already pinned. A paired Node opens no inbound port and its
+Node token is no longer used. It reconnects on its own after network loss
+without affecting runs. To give it a new key, issue
+`pairing create --name laptop --replace` and pair again; runs started under
+the old key become interrupted. `doctor` cannot see paired connections and
+reports them as unknown; check them in the Manager.
+
 ## 5. Path B — persistent deployment (container Bridge, native Node and adapters)
 
 Run the Bridge control plane in Compose and keep the Node plus Pi/Codex/Claude Code
@@ -232,7 +269,8 @@ are not accepted by the Manager. Order matters:
 
 1. **Node:** add the Node URL with its token. Native evaluation uses the
    loopback Node URL; container Bridge uses the host-reachable Node URL from
-   section 5.
+   section 5. Embedded and paired Nodes (section 4) register themselves and
+   skip this step.
 2. **Workspaces:** add one mapping per canonical Node-local root, then enable
    it and set write scope (`handoff` default; `none` denies all writes
    including handoff publication; `workspace` allows permitted source text).
