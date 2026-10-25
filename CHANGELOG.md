@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Runs no longer stay active forever after a Node or adapter URL or token
+  changes. They are marked `interrupted` (`runtime_authority_changed`) with
+  stale interactions, without contacting the replacement endpoint. The
+  background sweep skips runs whose Node or adapter is disabled or changed,
+  so they cannot starve newer runs, and visits the least recently updated
+  runs first.
+- New local-admin `POST /api/runs/<run_id>/abandon` marks an unreachable run
+  `orphaned` (`abandoned_by_admin`) without contacting its runtime.
+- Git evidence neutralizes clean/smudge/process filter drivers defined in a
+  repository's `.git/config`; an unparseable filter section fails closed.
+- The Manager's workspace routes and handoff document endpoints no longer
+  block the admin listener while waiting for the Node.
+- Direct-instruction runs publish their audit handoff under the same service
+  lock as `prepare_handoff`.
+
 ## 0.3.0
 
 - Add the OpenCode v2 host adapter with shared native storage, owned server

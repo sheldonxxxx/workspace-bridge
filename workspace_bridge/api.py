@@ -1207,6 +1207,8 @@ def make_admin(service: Service, port: int = 8766, *,
                 run_id = parts[2]
                 if len(parts) == 4 and parts[3] == "stop":
                     return JSONResponse(await run_in_threadpool(service.admin_stop_agent_run, run_id))
+                if len(parts) == 4 and parts[3] == "abandon":
+                    return JSONResponse(await run_in_threadpool(service.admin_abandon_agent_run, run_id))
                 if len(parts) == 4 and parts[3] in {"steer", "queue"}:
                     model = RunInput.model_validate(await body_json(request))
                     return JSONResponse(await run_in_threadpool(
@@ -1280,7 +1282,8 @@ def make_admin(service: Service, port: int = 8766, *,
                 with service.lock:
                     ws = service.workspace(ws_id, False)
                 if path.endswith("/routes") and request.method == "GET":
-                    return JSONResponse(service.workspace_route_policy(ws))
+                    # Contacts the Node and adapters; keep it off the event loop.
+                    return JSONResponse(await run_in_threadpool(service.workspace_route_policy, ws))
                 if path.endswith("/routes/default"):
                     if request.method == "POST":
                         model = WorkspaceDefault.model_validate(await body_json(request))
@@ -1304,9 +1307,13 @@ def make_admin(service: Service, port: int = 8766, *,
                     return JSONResponse(service.list_handoffs(ws, 0, 40))
             if path.endswith("/document"):
                 document = Artifact.model_validate(dict(request.query_params))
-                with service.lock:
-                    ws = service.workspace(ws_id, False)
-                    return JSONResponse(service.read_handoff(ws, **document.model_dump()))
+
+                def read_document() -> dict:
+                    # Reads through the Node; keep it off the event loop.
+                    with service.lock:
+                        ws = service.workspace(ws_id, False)
+                        return service.read_handoff(ws, **document.model_dump())
+                return JSONResponse(await run_in_threadpool(read_document))
             if path.endswith("/runs"):
                 try:
                     offset = max(0, int(request.query_params.get("offset", "0")))
@@ -1353,6 +1360,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/adapters/{adapter_id}/usage-limits", api),
         Route("/api/runs/{run_id}", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
+        Route("/api/runs/{run_id}/abandon", api, methods=["POST"]),
         Route("/api/runs/{run_id}/steer", api, methods=["POST"]),
         Route("/api/runs/{run_id}/queue", api, methods=["POST"]),
         Route("/api/runs/{run_id}/interactions/{interaction_id}", api, methods=["POST"]),

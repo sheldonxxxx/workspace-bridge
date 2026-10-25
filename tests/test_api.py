@@ -265,3 +265,32 @@ async def test_admin_session_bounded_count(env):
     for i in range(store.MAX_SESSIONS + 10):
         store.create()
     assert store.count <= store.MAX_SESSIONS
+
+
+async def test_admin_node_reads_run_off_the_event_loop(env, mcp, payload, monkeypatch):
+    """Route and handoff-document reads contact the Node; they must not block the loop."""
+    import threading
+    service = env["service"]
+    async with mcp:
+        r = await rpc(mcp, env, "tools/call", {"name": "prepare_handoff", "arguments": payload})
+        job = json.loads(r.json()["result"]["content"][0]["text"])
+    loop_thread = threading.current_thread()
+    seen = {}
+    for name in ("workspace_route_policy", "read_handoff"):
+        original = getattr(service, name)
+
+        def recorded(*args, _name=name, _original=original, **kwargs):
+            seen[_name] = threading.current_thread()
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(service, name, recorded)
+    app = make_admin(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as c:
+        c.headers["Cookie"] = admin_cookie(app)
+        assert (await c.get(f"/api/workspaces/{env['id']}/routes")).status_code == 200
+        document = await c.get(f"/api/workspaces/{env['id']}/document",
+                               params={"job_id": job["id"], "document": "TASK.md"})
+        assert document.status_code == 200, document.text
+    assert set(seen) == {"workspace_route_policy", "read_handoff"}
+    assert all(thread is not loop_thread for thread in seen.values())

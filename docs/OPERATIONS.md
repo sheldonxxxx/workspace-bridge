@@ -405,6 +405,19 @@ cannot confirm an operation, the Bridge records an interrupted or orphaned
 outcome and marks pending interactions stale. Transient adapter failures are
 reported as availability errors and do not cause a prompt retry.
 
+Changing a Node's or adapter's URL or token gives it a new connection
+revision. The Bridge never sends control traffic for an existing run to the
+replacement endpoint, so active runs started under the old revision are
+marked `interrupted` with error `runtime_authority_changed` and their pending
+interactions become stale. The native agent may still be running at the old
+endpoint; stop it on its host if needed. Disabling a Node or adapter keeps its
+revision, so its runs resume reconciliation when it is enabled again.
+
+For a run the Bridge can no longer reach for any other reason, the Manager
+API offers `POST /api/runs/<run_id>/abandon`. It marks the run `orphaned`
+with error `abandoned_by_admin` and stale interactions without contacting the
+runtime. It is local-admin only and never an MCP tool.
+
 Pi, Codex, and Claude Code adapters are Node-owned private processes using the same
 Runtime Protocol v1 contract. Native listen ports, bootstrap tokens, state
 paths, and service lifecycle remain configured on their hosts. Bridge Node

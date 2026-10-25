@@ -163,6 +163,7 @@ class RunCoordinator:
     def __init__(self, service, *, background: bool = True, read_only: bool = False):
         self.service = service
         self.background = background
+        self.read_only = read_only
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._sweep_failures: set[str] = set()
@@ -359,6 +360,77 @@ class RunCoordinator:
             raise BridgeError("The run's adapter authority changed", "adapter_changed")
         return self.service.adapter_registry.client(
             run["adapter_id"], require_enabled=True, workspace=ws, timeout=timeout)
+
+    # A run whose Node or adapter connection identity changed can never be
+    # controlled again: every later call refuses the new endpoint. Disabled
+    # Nodes or adapters keep their identity and stay recoverable.
+    _STRANDED_RUNS_SQL = (
+        "SELECT r.* FROM agent_runs r "
+        "LEFT JOIN nodes n ON n.id=r.node_id "
+        "LEFT JOIN node_adapters a ON a.adapter_id=r.adapter_id "
+        "WHERE r.phase IN ('starting','active') AND (n.id IS NULL OR a.adapter_id IS NULL "
+        "OR n.revision<>r.node_revision OR a.revision<>r.adapter_revision "
+        "OR a.node_id<>r.node_id)")
+
+    def _terminate_locked(self, run: dict, outcome: str, error: str) -> None:
+        """Mark one non-terminal run terminal without contacting its runtime."""
+        stamp = _now()
+        changed = self.service.db.execute(
+            "UPDATE agent_runs SET phase='terminal',active_state=NULL,outcome=?,error=?,updated=? "
+            "WHERE id=? AND phase<>'terminal'", (outcome, error, stamp, run["id"])).rowcount
+        if not changed:
+            return
+        self.service.db.execute(
+            "UPDATE agent_interactions SET state='stale',updated=? WHERE run=? AND state='pending'",
+            (stamp, run["id"]))
+        self._record_outcome_event_locked(run, outcome)
+
+    def interrupt_stranded_runs(self, run_id: str | None = None) -> list[str]:
+        """Interrupt active runs whose Node or adapter connection identity changed.
+
+        The Bridge never sends control traffic to a replacement endpoint, so the
+        native agent may still be running at the previous one. Nothing is
+        replayed; the run only stops occupying its conversation and the sweep.
+        """
+        if self.read_only:
+            return []
+        with self.service.lock:
+            if self._stop.is_set():
+                return []
+            sql, params = self._STRANDED_RUNS_SQL, ()
+            if run_id is not None:
+                sql, params = sql + " AND r.id=?", (run_id,)
+            candidates = [row["id"] for row in self.service.db.execute(sql, params)]
+        interrupted = []
+        for candidate in candidates:
+            with self._run_locks[hash(candidate) % len(self._run_locks)]:
+                with self.service.lock, self.service.db:
+                    if self._stop.is_set():
+                        return interrupted
+                    row = self.service.db.execute(
+                        self._STRANDED_RUNS_SQL + " AND r.id=?", (candidate,)).fetchone()
+                    if row is None:
+                        continue
+                    self._terminate_locked(dict(row), "interrupted", "runtime_authority_changed")
+            self.run_events.publish(candidate)
+            interrupted.append(candidate)
+        return interrupted
+
+    def wake(self) -> None:
+        """Ask the background sweep to run now, e.g. after a connection change."""
+        self._wake.set()
+
+    def abandon(self, ws: dict, run_id: str) -> dict:
+        """Local-admin escape hatch: stop tracking a run without contacting its runtime."""
+        with self._run_locks[hash(run_id) % len(self._run_locks)]:
+            run = self._run_row(ws, run_id)
+            if run["phase"] != "terminal":
+                with self.service.lock, self.service.db:
+                    if self._stop.is_set():
+                        raise RuntimeUnavailable("Runtime coordination stopped")
+                    self._terminate_locked(run, "orphaned", "abandoned_by_admin")
+                self.run_events.publish(run_id)
+        return self.read(ws, run_id, sync=False)
 
     def diagnostics(self) -> dict:
         rows = {}
@@ -1560,6 +1632,10 @@ class RunCoordinator:
                         "message": "Live run sync was skipped because runtime authority changed; "
                                    "showing the durable snapshot.",
                     }
+                    if self.interrupt_stranded_runs(run_id):
+                        sync_warning["message"] = (
+                            "The run's Node or adapter connection changed, so the run was marked "
+                            "interrupted. The agent may still be running at the previous endpoint.")
                 elif exc.code != "unknown_adapter":
                     raise
         run = self._run_row(ws, run_id)
@@ -2006,12 +2082,22 @@ class RunCoordinator:
     def _sweep(self) -> None:
         while not self._stop.is_set():
             self._wake.clear()
+            try:
+                self.interrupt_stranded_runs()
+            except Exception:  # noqa: BLE001 - the next sweep retries
+                pass
             with self.service.lock:
                 if self._stop.is_set():
                     return
+                # Only runs whose captured authority is currently usable can make
+                # progress; disabled or changed ones must not starve the rest.
+                # Least recently updated first, so every run gets a turn.
                 rows = self.service.db.execute(
-                    "SELECT * FROM agent_runs WHERE phase IN ('starting','active') "
-                    "ORDER BY created LIMIT 100").fetchall()
+                    "SELECT r.* FROM agent_runs r JOIN nodes n ON n.id=r.node_id "
+                    "JOIN node_adapters a ON a.adapter_id=r.adapter_id "
+                    "WHERE r.phase IN ('starting','active') AND n.enabled=1 AND a.enabled=1 "
+                    "AND n.revision=r.node_revision AND a.revision=r.adapter_revision "
+                    "AND a.node_id=r.node_id ORDER BY r.updated,r.id LIMIT 100").fetchall()
             self._manage_event_readers([dict(row) for row in rows])
             for row in rows:
                 if self._stop.is_set():

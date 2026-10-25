@@ -141,7 +141,15 @@ class NodeRegistry:
             raise BridgeError("Node name is already in use", "conflict") from None
         if enabled:
             self.refresh_adapters(node_id)
+        if connection_changed:
+            self._wake_runs()
         return self.public(self.get(node_id))
+
+    def _wake_runs(self) -> None:
+        # Runs started under the previous connection are interrupted by the sweep.
+        coordinator = getattr(self.service, "run_coordinator", None)
+        if coordinator is not None:
+            coordinator.wake()
 
     def delete(self, node_id: str) -> dict:
         self.get(node_id)
@@ -198,18 +206,21 @@ class NodeRegistry:
                 continue
             adapters.append((adapter_id, adapter))
         now = _now()
+        revision_changed = False
         with self.service.lock, self.service.db:
             # Adapter IDs are global identities.  Refuse a cross-Node claim
             # before changing any cache row, so a stale or malicious catalog
             # cannot silently re-home an existing runtime destination.
-            for adapter_id, _ in adapters:
+            for adapter_id, adapter in adapters:
                 existing = self.service.db.execute(
-                    "SELECT node_id FROM node_adapters WHERE adapter_id=?",
+                    "SELECT node_id,revision FROM node_adapters WHERE adapter_id=?",
                     (adapter_id,)).fetchone()
                 if existing is not None and existing["node_id"] != node_id:
                     raise BridgeError(
                         "Adapter identity is already owned by another Node",
                         "adapter_identity_conflict")
+                if existing is not None and existing["revision"] != adapter.get("revision", ""):
+                    revision_changed = True
             for adapter_id, adapter in adapters:
                 self.service.db.execute(
                     "INSERT INTO node_adapters(adapter_id,node_id,name,runtime_type,base_url,revision,enabled,has_token,last_seen) "
@@ -222,6 +233,8 @@ class NodeRegistry:
                      int(bool(adapter.get("enabled"))), int(bool(adapter.get("has_token"))), now))
             self.service.db.execute("UPDATE node_adapters SET enabled=0 WHERE node_id=? AND last_seen<>?",
                                     (node_id, now))
+        if revision_changed:
+            self._wake_runs()
         return catalog
 
     def sync_all(self) -> None:

@@ -257,7 +257,8 @@ The opaque hash is process-local; fetch fresh status after a Bridge restart.
 or HEAD to index (`staged`). It accepts only a fixed mode and an optional exact
 changed path; untracked paths have status entries but no patch. It has no arbitrary
 Git command, ref, or option surface. External diff/textconv and pagers are disabled,
-submodules are not traversed, patch secrets are redacted, and output is byte-paginated.
+filter drivers defined in the repository config are neutralized (an unparseable
+filter section fails closed), submodules are not traversed, patch secrets are redacted, and output is byte-paginated.
 Pass the latest status hash to either tool to reject stale review evidence. A status
 or diff is live observation only: it creates no snapshot and establishes no
 authorship. Dirty-tree changes may predate the current run. Continue with targeted

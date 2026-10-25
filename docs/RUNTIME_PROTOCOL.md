@@ -253,6 +253,13 @@ advertise `imageInput`; the current Pi, Codex, and Claude Code adapters advertis
 
 ## Recovery
 
+A run is bound to the Node and adapter connection revisions it started
+under. When either revision changes, Bridge marks the run `interrupted` with
+stale interactions instead of contacting the replacement endpoint, and frees
+its conversation. Disabled Nodes and adapters keep their revisions and their
+runs stay recoverable. The background sweep only reconciles runs whose
+authority is currently usable.
+
 When an adapter advertises events, they have an instance ID and monotonic
 cursor. They are latency hints; conversation, run, interaction, and activity
 snapshots are the source of truth. Bridge reads events for active runs on the

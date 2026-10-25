@@ -512,7 +512,7 @@ def _persist_pending_interaction(service, ws_id, token, native, run_id):
     return viewed["interactions"][0]["id"]
 
 
-def test_existing_run_node_revision_drift_blocks_live_control_and_keeps_snapshot(
+def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
@@ -530,20 +530,25 @@ def test_existing_run_node_revision_drift_blocks_live_control_and_keeps_snapshot
     assert reconcile_error.value.code == "node_changed"
     snapshot = service.call(ws_id, token, "read_agent_run", {"run_id": started["run_id"]})
     assert snapshot["sync_warning"]["code"] == "node_changed"
+    assert "interrupted" in snapshot["sync_warning"]["message"]
     assert snapshot["effective_security"] == started["effective_security"]
+    # The run can never be controlled again, so it stops occupying its
+    # conversation; its pending interaction is stale rather than answerable.
+    assert (snapshot["phase"], snapshot["outcome"]) == ("terminal", "interrupted")
+    assert snapshot["error"] == "runtime_authority_changed"
+    assert [item["state"] for item in snapshot["interactions"]] == ["stale"]
     with pytest.raises(BridgeError) as resolve_error:
         service.call(ws_id, token, "respond_agent_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
             "response": {"choiceId": "accept"}})
-    assert resolve_error.value.code == "node_changed"
-    with pytest.raises(BridgeError) as cancel_error:
-        service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
-    assert cancel_error.value.code == "node_changed"
+    assert resolve_error.value.code == "interaction_stale"
+    cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
+    assert cancelled["outcome"] == "interrupted"
     assert calls == []
     assert service.node_registry.get(ws["node_id"])["revision"] != original_node["revision"]
 
 
-def test_existing_run_adapter_revision_drift_blocks_live_control_and_keeps_snapshot(
+def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_calls(
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
@@ -561,17 +566,115 @@ def test_existing_run_adapter_revision_drift_blocks_live_control_and_keeps_snaps
     assert reconcile_error.value.code == "adapter_changed"
     snapshot = service.call(ws_id, token, "read_agent_run", {"run_id": started["run_id"]})
     assert snapshot["sync_warning"]["code"] == "adapter_changed"
+    assert "interrupted" in snapshot["sync_warning"]["message"]
     assert snapshot["effective_security"] == started["effective_security"]
+    # The run can never be controlled again, so it stops occupying its
+    # conversation; its pending interaction is stale rather than answerable.
+    assert (snapshot["phase"], snapshot["outcome"]) == ("terminal", "interrupted")
+    assert snapshot["error"] == "runtime_authority_changed"
+    assert [item["state"] for item in snapshot["interactions"]] == ["stale"]
     with pytest.raises(BridgeError) as resolve_error:
         service.call(ws_id, token, "respond_agent_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
             "response": {"choiceId": "accept"}})
-    assert resolve_error.value.code == "adapter_changed"
-    with pytest.raises(BridgeError) as cancel_error:
-        service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
-    assert cancel_error.value.code == "adapter_changed"
+    assert resolve_error.value.code == "interaction_stale"
+    cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
+    assert cancelled["outcome"] == "interrupted"
     assert calls == []
     assert service.adapter_registry.get(ADAPTER_ID)["revision"] != original_adapter["revision"]
+
+
+def _one_sweep(coordinator, monkeypatch):
+    """Run exactly one background sweep iteration in the test thread."""
+    class OneShot:
+        def clear(self):
+            pass
+
+        def set(self):
+            pass
+
+        def wait(self, _timeout):
+            coordinator._stop.set()
+
+    monkeypatch.setattr(coordinator, "_wake", OneShot())
+    coordinator._stop.clear()
+    coordinator._sweep()
+    coordinator._stop.clear()
+
+
+def test_sweep_interrupts_runs_stranded_by_an_adapter_connection_change(
+        modern_env, monkeypatch):
+    service, ws_id, token, job, native, _ = modern_env
+    started = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "stranded"})
+    calls = _record_native_calls(native, monkeypatch)
+    service.adapter_registry.update(ADAPTER_ID, {
+        "base_url": "http://127.0.0.1:9878", "token": "rotated-adapter-secret"})
+
+    _one_sweep(service.run_coordinator, monkeypatch)
+
+    run = service.run_coordinator._run_row(service.workspace(ws_id), started["run_id"])
+    assert (run["phase"], run["outcome"], run["error"]) == (
+        "terminal", "interrupted", "runtime_authority_changed")
+    with service.lock:
+        events = [row["event_type"] for row in service.db.execute(
+            "SELECT event_type FROM notification_events WHERE run_id=?", (run["id"],))]
+    assert events == ["run_interrupted"]
+    assert service.run_coordinator.interrupt_stranded_runs() == []
+    assert calls == []
+
+
+def test_disabled_adapter_keeps_runs_recoverable_and_out_of_the_sweep(
+        modern_env, monkeypatch):
+    service, ws_id, token, job, _, _ = modern_env
+    started = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "disabled-adapter"})
+    coordinator = service.run_coordinator
+    reconciled = []
+    monkeypatch.setattr(coordinator, "reconcile",
+                        lambda ws, run_id: reconciled.append(run_id))
+
+    service.adapter_registry.update(ADAPTER_ID, {"enabled": False})
+    _one_sweep(coordinator, monkeypatch)
+    run = coordinator._run_row(service.workspace(ws_id), started["run_id"])
+    assert run["phase"] == "active"
+    assert reconciled == []
+
+    service.adapter_registry.update(ADAPTER_ID, {"enabled": True})
+    _one_sweep(coordinator, monkeypatch)
+    assert reconciled == [started["run_id"]]
+
+
+@pytest.mark.asyncio
+async def test_admin_abandon_marks_run_orphaned_without_runtime_calls(
+        modern_env, monkeypatch):
+    service, ws_id, token, job, native, _ = modern_env
+    started = service.call(ws_id, token, "start_agent_run", {
+        "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "abandon-me"})
+    interaction_id = _persist_pending_interaction(service, ws_id, token, native,
+                                                   started["run_id"])
+    calls = _record_native_calls(native, monkeypatch)
+    app = make_admin(service)
+    headers = {"Cookie": admin_cookie(app)}
+    path = f"/api/runs/{started['run_id']}/abandon"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as client:
+        assert (await client.post(path)).status_code == 401
+        first = await client.post(path, headers=headers)
+        assert first.status_code == 200, first.text
+        repeated = await client.post(path, headers=headers)
+        assert repeated.status_code == 200, repeated.text
+    body = first.json()
+    assert (body["phase"], body["outcome"], body["error"]) == (
+        "terminal", "orphaned", "abandoned_by_admin")
+    assert [item["state"] for item in body["interactions"]] == ["stale"]
+    assert repeated.json()["outcome"] == "orphaned"
+    assert calls == []
+    with pytest.raises(BridgeError) as resolve_error:
+        service.call(ws_id, token, "respond_agent_interaction", {
+            "run_id": started["run_id"], "interaction_id": interaction_id,
+            "response": {"choiceId": "accept"}})
+    assert resolve_error.value.code == "interaction_stale"
 
 
 def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(

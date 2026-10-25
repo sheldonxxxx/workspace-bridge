@@ -351,6 +351,25 @@ def test_direct_instruction_auto_handoff_is_auditable_and_idempotent(simplified_
     _finish_test_run(service, native, ws_id, first["run_id"])
 
 
+def test_direct_instruction_handoff_is_published_under_the_service_lock(
+        simplified_env, monkeypatch):
+    service, ws_id, token, _, native, _ = simplified_env
+    original = service.prepare_handoff
+    owned = []
+
+    def checked(ws, payload):
+        # The handoff transaction shares one SQLite connection with every
+        # other caller, so it must run while this thread owns the lock.
+        owned.append(service.lock._is_owned())
+        return original(ws, payload)
+
+    monkeypatch.setattr(service, "prepare_handoff", checked)
+    started = _direct_instruction(service, ws_id, token, "direct-locked",
+                                  "Document the module layout.")
+    assert owned == [True]
+    _finish_test_run(service, native, ws_id, started["run_id"])
+
+
 def test_direct_instruction_mutual_exclusion_validation(simplified_env):
     service, ws_id, token, job, native, _ = simplified_env
     with pytest.raises(BridgeError) as both:

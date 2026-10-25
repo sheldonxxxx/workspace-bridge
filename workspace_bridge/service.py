@@ -319,8 +319,11 @@ class Service:
         """Run-admission body (normal runtime/security gates only)."""
         self.require_workspace_route(ws, adapter_id)
         if instruction:
-            job_id = self._direct_instruction_handoff(
-                ws, adapter_id, request_id, instruction)["id"]
+            # Same serialization as an MCP prepare_handoff call: the shared
+            # connection's handoff transaction must not interleave with others.
+            with self.lock:
+                job_id = self._direct_instruction_handoff(
+                    ws, adapter_id, request_id, instruction)["id"]
         return self.run_coordinator.start(
             ws, adapter_id, job_id, request_id, model, parent_run_id,
             continue_from_run_id, images=images)
@@ -717,6 +720,13 @@ class Service:
         ws = self._admin_run_workspace(run_id)
         return self.run_coordinator.cancel(ws, run_id)
 
+    def admin_abandon_agent_run(self, run_id: str) -> dict:
+        """Stop tracking one run through the local admin plane; the runtime is not contacted."""
+        ws = self._admin_run_workspace(run_id)
+        result = self.run_coordinator.abandon(ws, run_id)
+        self.event(ws["id"], "abandon_agent_run", result["outcome"] or "ok")
+        return result
+
     def admin_input_agent_run(self, run_id: str, instruction: str, request_id: str, mode: str) -> dict:
         ws = self._admin_run_workspace(run_id)
         return self.run_coordinator.input(ws, run_id, instruction, request_id, mode)
@@ -797,7 +807,8 @@ class Service:
                  (adapter_id or "")[:80], adapter_name[:80], runtime_type[:40]))
             self.db.execute("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id),0)-10000 FROM events)")
     def workspace(self, ident: str, require_enabled: bool = True) -> dict:
-        row = self.db.execute("SELECT * FROM workspaces WHERE id=?", (ident,)).fetchone()
+        with self.lock:
+            row = self.db.execute("SELECT * FROM workspaces WHERE id=?", (ident,)).fetchone()
         if not row or (require_enabled and not row["enabled"]):
             raise BridgeError("Workspace unavailable", "unavailable")
         return dict(row)
@@ -1024,7 +1035,8 @@ class Service:
             "expected_sha256": expected_sha256})
 
     def job(self, ws: dict, ident: str) -> dict:
-        row = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE id=? AND workspace=?", (ident, ws["id"])).fetchone()
+        with self.lock:
+            row = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE id=? AND workspace=?", (ident, ws["id"])).fetchone()
         if not row:
             raise BridgeError("Handoff not found in this workspace", "not_found")
         return dict(row)
