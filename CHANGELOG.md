@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `workspace-bridge service install|status|start|stop|restart|uninstall`
+  runs the Bridge itself as a LaunchAgent (`com.workspace-bridge.bridge`) or
+  systemd unit (`workspace-bridge.service`), reusing the Node's hardened
+  service lifecycle. Settings come from a private `bridge.env` in the state
+  folder, limited to known `WB_*` keys; real environment variables win.
+- The gateway records paired Node connection state. `doctor` reports
+  connected, disconnected, never connected or not reported, and shows paired
+  workspace roots as unknown instead of failed. `node service status` reads
+  the Node's own `link-status.json`.
 - Paired Nodes: a Node can dial the Bridge instead of listening. The Bridge
   runs a TLS Node gateway (default port 8767, loopback unless
   `WB_NODE_GATEWAY_HOST` is set) and issues single-use pairing strings with

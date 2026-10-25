@@ -36,6 +36,7 @@ from .security import BridgeError
 MAX_FRAME = 40 * 1024 * 1024
 AUTH_TIMEOUT = 10.0
 MAX_FAILURES_PER_MINUTE = 20
+HEARTBEAT_SECONDS = 30.0
 _NODE_ID = re.compile(r"node_[0-9a-f]{24}")
 
 
@@ -276,6 +277,8 @@ class NodeGateway:
             except Exception:  # noqa: BLE001 - the replaced socket may be gone
                 pass
         await websocket.send_json({"type": "ready", "node_id": node_id})
+        await asyncio.to_thread(self._record, node_id, "connected")
+        heartbeat = asyncio.create_task(self._heartbeat(connection))
         try:
             while True:
                 frame = json.loads(await websocket.receive_text())
@@ -284,10 +287,15 @@ class NodeGateway:
         except (WebSocketDisconnect, ValueError, KeyError, RuntimeError):
             pass
         finally:
+            heartbeat.cancel()
             connection.fail_all()
             with self._lock:
-                if self._connections.get(node_id) is connection:
+                current = self._connections.get(node_id) is connection
+                if current:
                     del self._connections[node_id]
+            # A replaced socket must not mark the Node's newer connection gone.
+            if current:
+                await asyncio.to_thread(self._record, node_id, "disconnected")
 
     async def _pair(self, websocket: WebSocket, message: dict, nonce: str,
                     fingerprint: str) -> None:
@@ -306,6 +314,28 @@ class NodeGateway:
         await websocket.send_json({"type": "paired", "node_id": node["id"],
                                    "name": node["name"]})
         await websocket.close()
+
+    async def _heartbeat(self, connection: NodeConnection) -> None:
+        while not connection.closed:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if not connection.closed:
+                await asyncio.to_thread(self._record, connection.node_id, "seen")
+
+    def _record(self, node_id: str, event: str) -> None:
+        """Persist connection state for Doctor and the Manager; never raises."""
+        stamp = _now().isoformat()
+        statements = {
+            "connected": ("UPDATE nodes SET connected_at=?,last_seen=? WHERE id=?", (stamp, stamp, node_id)),
+            "seen": ("UPDATE nodes SET last_seen=? WHERE id=?", (stamp, node_id)),
+            "disconnected": ("UPDATE nodes SET disconnected_at=?,last_seen=? WHERE id=?",
+                             (stamp, stamp, node_id)),
+        }
+        sql, params = statements[event]
+        try:
+            with self.service.lock, self.service.db:
+                self.service.db.execute(sql, params)
+        except Exception:  # noqa: BLE001 - observability must not break the connection
+            pass
 
     def _paired_node(self, node_id: str) -> dict | None:
         with self.service.lock:

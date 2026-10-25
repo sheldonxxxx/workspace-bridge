@@ -279,3 +279,71 @@ def test_local_node_runs_inside_the_bridge(tmp_path):
         assert read["lines"][0]["text"] == "# Local"
     finally:
         service.close()
+
+
+def test_gateway_records_connection_state_for_doctor(paired):
+    service, node_id = paired["service"], paired["node_id"]
+    row = service.node_registry.get(node_id)
+    assert row["connected_at"] and row["last_seen"] and not row["disconnected_at"]
+    paired["link"].stop()
+    _wait(lambda: service.node_registry.get(node_id)["disconnected_at"])
+    public = service.node_registry.public(service.node_registry.get(node_id))
+    assert public["connection"]["disconnected_at"] >= public["connection"]["connected_at"]
+    paired["link"] = _Link(paired["node_service"], paired["node_state"])
+    _wait(lambda: service.node_gateway.connected(node_id))
+
+
+def test_doctor_reports_paired_nodes_from_recorded_state(paired):
+    service, node_id = paired["service"], paired["node_id"]
+    ws_id = service.add_workspace("Alpha", str(paired["root"]), [], node_id)["workspace"]["id"]
+    doctor = Service(service.state, service.config, read_only=True,
+                     run_coordinator_background=False)
+    try:
+        report = doctor.diagnostic_report()
+    finally:
+        doctor.close()
+    reachable = next(check for check in report["checks"] if check["code"] == "node.reachable")
+    assert reachable["status"] == "pass" and "connected" in reachable["summary"]
+    root = next(check for check in report["checks"]
+                if check["code"] == "workspace.root_accessible" and check.get("workspace_id") == ws_id)
+    assert root["status"] == "unknown"
+
+
+def test_paired_connection_states():
+    from datetime import datetime, timedelta, timezone
+    from workspace_bridge.diagnostics import paired_connection_state
+    now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
+    stamp = lambda seconds: (now - timedelta(seconds=seconds)).isoformat()
+    assert paired_connection_state({}, now)[0] == "action_required"
+    assert paired_connection_state({"connected_at": stamp(600), "last_seen": stamp(10)}, now)[0] == "pass"
+    assert paired_connection_state({"connected_at": stamp(600), "last_seen": stamp(600)}, now)[0] == "unknown"
+    assert paired_connection_state({"connected_at": stamp(600), "last_seen": stamp(300),
+                                    "disconnected_at": stamp(300)}, now)[0] == "failed"
+
+
+def test_node_records_its_link_status(paired):
+    from workspace_bridge.node_launchd import probe_node_status
+    from workspace_bridge.node_link import read_link_status
+    state = paired["node_state"]
+    assert (state / "link-status.json").stat().st_mode & 0o777 == 0o600
+    connected = probe_node_status(load_node_config(state), "", state)
+    assert connected["status"] == "connected" and connected["since"]
+    paired["link"].stop()
+    assert read_link_status(state)["status"] == "stopped"
+    paired["gateway"].stop()
+    paired["link"] = _Link(paired["node_service"], state)
+    _wait(lambda: read_link_status(state)["status"] == "disconnected")
+    assert read_link_status(state)["code"] == "ConnectionRefusedError"
+    paired["gateway"] = _Gateway(paired["service"], paired["port"])
+    _wait(lambda: paired["service"].node_gateway.connected(paired["node_id"]))
+
+
+def test_link_status_staleness(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from workspace_bridge.node_link import read_link_status, write_link_status
+    assert read_link_status(tmp_path)["status"] == "unknown"
+    write_link_status(tmp_path, "connected", since="2026-10-25T00:00:00+00:00")
+    assert read_link_status(tmp_path)["status"] == "connected"
+    later = datetime.now(timezone.utc) + timedelta(minutes=10)
+    assert read_link_status(tmp_path, later) == {"status": "unknown",
+                                                 "code": "paired_node_status_stale"}

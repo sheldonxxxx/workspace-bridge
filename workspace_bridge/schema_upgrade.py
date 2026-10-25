@@ -79,4 +79,9 @@ def add_node_transports(db: sqlite3.Connection) -> None:
                        "CHECK(transport IN ('http','paired','local'))")
         if "public_key" not in columns:
             db.execute("ALTER TABLE nodes ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
+        # Paired Node connection state, written by the running Bridge's
+        # gateway so a separate Doctor process can report it.
+        for column in ("connected_at", "last_seen", "disconnected_at"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE nodes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         db.execute(NODE_PAIRINGS_SQL)

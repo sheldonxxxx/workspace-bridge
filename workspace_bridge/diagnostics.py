@@ -195,6 +195,29 @@ def _models(service, ws: dict, adapter_id: str) -> list[dict] | None:
         return None
 
 
+PAIRED_REPORT_FRESH_SECONDS = 90
+
+
+def paired_connection_state(node: dict, now: datetime | None = None) -> tuple[str, str, str | None]:
+    """Doctor's view of a paired Node, from state the running Bridge records."""
+    connected, seen = node.get("connected_at") or "", node.get("last_seen") or ""
+    disconnected = node.get("disconnected_at") or ""
+    if not connected:
+        return ("action_required", "Paired Node has never connected.",
+                "Start the Node service on that machine and check it can reach the Node gateway.")
+    if disconnected and disconnected >= connected:
+        return ("failed", f"Paired Node disconnected at {disconnected[:19]} UTC.",
+                "Start the Node service on that machine and check it can reach the Node gateway.")
+    try:
+        age = ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(seen)).total_seconds()
+    except ValueError:
+        age = None
+    if age is None or age > PAIRED_REPORT_FRESH_SECONDS:
+        return ("unknown", "The running Bridge has not reported this paired Node recently; "
+                           "the Bridge may be stopped.", None)
+    return ("pass", f"Paired Node is connected (reported by the running Bridge {int(age)} s ago).", None)
+
+
 def evaluate(service, *, offline: bool = False, listener: dict | None = None,
              runtime_configuration_error: bool = False) -> dict[str, Any]:
     """Observe local prerequisites and each explicit (workspace, adapter) route."""
@@ -287,6 +310,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                      if isinstance(_bridge_release, dict) else None)
     nodes = service.node_registry.rows()
     node_health: dict[str, bool] = {}
+    unobserved_nodes: set[str] = set()
     node_releases: dict[str, dict | None] = {}
     for node in nodes:
         healthy = False
@@ -313,9 +337,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         node_releases[node["id"]] = observed
         out.release_data["nodes"][node["id"]] = observed
         if unobservable and node["enabled"] and not offline:
-            out.add("node.reachable", "nodes", "unknown",
-                    "Paired Node connections are visible only to the running Bridge; "
-                    "check this Node in the Manager.")
+            unobserved_nodes.add(node["id"])
+            status, summary, remediation = paired_connection_state(node)
+            out.add("node.reachable", "nodes", status, summary, remediation=remediation)
         else:
             out.add("node.reachable", "nodes",
                     "pass" if healthy else ("unknown" if offline and node["enabled"] else
@@ -372,11 +396,17 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             except Exception:
                 root_ok = False
         root_access[wid] = root_ok
-        out.add("workspace.root_accessible", "workspaces",
-                "pass" if root_ok else "action_required",
-                f"Workspace root is authorized by Node {ws['node_id']}." if root_ok else
-                "Workspace root is unavailable or outside its Node allowed roots.",
-                workspace_id=wid)
+        if ws["node_id"] in unobserved_nodes:
+            # Only the running Bridge can reach a paired Node.
+            out.add("workspace.root_accessible", "workspaces", "unknown",
+                    "Workspace root on a paired Node is checked only by the running Bridge.",
+                    workspace_id=wid)
+        else:
+            out.add("workspace.root_accessible", "workspaces",
+                    "pass" if root_ok else "action_required",
+                    f"Workspace root is authorized by Node {ws['node_id']}." if root_ok else
+                    "Workspace root is unavailable or outside its Node allowed roots.",
+                    workspace_id=wid)
         out.add("workspace.enabled", "workspaces",
                 "pass" if ws["enabled"] else "action_required",
                 "Workspace mapping is enabled." if ws["enabled"] else "Workspace mapping is disabled.",
@@ -552,7 +582,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             blockers.append("adapter_node_mismatch")
         if not route["node_enabled"]:
             blockers.append("node.disabled")
-        if not node_health.get(route["node_id"], False):
+        if route["node_id"] in unobserved_nodes:
+            blockers.append("node.unobserved_by_doctor")
+        elif not node_health.get(route["node_id"], False):
             blockers.append("node.unavailable")
         if route["adapter_enabled"] and not descriptor:
             blockers.append("adapter.reachable")

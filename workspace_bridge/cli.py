@@ -306,6 +306,8 @@ def _doctor(state: Path, *, offline: bool, as_json: bool,
         return 1
 
     try:
+        from .bridge_service import load_env_file
+        load_env_file(state)
         extra_hosts = admin_allowed_hosts_from_env()
         invalid_admin_host_config = False
     except BridgeError:
@@ -567,6 +569,14 @@ def main(argv: list[str] | None = None):
     doctor.add_argument("--mcp-public-port", type=int, help=argparse.SUPPRESS)
     doctor.add_argument("--admin-public-port", type=int, help=argparse.SUPPRESS)
     sub.add_parser("reset-admin-password", help="Reset admin to the temporary bootstrap password; invalidates all sessions")
+    service_parser = sub.add_parser("service", help="Manage the Bridge as a persistent service (macOS launchd or Linux systemd)")
+    service_sub = service_parser.add_subparsers(dest="service_command", required=True)
+    for action, text in (("install", "Install and start the Bridge service"),
+                         ("status", "Show service state and listener health"),
+                         ("start", "Start the Bridge service"), ("stop", "Stop the Bridge service"),
+                         ("restart", "Restart the Bridge service"),
+                         ("uninstall", "Remove only the managed service definition")):
+        service_sub.add_parser(action, help=text)
     local_node = sub.add_parser("local-node", help="Run a Node inside this Bridge process for this machine's projects")
     local_node_sub = local_node.add_subparsers(dest="local_node_command", required=True)
     local_enable = local_node_sub.add_parser("enable", help="Create the embedded Node (restart serve afterwards)")
@@ -696,6 +706,14 @@ def main(argv: list[str] | None = None):
                 return
             parser.error("Unknown release subcommand")
         config = load_config(state)
+        # A managed service has no shell environment; private bridge.env
+        # supplies the allowlisted settings, and real variables still win.
+        from .bridge_service import load_env_file
+        load_env_file(state)
+        if args.command == "service":
+            from .bridge_service import run_action
+            print(json.dumps(run_action(args.service_command, state), indent=2, sort_keys=True))
+            return
         if args.command == "local-node":
             result = enable_local_node(state, args.allow_root, args.name)
             print(f"Local Node {result['name']} ({result['node_id']}) enabled. "
@@ -727,6 +745,12 @@ def main(argv: list[str] | None = None):
                     print("Shared bridge credential shown once. Authorizes every enabled mapping. Keep it out of ChatGPT.", file=sys.stderr)
                 else:
                     extra_admin_hosts = admin_allowed_hosts_from_env()
+                    try:
+                        # Managed macOS services bound their log files.
+                        from .native_logs import spawn_log_guard
+                        spawn_log_guard(state)
+                    except Exception:  # noqa: BLE001 - logging never blocks startup
+                        pass
                     print(f"MCP: http://127.0.0.1:{config['mcp_port']}/mcp | Local admin: http://127.0.0.1:{config['admin_port']}/")
                     if extra_admin_hosts:
                         print(f"WARNING: {ADMIN_ALLOWED_HOSTS_ENV}={','.join(extra_admin_hosts)} widens the admin listener to 0.0.0.0 with those Host values allowed. Prefer SSH port-forwarding or VPN; HTTP carries admin credentials in clear. Never tunnel the manager.", file=sys.stderr)

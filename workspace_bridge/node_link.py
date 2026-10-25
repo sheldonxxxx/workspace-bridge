@@ -16,6 +16,7 @@ import random
 import re
 import secrets
 import ssl
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -30,6 +31,9 @@ from .security import BridgeError
 MAX_FRAME = 40 * 1024 * 1024
 MAX_CONCURRENT_REQUESTS = 16
 HANDSHAKE_TIMEOUT = 10.0
+LINK_STATUS = "link-status.json"
+LINK_HEARTBEAT_SECONDS = 30.0
+LINK_STATUS_FRESH_SECONDS = 90
 _NONCE = re.compile(r"[0-9a-f]{64}")
 _METHODS = frozenset({"GET", "POST", "PATCH", "DELETE"})
 _log = logging.getLogger("workspace_bridge.ops")
@@ -75,6 +79,37 @@ def _write_atomic(path: Path, data: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def write_link_status(state: Path, status: str, *, since: str | None = None,
+                      code: str | None = None, retry_at: str | None = None) -> None:
+    """Record this Node's connection state for ``node service status``; never raises."""
+    value = {"status": status, "since": since, "code": code, "retry_at": retry_at,
+             "updated": datetime.now(timezone.utc).isoformat()}
+    try:
+        _write_atomic(state / LINK_STATUS, json.dumps(value, sort_keys=True).encode())
+    except OSError:
+        pass
+
+
+def read_link_status(state: Path, now: datetime | None = None) -> dict:
+    """Health view of the dial-out connection; stale or missing state is unknown."""
+    try:
+        fd = os.open(state / LINK_STATUS, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as stream:
+            value = json.loads(stream.read(4096))
+        updated = datetime.fromisoformat(value["updated"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"status": "unknown", "code": "paired_node_no_status"}
+    age = ((now or datetime.now(timezone.utc)) - updated).total_seconds()
+    if value.get("status") == "stopped":
+        return {"status": "stopped", "code": "paired_node"}
+    if value.get("status") == "connected" and age <= LINK_STATUS_FRESH_SECONDS:
+        return {"status": "connected", "code": "paired_node", "since": value.get("since")}
+    if value.get("status") == "retrying" and age <= max(LINK_STATUS_FRESH_SECONDS, 120):
+        return {"status": "disconnected", "code": str(value.get("code") or "retrying")[:80],
+                "retry_at": value.get("retry_at")}
+    return {"status": "unknown", "code": "paired_node_status_stale"}
 
 
 async def pair(state: Path, config: dict, pairing_string: str) -> dict:
@@ -151,6 +186,12 @@ async def _serve(websocket, service) -> None:
             task.cancel()
 
 
+async def _heartbeat(state: Path, since: str) -> None:
+    while True:
+        await asyncio.sleep(LINK_HEARTBEAT_SECONDS)
+        write_link_status(state, "connected", since=since)
+
+
 async def run_link(service, config: dict, state: Path, *,
                    stop: asyncio.Event | None = None, max_backoff: float = 60.0) -> None:
     """Keep the Node connected to its Bridge until ``stop`` is set."""
@@ -161,6 +202,7 @@ async def run_link(service, config: dict, state: Path, *,
     context = pairing.pinned_client_context(bridge["certificate"])
     stop = stop or asyncio.Event()
     backoff = 1.0
+    last_code = "connecting"
     while not stop.is_set():
         try:
             async with connect(bridge["url"], ssl=context, max_size=MAX_FRAME,
@@ -175,19 +217,28 @@ async def run_link(service, config: dict, state: Path, *,
                                               bridge["node_id"])}))
                 await _answer(websocket, "ready")
                 backoff = 1.0
+                last_code = "connection_closed"
+                since = datetime.now(timezone.utc).isoformat()
+                write_link_status(state, "connected", since=since)
                 emit(_log, "INFO", "node", "node_link_connected")
                 serving = asyncio.create_task(_serve(websocket, service))
                 stopping = asyncio.create_task(stop.wait())
+                heartbeat = asyncio.create_task(_heartbeat(state, since))
                 await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
                 stopping.cancel()
+                heartbeat.cancel()
                 if not serving.done():
                     serving.cancel()
         except Exception as exc:  # noqa: BLE001 - every failure retries with backoff
-            emit(_log, "WARNING", "node", "node_link_retry", code=error_code(exc))
+            last_code = error_code(exc)
+            emit(_log, "WARNING", "node", "node_link_retry", code=last_code)
         if stop.is_set():
+            write_link_status(state, "stopped")
             break
         delay = backoff * (0.5 + random.random() / 2)
         backoff = min(max_backoff, backoff * 2)
+        write_link_status(state, "retrying", code=last_code,
+                          retry_at=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat())
         try:
             await asyncio.wait_for(stop.wait(), delay)
         except asyncio.TimeoutError:

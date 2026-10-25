@@ -40,6 +40,10 @@ class NodeRegistry:
                 "created": row["created"], "updated": row["updated"],
                 "has_token": bool(row["token"]), "health": row.get("health", "unknown"),
                 "transport": row.get("transport", "http"),
+                "connection": ({"connected_at": row.get("connected_at") or None,
+                                "last_seen": row.get("last_seen") or None,
+                                "disconnected_at": row.get("disconnected_at") or None}
+                               if row.get("transport") == "paired" else None),
                 "protocol": row.get("protocol"), "capabilities": row.get("capabilities", [])}
         release = row.get("release")
         if isinstance(release, dict):

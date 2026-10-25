@@ -78,6 +78,29 @@ class CommandResult:
         return self.error is None and self.returncode == 0
 
 
+@dataclass(frozen=True)
+class ServiceSpec:
+    """What differs between the services this module installs.
+
+    The Node is the default. The Bridge reuses the same hardened lifecycle
+    (fixed unit path, manifest, ownership checks, fixed sudo helpers) with
+    its own unit name, launcher arguments, state checks and health probe.
+    """
+
+    unit_name: str
+    description: str
+    serve_args: Callable[[Path], list[str]]
+    validate_state: Callable[..., tuple[dict, str]]
+    config_status: Callable[..., tuple[dict | None, str | None, str | None]]
+    probe: Callable[[dict, str, Path], dict]
+    temp_prefix: str
+    listen: Callable[[dict], dict | None]
+
+    @property
+    def unit_path(self) -> Path:
+        return Path("/etc/systemd/system") / self.unit_name
+
+
 def _absolute_path(value: str | os.PathLike[str]) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -372,6 +395,7 @@ def build_systemd_unit(
     *,
     user: str,
     group: str,
+    spec: ServiceSpec | None = None,
 ) -> bytes:
     """Build deterministic system unit bytes with no secrets or roots."""
     prefix = systemd_program(program) if isinstance(program, (str, os.PathLike)) else _validate_systemd_prefix(list(program))
@@ -380,11 +404,12 @@ def build_systemd_unit(
     state_path = _absolute_path(state)
     if not state_path.is_absolute():
         raise BridgeError("Node state must be an absolute path", "node_state_unsafe")
-    full_argv = [*prefix, "node", "--state", str(state_path), "serve"]
+    spec = spec or NODE_SPEC
+    full_argv = [*prefix, *spec.serve_args(state_path)]
     encoded = " ".join(_encode_systemd_arg(part) for part in full_argv)
     text = (
         "[Unit]\n"
-        "Description=Workspace Bridge Node\n"
+        f"Description={spec.description}\n"
         "\n"
         "[Service]\n"
         "Type=simple\n"
@@ -425,11 +450,12 @@ def _manifest_for(
     group: str,
     uid: int,
     gid: int,
+    unit_name: str = UNIT_NAME,
 ) -> bytes:
     value = {
         "schema_version": 1,
         "state_path": str(paths.state),
-        "unit": UNIT_NAME,
+        "unit": unit_name,
         "unit_path": str(paths.unit),
         "unit_sha256": hashlib.sha256(unit).hexdigest(),
         "user": user,
@@ -572,11 +598,29 @@ def _config_status_as(
     return config, token, None
 
 
+NODE_SPEC = ServiceSpec(
+    unit_name=UNIT_NAME,
+    description="Workspace Bridge Node",
+    serve_args=lambda state: ["node", "--state", str(state), "serve"],
+    validate_state=lambda *args, **kwargs: _validate_state_as(*args, **kwargs),
+    config_status=lambda *args, **kwargs: _config_status_as(*args, **kwargs),
+    probe=lambda config, token, state: __import__(
+        "workspace_bridge.node_launchd", fromlist=["probe_node_status"]).probe_node_status(
+            config, token, state),
+    temp_prefix=".workspace-bridge-node.",
+    listen=lambda config: {
+        "host": config["host"], "port": config["port"],
+        "endpoint": __import__("workspace_bridge.node_launchd", fromlist=["_format_endpoint"])
+        ._format_endpoint(config["host"], config["port"])},
+)
+
+
 def _read_manifest_as(
     paths: SystemdServicePaths,
     owner_uid: int,
     *,
     stat_fn: Callable[[Path], os.stat_result] | None = None,
+    unit_name: str = UNIT_NAME,
 ) -> dict | None:
     if paths.manifest.is_symlink():
         raise _state_error("systemd manifest must not be a symlink", "node_service_conflict")
@@ -597,7 +641,7 @@ def _read_manifest_as(
     if (
         not isinstance(value, dict)
         or value.get("schema_version") != 1
-        or value.get("unit") != UNIT_NAME
+        or value.get("unit") != unit_name
         or value.get("unit_path") != str(paths.unit)
         or value.get("state_path") != str(paths.state)
         or not isinstance(value.get("unit_sha256"), str)
@@ -783,7 +827,9 @@ class SystemdManager:
         unit_owner_uid: int | None = None,
         stat_fn: Callable[[Path], os.stat_result] | None = None,
         lstat_fn: Callable[[Path], os.stat_result] | None = None,
+        spec: ServiceSpec | None = None,
     ):
+        self.spec = spec or NODE_SPEC
         self.runner = runner or subprocess.run
         self.platform_name = platform_name or platform.system()
         self._sudo_override = sudo_bin
@@ -836,7 +882,7 @@ class SystemdManager:
 
     def paths(self, state: str | os.PathLike[str]) -> SystemdServicePaths:
         state_path = _absolute_path(state)
-        unit = self._unit_override if self._unit_override is not None else UNIT_PATH
+        unit = self._unit_override if self._unit_override is not None else self.spec.unit_path
         return SystemdServicePaths(state=state_path, unit=unit, manifest=state_path / MANIFEST_NAME)
 
     def expected_unit_owner(self) -> int:
@@ -955,7 +1001,7 @@ class SystemdManager:
         self.require_linux()
         systemctl = self._systemctl()
         result = self._run(
-            [str(systemctl), "show", UNIT_NAME, "--property=LoadState,ActiveState,SubState,UnitFileState", "--no-pager"],
+            [str(systemctl), "show", self.spec.unit_name, "--property=LoadState,ActiveState,SubState,UnitFileState", "--no-pager"],
             timeout=SYSTEMCTL_TIMEOUT,
         )
         if result.error is not None or (result.returncode != 0 and _is_systemd_unavailable(result.stderr, result.error)):
@@ -1006,7 +1052,7 @@ class SystemdManager:
     def privileged_install_unit(self, *, temp_path: Path, dest: Path) -> None:
         self.require_linux()
         install = self._install()
-        if dest != (self._unit_override if self._unit_override is not None else UNIT_PATH):
+        if dest != (self._unit_override if self._unit_override is not None else self.spec.unit_path):
             raise _state_error("Refusing to install outside the fixed unit path", "node_service_conflict")
         self._privileged_run(
             "install-unit",
@@ -1016,7 +1062,7 @@ class SystemdManager:
     def privileged_remove_unit(self, *, dest: Path) -> None:
         self.require_linux()
         rm = self._rm()
-        if dest != (self._unit_override if self._unit_override is not None else UNIT_PATH):
+        if dest != (self._unit_override if self._unit_override is not None else self.spec.unit_path):
             raise _state_error("Refusing to remove outside the fixed unit path", "node_service_conflict")
         self._privileged_run("remove-unit", [str(rm), "--", str(dest)])
 
@@ -1028,27 +1074,27 @@ class SystemdManager:
     def enable_now(self) -> None:
         self.require_linux()
         systemctl = self._systemctl()
-        self._privileged_run("enable --now", [str(systemctl), "enable", "--now", UNIT_NAME])
+        self._privileged_run("enable --now", [str(systemctl), "enable", "--now", self.spec.unit_name])
 
     def start(self) -> None:
         self.require_linux()
         systemctl = self._systemctl()
-        self._privileged_run("start", [str(systemctl), "start", UNIT_NAME])
+        self._privileged_run("start", [str(systemctl), "start", self.spec.unit_name])
 
     def stop(self) -> None:
         self.require_linux()
         systemctl = self._systemctl()
-        self._privileged_run("stop", [str(systemctl), "stop", UNIT_NAME])
+        self._privileged_run("stop", [str(systemctl), "stop", self.spec.unit_name])
 
     def restart(self) -> None:
         self.require_linux()
         systemctl = self._systemctl()
-        self._privileged_run("restart", [str(systemctl), "restart", UNIT_NAME])
+        self._privileged_run("restart", [str(systemctl), "restart", self.spec.unit_name])
 
     def disable_now(self) -> None:
         self.require_linux()
         systemctl = self._systemctl()
-        self._privileged_run("disable --now", [str(systemctl), "disable", "--now", UNIT_NAME])
+        self._privileged_run("disable --now", [str(systemctl), "disable", "--now", self.spec.unit_name])
 
 
 # Backwards-incompatible rename guard: the user-unit manager is removed.
@@ -1107,9 +1153,6 @@ def service_status(
     manager: SystemdManager | None = None,
     probe: bool = True,
 ) -> dict:
-    from .node_launchd import _format_endpoint as _launchd_endpoint
-    from .node_launchd import probe_node_status as _launchd_probe
-
     manager = manager or SystemdManager()
     manager.require_linux()
     paths = manager.paths(state)
@@ -1118,7 +1161,7 @@ def service_status(
     except BridgeError as exc:
         return {
             "service_manager": "systemd",
-            "unit": UNIT_NAME,
+            "unit": manager.spec.unit_name,
             "state_path": str(paths.state),
             "installed": False,
             "unit_state": "unsafe",
@@ -1136,14 +1179,14 @@ def service_status(
             "listen": None,
         }
     stat_fn = manager._stat
-    config, token, config_error = _config_status_as(paths.state, _run_uid, stat_fn=stat_fn)
+    config, token, config_error = manager.spec.config_status(paths.state, _run_uid, stat_fn=stat_fn)
     unit_exists = paths.unit.exists() or paths.unit.is_symlink()
     installed = False
     unit_state = "missing"
     if unit_exists:
         try:
             raw_unit = _read_system_unit(paths, expected_owner_uid=manager.expected_unit_owner(), stat_fn=stat_fn)
-            manifest = _read_manifest_as(paths, _run_uid, stat_fn=stat_fn)
+            manifest = _read_manifest_as(paths, _run_uid, stat_fn=stat_fn, unit_name=manager.spec.unit_name)
             if manifest and raw_unit is not None:
                 installed = manifest["unit_sha256"] == hashlib.sha256(raw_unit).hexdigest()
                 unit_state = "managed" if installed else "modified"
@@ -1165,10 +1208,10 @@ def service_status(
     elif not probe:
         health = {"status": "not_probed", "code": "not_probed"}
     else:
-        health = _launchd_probe(config, token or "")
+        health = manager.spec.probe(config, token or "", paths.state)
     result: dict = {
         "service_manager": "systemd",
-        "unit": UNIT_NAME,
+        "unit": manager.spec.unit_name,
         "state_path": str(paths.state),
         "installed": installed,
         "unit_state": unit_state,
@@ -1184,14 +1227,7 @@ def service_status(
         "running": running,
         "health": health,
     }
-    if config is not None:
-        result["listen"] = {
-            "host": config["host"],
-            "port": config["port"],
-            "endpoint": _launchd_endpoint(config["host"], config["port"]),
-        }
-    else:
-        result["listen"] = None
+    result["listen"] = manager.spec.listen(config) if config is not None else None
     return result
 
 
@@ -1210,13 +1246,13 @@ def install_service(
     manager = manager or SystemdManager()
     manager.require_linux()
     paths = manager.paths(state)
-    if paths.unit != (manager._unit_override if manager._unit_override is not None else UNIT_PATH):
+    if paths.unit != (manager._unit_override if manager._unit_override is not None else manager.spec.unit_path):
         raise _state_error("Refusing to install outside the fixed unit path", "node_service_conflict")
     user, uid, group, gid = manager.current_ids()
     stat_fn = manager._stat
     # Ownership isolation: root on user-owned state (and vice versa) fails
     # closed here; state is never chown/migrated automatically.
-    _validate_state_as(paths.state, uid, stat_fn=stat_fn)
+    manager.spec.validate_state(paths.state, uid, stat_fn=stat_fn)
     program = systemd_program(executable)
     if uid == 0:
         # A root service executes ExecStart as uid 0: the lexical shim,
@@ -1228,7 +1264,7 @@ def install_service(
         os.close(fd)
     except BridgeError:
         raise _state_error("Node state path is not a safe directory") from None
-    desired = build_systemd_unit(paths.state, program, user=user, group=group)
+    desired = build_systemd_unit(paths.state, program, user=user, group=group, spec=manager.spec)
     desired_hash = hashlib.sha256(desired).hexdigest()
     # Existing unit handling (fail closed, never overwrite unmanaged).
     try:
@@ -1239,7 +1275,7 @@ def install_service(
             raise
         raise
     try:
-        manifest = _read_manifest_as(paths, uid, stat_fn=stat_fn)
+        manifest = _read_manifest_as(paths, uid, stat_fn=stat_fn, unit_name=manager.spec.unit_name)
     except BridgeError:
         raise
     if existing is not None and manifest is not None and manifest["unit_sha256"] != hashlib.sha256(existing).hexdigest():
@@ -1279,9 +1315,9 @@ def install_service(
             raise _state_error("Existing manifest does not match the desired system unit; uninstall first", "node_service_conflict")
         # Partial retry: manifest already exactly matches desired; recreate unit file.
     else:
-        _write_manifest_as(paths, _manifest_for(paths, desired, user=user, group=group, uid=uid, gid=gid), uid, overwrite=False, stat_fn=stat_fn)
+        _write_manifest_as(paths, _manifest_for(paths, desired, user=user, group=group, uid=uid, gid=gid, unit_name=manager.spec.unit_name), uid, overwrite=False, stat_fn=stat_fn)
     # Private temp bytes inside the private state dir, then fixed sudo install.
-    fd, temporary = tempfile.mkstemp(prefix=".workspace-bridge-node.", suffix=".service", dir=paths.state)
+    fd, temporary = tempfile.mkstemp(prefix=manager.spec.temp_prefix, suffix=".service", dir=paths.state)
     temporary_path = Path(temporary)
     try:
         os.chmod(temporary_path, PRIVATE_FILE_MODE)
@@ -1305,7 +1341,7 @@ def start_service(state: str | os.PathLike[str], *, manager: SystemdManager | No
     manager = manager or SystemdManager()
     manager.require_linux()
     paths = manager.paths(state)
-    _validate_state_as(paths.state, manager.current_ids()[1], stat_fn=manager._stat)
+    manager.spec.validate_state(paths.state, manager.current_ids()[1], stat_fn=manager._stat)
     _require_managed_with_program(paths, manager)
     manager.start()
     return _record_action("start", paths.state, manager)
@@ -1316,9 +1352,9 @@ def stop_service(state: str | os.PathLike[str], *, manager: SystemdManager | Non
     manager.require_linux()
     paths = manager.paths(state)
     _stop_uid = manager.current_ids()[1]
-    if (not paths.unit.exists() and not paths.unit.is_symlink()) and (_read_manifest_as(paths, _stop_uid, stat_fn=manager._stat) is None):
+    if (not paths.unit.exists() and not paths.unit.is_symlink()) and (_read_manifest_as(paths, _stop_uid, stat_fn=manager._stat, unit_name=manager.spec.unit_name) is None):
         return _record_action("stop", paths.state, manager)
-    _validate_state_as(paths.state, _stop_uid, stat_fn=manager._stat)
+    manager.spec.validate_state(paths.state, _stop_uid, stat_fn=manager._stat)
     _require_managed_with_program(paths, manager)
     try:
         manager.stop()
@@ -1337,7 +1373,7 @@ def restart_service(state: str | os.PathLike[str], *, manager: SystemdManager | 
     manager = manager or SystemdManager()
     manager.require_linux()
     paths = manager.paths(state)
-    _validate_state_as(paths.state, manager.current_ids()[1], stat_fn=manager._stat)
+    manager.spec.validate_state(paths.state, manager.current_ids()[1], stat_fn=manager._stat)
     _require_managed_with_program(paths, manager)
     manager.restart()
     return _record_action("restart", paths.state, manager)
@@ -1349,10 +1385,10 @@ def _require_managed_with_program(paths: SystemdServicePaths, manager: SystemdMa
     raw = _read_system_unit(paths, expected_owner_uid=owner, stat_fn=stat_fn)
     _req_user, _req_uid, _req_group, _req_gid = manager.current_ids()
     if raw is None:
-        if _read_manifest_as(paths, _req_uid, stat_fn=stat_fn) is None:
+        if _read_manifest_as(paths, _req_uid, stat_fn=stat_fn, unit_name=manager.spec.unit_name) is None:
             raise _state_error("Node systemd unit is not installed", "node_service_not_installed")
         raise _state_error("Refusing to operate on a missing systemd unit with a manifest", "node_service_conflict")
-    manifest = _read_manifest_as(paths, _req_uid, stat_fn=stat_fn)
+    manifest = _read_manifest_as(paths, _req_uid, stat_fn=stat_fn, unit_name=manager.spec.unit_name)
     if manifest is None:
         raise _state_error("Refusing to operate on an unmanaged systemd unit", "node_service_conflict")
     if manifest["unit_sha256"] != hashlib.sha256(raw).hexdigest():
@@ -1376,7 +1412,7 @@ def uninstall_service(state: str | os.PathLike[str], *, manager: SystemdManager 
     _un_user, _un_uid, _un_group, _un_gid = manager.current_ids()
     stat_fn = manager._stat
     if not paths.unit.exists() and not paths.unit.is_symlink():
-        manifest = _read_manifest_as(paths, _un_uid, stat_fn=stat_fn)
+        manifest = _read_manifest_as(paths, _un_uid, stat_fn=stat_fn, unit_name=manager.spec.unit_name)
         if manifest is None:
             return _record_action("uninstall", paths.state, manager)
         # Post-removal cleanup state: the managed unit is already gone but a
@@ -1398,7 +1434,7 @@ def uninstall_service(state: str | os.PathLike[str], *, manager: SystemdManager 
                 "Existing manifest does not match this Node service identity; uninstall first",
                 "node_service_conflict",
             )
-        _validate_state_as(paths.state, _un_uid, stat_fn=stat_fn)
+        manager.spec.validate_state(paths.state, _un_uid, stat_fn=stat_fn)
         manager.daemon_reload()
         try:
             paths.manifest.unlink()

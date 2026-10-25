@@ -108,9 +108,15 @@ workspace-bridge serve
 ```
 
 Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password `admin`, change the password, and continue with
-section 6. Keep this terminal attached; stopping it stops the Bridge unless
-you install the Bridge as a persistent service per your OS policy (see
-[Operations](OPERATIONS.md)).
+section 6. Keep this terminal attached; stopping it stops the Bridge. To run
+the Bridge persistently instead, stop it and install it as a service, with any
+`WB_*` settings in `bridge.env` in its state folder (see
+[Operations](OPERATIONS.md#service-persistence)):
+
+```sh
+workspace-bridge service install
+workspace-bridge service status
+```
 
 ### Embedded Node and paired remote Nodes
 

@@ -53,6 +53,7 @@ class NodeServicePaths:
     stdout_log: Path
     stderr_log: Path
     uid: int | None = None
+    label: str = LAUNCH_AGENT_LABEL
 
     @property
     def domain(self) -> str:
@@ -61,7 +62,24 @@ class NodeServicePaths:
 
     @property
     def target(self) -> str:
-        return f"{self.domain}/{LAUNCH_AGENT_LABEL}"
+        return f"{self.domain}/{self.label}"
+
+
+@dataclass(frozen=True)
+class LaunchAgentSpec:
+    """What differs between the LaunchAgents this module installs.
+
+    The Node is the default; the Bridge reuses the same lifecycle with its
+    own label, entrypoint, state checks and health probe.
+    """
+
+    label: str
+    console_script: str
+    module: str
+    validate_state: Callable[[Path], object]
+    config_status: Callable[[Path], tuple[dict | None, str | None, str | None]]
+    probe: Callable[[dict, str, Path], dict]
+    listen: Callable[[dict], dict | None]
 
 
 @dataclass(frozen=True)
@@ -90,19 +108,21 @@ def default_node_state() -> Path:
     return _absolute_path(Path.home() / ".local/state/workspace-bridge-node")
 
 
-def service_paths(state: str | os.PathLike[str], *, home: str | os.PathLike[str] | None = None) -> NodeServicePaths:
+def service_paths(state: str | os.PathLike[str], *, home: str | os.PathLike[str] | None = None,
+                  label: str = LAUNCH_AGENT_LABEL) -> NodeServicePaths:
     state_path = _absolute_path(state)
     home_path = _absolute_path(home if home is not None else Path.home())
     launch_agents = home_path / "Library" / "LaunchAgents"
     log_dir = state_path / LOG_DIRECTORY_NAME
     return NodeServicePaths(
         state=state_path,
-        plist=launch_agents / f"{LAUNCH_AGENT_LABEL}.plist",
+        plist=launch_agents / f"{label}.plist",
         manifest=state_path / MANIFEST_NAME,
         log_dir=log_dir,
         stdout_log=log_dir / STDOUT_LOG_NAME,
         stderr_log=log_dir / STDERR_LOG_NAME,
         uid=None,
+        label=label,
     )
 
 
@@ -284,7 +304,9 @@ def _validate_program(program: Sequence[str]) -> list[str]:
     return list(program)
 
 
-def launch_agent_program(executable: str | os.PathLike[str] | None = None) -> list[str]:
+def launch_agent_program(executable: str | os.PathLike[str] | None = None, *,
+                         console_script: str = "workspace-bridge-node",
+                         module: str = "workspace_bridge.node_cli") -> list[str]:
     """Resolve an absolute installed entrypoint without relying on shell activation."""
     if executable is not None:
         path = Path(executable).expanduser()
@@ -296,14 +318,14 @@ def launch_agent_program(executable: str | os.PathLike[str] | None = None) -> li
         return _validate_program([str(_absolute_path(path))])
 
     argv0 = Path(sys.argv[0])
-    if (argv0.name == "workspace-bridge-node" and argv0.is_absolute() and
+    if (argv0.name == console_script and argv0.is_absolute() and
             argv0.is_file() and os.access(argv0, os.X_OK)):
         return _validate_program([str(argv0)])
-    found = shutil.which("workspace-bridge-node")
+    found = shutil.which(console_script)
     if found:
         return _validate_program([str(_absolute_path(found))])
     python = _absolute_path(sys.executable)
-    return _validate_program([str(python), "-m", "workspace_bridge.node_cli"])
+    return _validate_program([str(python), "-m", module])
 
 
 def build_launch_agent_plist(
@@ -311,14 +333,15 @@ def build_launch_agent_plist(
     executable: str | os.PathLike[str],
     *,
     home: str | os.PathLike[str] | None = None,
+    label: str = LAUNCH_AGENT_LABEL,
 ) -> bytes:
     """Build deterministic XML plist bytes for the managed LaunchAgent."""
-    paths = service_paths(state, home=home)
+    paths = service_paths(state, home=home, label=label)
     program = _absolute_path(executable)
     if not program.is_absolute():
         raise BridgeError("Node executable must be an absolute path", "node_service_invalid")
     payload = {
-        "Label": LAUNCH_AGENT_LABEL,
+        "Label": label,
         "ProgramArguments": [str(program), "--state", str(paths.state), "serve"],
         "EnvironmentVariables": {"WB_NATIVE_LOG_GUARD": "1"},
         "RunAtLoad": True,
@@ -377,7 +400,7 @@ def _read_manifest(paths: NodeServicePaths) -> dict | None:
     except (OSError, UnicodeError, ValueError):
         raise _state_error("LaunchAgent manifest is invalid", "node_service_conflict") from None
     if (not isinstance(value, dict) or value.get("schema_version") != 1 or
-            value.get("label") != LAUNCH_AGENT_LABEL or
+            value.get("label") != paths.label or
             value.get("state_path") != str(paths.state) or
             not isinstance(value.get("plist_sha256"), str) or
             not re.fullmatch(r"[0-9a-f]{64}", value["plist_sha256"])):
@@ -409,7 +432,7 @@ def _managed_plist(paths: NodeServicePaths) -> bool:
 def _manifest_for(paths: NodeServicePaths, plist: bytes) -> bytes:
     value = {
         "schema_version": 1,
-        "label": LAUNCH_AGENT_LABEL,
+        "label": paths.label,
         "state_path": str(paths.state),
         "plist_sha256": hashlib.sha256(plist).hexdigest(),
     }
@@ -436,7 +459,9 @@ class LaunchdManager:
     def __init__(self, *, runner: Callable[..., object] | None = None,
                  platform_name: str | None = None,
                  home: str | os.PathLike[str] | None = None,
-                 uid: int | None = None):
+                 uid: int | None = None,
+                 spec: LaunchAgentSpec | None = None):
+        self.spec = spec or NODE_AGENT_SPEC
         self.runner = runner or subprocess.run
         self.platform_name = platform_name or platform.system()
         self.home = _absolute_path(home if home is not None else Path.home())
@@ -450,7 +475,7 @@ class LaunchdManager:
             )
 
     def paths(self, state: str | os.PathLike[str]) -> NodeServicePaths:
-        result = service_paths(state, home=self.home)
+        result = service_paths(state, home=self.home, label=self.spec.label)
         return NodeServicePaths(
             state=result.state,
             plist=result.plist,
@@ -459,12 +484,13 @@ class LaunchdManager:
             stdout_log=result.stdout_log,
             stderr_log=result.stderr_log,
             uid=self.uid,
+            label=self.spec.label,
         )
 
     def _target(self, state: str | os.PathLike[str]) -> tuple[NodeServicePaths, str, str]:
         paths = self.paths(state)
         domain = f"gui/{self.uid}"
-        return paths, domain, f"{domain}/{LAUNCH_AGENT_LABEL}"
+        return paths, domain, f"{domain}/{self.spec.label}"
 
     def run(self, arguments: Sequence[str]) -> LaunchctlResult:
         command = ["launchctl", *arguments]
@@ -672,12 +698,15 @@ def _root_status(value: dict) -> dict:
     return summary
 
 
-def probe_node_status(config: dict, token: str) -> dict:
+def probe_node_status(config: dict, token: str, state: Path | None = None) -> dict:
     """Probe the authenticated local Node endpoint without returning credentials."""
     if config.get("bridge"):
-        # A paired Node dials its Bridge and has no local listener to probe;
-        # its connection is visible in the Bridge Manager.
-        return {"status": "not_probed", "code": "paired_node"}
+        # A paired Node dials its Bridge and has no listener to probe; report
+        # the connection state its dial-out loop records instead.
+        if state is None:
+            return {"status": "not_probed", "code": "paired_node"}
+        from .node_link import read_link_status
+        return read_link_status(Path(state))
     request = urllib.request.Request(
         _health_url(config["host"], config["port"]),
         headers={"Accept": "application/json", "X-Node-Token": token},
@@ -727,7 +756,7 @@ def service_status(
     manager = manager or LaunchdManager()
     manager.require_macos()
     paths = manager.paths(state)
-    config, token, config_error = _config_status(paths.state)
+    config, token, config_error = manager.spec.config_status(paths.state)
     plist_exists = paths.plist.exists() or paths.plist.is_symlink()
     installed = False
     plist_state = "missing"
@@ -762,9 +791,9 @@ def service_status(
     elif not probe:
         health = {"status": "not_probed", "code": "not_probed"}
     else:
-        health = probe_node_status(config, token or "")
+        health = manager.spec.probe(config, token or "", paths.state)
     result = {
-        "label": LAUNCH_AGENT_LABEL,
+        "label": paths.label,
         "domain": paths.domain,
         "target": paths.target,
         "plist_path": str(paths.plist),
@@ -777,11 +806,7 @@ def service_status(
         "state": launchd_state,
         "health": health,
     }
-    if config is not None:
-        result["listen"] = {"host": config["host"], "port": config["port"],
-                             "endpoint": _format_endpoint(config["host"], config["port"])}
-    else:
-        result["listen"] = None
+    result["listen"] = manager.spec.listen(config) if config is not None else None
     return result
 
 
@@ -809,8 +834,9 @@ def install_service(
     manager = manager or LaunchdManager()
     manager.require_macos()
     paths = manager.paths(state)
-    validate_node_state(paths.state)
-    program = launch_agent_program(executable)
+    manager.spec.validate_state(paths.state)
+    program = launch_agent_program(executable, console_script=manager.spec.console_script,
+                                   module=manager.spec.module)
     _check_directory(paths.state, name="Node state", mode=STATE_MODE,
                      reject_group_write=False)
     _ensure_private_log_files(paths)
@@ -821,7 +847,7 @@ def install_service(
         # intentionally rendered here as a complete argv array as well.
         executable_path = _absolute_path(program[0])
         plist = plistlib.dumps({
-            "Label": LAUNCH_AGENT_LABEL,
+            "Label": paths.label,
             "ProgramArguments": [str(executable_path), *program[1:], "--state",
                                   str(paths.state), "serve"],
             "EnvironmentVariables": {"WB_NATIVE_LOG_GUARD": "1"},
@@ -833,7 +859,8 @@ def install_service(
             "StandardErrorPath": str(paths.stderr_log),
         }, fmt=plistlib.FMT_XML, sort_keys=True)
     else:
-        plist = build_launch_agent_plist(paths.state, program[0], home=manager.home)
+        plist = build_launch_agent_plist(paths.state, program[0], home=manager.home,
+                                         label=paths.label)
     existing = _plist_bytes(paths)
     manifest = _read_manifest(paths)
     if (existing is not None and manifest and
@@ -860,7 +887,7 @@ def start_service(state: str | os.PathLike[str], *, manager: LaunchdManager | No
     manager = manager or LaunchdManager()
     manager.require_macos()
     paths = manager.paths(state)
-    validate_node_state(paths.state)
+    manager.spec.validate_state(paths.state)
     _require_managed(paths)
     launchd = _print_state(manager.print_service(paths.state))
     if not launchd["loaded"]:
@@ -891,7 +918,7 @@ def restart_service(state: str | os.PathLike[str], *, manager: LaunchdManager | 
     manager = manager or LaunchdManager()
     manager.require_macos()
     paths = manager.paths(state)
-    validate_node_state(paths.state)
+    manager.spec.validate_state(paths.state)
     _require_managed(paths)
     launchd = _print_state(manager.print_service(paths.state))
     if launchd["loaded"]:
@@ -919,3 +946,15 @@ def uninstall_service(state: str | os.PathLike[str], *, manager: LaunchdManager 
     except OSError:
         raise _state_error("Unable to remove the managed LaunchAgent plist") from None
     return _record_action("uninstall", paths.state, manager)
+
+
+NODE_AGENT_SPEC = LaunchAgentSpec(
+    label=LAUNCH_AGENT_LABEL,
+    console_script="workspace-bridge-node",
+    module="workspace_bridge.node_cli",
+    validate_state=lambda state: validate_node_state(state),
+    config_status=lambda state: _config_status(state),
+    probe=lambda config, token, state: probe_node_status(config, token, state),
+    listen=lambda config: {"host": config["host"], "port": config["port"],
+                           "endpoint": _format_endpoint(config["host"], config["port"])},
+)

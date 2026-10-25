@@ -237,6 +237,41 @@ components.
 
 ## Service persistence
 
+### The Bridge
+
+The Bridge installs as a persistent service with the same hardened
+lifecycle as the Node: the per-user LaunchAgent `com.workspace-bridge.bridge`
+on macOS, or the system unit `workspace-bridge.service` on Linux, running
+`workspace-bridge --state <state> serve` as the state owner.
+
+```sh
+workspace-bridge service install
+workspace-bridge service status
+workspace-bridge service restart
+workspace-bridge service uninstall
+```
+
+A service has no shell environment. Put settings in `bridge.env` in the
+Bridge state folder (mode `0600`), one `KEY=value` per line. Only
+`WB_NODE_GATEWAY_HOST`, `WB_NODE_GATEWAY_URL`, `WB_DISCORD_WEBHOOK_URL`,
+`WB_ADMIN_ALLOWED_HOSTS` and `WB_LOG_LEVEL` are accepted; any other line is an
+error, and a variable set in the real environment wins. Restart the service
+after editing it. `status` reports whether both listeners answer on
+loopback.
+
+### Paired Node connection state
+
+The Bridge records when each paired Node connected, was last seen (every
+30 seconds) and disconnected. `doctor` reports it as connected, disconnected
+since a time, never connected, or unknown when the running Bridge has not
+reported for 90 seconds (for example because it is stopped). Workspace roots
+on paired Nodes show as unknown in `doctor`; the Manager checks them live. On
+the Node, `node service status` reads the dial-out loop's private
+`link-status.json`: `connected` with the time, `disconnected` with the last
+error code, `stopped`, or `unknown` when the status is stale.
+
+### Nodes
+
 On macOS the native Node persists through the per-user LaunchAgent
 `com.workspace-bridge.node`; on Linux through the system unit
 `workspace-bridge-node.service`. Neither is a Compose service. The managed
