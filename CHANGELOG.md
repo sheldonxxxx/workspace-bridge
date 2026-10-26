@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Breaking: agents run only as Node-supervised plugins. The HTTP adapter
+  services are gone: the `workspace-bridge adapter` command (init, serve,
+  show-token, service, open-session, reclaim-session), the
+  `workspace-bridge-claude-adapter`, `-codex-adapter` and
+  `-opencode-adapter` executables, adapter tokens and ports, and the Pi
+  HTTP server (`workspace-bridge-pi-adapter` now requires `--stdio`). Re-add
+  each agent with `workspace-bridge node adapter add <plugin> --name
+  <name>`. Existing HTTP adapter rows stay visible so their run history is
+  kept, but can only be renamed, disabled or deleted; runs on them fail
+  with `adapter_removed`. The Manager API accepts only plugin adapters.
+  OpenCode's terminal handoff and reclaim commands are removed.
+- Breaking: `workspace-bridge support bundle` is removed. Use
+  `workspace-bridge doctor --json` and the service and plugin logs.
+
 - Agent plugins (Agent Protocol v2): a Node can run Claude Code, Codex,
   OpenCode and Pi as supervised child processes speaking JSON-RPC over
   stdio, with no adapter port, token or service. Add one with
@@ -10,7 +24,7 @@
   field; `GET /api/nodes/{id}/plugins` lists what a Node can run. The Node
   restarts a crashed plugin with backoff, buffers pushed events for the
   Bridge, and keeps each plugin's stderr in a size-capped log. Pi gains a
-  `--stdio` mode. HTTP adapters keep working for now.
+  `--stdio` mode.
 
 - One slow Node or adapter no longer stalls the whole Bridge. The global
   service lock was held across Node file and Git calls, and every MCP run

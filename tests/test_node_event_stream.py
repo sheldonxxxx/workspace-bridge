@@ -7,6 +7,8 @@ import threading
 import httpx
 import pytest
 
+from conftest import patch_node_runtime
+
 from workspace_bridge.node_api import make_node_api
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.security import digest
@@ -22,8 +24,7 @@ def event_node(tmp_path):
         "host": "127.0.0.1",
     })
     adapter = node.save_adapter({
-        "name": "Event adapter", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8780", "token": "native-test-token",
+        "name": "Event adapter", "plugin": "codex",
     })
     try:
         yield node, adapter, token
@@ -47,7 +48,7 @@ async def test_pending_event_read_does_not_block_node_status(event_node, monkeyp
             assert release.wait(5), "event read was not released"
             return {"instanceId": "native-instance", "cursor": after, "events": []}
 
-    monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", BlockingRuntime)
+    patch_node_runtime(monkeypatch, BlockingRuntime)
     app = make_node_api(node, digest(token.encode()))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://node-test.invalid",
@@ -80,7 +81,7 @@ async def test_event_read_keeps_node_token_and_revision_validation(event_node, m
         constructed.append((args, kwargs))
         raise AssertionError("rejected event request constructed a native client")
 
-    monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", unexpected_native)
+    patch_node_runtime(monkeypatch, unexpected_native)
     app = make_node_api(node, digest(token.encode()))
     path = f"/v1/runtime/{adapter['id']}/events"
     body = {"arguments": {"after": 0, "wait_ms": 25000},
@@ -94,7 +95,7 @@ async def test_event_read_keeps_node_token_and_revision_validation(event_node, m
                                     headers={"X-Node-Token": token})
         assert missing.status_code == 400
         assert missing.json()["code"] == "invalid_arguments"
-        node.save_adapter({"base_url": "http://127.0.0.1:8781"}, adapter["id"])
+        node.save_adapter({"settings": {"log_level": "DEBUG"}}, adapter["id"])
         stale = await client.post(path, json=body, headers={"X-Node-Token": token})
         assert stale.status_code == 400
         assert stale.json()["code"] == "adapter_changed"

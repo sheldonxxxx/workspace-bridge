@@ -10,7 +10,7 @@ from typing import Any
 
 from .runtime import RuntimeUnsupported
 from .security import BridgeError, redact
-from .wbrp import CORE_FEATURES, Descriptor, HttpRuntimeAdapter
+from .wbrp import CORE_FEATURES, Descriptor
 
 STATUSES = frozenset({"pass", "warning", "unknown", "action_required", "failed"})
 SECTIONS = frozenset({"core", "nodes", "workspaces", "adapters", "runnable_routes",

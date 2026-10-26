@@ -18,14 +18,14 @@ Private MCP tunnel -- one channel, shared gateway credential
   |
 Bridge control plane -- /mcp plus a loopback-only Manager (never tunnel it)
   |
-Authoritative Node (native, per host) -- files, Git, handoffs, adapter secrets
+Authoritative Node (native, per host) -- files, Git, handoffs, agent plugins
   |
-Pi, Codex, and/or Claude Code adapter instances (native, per host)
+Claude Code, Codex, OpenCode and/or Pi plugins (child processes of the Node)
 ```
 
 The Bridge never inspects workspace files directly; the Node owns the data
-plane under its host `allowed_roots` ceiling. Each adapter state owns exactly
-one Pi, Codex, or Claude Code instance. Keep package installs, state, and tunnel profiles
+plane under its host `allowed_roots` ceiling and supervises one plugin
+process per adapter. Keep package installs, state, and tunnel profiles
 outside mapped projects.
 
 ## 1. Prerequisites
@@ -37,15 +37,12 @@ outside mapped projects.
   Engine/Desktop with Compose v2 is needed only if you run the Bridge in a
   container.
 - Decide: a projects parent that already exists (for example
-  `$HOME/Projects`), a Bridge state directory, a Node state directory, one
-  adapter state directory per instance, and distinct host ports in
-  1024–65535 for MCP and Manager.
+  `$HOME/Projects`), a Bridge state directory, a Node state directory, and
+  distinct host ports in 1024–65535 for MCP and Manager.
 - Default paths used below (generic examples; substitute your own):
   Bridge `$HOME/.local/state/workspace-bridge`, Node
-  `$HOME/.local/state/workspace-bridge-node`, Pi adapter
-  `$HOME/.local/state/workspace-bridge-adapter-pi`, Codex adapter
-  `$HOME/.local/state/workspace-bridge-adapter-codex`, Claude Code adapter
-  `$HOME/.local/state/workspace-bridge-adapter-claude`.
+  `$HOME/.local/state/workspace-bridge-node`. Agent plugins keep their state
+  inside the Node state folder.
 
 Docker is optional. Compose builds the Bridge image locally by default, and each
 release also publishes a multiarch image to
@@ -54,15 +51,15 @@ release also publishes a multiarch image to
 ## 2. Install packages
 
 Install the Python product persistently (provides `workspace-bridge`, the
-nested `node` and `adapter` surfaces, and the `workspace-bridge-codex-adapter`
-and `workspace-bridge-claude-adapter` executables):
+nested `node` surface, and the Claude Code, Codex and OpenCode agent
+plugins):
 
 ```sh
 uv tool install workspace-bridge
 workspace-bridge --version
 ```
 
-Install the Pi adapter package on each host that will run Pi:
+Install the Pi plugin package on each Node host that will run Pi:
 
 ```sh
 npm install -g workspace-bridge-pi-host-adapter
@@ -77,7 +74,8 @@ workspace-bridge --state "$HOME/.local/state/workspace-bridge" doctor --offline
 
 ## 3. Credentials you will handle
 
-The Manager uses an admin password; Node, adapter, and MCP access use tokens.
+The Manager uses an admin password; HTTP Node and MCP access use tokens.
+Paired Nodes use keys, and agent plugins need no credential of their own.
 Token creation, storage, and local reveal are distinct steps: reveal commands only read back a stored secret, they do
 not create it. Treat initial creation output as sensitive and local, and
 never paste tokens into chat, project files, or handoffs.
@@ -86,7 +84,6 @@ never paste tokens into chat, project files, or handoffs.
 |---|---|---|
 | Manager admin account | Username `admin`; temporary password `admin`; salted scrypt hash in private `admin-account.json` | Sign in locally and change the password on first login; recover with `workspace-bridge reset-admin-password` |
 | Node token | Created during `workspace-bridge node --state <node-state> init`, stored privately in Node state (`node-token`) | Reveal locally with `workspace-bridge node --state <node-state> show-token`; enter in the Manager Node form (or `POST /api/nodes`); stored in private Bridge SQLite (mode `0600`) |
-| Adapter runtime token | Created during `workspace-bridge adapter --state <adapter-state> init`, printed by `init` and stored privately in adapter state (`runtime-token`) | May be revealed locally again later with `workspace-bridge adapter --state <adapter-state> show-token`; enter in the Manager adapter form for the owning Node; stored in private Node SQLite (mode `0600`) |
 | Shared MCP gateway token | Created or rotated by the Manager or `POST /api/bridge {"operation":"rotate_token"}` while serving, or by `workspace-bridge rotate-bridge-token` while stopped; stored in Bridge state | Copy the displayed value locally into the tunnel environment file (mode `0600`) as the `X-Bridge-Token` header; never tunnel the Manager |
 
 Normal list and status APIs report only whether a token exists, never its
@@ -155,11 +152,11 @@ without affecting runs. To give it a new key, issue
 the old key become interrupted. `doctor` cannot see paired connections and
 reports them as unknown; check them in the Manager.
 
-## 5. Path B — persistent deployment (container Bridge, native Node and adapters)
+## 5. Path B — persistent deployment (container Bridge, native Node)
 
-Run the Bridge control plane in Compose and keep the Node plus Pi/Codex/Claude Code
-adapters native on each data-plane host so absolute workspace paths match.
-Do not add the Node or adapters to Compose. See [Docker](DOCKER.md) for the
+Run the Bridge control plane in Compose and keep the Node, with its agent
+plugins, native on each data-plane host so absolute workspace paths match.
+Do not add the Node or its agents to Compose. See [Docker](DOCKER.md) for the
 full container reference; this section is the minimal supported flow.
 
 ```sh
@@ -225,73 +222,21 @@ field. The Node starts a plugin on first use, restarts it with backoff if it
 exits, and writes its stderr to `plugins/<adapter-id>/plugin.log` in the
 Node state folder. The Bridge discovers the adapter on its next refresh.
 
-### HTTP adapter services
+### Platform notes
 
-The older path is package installation followed by the runtime-neutral
-`workspace-bridge adapter` lifecycle. It will be removed once plugin
-adapters cover every deployment. Each adapter state owns exactly one Pi,
-Codex, or Claude Code instance; use a separate `--state` directory per
-instance. A Claude Code instance also needs the optional SDK extra
-(`uv tool install 'workspace-bridge[claude]'`) and an existing Claude Code
-login on that host. Service
-artifacts never contain the runtime token or the projects root.
+Agent plugins run as child processes of the Node, as the Node's OS user,
+and are covered by the Node service (section 4). On macOS, privacy controls
+(Files & Folders, external-storage access) can still block a workspace path:
+grant only the required access to the actual executable or interpreter when
+prompted. Full Disk Access is not mandatory when a narrower permission
+suffices. On Linux, check the Node service journal with
+`journalctl -u <unit-name>`; each plugin's own stderr is in its
+`plugin.log`.
 
-```sh
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" init \
-  --runtime pi --projects-root "$HOME/Projects" --port 8780
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
-  --runtime codex --projects-root "$HOME/Projects" --port 8772
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
-  --runtime claude --projects-root "$HOME/Projects" --port 8774
-```
-
-Save each printed token immediately: it lives only in that state's private
-storage (mode `0600`). Reprint locally only with `show-token` on the same
-host; never paste it into chat.
-
-Install the persistent service with the same plain verbs as the Node:
-
-```sh
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service status
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service status
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service install
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service status
-```
-
-Expected: `service status` reports the per-instance unit with installed state
-plus bounded descriptor health. `GET /health` needs no token; every `/v1/*`
-endpoint requires the runtime token header. The Codex instance state is
-created under that instance's private runtime area on first start.
-
-Platform notes:
-
-- macOS: `service install` creates a per-user LaunchAgent under
-  `~/Library/LaunchAgents/` (starts after user login, restarts on unexpected
-  exit). Privacy controls (Files & Folders, external-storage access) can
-  still block a workspace path: grant only the required access to the actual
-  executable or interpreter when prompted. Full Disk Access is not mandatory
-  when a narrower permission suffices.
-- Linux: the same command installs a system unit under
-  `/etc/systemd/system/` that starts at boot and survives logout, while
-  `User=`/`Group=` keep the process non-root as the installing user. Run the
-  command without leading `sudo`; the backend requests `sudo` only for the
-  narrow systemd administration steps. For normal troubleshooting, check the
-  journal manually with `journalctl -u <unit-name>`; routine service status
-  does not read journal text. The sanitized support bundle collector is the
-  only programmatic reader: it invokes a fixed
-  `journalctl -u <validated exact unit> --no-pager --output=cat -n 200`
-  with bounded line/byte limits and strict sanitization (see
-  [Operations](OPERATIONS.md)). Host journald retention policy is untouched.
-
-Root mode is advanced only and intentional, per component: a root-owned Node
-state managed as root runs the Node as root with full Node filesystem
-authority, while a root-owned adapter state managed as root runs that
-adapter and its native agent as root. Running the Node as root does not by
-itself make separately non-root adapter services root. A root invocation
-against a user-owned state is rejected, never converted. See
-[Operations](OPERATIONS.md).
+Root mode is advanced only and intentional: a root-owned Node state managed
+as root runs the Node, and therefore every agent plugin it starts, as root
+with full filesystem authority. A root invocation against a user-owned state
+is rejected, never converted. See [Operations](OPERATIONS.md).
 
 ## 7. Register Node, workspaces, adapters, routes
 
@@ -309,10 +254,9 @@ are not accepted by the Manager. Order matters:
 2. **Workspaces:** add one mapping per canonical Node-local root, then enable
    it and set write scope (`handoff` default; `none` denies all writes
    including handoff publication; `workspace` allows permitted source text).
-3. **Adapter instances:** on the owning Node, add each destination with the
-   name, runtime type (`pi`, `codex`, or `claude`), the base URL as seen by the Node
-   host (loopback such as `http://127.0.0.1:8780` is correct there), and its
-   one-time runtime token.
+3. **Adapter instances:** on the owning Node host, add each agent as a plugin
+   with `workspace-bridge node adapter add <plugin> --name <name>` (section
+   6), or through `POST /api/adapters` with `node_id`, `name` and `plugin`.
 4. **Model policy** per adapter: list the live catalog first, then save the
    enabled selectors plus default. Every selector must currently exist or the
    save is rejected. With no policy the adapter is unrestricted by Bridge
@@ -322,8 +266,8 @@ are not accepted by the Manager. Order matters:
    Codex uses either a Bridge profile or its native configuration source. Discovery and
    binding use the exact workspace context.
 
-Endpoint and token edits take effect on the next request without restarting
-the Bridge. The Node `allowed_roots` ceiling is configured on the Node host
+Node connection and adapter setting changes take effect on the next request
+without restarting the Bridge. The Node `allowed_roots` ceiling is configured on the Node host
 and is not editable from the Bridge.
 
 ## 8. MCP tunnel and client connection
@@ -415,26 +359,19 @@ git pull
 docker compose up -d --build
 ```
 
-Node, Codex adapter, and Claude Code adapter (shared Python package):
+Node and its Claude Code, Codex and OpenCode plugins (shared Python package),
+plus the Pi plugin if you use it:
 
 ```sh
 uv tool upgrade workspace-bridge
+npm install -g workspace-bridge-pi-host-adapter
 workspace-bridge --version
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service restart
 ```
 
-Pi adapter (npm package):
-
-```sh
-npm install -g workspace-bridge-pi-host-adapter
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
-```
-
-Restart only the adapters you installed. These steps do not update the native
-Codex, Claude Code, or Pi CLIs. Restarting a service interrupts any run in
-flight on it, so check for active runs first. See
+Restarting the Node restarts its plugins. These steps do not update the
+native Codex, Claude Code, or Pi CLIs. Restarting interrupts any run in
+flight on that Node, so check for active runs first. See
 [Operations](OPERATIONS.md#manual-upgrades) for details.
 
 ## 11. Uninstall
@@ -443,9 +380,6 @@ Stop and remove services before deleting state. Service removal preserves
 state, tokens, bindings, and logs; deleting state is the destructive step.
 
 ```sh
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service uninstall
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service uninstall
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service uninstall
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
 docker compose down
 ```
@@ -465,9 +399,8 @@ Removing containers or units never deletes host bind directories by itself.
   from inside the container (`host.docker.internal` on Docker Desktop, a
   real host address on Linux Engine). Loopback inside the container is the
   container itself.
-- Adapter base URLs are host-relative as seen by the Node, not the
-  container: loopback there is correct while the Node URL itself must be
-  container-reachable.
+- An adapter fails its test: run `workspace-bridge node adapter test
+  <adapter-id>` on the Node host and read the `plugin.log` it names.
 - Model saves fail: read the live catalog first; stale selectors are
   rejected at save time.
 - No live service restart, publish, or credential rotation is performed by

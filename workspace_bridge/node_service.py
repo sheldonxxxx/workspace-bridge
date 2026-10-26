@@ -24,11 +24,10 @@ from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        SafeRoot, allowed, digest, file_text, handoff_allowed,
                        parts, redact, require_write_path)
-from .wbrp import HttpRuntimeAdapter
-from .adapter_registry import validate_base_url
+from .wbrp import RuntimeClient
 from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
 from .plugin_protocol import builtin_manifests, load_manifest
-from .plugin_supervisor import PluginRegistry, PluginRuntimeAdapter
+from .plugin_supervisor import PluginRegistry
 from . import __version__
 
 
@@ -53,6 +52,8 @@ def _public_adapter(row: dict) -> dict:
 
 
 PLUGIN_SETTING_LIMIT = 4096
+HTTP_REMOVED_MESSAGE = ("HTTP adapters were removed; add the agent as a plugin with "
+                        "`workspace-bridge node adapter add <plugin> --name <name>`")
 
 
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
@@ -616,52 +617,37 @@ class NodeService:
             self.plugins.stop(ident)
         return _public_adapter(self.adapter(ident))
 
-    def plugin_client(self, row: dict, *, timeout: float = 30) -> PluginRuntimeAdapter:
+    def plugin_client(self, row: dict, *, timeout: float = 30) -> RuntimeClient:
         process = self.plugins.process(row, self._manifest(row["plugin"]))
-        return PluginRuntimeAdapter(row["id"], row["runtime_type"], process, timeout=timeout)
+        return RuntimeClient(row["id"], row["runtime_type"], process, timeout=timeout)
 
     def save_adapter(self, payload: dict, adapter_id: str | None = None) -> dict:
+        if not isinstance(payload, dict):
+            raise BridgeError("Adapter object required", "invalid_arguments")
         current = self.adapter(adapter_id) if adapter_id else None
-        if isinstance(payload, dict) and ("plugin" in payload or (
-                current and current.get("kind") == "plugin")):
-            return self._save_plugin_adapter(payload, current)
-        allowed_fields = {"name", "runtime_type", "base_url", "token", "enabled"}
-        if not isinstance(payload, dict) or set(payload) - allowed_fields:
-            raise BridgeError("Unexpected adapter fields", "invalid_arguments")
-        name = payload.get("name", current["name"] if current else "")
+        if current is not None and current.get("kind", "http") != "plugin":
+            return self._save_legacy_adapter(payload, current)
+        if current is None and "plugin" not in payload:
+            raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
+        return self._save_plugin_adapter(payload, current)
+
+    def _save_legacy_adapter(self, payload: dict, current: dict) -> dict:
+        """A 0.3 HTTP adapter can only be renamed, disabled or deleted now."""
+        if set(payload) - {"name", "enabled"}:
+            raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
+        name = payload.get("name", current["name"])
+        enabled = payload.get("enabled", bool(current["enabled"]))
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid adapter name", "invalid_arguments")
-        runtime_type = payload.get("runtime_type", current["runtime_type"] if current else None)
-        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (current and runtime_type != current["runtime_type"]):
-            raise BridgeError("Adapter runtime type is immutable", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", current["base_url"] if current else None))
-        token = payload.get("token", "")
-        if not isinstance(token, str) or len(token) > 4096:
-            raise BridgeError("Invalid adapter token", "invalid_arguments")
-        if current and not token:
-            token = current["token"]
-        if not token:
-            raise BridgeError("Adapter token is required", "invalid_arguments")
-        enabled = payload.get("enabled", bool(current["enabled"]) if current else True)
         if not isinstance(enabled, bool):
             raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        stamp = _now()
-        ident = current["id"] if current else "adapter_" + secrets.token_hex(12)
-        revision = current["revision"] if current else "rev_" + secrets.token_hex(16)
-        if current and (base_url != current["base_url"] or token != current["token"]):
-            revision = "rev_" + secrets.token_hex(16)
         try:
             with self.lock, self.db:
-                self.db.execute("INSERT INTO runtime_adapters(id,name,runtime_type,base_url,token,enabled,revision,created,updated) "
-                                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
-                                "base_url=excluded.base_url,token=excluded.token,enabled=excluded.enabled,"
-                                "revision=excluded.revision,updated=excluded.updated",
-                                (ident, name.strip(), runtime_type, base_url, token, int(enabled), revision,
-                                 current["created"] if current else stamp, stamp))
+                self.db.execute("UPDATE runtime_adapters SET name=?,enabled=?,updated=? WHERE id=?",
+                                (name.strip(), int(enabled), _now(), current["id"]))
         except sqlite3.IntegrityError:
             raise BridgeError("Adapter name is already in use", "conflict") from None
-        os.chmod(self.state / "node.sqlite3", 0o600)
-        return _public_adapter(self.adapter(ident))
+        return _public_adapter(self.adapter(current["id"]))
 
     def delete_adapter(self, adapter_id: str) -> dict:
         self.adapter(adapter_id)
@@ -671,38 +657,13 @@ class NodeService:
         return {"deleted": adapter_id}
 
     def test_adapter(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {
-                "adapter_id", "name", "runtime_type", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected adapter test fields", "invalid_arguments")
-        adapter_id = payload.get("adapter_id")
-        saved = self.adapter(adapter_id) if adapter_id else None
-        if saved is not None and saved.get("kind") == "plugin":
-            return self._test_plugin_adapter(saved)
-        runtime_type = payload.get("runtime_type", saved["runtime_type"] if saved else None)
-        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (saved and runtime_type != saved["runtime_type"]):
-            raise BridgeError("Invalid or immutable runtime type", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", saved["base_url"] if saved else None))
-        token = payload.get("token", "")
-        if saved and not token:
-            token = saved["token"]
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Adapter token is required", "invalid_arguments")
-        test_id = adapter_id or "adapter_" + secrets.token_hex(12)
-        try:
-            descriptor = HttpRuntimeAdapter(test_id, runtime_type, base_url, token,
-                                            timeout=5).descriptor()
-        except BridgeError as exc:
-            return {"success": False, "runtime_type": runtime_type,
-                    "code": exc.code, "message": "Connection could not be verified."}
-        result: dict = {"success": True, "adapter_id": adapter_id, "runtime_type": runtime_type,
-                "native_runtime": descriptor.runtime_id,
-                "native_instance": descriptor.instance_id[:200],
-                "adapter_version": descriptor.adapter_version,
-                "native_version": descriptor.native_version,
-                "protocol": 1, "features": descriptor.features}
-        if descriptor.release is not None:
-            result["release"] = descriptor.release
-        return result
+        if not isinstance(payload, dict) or not isinstance(payload.get("adapter_id"), str):
+            raise BridgeError("Save the plugin adapter, then test it by id", "invalid_arguments")
+        saved = self.adapter(payload["adapter_id"])
+        if saved.get("kind", "http") != "plugin":
+            return {"success": False, "runtime_type": saved["runtime_type"],
+                    "code": "adapter_removed", "message": HTTP_REMOVED_MESSAGE}
+        return self._test_plugin_adapter(saved)
 
     def _test_plugin_adapter(self, row: dict) -> dict:
         try:
@@ -762,13 +723,10 @@ class NodeService:
             adapter_row = self.adapter(adapter_id, require_enabled=True)
             if expected_revision != adapter_row["revision"]:
                 raise BridgeError("The Node adapter configuration changed", "adapter_changed")
-            timeout = 10 if operation == "usage_limits" else 30
-            if adapter_row.get("kind") == "plugin":
-                client = self.plugin_client(adapter_row, timeout=timeout)
-            else:
-                client = HttpRuntimeAdapter(adapter_row["id"], adapter_row["runtime_type"],
-                                            adapter_row["base_url"], adapter_row["token"],
-                                            timeout=timeout)
+            if adapter_row.get("kind", "http") != "plugin":
+                raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
+            client = self.plugin_client(adapter_row,
+                                        timeout=10 if operation == "usage_limits" else 30)
         args = arguments
         if operation == "descriptor":
             value = client.descriptor()

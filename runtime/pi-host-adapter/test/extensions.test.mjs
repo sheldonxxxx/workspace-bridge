@@ -32,7 +32,7 @@ import {
   summarizeExtensionResult,
 } from "../executions.mjs";
 import { MANAGED_TOOLS } from "../trusted-permission-extension.mjs";
-import { createPiAdapterServer } from "../server.mjs";
+import { HANDLERS } from "../stdio.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
 import { createFakeTransport } from "./fake-sdk.mjs";
 
@@ -903,29 +903,10 @@ test("generic extension audit bounds input/result without secrets", () => {
   assert.equal(big.truncated, true);
 });
 
-// ------------------------------------------------------------ server
-test("third-party extension inventory is not exposed through the runtime API", async () => {
-  const agentDir = makeAgentDir(["npm:alpha"]);
-  writePackage(agentDir, "alpha", { manifest: ["./ext.js"] });
-  const fake = {
-    projectsRoot: "/tmp", sessionCount: 0,
-    listExtensions: () => readExtensionInventory(agentDir),
-  };
-  const server = createPiAdapterServer({
-    adapter: fake, token: "tok", adapterVersion: "0.3.0", instance: "i",
-    piUsable: true, piVersion: "0.87.0",
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const res = await fetch(`${base}/extensions`, { headers: { "X-Runtime-Token": "tok" } });
-    assert.equal(res.status, 404);
-    const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.capabilities, undefined);
-    assert.ok(!JSON.stringify(health).includes("alpha"));
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
+// ------------------------------------------------------------ protocol
+test("third-party extension inventory is not exposed through the plugin protocol", () => {
+  // The plugin protocol has no extensions or health method; inventory stays local.
+  assert.equal(Object.keys(HANDLERS).some((name) => /extension|health/.test(name)), false);
 });
 
 // ------------------------------------------------------------ SDK fixture

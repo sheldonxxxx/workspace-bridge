@@ -48,9 +48,6 @@ test = ["pytest>=8,<10", "httpx>=0.28,<1", "pytest-asyncio>=1,<2", "PyYAML>=6,<7
 [project.scripts]
 workspace-bridge = "workspace_bridge.cli:main"
 workspace-bridge-node = "workspace_bridge.node_cli:main"
-workspace-bridge-codex-adapter = "workspace_bridge.codex_host_adapter:main"
-workspace-bridge-claude-adapter = "workspace_bridge.claude_host_adapter:main"
-workspace-bridge-opencode-adapter = "workspace_bridge.opencode_host_adapter:main"
 
 [tool.setuptools.packages.find]
 include = ["workspace_bridge*"]

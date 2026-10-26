@@ -9,14 +9,9 @@ and ``rateLimitsByLimitId`` is an optional object of RateLimitSnapshots.
 Account quota is separate from run-scoped token usage and from adapter
 health/status semantics throughout.
 """
-import socket
-import threading
-import time
 from types import MethodType
 
 import pytest
-import uvicorn
-from starlette.testclient import TestClient
 
 from test_codex_host_adapter import FakeCodexRpc
 
@@ -27,10 +22,11 @@ from workspace_bridge.notifications import (DiscordChannel, NotificationEvent,
                                             codex_quota_summary)
 from workspace_bridge.runtime import RuntimeUnsupported
 from workspace_bridge.security import BridgeError, digest
-from workspace_bridge.wbrp import (Descriptor, HttpRuntimeAdapter,
+from workspace_bridge.wbrp import (Descriptor, RuntimeClient,
                                    validate_usage_limits)
 from workspace_bridge.codex_host_adapter import (AdapterFailure,
-                                                 CodexHostAdapter, make_app)
+                                                 CodexHostAdapter)
+from workspace_bridge.plugin_host import LocalPluginTransport, invoke
 
 ADAPTER_ID = "adapter_000000000000000000000001"
 
@@ -239,7 +235,7 @@ def test_usage_limits_unavailable_when_rpc_has_no_data(codex_adapter):
     assert "denied" not in str(failure.value)
 
 
-def test_usage_limits_http_route_requires_token(tmp_path):
+def test_usage_limits_plugin_method(tmp_path):
     projects = tmp_path / "projects"
     projects.mkdir()
     rpc = FakeCodexRpc()
@@ -249,12 +245,8 @@ def test_usage_limits_http_route_requires_token(tmp_path):
                  "resetsAt": None},
         secondary=None)}
     native = CodexHostAdapter(tmp_path / "state", projects, rpc=rpc)
-    client = TestClient(make_app(native, "secret-token"))
-    response = client.get("/v1/usage-limits", headers={"X-Runtime-Token": "wrong"})
-    assert response.status_code == 401
-    response = client.get("/v1/usage-limits", headers={"X-Runtime-Token": "secret-token"})
-    assert response.status_code == 200
-    body = response.json()
+    kind, body = invoke(native, "usageLimits", {})
+    assert kind == "result"
     assert body == {"available": True, "ordinaryUsageAllowed": None,
                     "buckets": [{"limitId": "codex", "limitName": None,
                                  "planType": None,
@@ -315,18 +307,18 @@ def test_validate_usage_limits_drops_malformed_buckets_and_derives_remaining():
     assert all(bucket["limitId"] != "no-windows" for bucket in result["buckets"])
 
 
-def test_http_usage_limits_requires_advertised_capability():
+def test_usage_limits_requires_advertised_capability():
     """Unsupported adapters fail as unsupported, never as unhealthy."""
     descriptor = Descriptor("pi", "Pi", "1.0", "0", "instance", {
         "models": 1, "conversations": 1, "runs": 1,
         "activities": 1, "interactions": 1})
-    client = HttpRuntimeAdapter(ADAPTER_ID, "pi", "http://127.0.0.1:1", "token")
+    client = RuntimeClient(ADAPTER_ID, "pi", None)
     client.descriptor = MethodType(lambda self: descriptor, client)
     with pytest.raises(RuntimeUnsupported):
         client.usage_limits()
 
 
-def start_codex_adapter_server(tmp_path):
+def codex_with_quota(tmp_path):
     base = tmp_path / "quota-native"
     projects = base / "projects"
     projects.mkdir(parents=True)
@@ -338,33 +330,23 @@ def start_codex_adapter_server(tmp_path):
         secondary={"usedPercent": 39, "windowDurationMins": 10080,
                    "resetsAt": 1800000000}),
         "ordinaryUsageAllowed": True}
-    native = CodexHostAdapter(base / "adapter-state", projects, rpc=rpc)
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(make_app(native, "secret-token"),
-                                           host="127.0.0.1", port=port,
-                                           log_level="error", access_log=False))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    for _ in range(200):
-        if server.started:
-            break
-        time.sleep(0.01)
-    assert server.started
-    return native, server, thread, port
+    return CodexHostAdapter(base / "adapter-state", projects, rpc=rpc)
+
+
+def serve_in_process(node_service, native):
+    """Answer every plugin adapter on this Node with one in-process adapter."""
+    node_service.plugins.process = lambda row, manifest: LocalPluginTransport(native)
 
 
 def test_node_runtime_call_usage_limits_without_workspace(tmp_path):
-    native, server, thread, port = start_codex_adapter_server(tmp_path)
+    native = codex_with_quota(tmp_path)
     try:
         config = {"allowed_roots": [str(tmp_path)],
                   "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
         node = NodeService(tmp_path / "node-state", config)
+        serve_in_process(node, native)
         try:
-            created = node.save_adapter({
-                "name": "Quota adapter", "runtime_type": "codex",
-                "base_url": f"http://127.0.0.1:{port}", "token": "secret-token"})
+            created = node.save_adapter({"name": "Quota adapter", "plugin": "codex"})
             result = node.runtime_call(created["id"], "usage_limits", {
                 "arguments": {},
                 "expected_adapter_revision": created["revision"]})
@@ -382,18 +364,16 @@ def test_node_runtime_call_usage_limits_without_workspace(tmp_path):
         finally:
             node.close()
     finally:
-        server.should_exit = True
-        thread.join(timeout=5)
         native.close()
 
 
 def test_service_usage_limits_and_admin_api_route(env, tmp_path):
-    native, server, thread, port = start_codex_adapter_server(tmp_path)
+    native = codex_with_quota(tmp_path)
     try:
         service = env["service"]
+        serve_in_process(env["node"]["service"], native)
         created = service.adapter_registry.create({
-            "name": "Codex quota", "runtime_type": "codex",
-            "base_url": f"http://127.0.0.1:{port}", "token": "secret-token",
+            "name": "Codex quota", "plugin": "codex",
             "enabled": True, "node_id": env["node_id"]})
         adapter_id = created["id"]
         summary = service.run_coordinator.usage_limits(adapter_id)
@@ -421,8 +401,6 @@ def test_service_usage_limits_and_admin_api_route(env, tmp_path):
         assert len(body["buckets"][0]["windows"]) == 2
         assert "accountId" not in str(body)
     finally:
-        server.should_exit = True
-        thread.join(timeout=5)
         native.close()
 
 
@@ -441,8 +419,7 @@ def test_admin_usage_limits_unsupported_and_disabled(env):
                                     headers={"Cookie": token})
     # Disabled adapter fails cleanly, not as an unhealthy probe.
     disabled = service.adapter_registry.create({
-        "name": "Disabled quota", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:9", "token": "t", "enabled": False})
+        "name": "Disabled quota", "plugin": "codex", "enabled": False})
     response = asyncio.run(fetch(disabled["id"]))
     assert response.status_code == 400
     assert response.json()["code"] == "adapter_disabled"

@@ -334,8 +334,9 @@ jobs:
               text = z.read(eps[0]).decode()
           assert "workspace-bridge = workspace_bridge.cli:main" in text, text
           assert "workspace-bridge-node = workspace_bridge.node_cli:main" in text, text
-          assert "workspace-bridge-codex-adapter = workspace_bridge.codex_host_adapter:main" in text, text
-          assert "workspace-bridge-opencode-adapter = workspace_bridge.opencode_host_adapter:main" in text, text
+          assert "-adapter = " not in text, text
+          for plugin in ("claude", "codex", "opencode", "pi"):
+              assert f"workspace_bridge/plugins/{plugin}.toml" in names, names
           assert "workspace_bridge/opencode_permission_plugin/index.mjs" in names
           assert "workspace_bridge/opencode_permission_plugin/package.json" in names
           print("wheel console_scripts ok")
@@ -372,10 +373,10 @@ jobs:
           uv pip install --python "$VENV/bin/python" dist/pypi/*.whl
           "$VENV/bin/workspace-bridge" --version
           "$VENV/bin/workspace-bridge" node --help
-          "$VENV/bin/workspace-bridge" adapter --help
           "$VENV/bin/workspace-bridge-node" --help
-          "$VENV/bin/python" -c 'from workspace_bridge.codex_host_adapter import main; assert callable(main)'
-          "$VENV/bin/python" -c 'from workspace_bridge.opencode_host_adapter import main; from importlib.resources import files; assert callable(main); assert files("workspace_bridge").joinpath("opencode_permission_plugin/index.mjs").is_file()'
+          "$VENV/bin/workspace-bridge-node" plugin --help
+          "$VENV/bin/python" -c 'from workspace_bridge.plugin_protocol import builtin_manifests; assert set(builtin_manifests()) == {"claude", "codex", "opencode", "pi"}'
+          "$VENV/bin/python" -c 'import workspace_bridge.plugin_host, workspace_bridge.opencode_host_adapter; from importlib.resources import files; assert files("workspace_bridge").joinpath("opencode_permission_plugin/index.mjs").is_file()'
       - name: Upload prepared PyPI dist
         uses: actions/upload-artifact@v7
         with:

@@ -1,10 +1,10 @@
 # Architecture
 
 Source-accurate reference for Workspace Bridge `0.3.0`: Bridge control plane
-plus local Manager, authoritative Nodes, Node-owned adapter instances
-(Pi/Codex/Claude Code), exact workspace routes, Runtime Protocol v1, optional secure MCP
-tunnel, native services on macOS and Linux, manual package updates, and
-bounded logs with support bundles.
+plus local Manager, authoritative Nodes, Node-supervised agent plugins
+(Claude Code, Codex, OpenCode, Pi), exact workspace routes, Agent Protocol
+v2, optional secure MCP tunnel, native services on macOS and Linux, manual
+package updates, and bounded logs.
 
 ## Component and deployment topology
 
@@ -16,9 +16,9 @@ flowchart TB
     Manager["Local Manager UI<br/>loopback only, admin credential"]
     NodeA["Node A (native)<br/>allowed roots, files, Git, handoffs"]
     NodeB["Node B (native)<br/>allowed roots, files, Git, handoffs"]
-    Pi["Pi adapter instance<br/>native sessions, trusted permission extension"]
-    Codex["Codex adapter instance<br/>native threads, app-server"]
-    Claude["Claude Code adapter instance<br/>Agent SDK sessions, permission hook"]
+    Pi["Pi plugin<br/>native sessions, trusted permission extension"]
+    Codex["Codex plugin<br/>native threads, app-server"]
+    Claude["Claude Code plugin<br/>Agent SDK sessions, permission hook"]
     subgraph Hosts["Data-plane hosts"]
         NodeA --- Pi
         NodeB --- Codex
@@ -37,7 +37,7 @@ Component responsibilities:
 - `service.py`: auth, mappings, Node-routed operations, handoff publication,
   write policy, adapter references, workspace routes.
 - `node_service.py` / `node_api.py`: Node data plane (allowed roots, files,
-  images, Git, handoffs, adapter secrets).
+  images, Git, handoffs, plugin adapters).
 - `node_registry.py` / `node_client.py`: Bridge-side Node inventory and
   bounded Node protocol proxy.
 - `adapter_registry.py`: sanitized Bridge cache of Node-owned instances with
@@ -53,7 +53,10 @@ Component responsibilities:
 - `manager_events.py`: bounded, process-local Manager SSE hints containing
   run IDs. Reconnects and queue overflow request a REST snapshot refresh;
   this stream has no durable event replay or runtime content.
-- `wbrp.py`: validated bounded private HTTP client for adapters.
+- `wbrp.py`: validated bounded runtime client for agent plugins.
+- `plugin_protocol.py` / `plugin_supervisor.py` / `plugin_host.py`: Agent
+  Protocol v2 framing and manifests, the Node's plugin supervisor, and the
+  plugin side for the Python agents.
 - `codex_host_adapter.py` / `codex_rpc.py`: Codex app-server host adapter
   with native thread ownership.
 - `claude_host_adapter.py`: Claude Code host adapter over the Claude Agent
@@ -135,26 +138,25 @@ flowchart TB
     Gateway["Shared MCP gateway credential<br/>authorizes all enabled mappings"]
     Admin["Bridge admin credential<br/>Manager only, loopback"]
     NodeCred["Node credential<br/>Bridge SQLite, private"]
-    RuntimeTok["Runtime token<br/>Node SQLite, private"]
     BridgeDB[("Bridge DB<br/>mappings, routes, policies,<br/>runs, sanitized adapter refs")]
-    NodeDB[("Node DB<br/>roots, files, handoffs,<br/>adapter secrets, runtime state")]
-    AdapterState[("Adapter-local state<br/>sessions, profiles,<br/>execution evidence")]
+    NodeDB[("Node DB<br/>roots, files, handoffs,<br/>plugin adapters, runtime state")]
+    AdapterState[("Plugin state in the Node folder<br/>sessions, profiles,<br/>execution evidence")]
     Internet --- Gateway
     Gateway --> BridgeDB
     Admin --> BridgeDB
     NodeCred --> NodeDB
-    RuntimeTok --> AdapterState
     BridgeDB --> NodeDB --> AdapterState
 ```
 
 Boundaries:
 
-- Bridge credential versus admin credential versus Node credential versus
-  runtime token are four distinct secrets with distinct storage and entry
-  points (see [Setup](SETUP.md)). One-time output stays local.
-- Bridge DB versus Node DB versus adapter-local state: the Bridge holds
-  sanitized adapter references; the Node holds adapter secrets and
-  data-plane state; each adapter holds native sessions and profiles. All
+- Bridge credential versus admin credential versus Node credential are
+  distinct secrets with distinct storage and entry points (see
+  [Setup](SETUP.md)); agent plugins have none. One-time output stays local.
+- Bridge DB versus Node DB versus plugin state: the Bridge holds sanitized
+  adapter references; the Node holds plugin configuration and data-plane
+  state; each plugin holds native sessions and profiles in its private
+  folder under the Node state. All
   state files are private (`0700` directories, `0600` files).
 - Write scope governs new handoff publication and source mutation; exact
   route enablement governs run admission. One does not imply the other.
@@ -248,9 +250,8 @@ is loopback-only in both modes and is never tunnelled.
   checkout fallback exists. Other Nodes are unaffected.
 - Adapter plus native runtime failure: runs on that instance stop making
   progress. The Codex adapter and its owned app-server form one supervised
-  unit: unexpected native loss terminates the adapter so the supervisor
-  restarts the whole unit instead of leaving a permanently degraded HTTP
-  surface. Active runs are marked interrupted, never replayed; idle persisted
+  unit: unexpected native loss terminates the plugin so the Node restarts
+  the whole unit instead of leaving it permanently degraded. Active runs are marked interrupted, never replayed; idle persisted
   conversations remain resumable.
 - A slow or hung Node or adapter delays only work on the same key. The
   Bridge's database lock covers SQLite statements only and is never held
@@ -272,20 +273,16 @@ is loopback-only in both modes and is never tunnelled.
   the installing user. Install commands run without leading `sudo`; the
   backend uses only fixed narrow `sudo` operations. Journal inspection is
   manual for normal troubleshooting; routine service status does not read
-  journal text. Only the sanitized support bundle collector reads journals
-  programmatically, via a fixed bounded `journalctl` invocation with strict
-  sanitization.
+  journal text.
 - Service artifacts contain only the stable launcher
-  (`workspace-bridge node --state <state> serve` or
-  `workspace-bridge adapter --state <state> serve`), never tokens or project
-  roots. `service status` is read-only and combines OS state with a bounded
+  (`workspace-bridge --state <state> serve` or
+  `workspace-bridge node --state <state> serve`), never tokens or project
+  roots. Agent plugins are child processes of the Node, not services. `service status` is read-only and combines OS state with a bounded
   authenticated health check. `service uninstall` removes only the managed
   unit; state, tokens, bindings, and logs remain.
-- Root mode is intentional only and per component: a root-owned Node state
-  managed as root runs the Node as root, while a root-owned adapter state
-  managed as root runs that adapter and its native agent as root. Running
-  the Node as root does not by itself make separately non-root adapter
-  services root. Mixed-ownership invocations are rejected, never converted.
+- Root mode is intentional only: a root-owned Node state managed as root
+  runs the Node, and every agent plugin it starts, as root. Mixed-ownership
+  invocations are rejected, never converted.
 
 ## Release identity and skew
 
@@ -301,7 +298,7 @@ a maintenance window. Protocol and feature compatibility stay strict, while
 malformed optional release metadata is observed as degraded update metadata
 without making an otherwise valid descriptor unavailable.
 
-## Logging, support bundles, extension points
+## Logging and extension points
 
 - Docker Bridge and tunnel logs use `json-file` rotation (`10m x3`).
 - macOS managed services bound each output stream to a 10 MiB active file
@@ -309,12 +306,11 @@ without making an otherwise valid descriptor unavailable.
   managed units only. Linux units log to the host journal; retention is the
   host journald policy. Logs carry bounded IDs, states, counts, and codes
   only — never prompts, results, paths, scopes, credentials, or raw bodies.
-- `workspace-bridge support bundle` builds a private `0600` ZIP (at most 5
-  MiB) with projected diagnostics, safe service status, and bounded log
-  excerpts. No upload occurs; review before sharing.
+- Each agent plugin's stderr goes to a private `plugin.log` in its folder,
+  capped at 5 MiB with one previous file kept.
 - Runtime extension points: new notification channels implement the channel
-  interface without changing run orchestration; new runtimes must pass the
-  Runtime Protocol conformance gate (idle-only admission, exact interaction
+  interface without changing run orchestration; new agents ship as plugins
+  with a manifest and must pass the conformance gate (idle-only admission, exact interaction
   routing, opaque models, ownership, restart reconciliation) without changing
   the coordinator state machine, schema, or workspace authorization.
 - Image path caveat: supported rasters decode in a fixed, timed worker and

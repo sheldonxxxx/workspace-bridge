@@ -1,30 +1,31 @@
-# Runtime protocol v1
+# Runtime protocol
 
 Workspace Bridge owns workspace authorization, handoffs, model policy, run
 records, and audit. An authoritative Node owns the workspace filesystem/Git/
-handoff data plane and runtime adapter registry/secrets. A runtime adapter owns
+handoff data plane and supervises its agent plugins. An agent plugin owns
 its native process or SDK, session files, model syntax, and security enforcement.
-Pi, Codex, Claude Code, and OpenCode adapters implement the same resource contract; Bridge never sends a
-vendor RPC directly to an adapter.
+Pi, Codex, Claude Code, and OpenCode plugins implement the same resource contract;
+Bridge never sends a vendor RPC directly to an agent. The resource model below
+is version 1 (descriptors report `protocol.major` 1); it travels over
+[Agent Protocol v2](#agent-protocol-v2-stdio-plugins), JSON-RPC over the
+plugin's stdio.
 
 ## Bridge routing identities
 
 `RuntimeType` is the protocol family (`pi`, `codex`, `claude`, or `opencode`) in the native descriptor.
 It describes behavior and does not identify a destination. `AdapterInstance` is
 one Node-owned destination with an opaque `adapter_id`, unique display name,
-runtime type, Node-local/reachable base URL, Node-held per-instance token,
-enabled state, and connection revision. Multiple AdapterInstances can share one
+runtime type, plugin, projects root, plugin settings, enabled state, and
+configuration revision. Multiple AdapterInstances can share one
 runtime type. `WorkspaceRoute` is the exact `(workspace_id, adapter_id)`
 permission and security binding, and its adapter must belong to the workspace's
 authoritative Node.
 
 Bridge stores sanitized adapter references, Node credentials, model policies,
 routes, conversations, and runs in private SQLite. Its local Manager owns
-Bridge-to-Node connection settings; each Node stores adapter credentials in
-private Node SQLite. The native Pi/Codex/Claude daemon's listen port, bootstrap token, state path,
-and process lifecycle remain configured on that host. A daemon's own
-`WB_RUNTIME_TOKEN` is its HTTP credential; it is not a Bridge-wide registry or
-shared Bridge environment variable.
+Bridge-to-Node connection settings; each Node stores its plugin adapters in
+private Node SQLite and runs them as child processes. Plugins have no port
+and no credential.
 
 ## Resources
 
@@ -35,7 +36,8 @@ shared Bridge environment variable.
 | Activity | One command, file change, tool call, search, subagent action, or other observable action within a run. |
 | Interaction | One live blocking request with exact adapter-provided response options or form fields. |
 
-The HTTP adapter surface is token authenticated and private:
+The operations, written as their version 1 routes (the v2 method table below
+maps each one to a JSON-RPC method):
 
 ```text
 GET    /v1/descriptor

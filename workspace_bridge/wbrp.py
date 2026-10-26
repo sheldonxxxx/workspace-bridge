@@ -1,4 +1,4 @@
-"""Bounded client and validation for the private Runtime Protocol v1.
+"""Bounded client and validation for the agent resource protocol.
 
 This module knows only Bridge resource names. Native Pi/Codex wire formats stay
 inside their adapters. No adapter endpoint accepts an arbitrary command.
@@ -7,17 +7,13 @@ from __future__ import annotations
 
 import json
 import re
-import socket
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from .plugin_protocol import to_rpc
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, redact
 
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
 OPTIONAL_FEATURES = frozenset({"events", "steering", "queueing", "inputControls", "imageInput", "securityRebind",
                                "usageLimits"})
@@ -389,92 +385,59 @@ class Descriptor:
         return self.features.get(feature) == 1
 
 
-class HttpRuntimeAdapter:
-    """One strict HTTP client for any conforming private runtime adapter."""
+class RuntimeClient:
+    """One strict client for any conforming agent plugin.
 
-    def __init__(self, adapter_id: str, runtime_type: str, base_url: str,
-                 token: str, *, timeout: float = 30):
+    Every method validates what the plugin returns. The transport carries
+    named Agent Protocol v2 requests: ``call(method, params, timeout)`` and
+    ``events(after, wait_ms)``. On a Node it is the supervised plugin
+    process; tests may use an in-process loopback.
+    """
+
+    def __init__(self, adapter_id: str, runtime_type: str, transport: Any, *,
+                 timeout: float = 30):
         if (not isinstance(adapter_id, str)
                 or not re.fullmatch(r"adapter_[0-9a-f]{24}", adapter_id)):
             raise BridgeError("Invalid adapter id", "invalid_arguments")
         if runtime_type not in {"pi", "codex", "claude", "opencode"}:
             raise BridgeError("Invalid runtime type", "invalid_arguments")
-        parsed = urllib.parse.urlparse(base_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
-            raise BridgeError("Invalid runtime adapter URL", "invalid_arguments")
-        if not isinstance(token, str) or not token:
-            raise BridgeError("Runtime adapter token is required", "invalid_arguments")
         self.adapter_id = adapter_id
         self.runtime_type = runtime_type
-        self.base_url = base_url.rstrip("/")
-        self.token = token
+        self.transport = transport
         self.timeout = min(max(float(timeout), 0.5), 60.0)
 
-    def _scrub_secret(self, value: Any) -> Any:
-        """Remove this connection's credential from every remote string value."""
+    @staticmethod
+    def _scrub_secret(value: Any) -> Any:
+        """Redact credential-shaped text from every string a plugin returns."""
         if isinstance(value, str):
-            return redact(value.replace(self.token, "[REDACTED_SECRET]"))[0]
+            return redact(value)[0]
         if isinstance(value, list):
-            return [self._scrub_secret(item) for item in value]
+            return [RuntimeClient._scrub_secret(item) for item in value]
         if isinstance(value, dict):
-            return {self._scrub_secret(key) if isinstance(key, str) else key:
-                    self._scrub_secret(item) for key, item in value.items()}
+            return {key: RuntimeClient._scrub_secret(item) for key, item in value.items()}
         return value
 
     @staticmethod
-    def _check_request_size(method: str, path: str, body: dict | None) -> bytes | None:
+    def _check_request_size(method: str, path: str, body: dict | None) -> None:
         """Bound one request body: 12 MiB for a run start with images, else 512 KiB."""
         raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
             raise BridgeError("Adapter request is too large", "invalid_arguments")
-        return raw_body
 
     def _request(self, method: str, path: str, *, body: dict | None = None,
                  query: dict | None = None, timeout: float | None = None) -> dict:
         if not path.startswith("/v1/"):
             raise BridgeError("Invalid adapter path", "invalid_arguments")
-        url = self.base_url + path
-        if query:
-            url += "?" + urllib.parse.urlencode({k: v for k, v in query.items()
-                                                   if v is not None})
-        raw_body = self._check_request_size(method, path, body)
-        headers = {"Accept": "application/json", "X-Runtime-Token": self.token}
-        if raw_body is not None:
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(url, data=raw_body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_RESPONSE_BYTES:
-                    raise RuntimeUnavailable("Runtime response is too large")
-                value = json.loads(raw)
-                if not isinstance(value, dict):
-                    raise RuntimeUnavailable("Runtime response is invalid")
-                return self._scrub_secret(value)
-        except urllib.error.HTTPError as exc:
-            detail = ""
-            code = "runtime_rejected"
-            try:
-                payload = json.loads(exc.read(8192))
-                if isinstance(payload, dict):
-                    detail = str(payload.get("error") or "")[:300]
-                    code = str(payload.get("code") or code)[:80]
-            except (ValueError, UnicodeError):
-                pass
-            detail = redact(detail.replace(self.token, "[REDACTED_SECRET]"))[0]
-            code = code.replace(self.token, "redacted")
-            if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
-                code = "runtime_rejected"
-            if exc.code == 501:
-                raise RuntimeUnsupported(detail or "Runtime feature is unsupported") from None
-            if exc.code in (400, 404, 409, 412, 422):
-                raise RuntimeRejected(detail or "Runtime rejected the request",
-                                      code=code, status=exc.code) from None
-            raise RuntimeUnavailable(detail or "Runtime adapter returned an error") from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
-            raise RuntimeUnavailable("Runtime adapter is unavailable") from None
-        except (ValueError, UnicodeError):
-            raise RuntimeUnavailable("Runtime returned invalid JSON") from None
+        self._check_request_size(method, path, body)
+        name, params = to_rpc(method, path, query, body)
+        if name == "events":
+            value = self.transport.events(int(params.get("after", 0)),
+                                          int(params.get("waitMs", 0)))
+        else:
+            value = self.transport.call(name, params, timeout or self.timeout)
+        if not isinstance(value, dict):
+            raise RuntimeUnavailable("Runtime response is invalid")
+        return self._scrub_secret(value)
 
     def descriptor(self) -> Descriptor:
         return Descriptor.parse(self._request("GET", "/v1/descriptor", timeout=3),

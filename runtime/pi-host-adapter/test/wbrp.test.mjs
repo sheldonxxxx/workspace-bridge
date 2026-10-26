@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { PiRuntimeProtocol } from "../wbrp.mjs";
-import { createPiAdapterServer } from "../server.mjs";
+import { PassThrough } from "node:stream";
+
+import { serveStdio } from "../stdio.mjs";
 import { PiAdapter } from "../adapter.mjs";
 import { safeDefaultPolicy } from "../policy.mjs";
 
@@ -118,63 +120,51 @@ test("Pi custom profiles persist external file controls and reject stale edits",
   }
 });
 
-test("Pi protocol routes are private and speak the shared HTTP contract", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-pi-wbrp-http-"));
+test("Pi protocol speaks the shared contract over the stdio plugin transport", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-pi-wbrp-stdio-"));
   const { adapter, directory } = fixture(root);
-  const server = createPiAdapterServer({ adapter, token: "secret",
-    adapterVersion: "test", instance: "test-instance" });
+  const input = new PassThrough();
+  const replies = new Map();
+  const waiters = [];
+  serveStdio({ input, buildAdapter: () => adapter, exit: () => {},
+    write: (line) => {
+      const message = JSON.parse(line);
+      replies.set(message.id, message);
+      for (const wake of waiters.splice(0)) wake();
+    } });
+  let next = 0;
+  const call = async (method, params = {}) => {
+    const id = ++next;
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    while (!replies.has(id)) await new Promise((resolve) => waiters.push(resolve));
+    return replies.get(id);
+  };
   try {
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const base = `http://127.0.0.1:${server.address().port}`;
-    const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.runtime, "pi");
-    assert.equal(health.protocol, 1);
-    assert.equal(health.locked, false);
-    assert.ok(!JSON.stringify(health).includes(directory));
-    assert.equal((await fetch(`${base}/v1/descriptor`)).status, 401);
-    const headers = { "X-Runtime-Token": "secret" };
-    const descriptor = await (await fetch(`${base}/v1/descriptor`, { headers })).json();
+    assert.equal((await call("initialize", { protocol: 2 })).result.protocol, 2);
+    const descriptor = (await call("descriptor")).result;
     assert.equal(descriptor.runtime.id, "pi");
     assert.equal(descriptor.features.securityRebind, 1);
-    const listed = await (await fetch(`${base}/v1/models`, { headers })).json();
-    assert.equal(listed.models[0].selector, "provider/model");
-    const profiles = (await (await fetch(`${base}/v1/profiles`, { headers })).json()).profiles;
-    const profile = profiles[0];
-    const other = profiles[1];
-    const response = await fetch(`${base}/v1/conversations`, {
-      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: "ws-one", directory,
-        securityProfile: { id: profile.id, revision: profile.revision } }),
-    });
-    assert.equal(response.status, 200);
-    assert.equal((await response.json()).workspaceId, "ws-one");
-    // Rebind via HTTP preserves the same conversation under the new profile.
-    const convId = (await (await fetch(`${base}/v1/conversations`, {
-      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: "ws-one", directory,
-        securityProfile: { id: profile.id, revision: profile.revision } }),
-    })).json()).id;
-    const rebindRes = await fetch(`${base}/v1/conversations/${convId}/security`, {
-      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ securityBinding: { source: "profile",
-        profile: { id: other.id, revision: other.revision } } }),
-    });
-    assert.equal(rebindRes.status, 200);
-    const rebound = await rebindRes.json();
-    assert.equal(rebound.id, convId);
+    assert.equal((await call("models")).result.models[0].selector, "provider/model");
+    const profiles = (await call("profiles.list")).result.profiles;
+    const [profile, other] = profiles;
+    const created = (await call("conversations.create", { body: { workspaceId: "ws-one", directory,
+      securityProfile: { id: profile.id, revision: profile.revision } } })).result;
+    assert.equal(created.workspaceId, "ws-one");
+    // Rebind keeps the same conversation under the new profile.
+    const rebound = (await call("conversations.rebind", { conversationId: created.id,
+      body: { securityBinding: { source: "profile",
+        profile: { id: other.id, revision: other.revision } } } })).result;
+    assert.equal(rebound.id, created.id);
     assert.deepEqual(rebound.securityBinding, { source: "profile",
       profile: { id: other.id, revision: other.revision } });
-    const bad = await fetch(`${base}/v1/conversations/${convId}/security`, {
-      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ securityBinding: { source: "profile",
-        profile: { id: other.id } } }),
-    });
-    assert.equal(bad.status, 400);
-    for (const legacyPath of ["/models", "/sessions", "/extensions"]) {
-      assert.equal((await fetch(`${base}${legacyPath}`, { headers })).status, 404);
+    const bad = await call("conversations.rebind", { conversationId: created.id,
+      body: { securityBinding: { source: "profile", profile: { id: other.id } } } });
+    assert.equal(bad.error.data.status, 400);
+    for (const legacy of ["sessions", "extensions", "health"]) {
+      assert.equal((await call(legacy)).error.data.code, "not_found");
     }
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    input.end();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

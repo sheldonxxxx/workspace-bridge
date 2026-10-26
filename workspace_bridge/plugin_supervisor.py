@@ -23,10 +23,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .plugin_protocol import MAX_LINE, PROTOCOL, encode, to_rpc
-from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
-from .security import BridgeError, redact
-from .wbrp import HttpRuntimeAdapter
+from .plugin_protocol import MAX_LINE, PROTOCOL, encode, raise_for_error
+from .runtime import RuntimeUnavailable
 
 _LOG = logging.getLogger("workspace_bridge.ops")
 INITIALIZE_TIMEOUT = 120.0
@@ -259,16 +257,7 @@ class PluginProcess:
         if message is None:
             raise RuntimeUnavailable("Plugin exited")
         if "error" in message:
-            error = message["error"] if isinstance(message["error"], dict) else {}
-            data = error.get("data") if isinstance(error.get("data"), dict) else {}
-            status, code = data.get("status"), str(data.get("code") or "runtime_rejected")[:80]
-            detail = redact(str(error.get("message") or ""))[0][:300]
-            if status == 501:
-                raise RuntimeUnsupported(detail or "Runtime feature is unsupported")
-            if status in (400, 404, 409, 412, 422):
-                raise RuntimeRejected(detail or "Runtime rejected the request",
-                                      code=code, status=status)
-            raise RuntimeUnavailable(detail or "Runtime adapter returned an error")
+            raise_for_error(message["error"])
         result = message.get("result")
         if not isinstance(result, dict):
             raise RuntimeUnavailable("Runtime response is invalid")
@@ -290,35 +279,6 @@ class PluginProcess:
             page = [event for event in self._buffer if event["cursor"] > after][:100]
             return {"instanceId": self.instance_id, "cursor": max(self._head, after),
                     "events": page}
-
-
-class PluginRuntimeAdapter(HttpRuntimeAdapter):
-    """The Node's runtime client for a plugin: same validation, stdio transport."""
-
-    def __init__(self, adapter_id: str, runtime_type: str, process: PluginProcess, *,
-                 timeout: float = 30):
-        self.adapter_id = adapter_id
-        self.runtime_type = runtime_type
-        self.process = process
-        self.token = None
-        self.timeout = min(max(float(timeout), 0.5), 60.0)
-
-    def _scrub_secret(self, value: Any) -> Any:
-        if isinstance(value, str):
-            return redact(value)[0]
-        if isinstance(value, list):
-            return [self._scrub_secret(item) for item in value]
-        if isinstance(value, dict):
-            return {key: self._scrub_secret(item) for key, item in value.items()}
-        return value
-
-    def _request(self, method: str, path: str, *, body: dict | None = None,
-                 query: dict | None = None, timeout: float | None = None) -> dict:
-        self._check_request_size(method, path, body)
-        name, params = to_rpc(method, path, query, body)
-        if name == "events":
-            return self.process.events(int(params.get("after", 0)), int(params.get("waitMs", 0)))
-        return self._scrub_secret(self.process.call(name, params, timeout or self.timeout))
 
 
 class PluginRegistry:

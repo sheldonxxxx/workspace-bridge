@@ -51,9 +51,22 @@ def attach_test_node(service: Service, state: Path, parent: Path,
     return node, record
 
 
+def plugin_payload(payload: dict) -> dict:
+    """Map a test adapter description onto the built-in plugin of its runtime type.
+
+    Tests intercept the Bridge's adapter client, so the plugin process is
+    only started by tests that exercise the Node plugin path itself.
+    """
+    if "plugin" in payload:
+        return payload
+    return {key: value for key, value in {
+        "name": payload.get("name"), "plugin": payload.get("runtime_type", "pi"),
+        "enabled": payload.get("enabled")}.items() if value is not None}
+
+
 def create_test_adapter(service: Service, node_id: str, payload: dict,
                         adapter_id: str | None = None):
-    row = service.adapter_registry.create({**payload, "node_id": node_id})
+    row = service.adapter_registry.create({**plugin_payload(payload), "node_id": node_id})
     if adapter_id is None:
         return row
     node_service = service._node_transport_services[node_id]
@@ -91,3 +104,17 @@ def payload():
         "plan": "Inspect src/main.py; make the smallest necessary change and update tests.",
         "acceptance": "Run the unit tests. Preserve pre-existing user edits.",
         "constraints": "Do not commit or push.", "context": "Small Python module.", "context_hashes": {}}
+
+
+def patch_node_runtime(monkeypatch, factory):
+    """Make every NodeService answer plugin adapters with ``factory``'s client.
+
+    ``factory`` receives ``(adapter_id, runtime_type, timeout=..., row=...)``;
+    the Node still checks the adapter row and revision before constructing it.
+    """
+    from workspace_bridge.node_service import NodeService
+
+    def plugin_client(self, row, *, timeout=30):
+        return factory(row["id"], row["runtime_type"], timeout=timeout, row=row)
+
+    monkeypatch.setattr(NodeService, "plugin_client", plugin_client)

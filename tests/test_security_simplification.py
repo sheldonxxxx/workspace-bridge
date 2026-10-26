@@ -40,8 +40,7 @@ def simplified_env(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Local Codex", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8767", "token": "codex-test-secret"}, ADAPTER_ID)
+        "name": "Local Codex", "plugin": "codex"}, ADAPTER_ID)
     native_client = DirectAdapter(native)
     client_factory = service.adapter_registry.client
     service.adapter_registry.client = lambda adapter_id, **kwargs: (

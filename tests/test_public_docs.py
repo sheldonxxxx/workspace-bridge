@@ -106,12 +106,21 @@ def test_mcp_tools_matches_run_contract():
 
 def test_agent_setup_covers_both_runtimes():
     text = (REPO / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
-    assert "--runtime pi" in text
-    assert "--runtime codex" in text
-    assert "workspace-bridge-adapter-pi" in text and "service install" in text
-    assert "workspace-bridge-adapter-codex" in text
-    codex_block = text[text.find("--runtime codex"):]
-    assert "service install" in codex_block and "service status" in codex_block
+    assert "adapter add pi" in text
+    assert "adapter add codex" in text
+    assert "adapter test" in text and "service install" in text
+    # Agents are plugins of the Node: no adapter state, token or service.
+    assert "adapter --state" not in text and "runtime-token" not in text
+
+
+def test_public_docs_never_reference_removed_adapter_services():
+    removed = ("workspace-bridge adapter --state", "workspace-bridge-codex-adapter",
+               "workspace-bridge-claude-adapter", "workspace-bridge-opencode-adapter",
+               "support bundle --output", "reclaim-session", "X-Runtime-Token")
+    failures = [f"{path}: {phrase}" for path, text in _public_texts().items()
+                if "CHANGELOG" not in str(path)
+                for phrase in removed if phrase in text]
+    assert failures == []
 
 
 def test_no_apt_installs_uv():

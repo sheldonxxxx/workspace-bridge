@@ -6,11 +6,10 @@ import threading
 import time
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
-from workspace_bridge.codex_host_adapter import (AdapterFailure, CodexHostAdapter,
-                                                  make_app)
+from workspace_bridge.codex_host_adapter import AdapterFailure, CodexHostAdapter
 from workspace_bridge.codex_rpc import CodexRpcError
+from workspace_bridge.plugin_host import invoke
 
 
 class FakeCodexRpc:
@@ -1087,18 +1086,11 @@ def test_adapter_close_does_not_terminate(tmp_path):
     assert exits == []
 
 
-@pytest.mark.asyncio
-async def test_private_http_surface_requires_token(codex_adapter):
-    adapter, workspace, _ = codex_adapter
-    app = make_app(adapter, "private-token")
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="http://127.0.0.1:8772") as client:
-        denied = await client.get("/v1/descriptor")
-        assert denied.status_code == 401
-        allowed = await client.get("/v1/descriptor",
-                                   headers={"X-Runtime-Token": "private-token"})
-        assert allowed.status_code == 200
-        assert allowed.json()["runtime"]["id"] == "codex"
+def test_plugin_dispatch_serves_the_codex_descriptor(codex_adapter):
+    adapter, _, _ = codex_adapter
+    kind, value = invoke(adapter, "descriptor", {})
+    assert kind == "result" and value["runtime"]["id"] == "codex"
+    assert invoke(adapter, "shell.exec", {})[1]["data"]["code"] == "not_found"
 
 
 def _profile_revision_for(adapter, workspace, profile_id):
@@ -1457,61 +1449,44 @@ def test_rebind_waiter_conflict_restores_exact_old_state(codex_adapter):
         adapter._settings_updates.pop(thread_id, None)
 
 
-async def test_conversation_5xx_boundary_logs_sanitized(codex_adapter, caplog):
-    adapter, _, _ = codex_adapter
-
+def test_conversation_5xx_boundary_logs_sanitized(codex_adapter, caplog):
     class _FailingConversations:
         def create_conversation(self, body):
             raise AdapterFailure(
                 "boom at /Users/private/project for /Volumes/private/data; "
                 "WB_RUNTIME_TOKEN=super-secret-token", 502, "runtime_unavailable")
 
-    app = make_app(_FailingConversations(), "boundary-token")
-    with caplog.at_level("WARNING", logger="workspace_bridge.codex_host_adapter"):
+    with caplog.at_level("WARNING", logger="workspace_bridge.plugin"):
         caplog.clear()
-        async with AsyncClient(transport=ASGITransport(app=app),
-                                base_url="http://127.0.0.1:8772") as client:
-            response = await client.post(
-                "/v1/conversations", json={"workspaceId": "ws-one"},
-                headers={"X-Runtime-Token": "boundary-token"})
-    assert response.status_code == 502
-    payload = response.json()
-    assert payload["code"] == "runtime_unavailable"
-    assert payload["error"] == (
-        "boom at /Users/private/project for /Volumes/private/data; "
-        "WB_RUNTIME_TOKEN=super-secret-token")
+        kind, error = invoke(_FailingConversations(), "conversations.create",
+                             {"body": {"workspaceId": "ws-one"}})
+    assert kind == "error"
+    assert error["data"] == {"status": 502, "code": "runtime_unavailable"}
+    # The Node redacts secrets from the message; the log line is sanitized here.
     boundary = [record for record in caplog.records
-                if "conversation creation failed" in record.getMessage()]
+                if "plugin request failed" in record.getMessage()]
     assert len(boundary) == 1
     message = boundary[0].getMessage()
     assert "status=502" in message and "code=runtime_unavailable" in message
     assert "[PATH]" in message and "[REDACTED_SECRET]" in message
     assert "/Users/" not in message and "/Volumes/" not in message
-    assert "super-secret-token" not in message
-    assert "ws-one" not in message and "boundary-token" not in message
+    assert "super-secret-token" not in message and "ws-one" not in message
     assert len(message) <= 800
 
 
-async def test_conversation_4xx_not_logged_as_5xx(codex_adapter, caplog):
-    adapter, _, _ = codex_adapter
-
+def test_conversation_4xx_not_logged_as_5xx(codex_adapter, caplog):
     class _RejectingConversations:
         def create_conversation(self, body):
             raise AdapterFailure("Unknown or changed security profile", 409,
                                  "profile_mismatch")
 
-    app = make_app(_RejectingConversations(), "boundary-token")
-    with caplog.at_level("WARNING", logger="workspace_bridge.codex_host_adapter"):
+    with caplog.at_level("WARNING", logger="workspace_bridge.plugin"):
         caplog.clear()
-        async with AsyncClient(transport=ASGITransport(app=app),
-                                base_url="http://127.0.0.1:8772") as client:
-            response = await client.post(
-                "/v1/conversations", json={"workspaceId": "ws-one"},
-                headers={"X-Runtime-Token": "boundary-token"})
-    assert response.status_code == 409
-    assert response.json()["code"] == "profile_mismatch"
+        kind, error = invoke(_RejectingConversations(), "conversations.create",
+                             {"body": {"workspaceId": "ws-one"}})
+    assert kind == "error" and error["data"] == {"status": 409, "code": "profile_mismatch"}
     assert not [record for record in caplog.records
-                if "conversation creation failed" in record.getMessage()]
+                if "plugin request failed" in record.getMessage()]
 
 
 def test_rebind_confirmed_success_finalization_failure_stays_pending(

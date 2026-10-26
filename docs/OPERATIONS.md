@@ -1,7 +1,7 @@
 # Operations
 
 Public operator guide for Workspace Bridge `0.3.0`: state, services, manual
-upgrades, release identity, logging, support bundles, notifications,
+upgrades, release identity, logging, notifications,
 recovery, and troubleshooting. For installation see [Setup](SETUP.md); for
 architecture see [Architecture](ARCHITECTURE.md).
 
@@ -9,8 +9,8 @@ architecture see [Architecture](ARCHITECTURE.md).
 
 Default Bridge state is `$HOME/.local/state/workspace-bridge` (mode `0700`).
 Configuration, SQLite database, and the salted admin password file (`admin-account.json`) are private;
-`bridge.sqlite3` is mode `0600`. Node connection tokens are stored in
-private Bridge SQLite and runtime adapter tokens in private Node SQLite.
+`bridge.sqlite3` is mode `0600`. HTTP Node connection tokens are stored in
+private Bridge SQLite; agent plugins have no tokens.
 Normal Manager APIs return only whether a token exists, and tokens are
 excluded from diagnostics, logs, errors, and events. Treat both state
 databases and project handoff folders as sensitive: the Bridge holds
@@ -66,8 +66,8 @@ workspace-bridge --state "$HOME/.local/state/workspace-bridge" reset-admin-passw
 For Docker, use `docker compose exec bridge workspace-bridge --state /state
 reset-admin-password`. Recovery resets the account to username `admin` and
 temporary password `admin`, revokes existing sessions, and requires another
-password change on first login. It preserves mappings, run history, and MCP,
-Node, and adapter tokens.
+password change on first login. It preserves mappings, run history, and MCP
+and Node tokens.
 
 Fresh state and upgraded token-login state bootstrap this same temporary
 account. Upgrade creates `admin-account.json` on first Manager startup; old
@@ -320,10 +320,8 @@ root-owned Node state as root; the unit then carries `User=root` and
 `Group=root` and the backend executes the same fixed helper commands
 directly without `sudo`. The executable (including any shim and its target)
 plus both parent chains must be root-owned and non-writable, otherwise
-install fails closed. Root mode grants the Node full root filesystem
-authority; it does not by itself make separately non-root adapter services
-root (a root-owned adapter state managed as root is what runs that adapter
-and its native agent as root). Ownership is strictly isolated with no takeover:
+install fails closed. Root mode grants the Node, and every agent plugin it
+starts, full root filesystem authority. Ownership is strictly isolated with no takeover:
 a root invocation against an existing user-owned state is rejected rather
 than converted, a non-root invocation against root-owned state is rejected,
 and switching an installed service between root and non-root requires
@@ -343,29 +341,14 @@ manifest and preserves Node state, adapters, bindings, allowed roots,
 tokens, and logs. Unsupported operating systems fail explicitly; a Node
 container is not part of this deployment.
 
-### Adapter instances (Pi/Codex/Claude via `workspace-bridge adapter`)
+### Agent plugins
 
-Each adapter state owns exactly one Pi, Codex, or Claude Code AdapterInstance. The
-supported path is package installation (`uv tool install workspace-bridge`
-for the `workspace-bridge-codex-adapter` executable, `uv tool install
-'workspace-bridge[claude]'` for `workspace-bridge-claude-adapter`, `npm install -g
-workspace-bridge-pi-host-adapter` for `workspace-bridge-pi-adapter`)
-followed by `workspace-bridge adapter --state <path> init` (token printed
-once) plus `service install`; hand-written plists are not supported. The
-per-instance macOS label is
-`com.workspace-bridge.adapter.<runtime>.<opaque-id>` under
-`~/Library/LaunchAgents/`; the Linux unit is
-`workspace-bridge-adapter-<runtime>-<id>.service` under
-`/etc/systemd/system/`. Both artifacts run only the stable lexical
-`workspace-bridge adapter --state <state> serve` launcher and never contain
-the runtime token or projects root. `service status` combines OS service
-state with an authenticated descriptor health check and exposes only bounded
-readiness, version, and service fields. macOS starts after user login;
-Linux starts at boot. Root mode (root-owned state, root-controlled launcher
-plus runtime executable) gives the agent root filesystem authority and is
-intentional only. After every manual package update, explicitly run
-`service restart`; there is no auto-updater. `service uninstall` preserves
-config, token, runtime state, and logs.
+Agents are not separate services. Each adapter is a plugin the Node runs as
+a child process, as the Node's OS user, under the Node's own service; see
+[Runtimes](RUNTIMES.md#supervision). A root Node runs its plugins as root.
+Add, test and remove them with `workspace-bridge node adapter ...` on the
+Node host. Each plugin's stderr goes to `plugins/<adapter-id>/plugin.log`
+in the Node state folder, capped at 5 MiB with one previous file kept.
 
 The safe default Node listen host remains `127.0.0.1` for host-only use. If
 the Bridge runs in Docker Desktop, initialize the Node with an explicit
@@ -385,7 +368,7 @@ mounted into the Bridge.
 The optional `scripts/run_tunnel.py` helper only launches the official
 client when manually invoked. It is not imported or callable by the MCP
 server. Runtime execution is available only through bounded, opt-in Runtime
-Protocol tools and separate host adapters; the server never exposes a shell
+Protocol tools and Node-supervised agent plugins; the server never exposes a shell
 or arbitrary command tool.
 
 ## Native logging policy
@@ -393,7 +376,7 @@ or arbitrary command tool.
 Docker Bridge and tunnel logs use Docker `json-file` rotation
 (`max-size: 10m`, `max-file: 3`).
 
-macOS managed Node and adapter services write private `<state>/logs/`
+macOS managed Bridge and Node services write private `<state>/logs/`
 `stdout.log` and `stderr.log` (`0700` directory, `0600` files). Each stream
 is bounded to a 10 MiB active file plus two 10 MiB archives under the same
 private state. A package-owned guard performs bounded copy-truncate rotation
@@ -401,33 +384,10 @@ for managed services only; foreground `serve` never spawns it. The guard
 owns only those log files, emits nothing to the service logs, exits when its
 parent service is gone, and never supervises or restarts the service.
 
-Linux Node and adapter units declare journal output explicitly. Retention
+Linux Bridge and Node units declare journal output explicitly. Retention
 and rotation remain the host journald and administrator policy; Workspace
 Bridge does not install or edit journald, logrotate, timer, cron, or daemon
-configuration. Support exports bound what is read (newest lines via fixed
-`journalctl` only).
-
-## Support bundle
-
-`workspace-bridge support bundle --output <new-file.zip> [--offline]
-[--node-state <path>] [--adapter-state <path> ...]` creates a new private
-(`0600`) ZIP of at most 5 MiB for troubleshooting. It is a local-admin
-read and export operation only: no service or package mutation, no upload,
-and no network beyond the same bounded `doctor` probes unless `--offline`
-is set. Node and adapter states are explicit local-admin paths; the default
-Node state is included only when it exists and validates, adapter states
-only when explicitly supplied (deterministic order, at most 16). When Bridge
-state is unavailable, the bundle still contains a sanitized initialization
-diagnostic plus any readable local service evidence.
-
-The ZIP uses fixed generic names and contains only projected diagnostics and
-release identities, safe local service status, and bounded sanitized log
-excerpts (newest lines per service). It excludes tokens, credentials,
-prompts, results, tool arguments, provider payloads, absolute paths,
-environment dumps, webhook URLs, raw bodies and headers, private keys, and
-SQLite, config, and token files, and it never reads project files. The
-bundle is designed to be shareable but must still be reviewed before any
-external upload; no upload occurs automatically.
+configuration.
 
 ## Runtime Protocol runs and restart recovery
 
@@ -563,32 +523,25 @@ docker compose up -d --build
 
 Without Docker, upgrade the Python package, then restart the `serve` process.
 
-**Node, Codex adapter, and Claude Code adapter.** These share the Python
-package. Upgrade it, then restart each service with its own state directory:
+**Node and its agent plugins.** The Node and the Claude Code, Codex and
+OpenCode plugins share the Python package; the Pi plugin is a separate npm
+package. Upgrade what you use, then restart the Node, which restarts its
+plugins:
 
 ```sh
 uv tool upgrade workspace-bridge
+npm install -g workspace-bridge-pi-host-adapter
 workspace-bridge --version
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service restart
 ```
 
-A Claude Code adapter installed with its extra
-(`uv tool install 'workspace-bridge[claude]'`) keeps it on upgrade. A host that
-runs a Node or adapter from a source checkout (an editable install) needs
-only the restart after `git pull`.
-
-**Pi adapter.** It is a separate npm package:
-
-```sh
-npm install -g workspace-bridge-pi-host-adapter
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
-```
+An install with the Claude extra (`uv tool install 'workspace-bridge[claude]'`)
+keeps it on upgrade. A host that runs a Node from a source checkout (an
+editable install) needs only the restart after `git pull`.
 
 These steps do not update the native Codex, Claude Code, or Pi CLIs, which you
 update with their own installers. A restart interrupts any run in flight on that
-service; Bridge never replays prompts or approvals, so check for active runs
+Node; Bridge never replays prompts or approvals, so check for active runs
 first.
 
 ## Known limitations / validation status
@@ -604,7 +557,4 @@ first.
   fixture scripts that still encode the pre-Node local-bind flow are not
   evidence for the current authority boundary.
 - Root service mode is advanced only. A root-owned Node state managed as root
-  runs the Node as root with full Node filesystem authority; a root-owned
-  adapter state managed as root runs that adapter and its native agent as
-  root. Running the Node as root does not by itself make separately non-root
-  adapter services root.
+  runs the Node and its agent plugins as root with full filesystem authority.

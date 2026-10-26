@@ -5,9 +5,9 @@ import threading
 import time
 
 import pytest
-from starlette.testclient import TestClient
 
-from workspace_bridge.opencode_host_adapter import OpenCodeHostAdapter, tool_decision, make_app
+from workspace_bridge.opencode_host_adapter import OpenCodeHostAdapter, tool_decision
+from workspace_bridge.plugin_host import invoke
 from workspace_bridge.claude_host_adapter import AdapterFailure
 from workspace_bridge.wbrp import validate_run_state, Descriptor
 
@@ -261,11 +261,9 @@ def test_native_permission_is_answered_once_without_saving_a_grant(adapter):
     assert next(body for method,path,body in native.calls if method=='POST' and path.endswith('/per_fixture/reply'))=={'decision':'once'}
 
 
-def test_private_http_requires_token_and_plugin_readiness(adapter):
+def test_plugin_descriptor_and_permission_plugin_readiness(adapter):
     a,native,root=adapter
-    with TestClient(make_app(a,'runtime-token')) as client:
-        assert client.get('/v1/descriptor').status_code==401
-        assert client.get('/v1/descriptor',headers={'X-Runtime-Token':'runtime-token'}).json()['runtime']['id']=='opencode'
+    assert invoke(a,'descriptor',{})[1]['runtime']['id']=='opencode'
     a.ready.clear();native.adapter=None
     with pytest.raises(AdapterFailure,match='plugin'):
         a._activate(str(root))

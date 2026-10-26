@@ -18,7 +18,7 @@ EXPECTED_MJS = [
     "adapter.mjs", "config.mjs", "execution-store.mjs", "executions.mjs", "extensions.mjs",
     "fingerprint.mjs", "logging.mjs", "login-path.mjs", "main.mjs",
     "paths.mjs", "pi-adapter.mjs", "policy.mjs", "release.mjs",
-    "sdk-events.mjs", "sdk-transport.mjs", "server.mjs", "stdio.mjs",
+    "sdk-events.mjs", "sdk-transport.mjs", "stdio.mjs",
     "trusted-permission-extension.mjs", "wbrp.mjs",
 ]
 
@@ -490,23 +490,13 @@ def test_pi_bin_is_packaged():
     assert "package.json" in paths
 
 
-def test_python_wheel_exposes_adapter_commands():
-    import configparser
-    import zipfile
-    from workspace_bridge.adapter_cli import main as adapter_main
-    from workspace_bridge.adapter_service import adapter_label, adapter_unit
-    # The top-level CLI exposes the runtime-neutral adapter namespace.
-    assert callable(adapter_main)
-    assert adapter_label("pi", "0123456789ab") == \
-        "com.workspace-bridge.adapter.pi.0123456789ab"
-    assert adapter_unit("codex", "0123456789ab") == \
-        "workspace-bridge-adapter-codex-0123456789ab.service"
-    # Codex keeps its packaged console script alongside Bridge/Node.
+def test_python_package_ships_plugins_not_adapter_commands():
+    from workspace_bridge.plugin_protocol import builtin_manifests
+    assert set(builtin_manifests()) == {"claude", "codex", "opencode", "pi"}
     text = (REPO / "pyproject.toml").read_text()
-    assert "workspace-bridge-codex-adapter" in text
-    assert "workspace_bridge.codex_host_adapter:main" in text
-    assert "workspace-bridge-opencode-adapter" in text
-    assert "workspace_bridge.opencode_host_adapter:main" in text
+    # Agents run as Node-supervised plugins; no adapter console scripts.
+    assert "-adapter = " not in text
+    assert '"plugins/*.toml"' in text
     assert '"opencode_permission_plugin/*.mjs"' in text
     assert '"opencode_permission_plugin/package.json"' in text
 
@@ -525,18 +515,17 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert "entry_points.txt" in text
     assert "workspace_bridge.cli:main" in text
     assert "workspace_bridge.node_cli:main" in text
-    assert "workspace_bridge.opencode_host_adapter:main" in text
+    assert "workspace_bridge/plugins/" in text
     assert "workspace_bridge/opencode_permission_plugin/index.mjs" in text
     assert "workspace_bridge/opencode_permission_plugin/package.json" in text
-    assert "workspace_bridge.codex_host_adapter:main" in text
     assert "uv pip install --python" in text
     assert '"$VENV/bin/workspace-bridge" --version' in text
     assert '"$VENV/bin/workspace-bridge" node --help' in text
-    assert '"$VENV/bin/workspace-bridge" adapter --help' in text
     assert '"$VENV/bin/workspace-bridge-node" --help' in text
-    # The Codex executable needs runtime settings even for --help; import
-    # its packaged entry point without starting a live adapter.
-    assert 'from workspace_bridge.codex_host_adapter import main; assert callable(main)' in text
+    assert '"$VENV/bin/workspace-bridge-node" plugin --help' in text
+    assert "builtin_manifests" in text
+    # Agent adapters are plugins now, never console scripts or a CLI namespace.
+    assert "adapter --help" not in text and "_host_adapter:main" not in text
 
 
 def test_setup_uv_pinned_exact_in_ci_and_release():

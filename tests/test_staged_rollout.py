@@ -332,8 +332,7 @@ def _install_fake(staged_env, runtime_type, release=None,
     service = staged_env["service"]
     row = service.adapter_registry.create({
         "node_id": staged_env["node_id"], "name": f"Test {runtime_type}",
-        "runtime_type": runtime_type,
-        "base_url": "http://127.0.0.1:9", "token": "secret-token",
+        "plugin": runtime_type,
     })
     fake = _FakeDescriptorAdapter(runtime_type, release, release_status,
                                   features)
@@ -568,8 +567,7 @@ def test_descriptor_failure_uses_structured_semantics_not_message_text(staged_en
     service = staged_env["service"]
     row = service.adapter_registry.create({
         "node_id": staged_env["node_id"], "name": "Structured codex",
-        "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:9", "token": "secret-token",
+        "plugin": "codex",
     })
 
     class _Raising:
@@ -643,8 +641,7 @@ def test_structured_descriptor_failure_blocks_start(staged_env):
     service = staged_env["service"]
     row = service.adapter_registry.create({
         "node_id": staged_env["node_id"], "name": "Failing codex",
-        "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:9", "token": "secret-token",
+        "plugin": "codex",
     })
 
     class _Failing:

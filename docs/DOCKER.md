@@ -74,9 +74,8 @@ deliberately; rerunning the helper is not required.
 
 Open **http://127.0.0.1:8766/**, sign in as `admin` with temporary password `admin`, and choose a new password before continuing. Add each
 Node (its endpoint and write-only token), then register workspace roots that are
-canonical paths on that Node. Add AdapterInstances from the Node detail and
-configure exact execution routes. Node adapter tokens are stored in private Node
-SQLite and are never read back by normal APIs. Do not use `/state` or invented
+canonical paths on that Node. Add agents as plugins on the Node host (see
+below) and configure exact execution routes. Do not use `/state` or invented
 `/workspace` aliases as workspace roots.
 
 The first startup initializes fresh Docker control-plane state with the current
@@ -235,40 +234,30 @@ reachable from Docker Desktop. Binding `0.0.0.0` makes the authenticated Node
 listen on host interfaces; restrict access with the macOS firewall/private
 network and do not expose the Node through the MCP tunnel or a public reverse
 proxy. Node token authentication remains mandatory. The system unit stores no
-Node or adapter token; state/config/token files remain private. On Linux,
-inspect the journal manually with
-`journalctl -u workspace-bridge-node.service` for normal troubleshooting;
-routine service status does not read journal text (only the sanitized support
-bundle collector does, via a fixed bounded invocation). Run the Linux service command without leading sudo; sudo is
+token; state/config/token files remain private. On Linux, inspect the journal
+manually with `journalctl -u workspace-bridge-node.service` for normal
+troubleshooting; routine service status does not read journal text. Run the Linux service command without leading sudo; sudo is
 requested only for the narrow systemd administration steps (an intentional
 root mode with a root-owned state is documented in OPERATIONS.md).
 
-## Adapter instances (optional)
+## Agent adapters (optional)
 
 Agent execution requires enabling the exact WorkspaceRoute for a workspace;
-there is no separate workspace-wide agent switch. Start the native Pi, Codex, or Claude Code
-daemon on its host and configure its
-own listen address, bootstrap token and process lifecycle there. The Bridge
-container does not start or publish those daemons.
+there is no separate workspace-wide agent switch. Agents run as plugins of
+the native Node on the host that owns the projects; the Bridge container
+never starts them. On that host, sign in to the agent's own CLI, then add
+it:
 
-In the local Manager's **Adapters** area, add one AdapterInstance for each
-destination. Save a distinct name, runtime type, endpoint reachable from the
-container, and the credential expected by that daemon. Docker Desktop and
-OrbStack commonly use `host.docker.internal`; Linux Engine needs a reachable host
-address. Do not assume `localhost` inside a container means the host. The
-per-instance Bridge connection token is stored as plaintext in private SQLite;
-the file is mode `0600`, and the UI never reads
-the token back. `.env` does not contain `WB_RUNTIME_ADAPTERS` or a Bridge-wide
-`WB_RUNTIME_TOKEN`. The same native daemon may still use `WB_RUNTIME_TOKEN` in
-its separate host process environment.
+```sh
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add codex --name Codex
+```
 
-The Manager's **Adapters** area shows each instance's health and allows a
-sanitized connection test. Optionally configure model policy, and profiles per
-adapter, then
-enable exact targets on each workspace. Two Pi instances can be configured
-independently. Bridge changes apply without container recreation or service
-restart. For daemon setup, see the [Pi adapter](../runtime/pi-host-adapter/README.md)
-and [Runtimes](RUNTIMES.md).
+The Manager's **Adapters** area then shows each adapter's health and allows a
+connection test. Optionally configure model policy and profiles per adapter,
+then enable exact targets on each workspace. Two Pi adapters can be
+configured independently. Bridge changes apply without container recreation
+or service restart. See [Runtimes](RUNTIMES.md) and the
+[Pi plugin](../runtime/pi-host-adapter/README.md).
 
 After restart, Bridge reconciles runs against Runtime Protocol adapter snapshots.
 It does not replay prompts or adopt unowned Pi TUI or Codex Desktop/TUI sessions.

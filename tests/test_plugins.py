@@ -117,7 +117,7 @@ def test_requests_round_trip_and_errors_keep_their_v1_meaning(node):
     assert missing.value.code == "not_found"
     # Unexpected plugin exceptions surface as unavailability, without detail.
     with pytest.raises(RuntimeUnavailable) as hidden:
-        plugin.process.call("usageLimits", {})
+        plugin.transport.call("usageLimits", {})
     assert "secret" not in str(hidden.value)
 
 
@@ -154,9 +154,9 @@ def test_a_plugin_whose_native_runtime_is_down_stays_up(node):
     plugin = client(service, add(service, projects, mode="native-down")["id"])
     with pytest.raises(RuntimeUnavailable, match="Native runtime is unavailable"):
         plugin.descriptor()
-    pid = plugin.process._process.pid
+    pid = plugin.transport._process.pid
     assert plugin.models("ws")[0]["selector"] == "fake"
-    assert plugin.process._process.pid == pid and plugin.process.instance_id.startswith("fake_instance_")
+    assert plugin.transport._process.pid == pid and plugin.transport.instance_id.startswith("fake_instance_")
 
 
 def test_a_crashed_plugin_fails_pending_calls_and_restarts_with_backoff(node):
@@ -168,7 +168,7 @@ def test_a_crashed_plugin_fails_pending_calls_and_restarts_with_backoff(node):
         plugin.cancel("native1")
     with pytest.raises(RuntimeUnavailable, match="restarting"):
         plugin.descriptor()
-    plugin.process._retry_at = 0
+    plugin.transport._retry_at = 0
     assert plugin.descriptor().runtime_id == "pi"
     assert (state / "started").read_text() != first_pid
 
@@ -195,7 +195,7 @@ def test_removing_or_closing_stops_the_plugin_gracefully(node):
     while not (state / "closed").exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert (state / "closed").exists()
-    assert plugin.process._process is None
+    assert plugin.transport._process is None
 
 
 def test_a_real_codex_adapter_runs_as_a_plugin_through_the_bridge(tmp_path, payload):

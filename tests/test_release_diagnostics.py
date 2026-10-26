@@ -65,8 +65,7 @@ def _install_adapter(env, runtime_type, release):
     service = env["service"]
     row = service.adapter_registry.create({
         "node_id": env["node_id"], "name": f"Test {runtime_type}",
-        "runtime_type": runtime_type,
-        "base_url": "http://127.0.0.1:9", "token": "secret-token",
+        "plugin": runtime_type,
     })
     fake = ReleaseAdapter(runtime_type, release)
     original = service.adapter_registry.client

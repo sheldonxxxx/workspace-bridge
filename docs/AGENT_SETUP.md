@@ -71,10 +71,7 @@ These are generic examples, not detected settings:
 | Native Bridge (Path A) | `$HOME/.local/state/workspace-bridge` | MCP `8765`, Manager `8766` |
 | Container Bridge (Path B) | `$HOME/.local/state/workspace-bridge-docker` on the host, `/state` inside the container | Published MCP `8875`, Manager `8766` |
 | Native Node | `$HOME/.local/state/workspace-bridge-node` | `8770` |
-| Pi instance | `$HOME/.local/state/workspace-bridge-adapter-pi` | `8780` |
-| Codex instance | `$HOME/.local/state/workspace-bridge-adapter-codex` | `8772` |
-| OpenCode v2 instance | `$HOME/.local/state/workspace-bridge-adapter-opencode` | `8776` |
-| Claude Code instance | `$HOME/.local/state/workspace-bridge-adapter-claude` | `8774` |
+| Agent plugins | inside the Node state (`plugins/<adapter-id>/`) | none |
 
 Use distinct available ports in `1024–65535` for listeners on the same host.
 Keep package installs, state, and private tunnel files outside mapped
@@ -138,26 +135,24 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
 For an approved Docker Desktop deployment, add `--host 0.0.0.0` to the Node
 initialization. Never expose the Node through the MCP tunnel.
 
-Run selected adapter blocks on their hosts. Tokens remain in private
-`runtime-token` files; redirection keeps them out of tool output.
+Add each selected agent on the Node that owns the projects. Agents run as
+plugins of the Node: there is no adapter port, token or service.
 
 ```sh
 # Pi only:
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" init \
-  --runtime pi --projects-root "$HOME/Projects" --port 8780 > /dev/null
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add pi --name Pi
 # Codex only:
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" init \
-  --runtime codex --projects-root "$HOME/Projects" --port 8772 > /dev/null
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add codex --name Codex
 # Claude Code only:
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" init \
-  --runtime claude --projects-root "$HOME/Projects" --port 8774 > /dev/null
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add claude --name "Claude Code"
 ```
 
-Follow [Runtimes](RUNTIMES.md) for login and Claude settings-layer choices.
+Follow [Runtimes](RUNTIMES.md) for login and Claude settings-layer choices
+(`--set setting_sources=...`).
 
-**Checkpoint:** enumerate created instances and verify directory (`0700`)
-and credential-file (`0600`) permissions using metadata only. Do not delete
-or reinitialize incomplete existing state.
+**Checkpoint:** run `workspace-bridge node --state <node-state> adapter test
+<adapter-id>` for each added adapter and report success or the stated reason.
+Do not delete or reinitialize incomplete existing state.
 
 ## 5. Start the approved components
 
@@ -168,12 +163,7 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
 ```
 
-For **each selected adapter**, substitute its approved state path:
-
-```sh
-workspace-bridge adapter --state "/path/to/selected-adapter-state" service install
-workspace-bridge adapter --state "/path/to/selected-adapter-state" service status
-```
+The Node starts its agent plugins itself; they need no service of their own.
 
 `service install` also starts the component: a per-user LaunchAgent on macOS,
 or a system unit running as the state owner on Linux. Run Linux commands as
@@ -241,10 +231,8 @@ Hand the user these steps for the loopback Manager (for the example port,
    and token in the Node form.
 3. Add one mapping per canonical Node-local workspace root, enable it, and
    choose its write scope (`handoff` by default).
-4. Reveal each adapter token **locally** with
-   `workspace-bridge adapter --state <adapter-state> show-token`. On its
-   owning Node, register the instance name, runtime type, Node-host-relative
-   base URL, and token.
+4. Confirm each adapter added in section 4 appears under its Node (the Bridge
+   discovers them on refresh); nothing needs to be entered.
 5. Read each adapter's live model catalog, then save enabled selectors and
    the default model.
 6. Enable each exact same-Node `(workspace_id, adapter_id)` route with its

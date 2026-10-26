@@ -12,12 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
 from workspace_bridge import wbrp
 from workspace_bridge.claude_host_adapter import (
     AdapterFailure, ClaudeHostAdapter, PROFILES, _normalize_claude_usage,
-    allowed_tools, decide_tool_use, make_app, parse_setting_sources)
+    allowed_tools, decide_tool_use, parse_setting_sources)
+from workspace_bridge.plugin_host import invoke
 
 READ_ONLY = dict(PROFILES["read-only"])
 REVIEWED = dict(PROFILES["workspace-write-reviewed"])
@@ -1093,34 +1092,25 @@ def test_catalog_probe_never_loads_workspace_configuration(tmp_path):
         adapter.close()
 
 
-# -- HTTP surface ----------------------------------------------------------
+# -- plugin surface --------------------------------------------------------
 
-async def test_private_http_surface_requires_token(claude):
+def test_plugin_surface_serves_the_resource_methods(claude):
     adapter, workspace, _ = claude
-    app = make_app(adapter, "private-token")
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="http://127.0.0.1:8774") as client:
-        assert (await client.get("/v1/descriptor")).status_code == 401
-        wrong = await client.get("/v1/descriptor", headers={"X-Runtime-Token": "nope"})
-        assert wrong.status_code == 401
-        headers = {"X-Runtime-Token": "private-token"}
-        allowed = await client.get("/v1/descriptor", headers=headers)
-        assert allowed.status_code == 200 and allowed.json()["runtime"]["id"] == "claude"
-        profiles = (await client.get("/v1/profiles", headers=headers)).json()["profiles"]
-        revision = next(row["revision"] for row in profiles if row["id"] == "read-only")
-        created = await client.post("/v1/conversations", headers=headers, json={
-            "workspaceId": "ws_test", "directory": str(workspace),
-            "securityProfile": {"id": "read-only", "revision": revision}})
-        assert created.status_code == 200
-        missing = await client.get("/v1/conversations/conv_missing", headers=headers)
-        assert missing.status_code == 404 and missing.json()["code"] == "not_found"
-        limits = await client.get("/v1/usage-limits", headers=headers)
-        assert limits.status_code == 200 and limits.json()["available"] is False
-        unknown = await client.get("/v1/nope", headers=headers)
-        assert unknown.status_code == 404
+    kind, descriptor = invoke(adapter, "descriptor", {})
+    assert kind == "result" and descriptor["runtime"]["id"] == "claude"
+    profiles = invoke(adapter, "profiles.list", {})[1]["profiles"]
+    revision = next(row["revision"] for row in profiles if row["id"] == "read-only")
+    kind, _ = invoke(adapter, "conversations.create", {"body": {
+        "workspaceId": "ws_test", "directory": str(workspace),
+        "securityProfile": {"id": "read-only", "revision": revision}}})
+    assert kind == "result"
+    kind, missing = invoke(adapter, "conversations.get", {"conversationId": "conv_missing"})
+    assert kind == "error" and missing["data"] == {"status": 404, "code": "not_found"}
+    assert invoke(adapter, "usageLimits", {})[1]["available"] is False
+    assert invoke(adapter, "nope", {})[1]["data"]["code"] == "not_found"
 
 
-async def test_http_queue_and_steer_routes_return_receipts(claude):
+def test_plugin_queue_and_steer_return_receipts(claude):
     adapter, workspace, sdk = claude
 
     async def scenario(client):
@@ -1138,27 +1128,18 @@ async def test_http_queue_and_steer_routes_return_receipts(claude):
     conversation = _conversation(adapter, workspace)
     started = adapter.start_run(conversation["id"], {"input": _text("first")})
     run_id = started["id"]
-    app = make_app(adapter, "private-token")
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="http://127.0.0.1:8774") as client:
-        headers = {"X-Runtime-Token": "private-token"}
-        queued = await client.post(f"/v1/runs/{run_id}/queue", headers=headers,
-                                   json=_control(run_id, "q1", "queued"))
-        assert queued.status_code == 200
-        assert queued.json()["inputMessages"][0] == {
-            "requestId": "q1", "mode": "queue", "status": "queued"}
-        mismatch = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
-                                     json=_control("wrong", "s1", "correct"))
-        assert mismatch.status_code == 409 and mismatch.json()["code"] == "run_mismatch"
-        steered = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
-                                    json=_control(run_id, "s1", "correct"))
-        assert steered.status_code == 200
+    kind, queued = invoke(adapter, "runs.queue", {"runId": run_id,
+                                                  "body": _control(run_id, "q1", "queued")})
+    assert kind == "result"
+    assert queued["inputMessages"][0] == {"requestId": "q1", "mode": "queue", "status": "queued"}
+    kind, mismatch = invoke(adapter, "runs.steer", {"runId": run_id,
+                                                    "body": _control("wrong", "s1", "correct")})
+    assert kind == "error" and mismatch["data"] == {"status": 409, "code": "run_mismatch"}
+    kind, _ = invoke(adapter, "runs.steer", {"runId": run_id,
+                                             "body": _control(run_id, "s1", "correct")})
+    assert kind == "result"
     done = _terminal(adapter, run_id)
     assert done["outcome"] == "succeeded"
     assert sdk.clients[0].prompts == ["first", "correct", "queued"]
 
 
-def test_make_app_requires_a_token(claude):
-    adapter, _, _ = claude
-    with pytest.raises(ValueError):
-        make_app(adapter, "")

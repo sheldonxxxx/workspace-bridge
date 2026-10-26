@@ -65,9 +65,8 @@ Why plan in ChatGPT:
   run until it gets an explicit answer.
 - **Your admin console never leaves your machine.** The Manager listens on
   loopback only and is never tunnelled.
-- **Secrets stay out.** Common credential files are blocked, tokens are kept
-  out of APIs, logs, and chat, and support bundles are created locally and
-  never uploaded automatically.
+- **Secrets stay out.** Common credential files are blocked, and tokens are
+  kept out of APIs, logs, and chat.
 
 Know the limits too: one shared connection credential covers every enabled
 project, and source that ChatGPT reads leaves your machine. Read
@@ -85,8 +84,7 @@ project, and source that ChatGPT reads leaves your machine. Read
 - **Images:** screenshots and other rasters return as native previews.
 - **Local Manager:** a terminal-style admin console for projects, agents,
   routes, models, runs, and diagnostics.
-- **Operations:** `doctor` diagnostics, sanitized support bundles, native
-  services on macOS and Linux, Discord run notifications, and a Docker image.
+- **Operations:** `doctor` diagnostics, native services on macOS and Linux, Discord run notifications, and a Docker image.
 
 Works with ChatGPT through OpenAI's secure MCP tunnel, and with any MCP
 client that supports Streamable HTTP. Runs on macOS, Linux, and WSL2.
@@ -129,7 +127,9 @@ workspace-bridge doctor
 ```
 
 Browsing and manual handoffs work at this point. To let ChatGPT start agent
-runs, add a Claude Code, Codex, OpenCode v2, or Pi adapter; see [Runtimes](docs/RUNTIMES.md).
+runs, add a Claude Code, Codex, OpenCode v2, or Pi adapter on the Node with
+`workspace-bridge node adapter add`; the Node runs it as a plugin. See
+[Runtimes](docs/RUNTIMES.md).
 Full instructions, including Docker, are in [Setup](docs/SETUP.md). If you
 would rather have a coding agent do the install, point it at
 [Agent setup](docs/AGENT_SETUP.md).

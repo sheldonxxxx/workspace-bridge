@@ -56,9 +56,7 @@ def diagnostic_env(tmp_path):
     for name, model in (("Local Pi", "local-model"), ("GPU Pi", "gpu-model")):
         row = service.adapter_registry.create({
             "node_id": node_record["id"],
-            "name": name, "runtime_type": "pi",
-            "base_url": f"http://127.0.0.1:{8760 + len(adapters)}",
-            "token": f"private-{name.lower().replace(' ', '-')}",
+            "name": name, "plugin": "pi",
         })
         adapters[row["id"]] = DiagnosticAdapter("pi", [model])
     client_factory = service.adapter_registry.client
@@ -160,74 +158,72 @@ def test_route_disable_and_offline_mode_are_exact_to_adapter(diagnostic_env):
     assert [client.descriptor_calls for client in env["adapters"].values()] == calls_before
 
 
-def test_adapter_tokens_are_not_returned_and_deletion_is_blocked(diagnostic_env):
+def test_plugin_adapters_have_no_token_and_deletion_is_blocked(diagnostic_env):
     env = diagnostic_env
     ws = ready_workspace(env)
     service = env["service"]
     adapter_id = next(iter(env["adapters"]))
     public = service.list_adapters()
     assert all("token" not in item for item in public["adapters"])
-    assert all(item["has_token"] for item in public["adapters"])
-    serialized = json.dumps({"adapters": public, "diagnostics": service.diagnostic_report()})
-    assert "private-local-pi" not in serialized
-    assert "private-gpu-pi" not in serialized
+    assert not any(item["has_token"] for item in public["adapters"])
     with pytest.raises(BridgeError, match="workspace routes"):
         service.adapter_registry.delete(adapter_id)
     assert service.workspace_route_policy(ws)["routes"][adapter_id]["enabled"]
 
 
-def test_adapter_connection_revision_and_blank_token_update(diagnostic_env):
+def test_adapter_configuration_revision(diagnostic_env):
     env = diagnostic_env
     service = env["service"]
     adapter_id = next(iter(env["adapters"]))
     original = service.adapter_registry.get(adapter_id)
-    renamed = service.adapter_registry.update(adapter_id, {
-        "name": "Local Pi Renamed", "token": ""})
+    renamed = service.adapter_registry.update(adapter_id, {"name": "Local Pi Renamed"})
     assert renamed["revision"] == original["revision"]
-    with pytest.raises(BridgeError) as exc:
-        service.adapter_registry.update(adapter_id, {"runtime_type": "codex"})
-    assert exc.value.code == "invalid_arguments"
+    for forbidden in ({"runtime_type": "codex"}, {"base_url": "https://pi.example"},
+                      {"token": "t"}):
+        with pytest.raises(BridgeError) as exc:
+            service.adapter_registry.update(adapter_id, forbidden)
+        assert exc.value.code == "invalid_arguments"
     replaced = service.adapter_registry.update(adapter_id, {
-        "base_url": "https://pi-gpu.example:9443", "token": "replacement-secret"})
+        "settings": {"agent_dir": "/opt/pi-agent"}})
     assert replaced["revision"] != original["revision"]
     service.adapter_registry.client = env["client_factory"]
     client = service.adapter_registry.client(adapter_id)
     assert not hasattr(client, "token")
     assert "token" not in service.adapter_registry.get(adapter_id)
     saved = env["node"]["service"].adapter(adapter_id)
-    assert saved["base_url"] == "https://pi-gpu.example:9443"
-    assert saved["token"] == "replacement-secret"
+    assert json.loads(saved["settings"]) == {"agent_dir": "/opt/pi-agent"}
 
 
 @pytest.mark.asyncio
-async def test_adapter_admin_crud_is_strict_and_never_reads_back_token(diagnostic_env):
+async def test_adapter_admin_crud_is_strict_and_plugin_only(diagnostic_env):
     service = diagnostic_env["service"]
     app = make_admin(service)
     token = admin_cookie(app)
     headers = {"Cookie": token}
     payload = {"node_id": diagnostic_env["node_id"],
-               "name": "Local Codex", "runtime_type": "codex",
-               "base_url": "http://127.0.0.1:9876", "token": "secret-for-test"}
+               "name": "Local Codex", "plugin": "codex"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
         assert (await client.post("/api/adapters", json=payload)).status_code == 401
         created = await client.post("/api/adapters", headers=headers,
                                     json={**payload, "unexpected": True})
         assert created.status_code == 400
+        http_form = await client.post("/api/adapters", headers=headers, json={
+            "node_id": diagnostic_env["node_id"], "name": "Old form", "runtime_type": "codex",
+            "base_url": "http://127.0.0.1:9876", "token": "secret-for-test"})
+        assert http_form.status_code == 400
         created = await client.post("/api/adapters", headers=headers, json=payload)
         assert created.status_code == 201, created.text
         adapter_id = created.json()["id"]
-        assert "secret-for-test" not in created.text
         saved = await client.get(f"/api/adapters/{adapter_id}", headers=headers)
-        assert saved.status_code == 200 and saved.json()["has_token"] is True
-        assert "secret-for-test" not in saved.text
+        assert saved.status_code == 200 and saved.json()["has_token"] is False
         updated = await client.patch(f"/api/adapters/{adapter_id}", headers=headers,
                                      json={"name": "Renamed Codex"})
-        assert updated.status_code == 200 and "secret-for-test" not in updated.text
+        assert updated.status_code == 200
         with diagnostic_env["node"]["service"].lock:
             row = diagnostic_env["node"]["service"].db.execute(
-                "SELECT token FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
-        assert row["token"] == "secret-for-test"
+                "SELECT kind,token FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
+        assert (row["kind"], row["token"]) == ("plugin", "")
 
 
 @pytest.mark.parametrize("read_only", [False, True])

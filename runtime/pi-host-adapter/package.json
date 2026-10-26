@@ -45,7 +45,6 @@
     "release.mjs",
     "sdk-events.mjs",
     "sdk-transport.mjs",
-    "server.mjs",
     "stdio.mjs",
     "trusted-permission-extension.mjs",
     "wbrp.mjs"

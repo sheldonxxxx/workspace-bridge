@@ -20,7 +20,7 @@ from workspace_bridge.wbrp import Descriptor
 
 from test_codex_host_adapter import FakeCodexRpc
 from notification_fakes import RecordingChannel
-from conftest import attach_test_node, create_test_adapter, start_test_node
+from conftest import attach_test_node, create_test_adapter, start_test_node, patch_node_runtime
 
 ADAPTER_ID = "adapter_000000000000000000000001"
 
@@ -166,8 +166,7 @@ def test_workspace_default_is_explicit_and_reported_per_adapter(modern_env):
     ws = service.workspace(ws_id)
     unbound_id = "adapter_000000000000000000000003"
     create_test_adapter(service, ws["node_id"], {
-        "name": "Unbound Codex", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8768", "token": "unbound-secret",
+        "name": "Unbound Codex", "plugin": "codex",
     }, unbound_id)
 
     selected = service.set_workspace_default(ws, ADAPTER_ID)
@@ -193,8 +192,7 @@ def test_runtime_config_binding_remains_unsupported_for_pi(modern_env):
             return {"profiles": [], "permissionProfiles": []}
 
     pi_id = "adapter_000000000000000000000002"
-    create_test_adapter(service, ws["node_id"], {"name": "Local Pi", "runtime_type": "pi",
-        "base_url": "http://127.0.0.1:8767", "token": "pi-secret"}, pi_id)
+    create_test_adapter(service, ws["node_id"], {"name": "Local Pi", "plugin": "pi"}, pi_id)
     existing_client = service.adapter_registry.client
     service.adapter_registry.client = lambda adapter_id, **kwargs: (
         PiProfileCatalog() if adapter_id == pi_id else existing_client(adapter_id, **kwargs))
@@ -386,8 +384,7 @@ def modern_env(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Local Codex", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8767", "token": "codex-test-secret"}, ADAPTER_ID)
+        "name": "Local Codex", "plugin": "codex"}, ADAPTER_ID)
     native_client = DirectAdapter(native)
     client_factory = service.adapter_registry.client
     def adapter_client(adapter_id, **kwargs):
@@ -422,8 +419,7 @@ def test_two_pi_instances_start_and_persist_as_distinct_destinations(modern_env,
     for name, url, secret, native in (
             ("Local Pi", "http://127.0.0.1:8780", "local-pi-secret", local_native),
             ("GPU Pi", "https://gpu.example:8780", "gpu-pi-secret", gpu_native)):
-        row = service.adapter_registry.create({"name": name, "runtime_type": "pi",
-                                               "base_url": url, "token": secret})
+        row = service.adapter_registry.create({"name": name, "plugin": "pi"})
         ids.append(row["id"])
         clients[row["id"]] = PiDirectAdapter(native)
     old_client = service.adapter_registry.client
@@ -466,10 +462,10 @@ def test_two_pi_instances_start_and_persist_as_distinct_destinations(modern_env,
     assert {(row["adapter_id"], row["runtime_type"]) for row in persisted} == {
         (ids[0], "pi"), (ids[1], "pi")}
     node_service = service._node_transport_services[ws["node_id"]]
-    assert node_service.db.execute(
-        "SELECT token FROM runtime_adapters WHERE id=?", (ids[0],)).fetchone()["token"] == "local-pi-secret"
-    assert node_service.db.execute(
-        "SELECT token FROM runtime_adapters WHERE id=?", (ids[1],)).fetchone()["token"] == "gpu-pi-secret"
+    for adapter_id in ids:
+        stored = node_service.db.execute(
+            "SELECT kind,token FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
+        assert (stored["kind"], stored["token"]) == ("plugin", "")
     assert "token" not in service.adapter_registry.get(ids[0])
     assert "token" not in service.adapter_registry.get(ids[1])
     local_native.close()
@@ -558,8 +554,7 @@ def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_call
                                                    started["run_id"])
     calls = _record_native_calls(native, monkeypatch)
     original_adapter = service.adapter_registry.get(ADAPTER_ID)
-    service.adapter_registry.update(ADAPTER_ID, {
-        "base_url": "http://127.0.0.1:9877", "token": "rotated-adapter-secret"})
+    service.adapter_registry.update(ADAPTER_ID, {"settings": {"log_level": "DEBUG"}})
 
     with pytest.raises(BridgeError) as reconcile_error:
         service.run_coordinator.reconcile(ws, started["run_id"])
@@ -608,8 +603,7 @@ def test_sweep_interrupts_runs_stranded_by_an_adapter_connection_change(
     started = service.call(ws_id, token, "start_agent_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "stranded"})
     calls = _record_native_calls(native, monkeypatch)
-    service.adapter_registry.update(ADAPTER_ID, {
-        "base_url": "http://127.0.0.1:9878", "token": "rotated-adapter-secret"})
+    service.adapter_registry.update(ADAPTER_ID, {"settings": {"log_level": "DEBUG"}})
 
     _one_sweep(service.run_coordinator, monkeypatch)
 
@@ -689,15 +683,18 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
                                   rpc=FakeCodexRpc())
     replacement_native = CodexHostAdapter(tmp_path / "replacement-codex-state", parent,
                                           rpc=FakeCodexRpc())
-    old_url = "http://old-runtime.example:8780"
-    replacement_url = "http://replacement-runtime.example:8780"
+    # The adapter's configuration selects which runtime answers: the
+    # default (old) or the one saved after a settings change (replacement).
+    old_url = "INFO"
+    replacement_url = "DEBUG"
     old_calls, replacement_calls, constructed = [], [], []
     old_adapter = DirectAdapter(old_native)
     replacement_adapter = DirectAdapter(replacement_native)
 
     class RoutedRuntime:
-        def __init__(self, adapter_id, runtime_type, base_url, token, *, timeout=30):
-            constructed.append((base_url, token))
+        def __init__(self, adapter_id, runtime_type, *, timeout=30, row=None):
+            base_url = json.loads(row["settings"]).get("log_level", "INFO")
+            constructed.append(base_url)
             targets = {
                 old_url: (old_adapter, old_calls),
                 replacement_url: (replacement_adapter, replacement_calls),
@@ -718,12 +715,11 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
 
             return call
 
-    monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", RoutedRuntime)
+    patch_node_runtime(monkeypatch, RoutedRuntime)
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Authoritative Codex", "runtime_type": "codex",
-        "base_url": old_url, "token": "old-adapter-secret"}, ADAPTER_ID)
+        "name": "Authoritative Codex", "plugin": "codex"}, ADAPTER_ID)
     try:
         ws_id = service.add_workspace("Alpha", str(root), [], node_record["id"])["workspace"]["id"]
         token = service.manage_bridge("rotate_token")["token"]
@@ -746,9 +742,7 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         run = service.run_coordinator._run_row(ws, started["run_id"])
         old_revision = run["adapter_revision"]
         updated = service._node_transport_services[node_record["id"]].save_adapter({
-            "name": "Authoritative Codex", "runtime_type": "codex",
-            "base_url": replacement_url, "token": "replacement-adapter-secret",
-        }, ADAPTER_ID)
+            "settings": {"log_level": "DEBUG"}}, ADAPTER_ID)
         assert updated["revision"] != old_revision
         assert service.adapter_registry.get(ADAPTER_ID)["revision"] == old_revision
 
@@ -833,9 +827,7 @@ def test_continuation_ignores_benign_revision_churn_and_rename_keeps_conversatio
     # historical run evidence stays immutable.
     node_row = service.node_registry.get(ws["node_id"])
     service._node_transport_services[ws["node_id"]].save_adapter({
-        "name": "Renamed Codex", "runtime_type": "codex",
-        "base_url": original["base_url"], "token": "rotated-codex-secret",
-    }, ADAPTER_ID)
+        "settings": {"log_level": "DEBUG"}}, ADAPTER_ID)
     with service.lock, service.db:
         service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
                            (node_row["revision"] + "-drifted", ws["node_id"]))
@@ -869,8 +861,7 @@ def test_wrong_node_route_and_start_fail_before_native_call(modern_env, tmp_path
         service._node_transport_services[node_b_record["id"]] = node_b["service"]
         service.node_registry.update(node_b_record["id"], {"enabled": True})
         wrong_adapter = create_test_adapter(service, node_b_record["id"], {
-            "name": "Other Node Pi", "runtime_type": "pi",
-            "base_url": "http://127.0.0.1:8789", "token": "other-secret",
+            "name": "Other Node Pi", "plugin": "pi",
         }, "adapter_555555555555555555555555")
 
         native_calls = []
@@ -1097,8 +1088,7 @@ def test_workspace_route_defaults_off_for_new_workspace(tmp_path):
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Local Codex", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8767", "token": "codex-test-secret"}, ADAPTER_ID)
+        "name": "Local Codex", "plugin": "codex"}, ADAPTER_ID)
     direct = DirectAdapter(native)
     factory = service.adapter_registry.client
     service.adapter_registry.client = lambda adapter_id, **kwargs: (
@@ -1616,7 +1606,7 @@ def test_stale_stored_route_uses_live_revision_for_fresh_run(modern_env, payload
 
 
 def test_wbrp_rebind_validation_and_backward_compat():
-    from workspace_bridge.wbrp import (Descriptor, HttpRuntimeAdapter, ALL_FEATURES)
+    from workspace_bridge.wbrp import (Descriptor, RuntimeClient, ALL_FEATURES)
     from workspace_bridge.security import BridgeError
     base = {"protocol": {"major": 1}, "runtime": {
         "id": "codex", "displayName": "Codex", "adapterVersion": "1",
@@ -1630,8 +1620,7 @@ def test_wbrp_rebind_validation_and_backward_compat():
     with_rebind["features"] = {**base["features"], "securityRebind": 1}
     modern = Descriptor.parse(with_rebind, expected_runtime="codex")
     assert modern.supports("securityRebind") is True
-    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
-                                "http://127.0.0.1:1", "secret")
+    client = RuntimeClient("adapter_000000000000000000000001", "codex", None)
     with pytest.raises(BridgeError):
         client.rebind_conversation("conv_1", {"source": "runtime-config", "revision": "x"})
     with pytest.raises(BridgeError):
@@ -1846,8 +1835,7 @@ def test_list_agent_adapters_disabled_not_probed(modern_env, monkeypatch):
     ws = service.workspace(ws_id)
     disabled_id = "adapter_000000000000000000000003"
     create_test_adapter(service, ws["node_id"], {
-        "name": "Disabled Codex", "runtime_type": "codex",
-        "base_url": "http://127.0.0.1:8768", "token": "disabled-secret",
+        "name": "Disabled Codex", "plugin": "codex",
     }, disabled_id)
     node_svc = service._node_transport_services[ws["node_id"]]
     node_svc.save_adapter({"enabled": False}, disabled_id)

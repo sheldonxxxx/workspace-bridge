@@ -8,10 +8,10 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Source map
 
 - `workspace_bridge/` — MCP service, Manager API, CLI, Node service,
-  adapter lifecycle, run coordination, diagnostics, notifications.
+  agent plugins and their supervisor, run coordination, diagnostics, notifications.
 - `web/` — Manager UI (build output packaged under
   `workspace_bridge/static/dist/`).
-- `runtime/pi-host-adapter/` — Pi adapter (npm package).
+- `runtime/pi-host-adapter/` — Pi plugin (npm package).
 - `tests/test_*.py`, `runtime/pi-host-adapter/test/*.test.mjs`,
   `web/tests/*.spec.ts` — test suites.
 - `docs/` — public docs indexed by [docs/README.md](docs/README.md).

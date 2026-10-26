@@ -180,32 +180,6 @@ def test_node_plist_carries_fixed_nonsecret_marker(tmp_path):
     assert b"node-token" not in raw
 
 
-def test_adapter_plist_carries_fixed_nonsecret_marker(tmp_path, monkeypatch):
-    from workspace_bridge.adapter_service import initialize_adapter, load_adapter_config
-    from workspace_bridge.adapter_launchd import build_launch_agent_plist
-    projects = tmp_path / "projects"
-    projects.mkdir(parents=True)
-    exe = tmp_path / "bin" / "workspace-bridge-pi-adapter"
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_text("#!/bin/sh\n")
-    exe.chmod(0o700)
-    state = tmp_path / "adapter-state"
-    initialize_adapter(state, runtime_type="pi", projects_root=str(projects),
-                       port=18999, executable=str(exe))
-    config = load_adapter_config(state, require_roots=False)
-    label = f"com.workspace-bridge.adapter.pi.{config['service_id']}"
-    launcher = tmp_path / "workspace-bridge"
-    launcher.write_text("#!/bin/sh\n")
-    launcher.chmod(0o700)
-    raw = build_launch_agent_plist(state, [str(launcher)], label, home=tmp_path / "home")
-    payload = plistlib.loads(raw)
-    assert payload["EnvironmentVariables"] == {"WB_NATIVE_LOG_GUARD": "1"}
-    assert payload["ProgramArguments"] == [str(launcher), "adapter", "--state", str(state), "serve"]
-    assert config["projects_root"].encode() not in raw
-    token = (state / "runtime-token").read_text().strip()
-    assert token.encode() not in raw
-
-
 def test_should_spawn_guard_requires_exact_marker_on_darwin():
     assert native_logs.should_spawn_guard(platform_name="Darwin",
                                           environ={"WB_NATIVE_LOG_GUARD": "1"}) is True
@@ -258,66 +232,8 @@ def test_spawn_uses_fixed_argv_no_shell_and_devnull_stdio(tmp_path):
     assert calls == []
 
 
-def test_adapter_serve_preserves_exec_argv_env(tmp_path, monkeypatch):
-    from workspace_bridge.adapter_service import initialize_adapter, serve_argv, build_adapter_env, validate_adapter_state
-    from workspace_bridge import adapter_cli
-    monkeypatch.setattr(
-        adapter_cli, "runtime_env_with_login_path",
-        lambda: (
-            dict(os.environ),
-            {"resolved": False, "path": None, "shell": "/bin/sh",
-             "shell_basename": "sh", "entry_count": 0, "code": "unsupported"},
-        ),
-    )
-    projects = tmp_path / "projects"
-    projects.mkdir(parents=True)
-    exe = tmp_path / "bin" / "workspace-bridge-pi-adapter"
-    exe.parent.mkdir(parents=True, exist_ok=True)
-    exe.write_text("#!/bin/sh\nexit 0\n")
-    exe.chmod(0o700)
-    state = tmp_path / "adapter-pi"
-    initialize_adapter(state, runtime_type="pi", projects_root=str(projects),
-                       port=18881, executable=str(exe))
-    # Capture execve argv/env while disabling the guard spawn.
-    monkeypatch.setattr(adapter_cli, "_serve", adapter_cli._serve)  # keep reference
-    import workspace_bridge.native_logs as _nl
-    spawned: list[bool] = []
-    real_spawn = _nl.spawn_log_guard
-    monkeypatch.setattr(_nl, "spawn_log_guard",
-                        lambda *a, **k: spawned.append(True) or False)
-    # Also patch the already-imported reference inside adapter_cli if any.
-    captured: dict = {}
-    def fake_execve(path, argv, env):
-        captured["path"] = path
-        captured["argv"] = list(argv)
-        captured["env"] = dict(env)
-        raise RuntimeError("stop")
-    monkeypatch.setattr(os, "execve", fake_execve)
-    # Foreground without marker: no guard, exec still exact.
-    monkeypatch.delenv("WB_NATIVE_LOG_GUARD", raising=False)
-    with pytest.raises(RuntimeError):
-        adapter_cli._serve(native_logs._absolute_state(state))
-    config, token = validate_adapter_state(state)
-    assert captured["argv"] == serve_argv(config)
-    assert captured["env"] == build_adapter_env(
-        config, token, state, base_env=dict(os.environ))
-    # With the marker on Darwin, spawn is attempted but exec argv/env unchanged.
-    monkeypatch.setenv("WB_NATIVE_LOG_GUARD", "1")
-    monkeypatch.setattr("workspace_bridge.native_logs.platform", "platform")
-    import platform as _plat
-    monkeypatch.setattr(_plat, "system", lambda: "Darwin")
-    captured.clear()
-    spawned.clear()
-    with pytest.raises(RuntimeError):
-        adapter_cli._serve(native_logs._absolute_state(state))
-    assert captured["argv"] == serve_argv(config)
-    assert captured["env"] == build_adapter_env(
-        config, token, state, base_env=dict(os.environ))
-
-
-def test_node_and_adapter_systemd_units_declare_journal(tmp_path):
+def test_node_systemd_unit_declares_journal(tmp_path):
     from workspace_bridge.node_systemd import build_systemd_unit as build_node
-    from workspace_bridge.adapter_systemd import build_systemd_unit as build_adapter
     exe = tmp_path / "workspace-bridge"
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o700)
@@ -329,8 +245,3 @@ def test_node_and_adapter_systemd_units_declare_journal(tmp_path):
     again = build_node(tmp_path / "node-state", [str(exe)],
                        user="testuser", group="testgroup").decode()
     assert node_unit == again
-    adapter_unit = build_adapter(tmp_path / "adapter-state", [str(exe)],
-                                 user="testuser", group="testgroup",
-                                 runtime_type="pi", service_id="0123456789ab").decode()
-    assert "StandardOutput=journal" in adapter_unit
-    assert "StandardError=journal" in adapter_unit

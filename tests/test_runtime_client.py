@@ -1,19 +1,15 @@
-"""The Bridge client speaks the private protocol over a real HTTP listener."""
-import json
-import socket
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
+"""The runtime client validates what a plugin returns, whatever the transport."""
 import pytest
-import uvicorn
 
-from workspace_bridge.codex_host_adapter import CodexHostAdapter, make_app
+from workspace_bridge.codex_host_adapter import AdapterFailure, CodexHostAdapter
 from workspace_bridge.node_client import NodeRuntimeAdapterProxy
+from workspace_bridge.plugin_host import LocalPluginTransport
 from workspace_bridge.runtime import RuntimeUnavailable
 from workspace_bridge.security import BridgeError
-from workspace_bridge.wbrp import Descriptor, HttpRuntimeAdapter
+from workspace_bridge.wbrp import Descriptor, RuntimeClient
 from test_codex_host_adapter import FakeCodexRpc
+
+ADAPTER_ID = "adapter_000000000000000000000001"
 
 
 def test_descriptor_ignores_future_optional_capabilities():
@@ -27,36 +23,21 @@ def test_descriptor_ignores_future_optional_capabilities():
     assert "futureFeature" not in descriptor.features
 
 
-def test_http_adapter_scrubs_its_token_from_remote_payloads():
-    token = "adapter-token-should-not-escape"
-    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "pi",
-                                "http://127.0.0.1:8780", token)
-    response = client._scrub_secret({"message": f"rejected with {token}",
-                                     "nested": [f"echo:{token}"]})
-    assert token not in str(response)
-    assert response["message"] == "rejected with [REDACTED_SECRET]"
+def test_client_redacts_credentials_in_plugin_payloads():
+    secret = "sk-proj-" + "x" * 32
+    response = RuntimeClient._scrub_secret({"message": f"rejected with {secret}",
+                                            "nested": [f"echo:{secret}"]})
+    assert secret not in str(response)
+    assert "[REDACTED_SECRET]" in response["message"]
 
 
-def test_codex_http_adapter_contract(tmp_path):
+def test_codex_plugin_contract(tmp_path):
     projects = tmp_path / "projects"
     workspace = projects / "work"
     workspace.mkdir(parents=True)
     native = CodexHostAdapter(tmp_path / "adapter", projects, rpc=FakeCodexRpc())
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(make_app(native, "secret"),
-        host="127.0.0.1", port=port, log_level="error", access_log=False))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
     try:
-        for _ in range(100):
-            if server.started:
-                break
-            time.sleep(0.01)
-        assert server.started
-        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
-                                    f"http://127.0.0.1:{port}", "secret")
+        client = RuntimeClient(ADAPTER_ID, "codex", LocalPluginTransport(native))
         assert client.adapter_id == "adapter_000000000000000000000001"
         assert client.runtime_type == "codex"
         assert client.descriptor().supports("interactions")
@@ -140,82 +121,36 @@ def test_codex_http_adapter_contract(tmp_path):
         assert all(row["unavailableReason"] == "legacy-sandbox-conflict"
                    for row in blocked["profiles"])
     finally:
-        server.should_exit = True
-        thread.join(timeout=5)
         native.close()
 
 
-def _serve_502_once(payload: dict):
-    class _Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            body = json.dumps(payload).encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+class _Failing:
+    def __init__(self, message):
+        self.message = message
 
-        def log_message(self, *args):
-            pass
-
-    server = HTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
+    def create_conversation(self, body):
+        raise AdapterFailure(self.message, 502, "runtime_unavailable")
 
 
-def test_http_502_preserves_sanitized_native_detail():
-    token = "adapter-token-should-not-escape"
-    # Adapter already applies sanitize_diagnostic (paths -> [PATH]); WBRP must
-    # preserve that bounded detail while scrubbing its own token.
-    native_detail = (
-        "Codex thread/start failed: denied at [PATH]; "
-        f"echo:{token}")
-    server, thread = _serve_502_once({
-        "error": native_detail, "code": "runtime_unavailable"})
-    try:
-        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
-                                    f"http://127.0.0.1:{server.server_port}", token)
-        with pytest.raises(RuntimeUnavailable) as exc:
-            client.create_conversation({"workspaceId": "ws-one"})
-        assert exc.value.code == "runtime_unavailable"
-        message = str(exc.value)
-        assert "denied" in message
-        assert "[PATH]" in message and "[REDACTED_SECRET]" in message
-        assert "/Users/" not in message
-        assert token not in message
-        assert len(message) <= 500
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
-
-
-def test_http_502_empty_detail_stays_generic():
-    server, thread = _serve_502_once({"error": "", "code": "runtime_unavailable"})
-    try:
-        client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
-                                    f"http://127.0.0.1:{server.server_port}", "secret")
-        with pytest.raises(RuntimeUnavailable) as exc:
-            client.create_conversation({"workspaceId": "ws-one"})
-        assert exc.value.code == "runtime_unavailable"
-        assert str(exc.value) == "Runtime adapter returned an error"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
-
-
-def test_http_network_unavailable_stays_generic():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        unused_port = sock.getsockname()[1]
-    client = HttpRuntimeAdapter("adapter_000000000000000000000001", "codex",
-                                f"http://127.0.0.1:{unused_port}", "secret")
+def test_plugin_502_preserves_sanitized_native_detail():
+    secret = "sk-proj-" + "y" * 32
+    # Adapters already apply sanitize_diagnostic (paths -> [PATH]); the
+    # client keeps that bounded detail and redacts credentials.
+    client = RuntimeClient(ADAPTER_ID, "codex", LocalPluginTransport(
+        _Failing(f"Codex thread/start failed: denied at [PATH]; echo:{secret}")))
     with pytest.raises(RuntimeUnavailable) as exc:
         client.create_conversation({"workspaceId": "ws-one"})
     assert exc.value.code == "runtime_unavailable"
-    assert str(exc.value) == "Runtime adapter is unavailable"
+    message = str(exc.value)
+    assert "denied" in message and "[PATH]" in message and "[REDACTED_SECRET]" in message
+    assert secret not in message and len(message) <= 500
+
+
+def test_plugin_502_empty_detail_stays_generic():
+    client = RuntimeClient(ADAPTER_ID, "codex", LocalPluginTransport(_Failing("")))
+    with pytest.raises(RuntimeUnavailable) as exc:
+        client.create_conversation({"workspaceId": "ws-one"})
+    assert str(exc.value) == "Runtime adapter returned an error"
 
 
 def test_node_proxy_preserves_safe_runtime_unavailable():

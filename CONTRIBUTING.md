@@ -8,12 +8,12 @@ here.
 ## Repo structure
 
 - `workspace_bridge/` — Python MCP service, Manager API, security policy,
-  CLI (`cli.py`), Node service (`node_*.py`), adapter lifecycle
-  (`adapter_*.py`), run coordination, diagnostics, notifications, release
-  and support-bundle helpers.
+  CLI (`cli.py`), Node service (`node_*.py`), agent plugins
+  (`plugin_*.py`, `*_host_adapter.py`), run coordination, diagnostics,
+  notifications, and release helpers.
 - `web/` — React/TypeScript Manager. Vite builds into
   `workspace_bridge/static/dist/` for packaging.
-- `runtime/pi-host-adapter/` — native Node.js Pi adapter (npm package
+- `runtime/pi-host-adapter/` — Node.js Pi plugin (npm package
   `workspace-bridge-pi-host-adapter`).
 - `tests/test_*.py` — Python suite. Adapter tests live in
   `runtime/pi-host-adapter/test/*.test.mjs`; browser tests in

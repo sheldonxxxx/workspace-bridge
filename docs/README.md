@@ -13,7 +13,7 @@ authority; prose never overrides them.
 - [Docker](DOCKER.md) — container Bridge control-plane detail. Read after
   Setup, not instead of it.
 - [Operations](OPERATIONS.md) — state and backups, service management,
-  manual upgrades, release identity, logging, support bundles, notifications,
+  manual upgrades, release identity, logging, notifications,
   recovery, troubleshooting, and validation status.
 
 ## Agents asked to install or configure
@@ -54,7 +54,7 @@ authority; prose never overrides them.
 - [Plugin skill packaging](PLUGIN_SKILL_PACKAGING.md) — build a skill snapshot
   for an existing private/workspace MCP app using its technical ID and local
   package identity/version state.
-- [Runtime Protocol](RUNTIME_PROTOCOL.md) — Runtime Protocol v1 contract
+- [Runtime Protocol](RUNTIME_PROTOCOL.md) — agent resource contract and Agent Protocol v2 (stdio plugins)
   between Bridge, Node, and adapters.
 - [File access](FILE_ACCESS.md) — read/write interface and write scopes.
 - [Image support](IMAGE_SUPPORT.md) — image reads, limits, privacy, and

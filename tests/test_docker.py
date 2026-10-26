@@ -327,16 +327,15 @@ def test_dockerfile_dependency_layer_before_source():
 
 
 def test_pi_adapter_is_native_without_container_image():
-    """The Pi host adapter runs natively on the host: no Dockerfile, no
-    Compose service, no published port. The bridge only holds the adapter
-    URL plus the shared runtime token."""
+    """The Pi plugin runs natively under its Node: no Dockerfile, no
+    Compose service, no published port."""
     import re
     adapter_dir = ROOT/'runtime/pi-host-adapter'
     assert not list(adapter_dir.glob('Dockerfile*'))
     assert (adapter_dir/'package.json').exists()
     # Every relative .mjs import of the shipped entry modules must exist,
     # otherwise the native adapter crashes with ERR_MODULE_NOT_FOUND.
-    entry_modules = ['adapter.mjs', 'server.mjs', 'main.mjs']
+    entry_modules = ['adapter.mjs', 'stdio.mjs', 'main.mjs']
     for module in entry_modules:
         assert (adapter_dir/module).exists(), module
         source = (adapter_dir/module).read_text()

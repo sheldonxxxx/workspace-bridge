@@ -20,7 +20,7 @@ ADAPTER_ID = "adapter_0000000000000000000000c1"
 
 
 class ClaudeDirect:
-    """In-process WBRP transport; production uses HttpRuntimeAdapter."""
+    """In-process adapter calls; production goes through the Node plugin client."""
 
     def __init__(self, native):
         self.native = native
@@ -83,8 +83,7 @@ def claude_env(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Local Claude", "runtime_type": "claude",
-        "base_url": "http://127.0.0.1:8774", "token": "claude-test-secret"}, ADAPTER_ID)
+        "name": "Local Claude", "plugin": "claude"}, ADAPTER_ID)
     client = ClaudeDirect(native)
     client_factory = service.adapter_registry.client
 

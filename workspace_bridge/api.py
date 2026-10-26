@@ -722,15 +722,6 @@ class AdapterModelPolicy(Input):
 
 
 class AdapterCreate(Input):
-    node_id: NodeID
-    name: str = Field(min_length=1, max_length=80)
-    runtime_type: Literal["pi", "codex", "claude", "opencode"]
-    base_url: str = Field(min_length=1, max_length=2048)
-    token: str = Field(min_length=1, max_length=4096)
-    enabled: bool = True
-
-
-class PluginAdapterCreate(Input):
     """An adapter the Node runs as a supervised stdio plugin."""
     node_id: NodeID
     name: str = Field(min_length=1, max_length=80)
@@ -744,21 +735,11 @@ class AdapterUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     projects_root: str | None = Field(default=None, min_length=1, max_length=4096)
     settings: dict[str, str] | None = Field(default=None, max_length=17)
-    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
-    token: str | None = Field(default=None, max_length=4096,
-                              description="Blank or omitted preserves the saved token.")
     enabled: bool | None = None
 
 
 class AdapterTest(Input):
-    node_id: NodeID | None = None
-    name: str = Field(min_length=1, max_length=80)
-    runtime_type: Literal["pi", "codex", "claude", "opencode"]
-    base_url: str = Field(min_length=1, max_length=2048)
-    adapter_id: AdapterID | None = None
-    token: str = Field(default="", max_length=4096,
-                       description="New-adapter tests require a token; for an existing adapter, blank reuses its saved token.")
-    enabled: bool = True
+    adapter_id: AdapterID
 
 
 class AdapterProfile(Input):
@@ -1095,7 +1076,8 @@ def make_admin(service: Service, port: int = 8766, *,
                         model = AdapterCreate.model_validate({"node_id": node_id,
                             **await body_json(request)})
                         return JSONResponse(await run_in_threadpool(
-                            service.adapter_registry.create, model.model_dump()), 201)
+                            service.adapter_registry.create,
+                            model.model_dump(exclude_none=True)), 201)
                 return JSONResponse({"error": "Unknown Node route"}, 404)
             if path == "/api/runs":
                 try:
@@ -1114,11 +1096,8 @@ def make_admin(service: Service, port: int = 8766, *,
                 if request.method == "GET":
                     return JSONResponse(await run_in_threadpool(service.list_adapters))
                 if request.method == "POST":
-                    raw = await body_json(request)
-                    if isinstance(raw, dict) and "plugin" in raw:
-                        payload = PluginAdapterCreate.model_validate(raw).model_dump(exclude_none=True)
-                    else:
-                        payload = AdapterCreate.model_validate(raw).model_dump()
+                    payload = AdapterCreate.model_validate(await body_json(request)).model_dump(
+                        exclude_none=True)
                     result = await run_in_threadpool(service.adapter_registry.create, payload)
                     return JSONResponse(result, 201)
                 return JSONResponse({"error": "Method not allowed"}, 405)

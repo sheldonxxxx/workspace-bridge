@@ -268,22 +268,13 @@ class Service:
         return {"adapters": adapters}
 
     def test_adapter_connection(self, payload: dict) -> dict:
+        """Ask the owning Node to start the saved plugin adapter and read its descriptor."""
         adapter_id = payload.get("adapter_id")
-        node_id = payload.get("node_id")
-        if adapter_id is not None:
-            saved = self.adapter_registry.get(adapter_id)
-            if payload.get("runtime_type", saved["runtime_type"]) != saved["runtime_type"]:
-                raise BridgeError("Adapter runtime type is immutable", "invalid_arguments")
-            node_id = saved["node_id"]
-        if not isinstance(node_id, str):
-            raise BridgeError("node_id is required to test a runtime adapter", "invalid_arguments")
-        request = {key: value for key, value in payload.items()
-                   if key in {"adapter_id", "name", "runtime_type", "base_url", "token", "enabled"}}
-        client = self.node_registry.client(node_id, timeout=5)
-        # Always test the supplied form values. For an existing adapter,
-        # adapter_id is included so the Node reuses the saved token when the
-        # form token is blank, while base_url/name overrides are honored.
-        return client.test_adapter_config(request)
+        if not isinstance(adapter_id, str):
+            raise BridgeError("Save the plugin adapter, then test it by id", "invalid_arguments")
+        saved = self.adapter_registry.get(adapter_id)
+        return self.node_registry.client(saved["node_id"], timeout=15).test_adapter_config(
+            {"adapter_id": adapter_id})
 
     def diagnostic_report(self, *, offline: bool = False,
                           listener: dict | None = None,

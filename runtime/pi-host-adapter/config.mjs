@@ -12,8 +12,6 @@ import { fileURLToPath } from "node:url";
 export const ADAPTER_VERSION = "0.3.0";
 export const DEFAULT_LOG_LEVEL = "INFO";
 export const ALLOWED_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"];
-export const DEFAULT_HOST = "127.0.0.1";
-export const DEFAULT_PORT = 8780;
 export const DEFAULT_PI_BINARY = "pi";
 export const READONLY_TOOLS = ["read", "grep", "find", "ls"];
 export const PI_VERSION_TIMEOUT_MS = 10000;
@@ -113,24 +111,15 @@ export function parseLogLevel(raw) {
 }
 
 export function loadConfig(env = process.env, homeDir = os.homedir()) {
-  const token = String(env.WB_RUNTIME_TOKEN || "");
   const logRaw = env ? env.WB_LOG_LEVEL : undefined;
   const logLevel = logRaw === undefined || logRaw === null
     || (typeof logRaw === "string" && !logRaw.trim())
     ? DEFAULT_LOG_LEVEL : parseLogLevel(logRaw);
-  const host = String(env.WB_PI_ADAPTER_HOST || DEFAULT_HOST).trim() || DEFAULT_HOST;
-  const portRaw = String(env.WB_PI_ADAPTER_PORT || DEFAULT_PORT).trim();
-  const port = Number(portRaw);
   const binary = String(env.WB_PI_BINARY || DEFAULT_PI_BINARY).trim() || DEFAULT_PI_BINARY;
   const projectsDir = String(env.WB_PI_PROJECTS_DIR || env.WB_PROJECTS_DIR || "").trim();
   const agentDirRaw = String(env.PI_CODING_AGENT_DIR || "").trim();
   return {
     adapterVersion: ADAPTER_VERSION,
-    host,
-    port: Number.isSafeInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT,
-    token,
-    locked: !token,
-    tokenConfigured: Boolean(token),
     piBinary: binary,
     projectsDirRaw: projectsDir,
     projectsConfigured: Boolean(projectsDir),

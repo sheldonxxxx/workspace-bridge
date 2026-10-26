@@ -4,6 +4,8 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+
+from conftest import patch_node_runtime
 from PIL import Image
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.run_images import validate_images
@@ -19,7 +21,7 @@ def test_node_decodes_and_audits_run_images(tmp_path,monkeypatch):
     node=NodeService(tmp_path/'node',{'allowed_roots':[str(tmp_path)],'host':'127.0.0.1','node_token_hash':digest(b'test')})
     ws={'id':'ws_'+'1'*24,'root':str(root),'excludes':[],'write_scope':'none'}
     node.register_workspace(ws)
-    adapter=node.save_adapter({'name':'OpenCode','runtime_type':'opencode','base_url':'http://127.0.0.1:8776','token':'test-runtime-token'})
+    adapter=node.save_adapter({'name':'OpenCode','plugin': 'opencode'})
     submissions=[]
     class Client:
         def __init__(self,*a,**kw):pass
@@ -28,7 +30,7 @@ def test_node_decodes_and_audits_run_images(tmp_path,monkeypatch):
         def start_run(self,ident,payload):
             submissions.append(payload)
             return {'id':'run','phase':'active','activeState':'running','outcome':None}
-    monkeypatch.setattr('workspace_bridge.node_service.HttpRuntimeAdapter',Client)
+    patch_node_runtime(monkeypatch, Client)
     def invoke(images):
         return node.runtime_call(adapter['id'],'start_run',{'expected_adapter_revision':adapter['revision'],
             'workspace':ws,'arguments':{'conversation_id':'conv','payload':{'clientRunId':'run',

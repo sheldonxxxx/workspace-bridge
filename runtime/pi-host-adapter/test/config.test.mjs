@@ -5,29 +5,15 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  ADAPTER_VERSION, DEFAULT_HOST, DEFAULT_PORT, expandAgentDir, resolveAgentDir,
+  ADAPTER_VERSION, expandAgentDir, resolveAgentDir,
   isAgentDirAllowed, loadConfig, checkPiBinary, defaultAgentDir, sdkToolLoadout,
 } from "../config.mjs";
 
-test("default host/port and token locking", () => {
-  const config = loadConfig({}, "/home/tester");
-  assert.equal(config.host, DEFAULT_HOST);
-  assert.equal(config.host, "127.0.0.1");
-  assert.equal(config.port, DEFAULT_PORT);
-  assert.equal(config.port, 8780);
-  assert.equal(config.locked, true);
-  assert.equal(config.tokenConfigured, false);
-  const open = loadConfig({ WB_RUNTIME_TOKEN: "s3cret" }, "/home/tester");
-  assert.equal(open.locked, false);
-  assert.equal(open.tokenConfigured, true);
-});
-
-test("host/port overrides with invalid port fallback", () => {
-  const config = loadConfig({ WB_PI_ADAPTER_HOST: "127.0.0.1", WB_PI_ADAPTER_PORT: "9999" }, "/home/tester");
-  assert.equal(config.host, "127.0.0.1");
-  assert.equal(config.port, 9999);
-  const bad = loadConfig({ WB_PI_ADAPTER_PORT: "banana" }, "/home/tester");
-  assert.equal(bad.port, DEFAULT_PORT);
+test("the plugin config has no network listener or token", () => {
+  const config = loadConfig({ WB_RUNTIME_TOKEN: "s3cret", WB_PI_ADAPTER_PORT: "9999" }, "/home/tester");
+  for (const key of ["host", "port", "token", "locked", "tokenConfigured"]) {
+    assert.equal(key in config, false, key);
+  }
 });
 
 test("PI_CODING_AGENT_DIR defaults to ~/.pi/workspace-bridge", () => {

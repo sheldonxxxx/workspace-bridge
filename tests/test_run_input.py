@@ -8,7 +8,7 @@ from admin_helpers import admin_cookie
 from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.runtime import RuntimeUnavailable, RuntimeUnsupported
 from workspace_bridge.security import BridgeError
-from workspace_bridge.wbrp import HttpRuntimeAdapter, validate_run_state
+from workspace_bridge.wbrp import RuntimeClient, validate_run_state
 from test_run_coordinator import ADAPTER_ID, modern_env  # noqa: F401
 
 
@@ -148,7 +148,7 @@ def test_input_tools_are_scoped_mutating_open_world():
 @pytest.mark.parametrize("mode", ["queue", "steer"])
 def test_legacy_adapter_without_receipts_never_receives_input(monkeypatch, mode):
     from workspace_bridge.wbrp import Descriptor
-    client = HttpRuntimeAdapter(ADAPTER_ID, "codex", "http://127.0.0.1:1", "test")
+    client = RuntimeClient(ADAPTER_ID, "codex", None)
     descriptor = Descriptor.parse({"protocol": {"major": 1}, "runtime": {
         "id": "codex", "instanceId": "test"}, "features": {
         "models": 1, "conversations": 1, "runs": 1, "activities": 1, "interactions": 1,

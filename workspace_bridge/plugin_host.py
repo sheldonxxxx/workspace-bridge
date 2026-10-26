@@ -19,7 +19,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
-from .plugin_protocol import MAX_LINE, METHODS, PROTOCOL, encode, error_payload
+from .codex_rpc import sanitize_diagnostic
+from .plugin_protocol import (MAX_LINE, METHODS, PROTOCOL, encode, error_payload,
+                              raise_for_error)
 
 _LOG = logging.getLogger("workspace_bridge.plugin")
 MAX_WORKERS = 16
@@ -73,6 +75,66 @@ HANDLERS: dict[str, Callable[[Any, dict], Any]] = {
 assert set(HANDLERS) == METHODS
 
 
+def failure_payload(exc: BaseException,
+                    unavailable: tuple[type[BaseException], ...] = ()) -> dict:
+    """The protocol error for one exception raised by an adapter method."""
+    status, code = getattr(exc, "status", None), getattr(exc, "code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and isinstance(code, str):
+        if status >= 500:
+            # Adapters bound their own messages; keep the reason in the plugin log.
+            _LOG.warning("plugin request failed: status=%s code=%s detail=%s",
+                         status, code, sanitize_diagnostic(str(exc), limit=300))
+        return error_payload(status, code, str(exc))
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return error_payload(400, "invalid_arguments", "Invalid request")
+    if not (unavailable and isinstance(exc, unavailable)):
+        _LOG.error("plugin request failed: %s: %s", type(exc).__name__,
+                   sanitize_diagnostic(str(exc), limit=300))
+    return error_payload(502, "runtime_unavailable", "Native runtime is unavailable")
+
+
+def invoke(adapter, method: str, params: dict, *,
+           result_filter: Callable[[Any], Any] | None = None,
+           unavailable: tuple[type[BaseException], ...] = ()) -> tuple[str, dict]:
+    """Run one v2 method on an adapter object: ("result", value) or ("error", payload)."""
+    if method not in HANDLERS:
+        return "error", error_payload(404, "not_found", "Unknown method")
+    try:
+        result = HANDLERS[method](adapter, params)
+        if result_filter is not None:
+            result = result_filter(result)
+        if not isinstance(result, dict):
+            raise TypeError("result must be an object")
+        return "result", result
+    except Exception as exc:  # noqa: BLE001 - every failure becomes a protocol error
+        return "error", failure_payload(exc, unavailable)
+
+
+class LocalPluginTransport:
+    """An adapter object behind the plugin interface, in this process.
+
+    Same dispatch and error mapping as the stdio server, without a child
+    process: for tests and for tools that already hold the adapter.
+    """
+
+    def __init__(self, adapter, *, result_filter=None, unavailable=()):
+        self.adapter = adapter
+        self.result_filter = result_filter
+        self.unavailable = unavailable
+
+    def call(self, method: str, params: dict, timeout: float = 30) -> dict:
+        # Round-trip through JSON, exactly as the wire would.
+        params = json.loads(json.dumps(params))
+        kind, value = invoke(self.adapter, method, params, result_filter=self.result_filter,
+                             unavailable=self.unavailable)
+        if kind == "error":
+            raise_for_error(value)
+        return json.loads(json.dumps(value))
+
+    def events(self, after: int, wait_ms: int) -> dict:
+        return self.call("events", {"after": after, "waitMs": wait_ms})
+
+
 class PluginServer:
     """Serve one adapter object over the v2 stdio protocol."""
 
@@ -80,7 +142,7 @@ class PluginServer:
                  result_filter: Callable[[Any], Any] | None = None,
                  unavailable: tuple[type[BaseException], ...] = ()):
         self.factory = factory
-        self.result_filter = result_filter or (lambda value: value)
+        self.result_filter = result_filter
         self.unavailable = unavailable
         self.adapter = None
         self._out: BinaryIO | None = None
@@ -95,33 +157,19 @@ class PluginServer:
             self._out.write(line)
             self._out.flush()
 
-    def _failure(self, exc: BaseException) -> dict:
-        status, code = getattr(exc, "status", None), getattr(exc, "code", None)
-        if isinstance(status, int) and not isinstance(status, bool) and isinstance(code, str):
-            return error_payload(status, code, str(exc))
-        if isinstance(exc, (ValueError, TypeError, KeyError)):
-            return error_payload(400, "invalid_arguments", "Invalid request")
-        if self.unavailable and isinstance(exc, self.unavailable):
-            return error_payload(502, "runtime_unavailable", "Native runtime is unavailable")
-        _LOG.error("plugin request failed: %s: %s", type(exc).__name__, str(exc)[:300])
-        return error_payload(502, "runtime_unavailable", "Native runtime is unavailable")
-
     def _handle(self, ident: Any, method: str, params: dict) -> None:
+        if self.adapter is None:
+            kind, value = "error", error_payload(400, "invalid_arguments", "initialize first")
+        else:
+            kind, value = invoke(self.adapter, method, params, result_filter=self.result_filter,
+                                 unavailable=self.unavailable)
         try:
-            if self.adapter is None:
-                raise ValueError("initialize first")
-            if method not in HANDLERS:
-                self._send({"jsonrpc": "2.0", "id": ident,
-                            "error": error_payload(404, "not_found", "Unknown method")})
-                return
-            result = self.result_filter(HANDLERS[method](self.adapter, params))
-            if not isinstance(result, dict):
-                raise TypeError("result must be an object")
-            self._send({"jsonrpc": "2.0", "id": ident, "result": result})
-        except Exception as exc:  # noqa: BLE001 - every failure becomes a response
+            self._send({"jsonrpc": "2.0", "id": ident, kind: value})
+        except Exception:  # noqa: BLE001 - unsendable or the pipe is gone; the Node restarts us
             try:
-                self._send({"jsonrpc": "2.0", "id": ident, "error": self._failure(exc)})
-            except Exception:  # noqa: BLE001 - the pipe is gone; the Node restarts us
+                self._send({"jsonrpc": "2.0", "id": ident, "error": error_payload(
+                    502, "runtime_unavailable", "Response could not be sent")})
+            except Exception:  # noqa: BLE001
                 self._stop.set()
 
     def _pump_events(self) -> None:
@@ -150,8 +198,9 @@ class PluginServer:
             self.adapter = self.factory(params)
         except Exception as exc:  # noqa: BLE001 - reported, then the Node retries later
             # The plugin log is local to the Node; the reason helps the admin.
-            _LOG.error("plugin initialize failed: %s: %s", type(exc).__name__, str(exc)[:300])
-            self._send({"jsonrpc": "2.0", "id": ident, "error": self._failure(exc)})
+            _LOG.error("plugin initialize failed: %s: %s", type(exc).__name__,
+                       sanitize_diagnostic(str(exc), limit=300))
+            self._send({"jsonrpc": "2.0", "id": ident, "error": failure_payload(exc, self.unavailable)})
             self._stop.set()
             return
         instance = getattr(self.adapter, "instance_id", "")

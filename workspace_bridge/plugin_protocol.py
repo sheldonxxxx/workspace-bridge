@@ -16,7 +16,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .security import BridgeError
+from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
+from .security import BridgeError, redact
 
 PROTOCOL = 2
 MAX_LINE = 16 * 1024 * 1024
@@ -91,6 +92,21 @@ def error_payload(status: int, code: str, message: str) -> dict:
         status = 502
     return {"code": -32000, "message": str(message)[:300],
             "data": {"status": status, "code": code}}
+
+
+def raise_for_error(error: Any) -> None:
+    """Raise the runtime exception a plugin error stands for (v1 meaning)."""
+    error = error if isinstance(error, dict) else {}
+    data = error.get("data") if isinstance(error.get("data"), dict) else {}
+    status, code = data.get("status"), str(data.get("code") or "runtime_rejected")[:80]
+    if not _CODE.fullmatch(code):
+        code = "runtime_rejected"
+    detail = redact(str(error.get("message") or ""))[0][:300]
+    if status == 501:
+        raise RuntimeUnsupported(detail or "Runtime feature is unsupported")
+    if status in (400, 404, 409, 412, 422):
+        raise RuntimeRejected(detail or "Runtime rejected the request", code=code, status=status)
+    raise RuntimeUnavailable(detail or "Runtime adapter returned an error")
 
 
 # ---------------------------------------------------------------------------
