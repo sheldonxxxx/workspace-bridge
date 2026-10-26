@@ -715,28 +715,30 @@ class GitEvidence:
         if after["status_sha256"] != observed:
             raise BridgeError("Git status changed while collecting the diff; request a fresh status page",
                               "stale_evidence")
-        text, redacted = redact(raw.decode("utf-8", errors="replace"))
-        patch = text.encode("utf-8")
-        start = min(offset, len(patch))
-        while start < len(patch) and start > 0 and patch[start] & 0xC0 == 0x80:
-            start += 1
-        end = start
-        while end < len(patch):
-            byte = patch[end]
-            width = 1 if byte < 0x80 else 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
-            if end + width > len(patch) or end + width - start > max_bytes:
-                break
-            end += width
-        if end == start and start < len(patch):
-            raise BridgeError("Requested diff page limit cannot fit one character", "output_limit")
-        page = patch[start:end].decode("utf-8", errors="strict")
-        return {
-            "available": True,
-            "mode": mode,
-            "patch": page,
-            "offset": start,
-            "next_offset": end if end < len(patch) else None,
-            "total_bytes": len(patch),
-            "redacted": redacted,
-            "status_sha256": observed,
-        }
+        return {"available": True, "mode": mode, **page_patch(raw, offset, max_bytes),
+                "status_sha256": observed}
+
+
+def page_patch(raw: bytes, offset: int, max_bytes: int) -> dict:
+    """Redact a bounded patch, then return one UTF-8-safe byte page of it."""
+    text, redacted = redact(raw.decode("utf-8", errors="replace"))
+    patch = text.encode("utf-8")
+    start = min(offset, len(patch))
+    while start < len(patch) and start > 0 and patch[start] & 0xC0 == 0x80:
+        start += 1
+    end = start
+    while end < len(patch):
+        byte = patch[end]
+        width = 1 if byte < 0x80 else 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+        if end + width > len(patch) or end + width - start > max_bytes:
+            break
+        end += width
+    if end == start and start < len(patch):
+        raise BridgeError("Requested diff page limit cannot fit one character", "output_limit")
+    return {
+        "patch": patch[start:end].decode("utf-8", errors="strict"),
+        "offset": start,
+        "next_offset": end if end < len(patch) else None,
+        "total_bytes": len(patch),
+        "redacted": redacted,
+    }

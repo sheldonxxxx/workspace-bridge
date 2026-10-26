@@ -21,6 +21,7 @@ from .wbrp import validate_run_state
 from .adapter_events import AdapterEventReader
 from .manager_events import RunEventHub
 from .keyed_locks import KeyedLocks
+from .run_checkpoints import RunCheckpoints
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -236,6 +237,7 @@ class RunCoordinator:
                 raise BridgeError(
                     "Bridge state is incomplete for schema v4; use a fresh state path",
                     "state_schema_incompatible")
+        self.checkpoints = RunCheckpoints(self, read_only=read_only)
 
     @staticmethod
     def _outcome_event_type(outcome: str | None) -> str | None:
@@ -244,6 +246,8 @@ class RunCoordinator:
                 "orphaned": "run_orphaned"}.get(outcome or "")
 
     def _record_outcome_event_locked(self, run: dict, outcome: str | None) -> None:
+        # Every terminal transition passes here inside its own transaction.
+        self.checkpoints.enqueue_post_locked(run["id"])
         event_type = self._outcome_event_type(outcome)
         if event_type is None:
             return
@@ -1151,6 +1155,7 @@ class RunCoordinator:
                      None, "", "", None, json.dumps(effective_security, sort_keys=True), timestamp, timestamp))
                 if images:
                     self.service.db.execute("INSERT INTO agent_run_images(run,refs) VALUES(?,?)", (bridge_run_id, json.dumps(images, sort_keys=True)))
+                self.checkpoints.begin_locked(bridge_run_id, ws["id"], node_info["id"])
             self.run_events.publish(bridge_run_id)
             if rebind_old is not None and rebind_new is not None:
                 # The runtime security transition is a real state mutation
@@ -1175,6 +1180,9 @@ class RunCoordinator:
                         "VALUES(?,?,?,?,?,?,?,?)",
                         (_id("act_"), bridge_run_id, "security-rebind:" + bridge_run_id,
                          "security_binding_rebound", "completed", rebind_payload, _now(), _now()))
+            # Bounded and best effort: a capture failure is recorded on the
+            # run's checkpoint and never prevents the native start.
+            self.checkpoints.capture_pre(ws, bridge_run_id)
             try:
                 run_payload = {
                     "input": [{"type": "text", "text": self._prompt(ws, job)}],
@@ -1660,6 +1668,9 @@ class RunCoordinator:
              "details": json.loads(item["payload"])} for item in interactions]}
         if sync_warning is not None:
             result["sync_warning"] = sync_warning
+        checkpoint = self.checkpoints.view(ws, run_id)
+        if checkpoint is not None:
+            result["checkpoint"] = checkpoint
         result["input_capabilities"] = {"steer": False, "queue": False}
         if sync and sync_warning is None and run["phase"] == "active":
             try:
@@ -2017,6 +2028,7 @@ class RunCoordinator:
         self._thread = threading.Thread(target=self._sweep, name="wbrp-reconcile",
                                         daemon=True)
         self._thread.start()
+        self.checkpoints.start()
 
     @staticmethod
     def _event_authority(run: dict) -> tuple[str, str, str, str]:
@@ -2160,6 +2172,7 @@ class RunCoordinator:
         deadline = time.monotonic() + 5
         if self._thread is not None:
             self._thread.join(timeout=max(0, deadline - time.monotonic()))
+        self.checkpoints.close(deadline)
         for reader in readers:
             if reader.thread is not None:
                 reader.thread.join(timeout=max(0, deadline - time.monotonic()))

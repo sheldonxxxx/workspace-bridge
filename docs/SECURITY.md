@@ -173,6 +173,24 @@ a workspace binding should be described as an OS sandbox unless the specific
 runtime provides that guarantee. Pi runs with the host user's authority; review
 its file, external-path, protected-path, and shell controls before allowing writes.
 
+## Run checkpoints
+
+Run checkpoints are the only stored copy of workspace source. The owning Node
+keeps them in `checkpoints/` under its private state directory, which can never
+overlap a workspace. Content is limited to what `read_file` may return: the same
+built-in deny list, workspace exclusions and 512 KiB per-file limit, read through
+the same no-symlink descriptor checks. Git writes only that store; the
+workspace and its `.git` are never written, and Git runs with fixed arguments,
+no hooks and no user or system configuration.
+
+A file deleted or rewritten in the workspace stays readable through run diffs
+until retention removes its checkpoints (14 days, or sooner once a workspace
+store exceeds 1 GiB). Exclusions added later hide paths immediately; clear the
+workspace's checkpoints in the Manager to delete them from disk. Diffs are
+redacted like `git_diff`, which is not a DLP guarantee. The Bridge stores only
+checkpoint IDs, statuses, error codes and changed path names. Support bundles
+never include checkpoints.
+
 ## Diagnostics and Doctor
 
 The local-admin diagnostics API requires the admin bearer/session authentication.

@@ -214,7 +214,7 @@ read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
 
 `prepare_handoff` creates TASK.md, CONTEXT.md and ACCEPTANCE.md only, and is denied when `write_scope=none`. Optional
 context hashes check specifically named files at publication; no source snapshot
-is captured. The local agent replies in its conversation and the user pastes that reply
+is captured at publication ([run checkpoints](#run-checkpoints) belong to runs). The local agent replies in its conversation and the user pastes that reply
 into ChatGPT. Review uses the same normal browsing tools. Findings stay in chat, with optional ordinary handoff notes.
 
 Optional `attachments` contains up to 20 unique existing image references:
@@ -241,8 +241,8 @@ calls fail as unknown tools. Tool discovery is authoritative for exact schemas.
 
 ```text
 git_status(workspace_id, offset=0, limit=50, expected_status_sha256=null)
-git_diff(workspace_id, mode=head|worktree|staged, path=null, offset=0,
-         max_bytes=3000, expected_status_sha256=null)
+git_diff(workspace_id, mode=head|worktree|staged|run, path=null, offset=0,
+         max_bytes=3000, expected_status_sha256=null, run_id=null)
 ```
 
 These tools inspect only a repository with a real `.git` directory directly under
@@ -263,6 +263,36 @@ Pass the latest status hash to either tool to reject stale review evidence. A st
 or diff is live observation only: it creates no snapshot and establishes no
 authorship. Dirty-tree changes may predate the current run. Continue with targeted
 current-source reads and runtime activity evidence.
+
+### Run checkpoints
+
+Every Runtime Protocol run gets a checkpoint before its native start and after
+it becomes terminal. `git_diff` with `mode=run` and `run_id` returns the
+redacted, byte-paginated patch between the two, so edits that were already in
+the worktree before the run are excluded. It works for non-Git workspaces too.
+`run_id` is required with `mode=run` and not accepted otherwise;
+`expected_status_sha256` is not used because checkpoints never change.
+
+The diff covers the run's time window, not authorship: edits by people and by
+other runs listed in `checkpoint.overlapping_runs` are included. A run that is
+still active, whose capture failed, or whose checkpoints were removed by
+retention fails with `checkpoint_pending`, `checkpoint_unavailable` or
+`checkpoint_expired`. A path excluded after capture is no longer shown.
+
+The owning Node captures checkpoints into its own private Git store, reading
+files with the same exclusions, built-in deny list and 512 KiB per-file limit as
+`read_file`. A Git workspace's `.gitignore` rules also apply, tracked files are
+captured first, and the workspace and its `.git` are never written. A larger
+file, or a file beyond the per-checkpoint cap (10,000 files or 256 MiB), is
+recorded as a placeholder and reported as `not_captured`, so it reads as
+changed rather than deleted. Symlinks, hard-linked and special files are skipped.
+
+The pre capture has a 15 second budget and never blocks the run: a failure only
+marks the checkpoint unavailable. The post capture is durable across Bridge
+restarts; one taken more than a minute after the run ended is marked `late`.
+Checkpoints are kept for 14 days and up to 1 GiB per workspace, oldest first;
+active runs and the newest finished run are never removed. They never restore
+files.
 
 ## Agent run tools (Runtime Protocol v1)
 
@@ -364,6 +394,11 @@ admin list/read APIs and MCP run tools; there is no separate usage endpoint.
 It also includes the immutable `node_id`/revision, adapter revision, and
 `effective_security` snapshot used immediately before that run started; this
 snapshot remains historical if workspace settings later change.
+Runs started with checkpoint support include `checkpoint`: overall `status`
+(`pending`, `complete`, `partial`, `unavailable` or `expired`), per-phase status,
+capture time and error code, `late`, `overlapping_runs`, and after the post
+capture `changed_paths` with up to 100 `changes` (`path`, `status`, optional
+`not_captured`). See [Run checkpoints](#run-checkpoints).
 Use `read_agent_interaction` to inspect the exact live request and supported
 choices. Submit the adapter's opaque choice ID unchanged with
 `respond_agent_interaction` only when the user has authorized that response; the

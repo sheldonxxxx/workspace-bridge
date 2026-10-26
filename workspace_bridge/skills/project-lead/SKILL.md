@@ -149,8 +149,11 @@ and inspection guides, not proof. Delivery status says nothing about the outcome
    `list_agent_executions` (paginate) and `read_agent_execution` for material
    entries, plus `list_agent_activities` and `read_agent_activity`. Cross-check
    reported tests and commands against that evidence.
-3. Inspect `git_status`, targeted `git_diff`, and current source, callers,
-   configuration, and tests yourself; source inspection is authoritative.
+3. If the run `checkpoint` is `complete` or `partial`, start with `git_diff`
+   `mode: "run"`: it covers only the run window; `overlapping_runs`, `late`
+   and `not_captured` are gaps. Then inspect `git_status`, targeted `git_diff`,
+   and current source, callers, configuration, tests; source inspection is
+   authoritative.
 4. Check acceptance criteria and plausible regressions.
 
 Also look for failures, PATH or tool problems, permission friction, retries, hangs,

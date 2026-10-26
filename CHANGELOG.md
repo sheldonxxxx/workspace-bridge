@@ -69,6 +69,13 @@
   block the admin listener while waiting for the Node.
 - Direct-instruction runs publish their audit handoff under the same service
   lock as `prepare_handoff`.
+- Run checkpoints: the owning Node captures each run's workspace before the
+  native start and after it ends, in a private shadow Git store that never
+  writes the workspace or its `.git`. `git_diff` `mode=run` returns the
+  run-window diff, `read_agent_run` reports checkpoint status, changed paths and
+  overlapping runs, and the Manager shows a Changes panel plus storage controls.
+  Capture failures never block a run. Retention is 14 days and 1 GiB per
+  workspace.
 
 ## 0.3.0
 

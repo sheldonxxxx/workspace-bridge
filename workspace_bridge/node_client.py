@@ -140,7 +140,8 @@ class NodeClient:
     def workspace(self, operation: str, workspace: dict, arguments: dict):
         allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file", "write_image",
                    "edit_file", "git_status", "git_diff", "read_handoff_artifact",
-                   "hash_files", "publish_handoff_artifacts"}
+                   "hash_files", "publish_handoff_artifacts", "checkpoint_capture",
+                   "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats"}
         if operation not in allowed:
             raise BridgeError("Unknown Node workspace operation", "invalid_arguments")
         result = self._request("POST", "/v1/workspaces/" + operation,
