@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .login_path import resolve_login_path, runtime_env_with_login_path
 from .plugin_protocol import MAX_LINE, PROTOCOL, encode, raise_for_error
 from .runtime import RuntimeUnavailable
 
@@ -34,9 +35,28 @@ LOG_LIMIT = 5 * 1024 * 1024
 STABLE_AFTER = 60.0
 
 
+_login_path_lock = threading.Lock()
+_login_path: dict | None = None
+
+
+def _cached_login_path() -> dict:
+    # A launchd or systemd service starts with a minimal PATH that misses the
+    # user's agent installs (Homebrew, npm, ~/.local/bin). Probe the login
+    # shell once per process; a failed probe is retried on the next spawn.
+    global _login_path
+    with _login_path_lock:
+        if _login_path is None:
+            result = resolve_login_path()
+            if not result.get("resolved"):
+                return result
+            _login_path = result
+        return _login_path
+
+
 def _plugin_env(log_level: str | None) -> dict:
     # The Node's own WB_* settings never reach an agent or the shells it runs.
     env = {key: value for key, value in os.environ.items() if not key.startswith("WB_")}
+    env, _ = runtime_env_with_login_path(env, _resolve=_cached_login_path)
     if log_level:
         env["WB_LOG_LEVEL"] = log_level
     return env
@@ -79,10 +99,10 @@ class PluginProcess:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _command(self) -> list[str]:
+    def _command(self, env: dict) -> list[str]:
         command = list(self.manifest["command"])
         if not os.path.isabs(command[0]):
-            found = shutil.which(command[0])
+            found = shutil.which(command[0], path=env.get("PATH"))
             if found is None:
                 raise RuntimeUnavailable("Plugin command is not installed on this Node")
             command[0] = found
@@ -96,11 +116,11 @@ class PluginProcess:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         (self.state / "state").mkdir(mode=0o700, exist_ok=True)
         log = _open_log(self.state / "plugin.log")
+        env = _plugin_env(self.log_level)
         try:
             process = subprocess.Popen(
-                self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
-                cwd=self.state, env=_plugin_env(self.log_level), start_new_session=True,
-                close_fds=True)
+                self._command(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
+                cwd=self.state, env=env, start_new_session=True, close_fds=True)
         except OSError:
             self._failed()
             raise RuntimeUnavailable("Plugin could not be started") from None

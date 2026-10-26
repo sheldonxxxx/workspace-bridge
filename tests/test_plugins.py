@@ -135,6 +135,36 @@ def test_stray_stdout_and_node_environment_never_reach_the_protocol(node, monkey
         assert b"WB_NODE_SECRET" not in environ.read_bytes()
 
 
+def test_a_bare_plugin_command_resolves_through_the_login_path(tmp_path, monkeypatch):
+    # A launchd service has only /usr/bin:/bin; the Pi plugin command lives
+    # in Homebrew's or npm's bin folder, which only the login shell adds.
+    from workspace_bridge import plugin_supervisor
+    bin_dir = tmp_path / "login-bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "fake-plugin"
+    launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{PLUGINS / "fake_agent.py"}"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(plugin_supervisor, "_login_path", None)
+    monkeypatch.setattr(plugin_supervisor, "resolve_login_path", lambda: {
+        "resolved": True, "path": f"{bin_dir}:/usr/bin:/bin", "shell": "/bin/zsh",
+        "shell_basename": "zsh", "entry_count": 3, "code": None})
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    manifest = tmp_path / "bare.toml"
+    manifest.write_text('id = "bare"\nversion = "0.1"\nprotocol = 2\nruntime_type = "pi"\n'
+                        'command = ["fake-plugin"]\nsettings = []\n')
+    service = NodeService(tmp_path / "node", {
+        "allowed_roots": [str(projects)], "node_token_hash": digest(b"t"), "host": "127.0.0.1"})
+    try:
+        service.install_manifest(manifest)
+        adapter = service.save_adapter({"name": "Bare", "plugin": "bare",
+                                        "projects_root": str(projects), "settings": {}})
+        assert client(service, adapter["id"]).descriptor().runtime_id == "pi"
+    finally:
+        service.close()
+
+
 def test_events_are_pushed_and_served_as_v1_pages(node):
     service, projects = node
     plugin = client(service, add(service, projects)["id"])
