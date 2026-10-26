@@ -22,7 +22,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.asyncio.client import connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from . import node_api, pairing
 from .oplog import emit, error_code
@@ -181,6 +181,8 @@ async def _serve(websocket, service) -> None:
                 task = asyncio.create_task(answer(frame))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
+    except ConnectionClosed:
+        pass  # A Bridge restart or network drop; run_link reconnects.
     finally:
         for task in tasks:
             task.cancel()
@@ -229,6 +231,10 @@ async def run_link(service, config: dict, state: Path, *,
                 heartbeat.cancel()
                 if not serving.done():
                     serving.cancel()
+                elif not serving.cancelled():
+                    serving.result()  # An unexpected failure takes the retry path below.
+                if not stop.is_set():
+                    emit(_log, "INFO", "node", "node_link_disconnected")
         except Exception as exc:  # noqa: BLE001 - every failure retries with backoff
             last_code = error_code(exc)
             emit(_log, "WARNING", "node", "node_link_retry", code=last_code)

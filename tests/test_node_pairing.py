@@ -1,6 +1,8 @@
 """Paired Nodes dial the Bridge gateway; the embedded local Node runs in-process."""
 import asyncio
+import gc
 import json
+import logging
 import socket
 import ssl
 import threading
@@ -141,6 +143,22 @@ def test_reconnect_keeps_revision_and_outage_fails_closed(paired):
     _wait(lambda: service.node_gateway.connected(node_id))
     assert service.node_registry.client(node_id, timeout=5).status()["status"] == "ok"
     assert service.node_registry.get(node_id)["revision"] == revision
+
+
+def test_bridge_restart_is_a_clean_disconnect_and_reconnect(paired, caplog):
+    service, node_id, link = paired["service"], paired["node_id"], paired["link"]
+    unhandled = []
+    link.loop.call_soon_threadsafe(
+        link.loop.set_exception_handler, lambda _loop, context: unhandled.append(context))
+    caplog.set_level(logging.INFO, logger="workspace_bridge.ops")
+    paired["gateway"].stop()
+    _wait(lambda: not service.node_gateway.connected(node_id))
+    paired["gateway"] = _Gateway(service, paired["port"])
+    _wait(lambda: service.node_gateway.connected(node_id))
+    assert service.node_registry.client(node_id, timeout=5).status()["status"] == "ok"
+    gc.collect()
+    assert [str(item.get('message')) + ' ' + repr(item.get('exception')) for item in unhandled] == []
+    assert "node_link_disconnected" in caplog.text
 
 
 def test_pairing_codes_are_single_use(paired):

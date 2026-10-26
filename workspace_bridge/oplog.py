@@ -36,7 +36,7 @@ COMPONENT = "bridge"
 # Stable event names emitted by the bridge process.
 EVENTS = frozenset({
     "bridge_ready", "boundary_reject", "request_error", "process_error",
-    "node_link_connected", "node_link_retry",
+    "node_link_connected", "node_link_disconnected", "node_link_retry",
 })
 
 # Bounded scalar fields only. IDs/state names/counts/durations/sanitized
