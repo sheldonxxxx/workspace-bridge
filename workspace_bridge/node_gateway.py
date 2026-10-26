@@ -209,6 +209,22 @@ class NodeGateway:
     def connected(self, node_id: str) -> bool:
         return self.connection(node_id) is not None
 
+    def disconnect(self, node_id: str) -> None:
+        """Close a Node's live socket after it was disabled or deleted.
+
+        The Node's reconnect is then refused at ``hello`` until it is enabled
+        again or re-paired.
+        """
+        connection = self.connection(node_id)
+        if connection is None:
+            return
+        connection.fail_all()
+        try:
+            asyncio.run_coroutine_threadsafe(
+                connection.websocket.close(code=4403), connection.loop)
+        except RuntimeError:
+            pass  # The gateway loop already stopped.
+
     def transport(self, node_id: str, *, timeout: float = 30) -> GatewayTransport:
         return GatewayTransport(self, node_id, timeout)
 

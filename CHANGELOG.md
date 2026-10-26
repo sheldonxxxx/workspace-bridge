@@ -26,6 +26,10 @@
   Bridge, and keeps each plugin's stderr in a size-capped log. Pi gains a
   `--stdio` mode.
 
+- The Manager can delete a Node (not the Bridge's embedded Node). Deleting
+  or disabling a paired Node now closes its live gateway connection, and
+  the Node stays refused until it is enabled again or re-paired.
+
 - One slow Node or adapter no longer stalls the whole Bridge. The global
   service lock was held across Node file and Git calls, and every MCP run
   mutation queued behind one global lock. Now the database lock covers only

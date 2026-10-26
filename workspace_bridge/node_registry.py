@@ -156,9 +156,16 @@ class NodeRegistry:
             raise BridgeError("Node name is already in use", "conflict") from None
         if enabled:
             self.refresh_adapters(node_id)
+        else:
+            self._disconnect(row)
         if connection_changed:
             self._wake_runs()
         return self.public(self.get(node_id))
+
+    def _disconnect(self, row: dict) -> None:
+        gateway = getattr(self.service, "node_gateway", None)
+        if row.get("transport") == "paired" and gateway is not None:
+            gateway.disconnect(row["id"])
 
     def _wake_runs(self) -> None:
         # Runs started under the previous connection are interrupted by the sweep.
@@ -167,13 +174,16 @@ class NodeRegistry:
             coordinator.wake()
 
     def delete(self, node_id: str) -> dict:
-        self.get(node_id)
+        row = self.get(node_id)
+        if row.get("transport") == "local":
+            raise BridgeError("The Bridge's embedded Node cannot be deleted", "conflict")
         with self.service.lock, self.service.db:
             if self.service.db.execute("SELECT 1 FROM workspaces WHERE node_id=? LIMIT 1", (node_id,)).fetchone():
                 raise BridgeError("Node is referenced by workspaces", "conflict")
             if self.service.db.execute("SELECT 1 FROM node_adapters WHERE node_id=? LIMIT 1", (node_id,)).fetchone():
                 raise BridgeError("Node is referenced by adapter history", "conflict")
             self.service.db.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+        self._disconnect(row)
         return {"deleted": node_id}
 
     def test_connection(self, payload: dict) -> dict:

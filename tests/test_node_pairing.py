@@ -161,6 +161,40 @@ def test_bridge_restart_is_a_clean_disconnect_and_reconnect(paired, caplog):
     assert "node_link_disconnected" in caplog.text
 
 
+def test_disabling_a_paired_node_closes_its_socket_until_enabled(paired):
+    service, node_id = paired["service"], paired["node_id"]
+    service.node_registry.update(node_id, {"enabled": False})
+    _wait(lambda: not service.node_gateway.connected(node_id))
+    time.sleep(0.6)  # Several reconnect attempts at the test backoff.
+    assert not service.node_gateway.connected(node_id)
+    service.node_registry.update(node_id, {"enabled": True})
+    _wait(lambda: service.node_gateway.connected(node_id))
+
+
+def test_deleting_a_paired_node_closes_its_socket(paired):
+    service, node_id = paired["service"], paired["node_id"]
+    assert service.node_registry.delete(node_id) == {"deleted": node_id}
+    _wait(lambda: not service.node_gateway.connected(node_id))
+    time.sleep(0.6)
+    assert not service.node_gateway.connected(node_id)
+
+
+def test_the_embedded_local_node_cannot_be_deleted(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    state = tmp_path / "bridge-state"
+    config = initialize(state, 8765, 8766)
+    Service(state, config, run_coordinator_background=False).close()
+    node_id = enable_local_node(state, [str(projects)])["node_id"]
+    service = Service(state, config, run_coordinator_background=False)
+    try:
+        with pytest.raises(BridgeError) as refused:
+            service.node_registry.delete(node_id)
+        assert refused.value.code == "conflict"
+    finally:
+        service.close()
+
+
 def test_pairing_codes_are_single_use(paired):
     second_state = paired["tmp"] / "second-node"
     initialize_node(second_state, [str(paired["parent"])], "127.0.0.1", _free_port())

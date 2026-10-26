@@ -81,6 +81,7 @@ export interface NodeInfo {
   enabled: boolean;
   revision: string;
   has_token: boolean;
+  transport?: "http" | "paired" | "local";
   health?: string;
   protocol?: number;
   node_version?: string;

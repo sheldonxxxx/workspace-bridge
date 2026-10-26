@@ -2834,6 +2834,29 @@ export default function App() {
                             >
                               Edit
                             </Button>
+                            {node.transport !== "local" && (
+                              <Button
+                                variant="outline"
+                                onClick={() =>
+                                  ask({
+                                    title: `Delete ${node.name}?`,
+                                    description:
+                                      "Deletion is available only when no workspace or adapter history references this Node. A paired Node is disconnected and must be paired again to come back.",
+                                    destructive: true,
+                                    action: async () => {
+                                      await api(
+                                        `/api/nodes/${node.id}`,
+                                        "DELETE",
+                                      );
+                                      await refresh();
+                                      notify("Node deleted.");
+                                    },
+                                  })
+                                }
+                              >
+                                Delete
+                              </Button>
+                            )}
                             <Button
                               onClick={() => {
                                 setAdapterTest("");
