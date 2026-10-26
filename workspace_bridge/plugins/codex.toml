@@ -1,0 +1,8 @@
+id = "codex"
+version = "1.0.0"
+protocol = 2
+runtime_type = "codex"
+python_module = "codex"
+description = "Codex through codex app-server"
+features = ["steer", "queue", "events", "usage_limits"]
+settings = []

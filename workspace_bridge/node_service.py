@@ -26,7 +26,9 @@ from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        parts, redact, require_write_path)
 from .wbrp import HttpRuntimeAdapter
 from .adapter_registry import validate_base_url
-from .schema_upgrade import widen_runtime_type_check
+from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
+from .plugin_protocol import builtin_manifests, load_manifest
+from .plugin_supervisor import PluginRegistry, PluginRuntimeAdapter
 from . import __version__
 
 
@@ -39,11 +41,18 @@ def _inside(path: Path, parent: Path) -> bool:
 
 
 def _public_adapter(row: dict) -> dict:
-    return {"id": row["id"], "name": row["name"],
+    view = {"id": row["id"], "name": row["name"],
             "runtime_type": row["runtime_type"], "base_url": row["base_url"],
             "enabled": bool(row["enabled"]), "revision": row["revision"],
             "created": row["created"], "updated": row["updated"],
-            "has_token": bool(row["token"])}
+            "has_token": bool(row["token"]), "kind": row.get("kind", "http")}
+    if view["kind"] == "plugin":
+        view.update(plugin=row["plugin"], projects_root=row["projects_root"],
+                    settings=json.loads(row.get("settings") or "{}"))
+    return view
+
+
+PLUGIN_SETTING_LIMIT = 4096
 
 
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
@@ -155,11 +164,15 @@ class NodeService:
         elif not {"runtime_adapters", "node_workspaces"}.issubset(tables):
             self.db.close()
             raise BridgeError("Node state schema is incompatible", "state_schema_incompatible")
-        elif not read_only:
+        if tables and not read_only:
             widen_runtime_type_check(self.db, "runtime_adapters")
+        if not read_only:
+            add_plugin_adapters(self.db)
         self.browser = Browser(self)
+        self.plugins = PluginRegistry(self.state / "plugins")
 
     def close(self) -> None:
+        self.plugins.close()
         self.db.close()
 
     def safe_root(self, workspace: dict) -> SafeRoot:
@@ -503,11 +516,118 @@ class NodeService:
     def list_adapters(self) -> dict:
         return {"adapters": [_public_adapter(row) for row in self.adapters()]}
 
+    # -- plugins -----------------------------------------------------------
+
+    def manifests(self) -> dict[str, dict]:
+        """Built-in plugin manifests plus any installed on this Node."""
+        manifests = builtin_manifests()
+        for path in sorted((self.state / "plugins" / "manifests").glob("*.toml")):
+            try:
+                manifest = load_manifest(path)
+            except BridgeError:
+                continue
+            manifests.setdefault(manifest["id"], manifest)
+        return manifests
+
+    def install_manifest(self, source: Path) -> dict:
+        """Copy one third-party manifest into this Node's plugin folder."""
+        manifest = load_manifest(source)
+        if manifest["id"] in builtin_manifests():
+            raise BridgeError("A built-in plugin already uses this id", "conflict")
+        folder = self.state / "plugins" / "manifests"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = folder / f"{manifest['id']}.toml"
+        target.write_bytes(source.read_bytes())
+        os.chmod(target, 0o600)
+        return manifest
+
+    def _manifest(self, plugin: str) -> dict:
+        manifest = self.manifests().get(plugin) if isinstance(plugin, str) else None
+        if manifest is None:
+            raise BridgeError("Unknown plugin on this Node", "unknown_plugin")
+        return manifest
+
+    def _projects_root(self, raw: object) -> str:
+        if raw in (None, ""):
+            if len(self.allowed_roots) != 1:
+                raise BridgeError("Choose a projects root inside this Node's allowed roots",
+                                  "invalid_arguments")
+            return str(self.allowed_roots[0])
+        if not isinstance(raw, str) or not os.path.isabs(raw) or len(raw) > 4096:
+            raise BridgeError("Projects root must be an absolute path", "invalid_arguments")
+        resolved = Path(raw).resolve()
+        if str(resolved) != os.path.normpath(raw) or not resolved.is_dir():
+            raise BridgeError("Projects root must be an existing canonical folder", "invalid_arguments")
+        if not any(resolved == root or root in resolved.parents for root in self.allowed_roots):
+            raise BridgeError("Projects root is outside this Node's allowed roots", "root_denied")
+        return str(resolved)
+
+    @staticmethod
+    def _plugin_settings(raw: object, manifest: dict) -> dict:
+        if raw is None:
+            return {}
+        allowed = set(manifest["settings"]) | {"log_level"}
+        if (not isinstance(raw, dict) or set(raw) - allowed
+                or any(not isinstance(value, str) or len(value) > PLUGIN_SETTING_LIMIT
+                       for value in raw.values())):
+            raise BridgeError("Plugin settings accept only: " + ", ".join(sorted(allowed)),
+                              "invalid_arguments")
+        if raw.get("log_level", "INFO") not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise BridgeError("log_level must be DEBUG, INFO, WARNING or ERROR", "invalid_arguments")
+        return {key: value for key, value in raw.items() if value}
+
+    def _save_plugin_adapter(self, payload: dict, current: dict | None) -> dict:
+        if set(payload) - {"name", "plugin", "projects_root", "settings", "enabled"}:
+            raise BridgeError("A plugin adapter has no URL or token", "invalid_arguments")
+        plugin = payload.get("plugin", current["plugin"] if current else None)
+        if current and plugin != current["plugin"]:
+            raise BridgeError("Adapter plugin is immutable", "invalid_arguments")
+        manifest = self._manifest(plugin)
+        name = payload.get("name", current["name"] if current else "")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            raise BridgeError("Invalid adapter name", "invalid_arguments")
+        projects_root = self._projects_root(
+            payload.get("projects_root", current["projects_root"] if current else None))
+        settings = self._plugin_settings(
+            payload.get("settings", json.loads(current["settings"]) if current else None), manifest)
+        enabled = payload.get("enabled", bool(current["enabled"]) if current else True)
+        if not isinstance(enabled, bool):
+            raise BridgeError("enabled must be a boolean", "invalid_arguments")
+        encoded = json.dumps(settings, sort_keys=True)
+        stamp = _now()
+        ident = current["id"] if current else "adapter_" + secrets.token_hex(12)
+        revision = current["revision"] if current else "rev_" + secrets.token_hex(16)
+        if current and (projects_root != current["projects_root"] or encoded != current["settings"]):
+            revision = "rev_" + secrets.token_hex(16)
+        try:
+            with self.lock, self.db:
+                self.db.execute(
+                    "INSERT INTO runtime_adapters(id,name,runtime_type,base_url,token,enabled,revision,"
+                    "created,updated,kind,plugin,projects_root,settings) "
+                    "VALUES(?,?,?,'','',?,?,?,?,'plugin',?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "name=excluded.name,enabled=excluded.enabled,revision=excluded.revision,"
+                    "updated=excluded.updated,projects_root=excluded.projects_root,"
+                    "settings=excluded.settings",
+                    (ident, name.strip(), manifest["runtime_type"], int(enabled), revision,
+                     current["created"] if current else stamp, stamp, plugin, projects_root, encoded))
+        except sqlite3.IntegrityError:
+            raise BridgeError("Adapter name is already in use", "conflict") from None
+        if not enabled or (current and revision != current["revision"]):
+            self.plugins.stop(ident)
+        return _public_adapter(self.adapter(ident))
+
+    def plugin_client(self, row: dict, *, timeout: float = 30) -> PluginRuntimeAdapter:
+        process = self.plugins.process(row, self._manifest(row["plugin"]))
+        return PluginRuntimeAdapter(row["id"], row["runtime_type"], process, timeout=timeout)
+
     def save_adapter(self, payload: dict, adapter_id: str | None = None) -> dict:
+        current = self.adapter(adapter_id) if adapter_id else None
+        if isinstance(payload, dict) and ("plugin" in payload or (
+                current and current.get("kind") == "plugin")):
+            return self._save_plugin_adapter(payload, current)
         allowed_fields = {"name", "runtime_type", "base_url", "token", "enabled"}
         if not isinstance(payload, dict) or set(payload) - allowed_fields:
             raise BridgeError("Unexpected adapter fields", "invalid_arguments")
-        current = self.adapter(adapter_id) if adapter_id else None
         name = payload.get("name", current["name"] if current else "")
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid adapter name", "invalid_arguments")
@@ -547,6 +667,7 @@ class NodeService:
         self.adapter(adapter_id)
         with self.lock, self.db:
             self.db.execute("DELETE FROM runtime_adapters WHERE id=?", (adapter_id,))
+        self.plugins.stop(adapter_id)
         return {"deleted": adapter_id}
 
     def test_adapter(self, payload: dict) -> dict:
@@ -555,6 +676,8 @@ class NodeService:
             raise BridgeError("Unexpected adapter test fields", "invalid_arguments")
         adapter_id = payload.get("adapter_id")
         saved = self.adapter(adapter_id) if adapter_id else None
+        if saved is not None and saved.get("kind") == "plugin":
+            return self._test_plugin_adapter(saved)
         runtime_type = payload.get("runtime_type", saved["runtime_type"] if saved else None)
         if runtime_type not in {"pi", "codex", "claude", "opencode"} or (saved and runtime_type != saved["runtime_type"]):
             raise BridgeError("Invalid or immutable runtime type", "invalid_arguments")
@@ -580,6 +703,20 @@ class NodeService:
         if descriptor.release is not None:
             result["release"] = descriptor.release
         return result
+
+    def _test_plugin_adapter(self, row: dict) -> dict:
+        try:
+            descriptor = self.plugin_client(row, timeout=10).descriptor()
+        except BridgeError as exc:
+            log = self.state / "plugins" / row["id"] / "plugin.log"
+            return {"success": False, "runtime_type": row["runtime_type"], "code": exc.code,
+                    "message": f"{exc} (details in {log})"}
+        return {"success": True, "adapter_id": row["id"], "runtime_type": row["runtime_type"],
+                "native_runtime": descriptor.runtime_id,
+                "native_instance": descriptor.instance_id[:200],
+                "adapter_version": descriptor.adapter_version,
+                "native_version": descriptor.native_version,
+                "protocol": 2, "features": descriptor.features}
 
     def runtime_call(self, adapter_id: str, operation: str, body: dict):
         allowed_ops = {"descriptor", "models", "profile_catalog", "profiles", "save_profile",
@@ -625,9 +762,13 @@ class NodeService:
             adapter_row = self.adapter(adapter_id, require_enabled=True)
             if expected_revision != adapter_row["revision"]:
                 raise BridgeError("The Node adapter configuration changed", "adapter_changed")
-            client = HttpRuntimeAdapter(adapter_row["id"], adapter_row["runtime_type"],
-                                        adapter_row["base_url"], adapter_row["token"],
-                                        timeout=10 if operation == "usage_limits" else 30)
+            timeout = 10 if operation == "usage_limits" else 30
+            if adapter_row.get("kind") == "plugin":
+                client = self.plugin_client(adapter_row, timeout=timeout)
+            else:
+                client = HttpRuntimeAdapter(adapter_row["id"], adapter_row["runtime_type"],
+                                            adapter_row["base_url"], adapter_row["token"],
+                                            timeout=timeout)
         args = arguments
         if operation == "descriptor":
             value = client.descriptor()

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Agent plugins (Agent Protocol v2): a Node can run Claude Code, Codex,
+  OpenCode and Pi as supervised child processes speaking JSON-RPC over
+  stdio, with no adapter port, token or service. Add one with
+  `workspace-bridge node adapter add <plugin> --name <name>` (or
+  `local-node adapter add`), or through the Manager API with a `plugin`
+  field; `GET /api/nodes/{id}/plugins` lists what a Node can run. The Node
+  restarts a crashed plugin with backoff, buffers pushed events for the
+  Bridge, and keeps each plugin's stderr in a size-capped log. Pi gains a
+  `--stdio` mode. HTTP adapters keep working for now.
+
 - One slow Node or adapter no longer stalls the whole Bridge. The global
   service lock was held across Node file and Git calls, and every MCP run
   mutation queued behind one global lock. Now the database lock covers only

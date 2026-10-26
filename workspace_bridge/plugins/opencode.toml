@@ -1,0 +1,9 @@
+id = "opencode"
+version = "1.0.0"
+protocol = 2
+runtime_type = "opencode"
+python_module = "opencode"
+description = "OpenCode through opencode serve"
+features = ["steer", "queue", "events", "images"]
+# binary: path to the opencode CLI.
+settings = ["binary"]

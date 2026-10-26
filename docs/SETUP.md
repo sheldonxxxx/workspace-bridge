@@ -199,8 +199,37 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-to
 
 ## 6. Runtime adapters (native, per host)
 
-The supported path is package installation followed by the runtime-neutral
-`workspace-bridge adapter` lifecycle. Each adapter state owns exactly one Pi,
+### Plugin adapters (no separate service)
+
+A Node can run each agent itself as a child process (an agent plugin), so
+an adapter needs no port, token or service of its own. Install the agent's
+own CLI and sign in to it as usual on that host, then add the adapter on the
+Node that owns the projects:
+
+```sh
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" plugin list
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add claude --name "Claude Code"
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter add codex --name "Codex"
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter test <adapter-id>
+```
+
+For the Bridge machine's embedded Node use `workspace-bridge local-node
+adapter add ...` instead. `--projects-root` defaults to the Node's only
+allowed root and must stay inside the allowed roots. Plugin settings are
+passed with `--set`, for example `--set binary=/opt/homebrew/bin/claude` or
+`--set setting_sources=user`; `plugin list` shows each plugin's settings.
+Pi needs the npm package `workspace-bridge-pi-host-adapter` installed so its
+`workspace-bridge-pi-adapter` command is on the Node's `PATH`. The Manager
+can create the same adapters through `POST /api/adapters` with a `plugin`
+field. The Node starts a plugin on first use, restarts it with backoff if it
+exits, and writes its stderr to `plugins/<adapter-id>/plugin.log` in the
+Node state folder. The Bridge discovers the adapter on its next refresh.
+
+### HTTP adapter services
+
+The older path is package installation followed by the runtime-neutral
+`workspace-bridge adapter` lifecycle. It will be removed once plugin
+adapters cover every deployment. Each adapter state owns exactly one Pi,
 Codex, or Claude Code instance; use a separate `--state` directory per
 instance. A Claude Code instance also needs the optional SDK extra
 (`uv tool install 'workspace-bridge[claude]'`) and an existing Claude Code

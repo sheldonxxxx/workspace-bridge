@@ -583,6 +583,8 @@ def main(argv: list[str] | None = None):
     local_enable.add_argument("--allow-root", action="append", required=True,
                               help="Project root this Node may expose (repeatable)")
     local_enable.add_argument("--name", default="This machine", help="Node display name")
+    from .node_cli import add_plugin_commands
+    add_plugin_commands(local_node_sub)
     pairing_parser = sub.add_parser("pairing", help="Issue one-time pairing strings for Nodes that dial this Bridge")
     pairing_sub = pairing_parser.add_subparsers(dest="pairing_command", required=True)
     pairing_create = pairing_sub.add_parser("create", help="Create a single-use pairing string (valid 10 minutes)")
@@ -601,7 +603,7 @@ def main(argv: list[str] | None = None):
     node.add_argument("--state", dest="node_state", type=Path, default=default_node_state(),
                       help="Node state directory (separate from Bridge --state)")
     node.add_argument("node_argv", nargs=argparse.REMAINDER,
-                      help="Node command: init | pair | serve | show-token | service ...")
+                      help="Node command: init | pair | serve | show-token | service | plugin | adapter ...")
     adapter = sub.add_parser("adapter", help="Administer one native Pi/Codex/Claude adapter instance")
     adapter.add_argument("--state", dest="adapter_state", type=Path, required=True,
                          help="Adapter instance state directory (separate from Bridge --state and Node state)")
@@ -713,6 +715,16 @@ def main(argv: list[str] | None = None):
         if args.command == "service":
             from .bridge_service import run_action
             print(json.dumps(run_action(args.service_command, state), indent=2, sort_keys=True))
+            return
+        if args.command == "local-node" and getattr(args, "plugin_group", None):
+            from .node_cli import load_node_config, run_plugin_command
+            from .node_service import NodeService
+            local = state / Service.LOCAL_NODE_DIR
+            node = NodeService(local, load_node_config(local))
+            try:
+                print(json.dumps(run_plugin_command(node, args), indent=2, sort_keys=True))
+            finally:
+                node.close()
             return
         if args.command == "local-node":
             result = enable_local_node(state, args.allow_root, args.name)

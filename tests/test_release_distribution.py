@@ -18,7 +18,7 @@ EXPECTED_MJS = [
     "adapter.mjs", "config.mjs", "execution-store.mjs", "executions.mjs", "extensions.mjs",
     "fingerprint.mjs", "logging.mjs", "login-path.mjs", "main.mjs",
     "paths.mjs", "pi-adapter.mjs", "policy.mjs", "release.mjs",
-    "sdk-events.mjs", "sdk-transport.mjs", "server.mjs",
+    "sdk-events.mjs", "sdk-transport.mjs", "server.mjs", "stdio.mjs",
     "trusted-permission-extension.mjs", "wbrp.mjs",
 ]
 

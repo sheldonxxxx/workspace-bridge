@@ -21,6 +21,7 @@ import { createLogger, sanitizedErrorCode } from "./logging.mjs";
 import { applyLoginPathResult, resolveLoginPathSync } from "./login-path.mjs";
 import { canonicalizeProjectsDir } from "./paths.mjs";
 import { createPiAdapterServer } from "./server.mjs";
+import { serveStdio } from "./stdio.mjs";
 
 export function createLog(env = process.env) {
   // loadConfig validates WB_LOG_LEVEL; the logger then enforces it.
@@ -123,7 +124,42 @@ const isEntry = typeof process.argv[1] === "string" && (
   || process.argv[1].endsWith("workspace-bridge-pi-adapter")
 );
 
-if (isEntry) {
+// `--stdio`: Agent Protocol v2 for a supervising Workspace Bridge Node. The
+// real stdout carries protocol lines only; every other stdout write, logs
+// included, is sent to stderr.
+export function buildStdioAdapter(params, env = process.env) {
+  const settings = params.settings && typeof params.settings === "object" ? params.settings : {};
+  const merged = { ...env, WB_PI_PROJECTS_DIR: String(params.projectsRoot || "") };
+  if (typeof settings.pi_binary === "string") merged.WB_PI_BINARY = settings.pi_binary;
+  if (typeof settings.agent_dir === "string") merged.PI_CODING_AGENT_DIR = settings.agent_dir;
+  if (typeof settings.log_level === "string") merged.WB_LOG_LEVEL = settings.log_level;
+  const built = buildMain(merged);
+  if (!built.projectsRoot) {
+    throw built.projectsError || new Error("Pi projects root is unavailable");
+  }
+  if (!built.agentDirOk) throw new Error("Pi agent directory is not allowed");
+  return new PiAdapter({
+    projectsRoot: built.projectsRoot,
+    agentDir: built.config.agentDir,
+    piUsable: built.piCheck.usable && built.agentDirOk,
+    piVersion: built.piCheck.version,
+    onLog: built.log,
+  });
+}
+
+const stdioMode = isEntry && process.argv.includes("--stdio");
+
+if (stdioMode) {
+  const protocolWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => process.stderr.write(chunk, ...rest);
+  serveStdio({
+    write: (line) => protocolWrite(`${line}\n`),
+    buildAdapter: (params) => buildStdioAdapter(params),
+    onLog: createLogger({ level: process.env.WB_LOG_LEVEL || "INFO" }),
+  });
+}
+
+if (isEntry && !stdioMode) {
   let built;
   try {
     built = buildMain(process.env);

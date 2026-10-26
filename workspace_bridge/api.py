@@ -730,8 +730,20 @@ class AdapterCreate(Input):
     enabled: bool = True
 
 
+class PluginAdapterCreate(Input):
+    """An adapter the Node runs as a supervised stdio plugin."""
+    node_id: NodeID
+    name: str = Field(min_length=1, max_length=80)
+    plugin: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")
+    projects_root: str | None = Field(default=None, min_length=1, max_length=4096)
+    settings: dict[str, str] = Field(default_factory=dict, max_length=17)
+    enabled: bool = True
+
+
 class AdapterUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    projects_root: str | None = Field(default=None, min_length=1, max_length=4096)
+    settings: dict[str, str] | None = Field(default=None, max_length=17)
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     token: str | None = Field(default=None, max_length=4096,
                               description="Blank or omitted preserves the saved token.")
@@ -1060,6 +1072,10 @@ def make_admin(service: Service, port: int = 8766, *,
                     if request.method == "DELETE":
                         return JSONResponse(await run_in_threadpool(
                             service.node_registry.delete, node_id))
+                if len(parts) == 4 and parts[3] == "plugins" and request.method == "GET":
+                    # Agent plugins this Node can run (built-in and installed).
+                    return JSONResponse(await run_in_threadpool(
+                        lambda: service.node_registry.client(node_id, timeout=5).plugins()))
                 if len(parts) == 4 and parts[3] == "test" and request.method == "POST":
                     raw = await body_json(request)
                     raw["node_id"] = node_id
@@ -1098,9 +1114,12 @@ def make_admin(service: Service, port: int = 8766, *,
                 if request.method == "GET":
                     return JSONResponse(await run_in_threadpool(service.list_adapters))
                 if request.method == "POST":
-                    model = AdapterCreate.model_validate(await body_json(request))
-                    result = await run_in_threadpool(
-                        service.adapter_registry.create, model.model_dump())
+                    raw = await body_json(request)
+                    if isinstance(raw, dict) and "plugin" in raw:
+                        payload = PluginAdapterCreate.model_validate(raw).model_dump(exclude_none=True)
+                    else:
+                        payload = AdapterCreate.model_validate(raw).model_dump()
+                    result = await run_in_threadpool(service.adapter_registry.create, payload)
                     return JSONResponse(result, 201)
                 return JSONResponse({"error": "Method not allowed"}, 405)
             if path == "/api/adapters/test" and request.method == "POST":
@@ -1356,6 +1375,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/nodes/pairings", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/test", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/adapters", api, methods=["GET", "POST"]),
+        Route("/api/nodes/{node_id}/plugins", api, methods=["GET"]),
         Route("/api/nodes/{node_id}", api, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/adapters", api, methods=["GET", "POST"]),
         Route("/api/adapters/test", api, methods=["POST"]),

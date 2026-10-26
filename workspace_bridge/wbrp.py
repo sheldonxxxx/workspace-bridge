@@ -421,6 +421,14 @@ class HttpRuntimeAdapter:
                     self._scrub_secret(item) for key, item in value.items()}
         return value
 
+    @staticmethod
+    def _check_request_size(method: str, path: str, body: dict | None) -> bytes | None:
+        """Bound one request body: 12 MiB for a run start with images, else 512 KiB."""
+        raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+        if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
+            raise BridgeError("Adapter request is too large", "invalid_arguments")
+        return raw_body
+
     def _request(self, method: str, path: str, *, body: dict | None = None,
                  query: dict | None = None, timeout: float | None = None) -> dict:
         if not path.startswith("/v1/"):
@@ -429,9 +437,7 @@ class HttpRuntimeAdapter:
         if query:
             url += "?" + urllib.parse.urlencode({k: v for k, v in query.items()
                                                    if v is not None})
-        raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
-            raise BridgeError("Adapter request is too large", "invalid_arguments")
+        raw_body = self._check_request_size(method, path, body)
         headers = {"Accept": "application/json", "X-Runtime-Token": self.token}
         if raw_body is not None:
             headers["Content-Type"] = "application/json"

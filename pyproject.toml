@@ -56,7 +56,7 @@ workspace-bridge-opencode-adapter = "workspace_bridge.opencode_host_adapter:main
 include = ["workspace_bridge*"]
 
 [tool.setuptools.package-data]
-workspace_bridge = ["static/dist/*", "static/dist/assets/*", "skills/*/SKILL.md", "opencode_permission_plugin/*.mjs", "opencode_permission_plugin/package.json"]
+workspace_bridge = ["static/dist/*", "static/dist/assets/*", "skills/*/SKILL.md", "plugins/*.toml", "opencode_permission_plugin/*.mjs", "opencode_permission_plugin/package.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

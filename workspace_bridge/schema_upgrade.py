@@ -85,3 +85,20 @@ def add_node_transports(db: sqlite3.Connection) -> None:
             if column not in columns:
                 db.execute(f"ALTER TABLE nodes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         db.execute(NODE_PAIRINGS_SQL)
+
+
+PLUGIN_ADAPTER_COLUMNS = (
+    ("kind", "TEXT NOT NULL DEFAULT 'http' CHECK(kind IN ('http','plugin'))"),
+    ("plugin", "TEXT NOT NULL DEFAULT ''"),
+    ("projects_root", "TEXT NOT NULL DEFAULT ''"),
+    ("settings", "TEXT NOT NULL DEFAULT '{}'"),
+)
+
+
+def add_plugin_adapters(db: sqlite3.Connection) -> None:
+    """Let a Node adapter be a supervised stdio plugin instead of an HTTP URL."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(runtime_adapters)")}
+    with db:
+        for name, definition in PLUGIN_ADAPTER_COLUMNS:
+            if name not in columns:
+                db.execute(f"ALTER TABLE runtime_adapters ADD COLUMN {name} {definition}")

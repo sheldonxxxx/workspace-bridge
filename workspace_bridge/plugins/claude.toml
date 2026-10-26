@@ -1,0 +1,10 @@
+id = "claude"
+version = "1.0.0"
+protocol = 2
+runtime_type = "claude"
+python_module = "claude"
+description = "Claude Code through the Claude Agent SDK"
+features = ["steer", "queue", "events", "usage_limits"]
+# binary: path to the claude CLI; setting_sources: comma-separated list of
+# user, project, local (which Claude Code settings files to load).
+settings = ["binary", "setting_sources"]

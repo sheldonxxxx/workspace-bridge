@@ -294,6 +294,60 @@ policy, and the Claude Code adapter's tool-list and permission-hook policy are
 different enforcement mechanisms; a security profile describes the adapter's exact claims and never
 asserts they are equivalent.
 
+## Agent Protocol v2 (stdio plugins)
+
+Version 2 keeps the resource model above and replaces HTTP with JSON-RPC 2.0
+over the plugin's stdin and stdout. The Node starts the plugin from its
+manifest, owns both pipes, and is the only client. Each message is one UTF-8
+JSON object on one line, at most 16 MiB. Nothing else may be written to the
+plugin's stdout; logs go to stderr, which the Node keeps in a size-capped
+`plugin.log`.
+
+1. The Node sends `initialize` with `{protocol: 2, state, projectsRoot,
+   settings, adapterId}`. `state` is a private folder for the plugin;
+   `settings` holds only the keys the manifest lists, plus `log_level`. The
+   plugin answers `{protocol: 2, instanceId}` once it is ready, even if its
+   native runtime is not usable yet; that is reported per request.
+2. Requests use these methods, with path parameters and query values as
+   camelCase params and any v1 request body as `body`:
+
+| v2 method | v1 route |
+| --- | --- |
+| `descriptor`, `models`, `usageLimits` | `GET /v1/descriptor`, `/v1/models`, `/v1/usage-limits` |
+| `profiles.list`, `profiles.save`, `profiles.delete` | `GET`/`POST /v1/profiles`, `DELETE /v1/profiles/{id}` |
+| `conversations.create`, `conversations.get`, `conversations.rebind` | `POST /v1/conversations`, `GET /v1/conversations/{id}`, `POST .../security` |
+| `runs.start`, `runs.find` | `POST /v1/conversations/{id}/runs`, `GET .../runs/{clientRunId}` |
+| `runs.get`, `runs.cancel`, `runs.steer`, `runs.queue` | `GET /v1/runs/{id}`, `POST .../cancel`, `.../steer`, `.../queue` |
+| `runs.interactions`, `runs.activities` | `GET /v1/runs/{id}/interactions`, `.../activities` |
+| `interactions.resolve`, `activities.get` | `POST /v1/interactions/{id}/resolve`, `GET /v1/activities/{id}` |
+
+3. A failed request returns `error: {code: -32000, message, data: {status,
+   code}}`, where `status` and `code` keep their v1 meaning (409
+   `conversation_busy`, 501 unsupported, and so on).
+4. A plugin that advertises `events` pushes `{method: "event", params:
+   {instanceId, event}}` notifications as events happen. The Node buffers
+   the latest 1,000 and serves the Bridge's long poll from them; snapshots
+   stay authoritative.
+5. `shutdown`, or end of stdin, asks the plugin to close cleanly. The Node
+   stops the whole process group if the plugin has not exited within
+   five seconds.
+
+A manifest is a TOML file:
+
+```toml
+id = "myagent"            # lowercase name used by `adapter add`
+version = "1.0.0"
+protocol = 2
+runtime_type = "pi"       # pi, codex, claude or opencode for now
+command = ["myagent-plugin", "--stdio"]
+settings = ["binary"]     # setting keys the plugin accepts
+features = ["steer", "queue"]   # informational; the descriptor is authoritative
+```
+
+Install a third-party manifest with `workspace-bridge node plugin add
+<manifest.toml>`. The Node runs the command without a shell, in its own
+process group, with the Node's environment minus every `WB_*` variable.
+
 ## Conformance gate
 
 A second adapter must run against one Bridge coordinator without changing its

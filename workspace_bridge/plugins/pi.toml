@@ -1,0 +1,10 @@
+id = "pi"
+version = "1.0.0"
+protocol = 2
+runtime_type = "pi"
+# Installed with: npm install -g workspace-bridge-pi-host-adapter
+command = ["workspace-bridge-pi-adapter", "--stdio"]
+description = "Pi through the Pi coding agent SDK"
+features = ["steer", "queue"]
+# pi_binary: path to the pi CLI; agent_dir: Pi agent directory.
+settings = ["pi_binary", "agent_dir"]

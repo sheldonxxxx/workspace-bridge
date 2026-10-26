@@ -159,6 +159,9 @@ class NodeClient:
     def list_adapters(self) -> dict:
         return self._request("GET", "/v1/adapters")
 
+    def plugins(self) -> dict:
+        return self._request("GET", "/v1/plugins")
+
     def create_adapter(self, payload: dict) -> dict:
         return self._request("POST", "/v1/adapters", payload)
 

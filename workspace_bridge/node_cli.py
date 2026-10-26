@@ -108,6 +108,55 @@ def select_service_backend(platform_name: str | None = None) -> str:
     )
 
 
+def add_plugin_commands(sub) -> None:
+    """``plugin`` and ``adapter`` subcommands, shared by Node and local-node CLIs."""
+    plugin = sub.add_parser("plugin", help="List or install agent plugin manifests")
+    plugin.set_defaults(plugin_group="plugin")
+    plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
+    plugin_sub.add_parser("list", help="List the agent plugins this Node can run")
+    plugin_add = plugin_sub.add_parser("add", help="Install a third-party plugin manifest (TOML)")
+    plugin_add.add_argument("manifest", type=Path)
+    adapter = sub.add_parser("adapter", help="Add, list, test or remove agent adapters run as plugins")
+    adapter.set_defaults(plugin_group="adapter")
+    adapter_sub = adapter.add_subparsers(dest="adapter_command", required=True)
+    add = adapter_sub.add_parser("add", help="Add an adapter that runs a plugin under this Node")
+    add.add_argument("plugin", help="Plugin id, e.g. claude, codex, opencode or pi")
+    add.add_argument("--name", required=True)
+    add.add_argument("--projects-root", help="Folder the agent may work in; defaults to the only allowed root")
+    add.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                     help="Plugin setting, e.g. binary=/opt/homebrew/bin/claude (repeatable)")
+    adapter_sub.add_parser("list", help="List this Node's adapters")
+    test = adapter_sub.add_parser("test", help="Start the plugin and print its descriptor")
+    test.add_argument("adapter_id")
+    remove = adapter_sub.add_parser("remove", help="Remove an adapter (its plugin state folder is kept)")
+    remove.add_argument("adapter_id")
+
+
+def run_plugin_command(node: NodeService, args) -> dict:
+    if args.plugin_group == "plugin":
+        if args.plugin_command == "add":
+            manifest = node.install_manifest(args.manifest)
+            return {"installed": manifest["id"], "runtime_type": manifest["runtime_type"]}
+        return {"plugins": [{"id": m["id"], "runtime_type": m["runtime_type"],
+                             "version": m["version"], "settings": m["settings"],
+                             "description": m["description"]}
+                            for m in node.manifests().values()]}
+    if args.adapter_command == "add":
+        settings = {}
+        for item in args.set:
+            key, sep, value = item.partition("=")
+            if not sep or not key:
+                raise BridgeError("--set expects KEY=VALUE", "invalid_arguments")
+            settings[key] = value
+        return node.save_adapter({"name": args.name, "plugin": args.plugin,
+                                  "projects_root": args.projects_root, "settings": settings})
+    if args.adapter_command == "list":
+        return node.list_adapters()
+    if args.adapter_command == "test":
+        return node.test_adapter({"adapter_id": args.adapter_id})
+    return node.delete_adapter(args.adapter_id)
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Private workspace-bridge Node data-plane service")
     parser.add_argument("--state", type=Path, default=default_node_state())
@@ -128,6 +177,7 @@ def main(argv: list[str] | None = None):
     service_sub.add_parser("stop", help="Stop the managed system service")
     service_sub.add_parser("restart", help="Restart the managed system service")
     service_sub.add_parser("uninstall", help="Remove only the managed system unit")
+    add_plugin_commands(sub)
     args = parser.parse_args(argv)
     state = args.state.expanduser().absolute()
     os.umask(0o077)
@@ -182,6 +232,13 @@ def main(argv: list[str] | None = None):
             if path.is_symlink() or path.stat().st_mode & 0o077:
                 raise BridgeError("Unsafe Node token file")
             print(path.read_text().strip())
+            return
+        if args.command in ("plugin", "adapter"):
+            node = NodeService(state, config)
+            try:
+                print(json.dumps(run_plugin_command(node, args), indent=2, sort_keys=True))
+            finally:
+                node.close()
             return
         if args.command == "pair":
             from .node_link import pair

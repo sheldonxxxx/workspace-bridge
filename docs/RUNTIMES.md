@@ -14,6 +14,29 @@ instances may share a runtime type (for example two Pi daemons). MCP callers
 discover instances with `list_agent_adapters` and select by `adapter_id`;
 the runtime type never selects a destination and there is no fallback.
 
+## Plugin adapters
+
+Each runtime also ships as an agent plugin that the owning Node starts and
+supervises over stdio (Agent Protocol v2, see
+[Runtime Protocol](RUNTIME_PROTOCOL.md#agent-protocol-v2-stdio-plugins)).
+A plugin adapter has no endpoint, token or service; add one with
+`workspace-bridge node adapter add <plugin> --name <name>` (or
+`workspace-bridge local-node adapter add` on the Bridge machine) as shown in
+[Setup](SETUP.md#plugin-adapters-no-separate-service).
+
+| Plugin | Command the Node runs | Settings |
+|---|---|---|
+| `claude` | `python -m workspace_bridge.plugin_host claude` (needs the `claude` extra) | `binary`, `setting_sources` |
+| `codex` | `python -m workspace_bridge.plugin_host codex` | none |
+| `opencode` | `python -m workspace_bridge.plugin_host opencode` | `binary` |
+| `pi` | `workspace-bridge-pi-adapter --stdio` (npm package) | `pi_binary`, `agent_dir` |
+
+Every plugin also accepts `log_level`. Runtime behaviour, security profiles,
+recovery and the no-replay rule are the same as for the HTTP adapters
+below; only the transport differs. Changing a plugin adapter's projects root
+or settings rotates its revision, so active runs bound to the old
+configuration are marked interrupted.
+
 ## Installation surface
 
 | Item | Pi | Codex | Claude Code | OpenCode v2 |

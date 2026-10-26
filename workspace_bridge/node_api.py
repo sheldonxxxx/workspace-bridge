@@ -91,6 +91,10 @@ def _route(service, method: str, path: str, raw: bytes) -> tuple[int, object]:
         return 200, service.workspace_call(pieces[2], _body(raw, limit))
     if path == "/v1/adapters" and method == "GET":
         return 200, service.list_adapters()
+    if path == "/v1/plugins" and method == "GET":
+        return 200, {"plugins": [{key: m[key] for key in ("id", "runtime_type", "version",
+                                                          "description", "settings", "features")}
+                                 for m in service.manifests().values()]}
     if path == "/v1/adapters" and method == "POST":
         return 201, service.save_adapter(_body(raw, limit))
     if path == "/v1/adapters/test" and method == "POST":
@@ -163,6 +167,7 @@ def make_node_api(service, token_hash: str):
         Route("/v1/workspaces/{workspace_id}/configure", dispatch, methods=["POST"]),
         Route("/v1/workspaces/{operation}", dispatch, methods=["POST"]),
         Route("/v1/adapters", dispatch, methods=["GET", "POST"]),
+        Route("/v1/plugins", dispatch, methods=["GET"]),
         Route("/v1/adapters/test", dispatch, methods=["POST"]),
         Route("/v1/adapters/{adapter_id}", dispatch, methods=["GET", "PATCH", "DELETE"]),
         Route("/v1/adapters/{adapter_id}/test", dispatch, methods=["POST"]),
