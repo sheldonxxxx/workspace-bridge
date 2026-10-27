@@ -13,7 +13,7 @@ export interface WorkspaceRoute {
   ready?: boolean;
   default_model?: string | null;
   security_binding?: {
-    source: "profile" | "runtime-config";
+    source: "profile" | "native";
     profile?: { id: string; revision?: string };
     revision?: string;
     status?: string;

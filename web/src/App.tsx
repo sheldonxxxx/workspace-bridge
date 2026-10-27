@@ -783,12 +783,6 @@ function WorkspaceCard({
                     Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
                   </span>
                 </p>
-                {grant.security_binding?.source === "runtime-config" &&
-                  grant.security_binding.status !== "ready" && (
-                    <p className="runtime-security-summary">
-                      Codex security config is currently unavailable
-                    </p>
-                  )}
                 {!diagnosticsUnavailable && route && !route.ready && (
                   <div className="runtime-route-blocker">
                     <p>{blockers[0]?.check?.summary || route.summary}</p>

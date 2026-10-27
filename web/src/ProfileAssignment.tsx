@@ -13,39 +13,19 @@ import {
 type Profile = {
   id: string;
   revision: string;
-  mutable: boolean;
-  available?: boolean;
-  unavailableReason?:
-    | "native-permission-unavailable"
-    | "managed-requirements"
-    | "legacy-sandbox-conflict";
+  builtin: boolean;
+  description?: string;
+  restricts: string[];
 };
 
-function unavailableMessage(profile: Profile): string {
-  switch (profile.unavailableReason) {
-    case "native-permission-unavailable":
-      return "Native permission profile is missing or disallowed here.";
-    case "managed-requirements":
-      return "Blocked by Codex managed security requirements.";
-    case "legacy-sandbox-conflict":
-      return "Remove legacy sandbox_workspace_write settings from Codex config to use this profile.";
-    default:
-      return "Unavailable for this workspace.";
-  }
+type AdapterSecurity = { enforces: string[]; native: boolean };
+
+// Rules a profile restricts that this agent cannot enforce; the Bridge
+// refuses such a route, so the dialog shows why before saving.
+function unenforced(profile: Profile, security: AdapterSecurity | null) {
+  if (!security) return [];
+  return profile.restricts.filter((key) => !security.enforces.includes(key));
 }
-
-type RuntimeConfigSecurity = {
-  supported: boolean;
-  available: boolean;
-  status: string;
-  revision: string;
-  resolvedSummary?: {
-    activePermissionProfile?: string | null;
-    approvalPolicy?: string;
-    approvalsReviewer?: string;
-    provenance?: string;
-  };
-};
 
 export function ProfileAssignment({
   workspace,
@@ -63,12 +43,11 @@ export function ProfileAssignment({
   notify: (message: string) => void;
 }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [runtimeConfig, setRuntimeConfig] =
-    useState<RuntimeConfigSecurity | null>(null);
+  const [security, setSecurity] = useState<AdapterSecurity | null>(null);
   const route = workspace.routes?.[adapterId];
-  const [securitySource, setSecuritySource] = useState<
-    "profile" | "runtime-config"
-  >(route?.security_binding?.source || "profile");
+  const [securitySource, setSecuritySource] = useState<"profile" | "native">(
+    route?.security_binding?.source || "profile",
+  );
   const [selectedId, setSelectedId] = useState(route?.profile?.id || "");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -76,25 +55,23 @@ export function ProfileAssignment({
 
   useEffect(() => {
     let live = true;
-    const query = new URLSearchParams({
-      workspace_id: workspace.id,
-      fresh: "1",
-    });
-    api<{ profiles: Profile[]; runtimeConfig?: RuntimeConfigSecurity }>(
-      `/api/adapters/${adapterId}/profiles?${query.toString()}`,
-    )
-      .then((data) => {
+    Promise.all([
+      api<{ profiles: Profile[] }>("/api/profiles"),
+      api<{ security?: AdapterSecurity }>(`/api/adapters/${adapterId}`),
+    ])
+      .then(([data, adapter]) => {
         if (!live) return;
-        const available = (data.profiles || []).filter(
-          (profile) => profile.available !== false,
+        const caps = adapter.security || null;
+        const usable = (data.profiles || []).filter(
+          (profile) => unenforced(profile, caps).length === 0,
         );
         setProfiles(data.profiles || []);
+        setSecurity(caps);
         setSelectedId((current) =>
-          available.some((profile) => profile.id === current)
+          usable.some((profile) => profile.id === current)
             ? current
-            : available[0]?.id || "",
+            : usable[0]?.id || "",
         );
-        setRuntimeConfig(data.runtimeConfig || null);
       })
       .catch((failure) => {
         if (live) setError((failure as Error).message);
@@ -105,7 +82,7 @@ export function ProfileAssignment({
     return () => {
       live = false;
     };
-  }, [adapterId, workspace.id]);
+  }, [adapterId]);
 
   async function assign() {
     if (securitySource === "profile" && !selectedId) return;
@@ -121,7 +98,7 @@ export function ProfileAssignment({
       notify(
         securitySource === "profile"
           ? `Profile ${selectedId} assigned to ${workspace.name}.`
-          : `Workspace ${workspace.name} will follow current Codex config.`,
+          : `${route?.name || "The agent"} will use its own security in ${workspace.name}.`,
       );
       onClose();
     } catch (failure) {
@@ -137,28 +114,26 @@ export function ProfileAssignment({
         <DialogHeader>
           <DialogTitle>Route security</DialogTitle>
           <DialogDescription>
-            Choose a {route?.name || "adapter"} profile for {workspace.name}.
-            New conversations use the selected profile. Native choices are
-            checked against this workspace's native permission-profile catalog.
+            Choose the security {route?.name || "this agent"} runs under in{" "}
+            {workspace.name}. Every run uses the profile's current rules.
           </DialogDescription>
         </DialogHeader>
-        {route?.runtime_type === "codex" && (
+        {security?.native && (
           <fieldset className="profile-assignment-modes">
             <legend>Security source</legend>
             <label className="profile-assignment-mode">
               <input
                 type="radio"
                 name="security-source"
-                value="runtime-config"
-                checked={securitySource === "runtime-config"}
-                disabled={!runtimeConfig?.supported || !runtimeConfig.available}
-                onChange={() => setSecuritySource("runtime-config")}
+                value="native"
+                checked={securitySource === "native"}
+                onChange={() => setSecuritySource("native")}
               />
               <span>
-                <strong>Use Codex config (config.toml)</strong>
+                <strong>Use the agent's own security</strong>
                 <small>
-                  Follow the current effective Codex security settings for this
-                  workspace.
+                  Follow the agent's native configuration; each native approval
+                  becomes an interaction.
                 </small>
               </span>
             </label>
@@ -171,44 +146,10 @@ export function ProfileAssignment({
                 onChange={() => setSecuritySource("profile")}
               />
               <span>
-                <strong>Use Workspace Bridge profile</strong>
-                <small>
-                  Use an explicit Bridge profile revision for new conversations.
-                </small>
+                <strong>Use a Workspace Bridge profile</strong>
+                <small>The agent enforces the profile's rules.</small>
               </span>
             </label>
-            {securitySource === "runtime-config" && (
-              <div className="runtime-config-summary" aria-live="polite">
-                <strong>
-                  {runtimeConfig?.available
-                    ? "Codex config is available"
-                    : "Codex config is unavailable"}
-                </strong>
-                {runtimeConfig?.resolvedSummary && (
-                  <dl>
-                    <div>
-                      <dt>Permission profile</dt>
-                      <dd>
-                        {runtimeConfig.resolvedSummary
-                          .activePermissionProfile || "Codex default"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Approval</dt>
-                      <dd>{runtimeConfig.resolvedSummary.approvalPolicy}</dd>
-                    </div>
-                    <div>
-                      <dt>Reviewer</dt>
-                      <dd>{runtimeConfig.resolvedSummary.approvalsReviewer}</dd>
-                    </div>
-                    <div>
-                      <dt>Provenance</dt>
-                      <dd>{runtimeConfig.resolvedSummary.provenance}</dd>
-                    </div>
-                  </dl>
-                )}
-              </div>
-            )}
           </fieldset>
         )}
         {securitySource === "profile" && (
@@ -218,32 +159,32 @@ export function ProfileAssignment({
             aria-label="Workspace Bridge profiles"
           >
             {loading && <p role="status">Loading profiles…</p>}
-            {!loading && !error && profiles.length === 0 && (
-              <p role="status">No Workspace Bridge profiles were found.</p>
-            )}
             {!loading && profiles.length > 0 && !selectedId && (
               <p role="status">
-                No profiles can be assigned here. Review the reasons below
-                {route?.runtime_type === "codex" && " or use Codex config"}.
+                This agent cannot enforce any profile
+                {security?.native && "; use its own security instead"}.
               </p>
             )}
-            {profiles.map((profile) => (
-              <button
-                key={profile.id}
-                type="button"
-                aria-pressed={selectedId === profile.id}
-                className={`profile-list-item ${selectedId === profile.id ? "current" : ""}`}
-                disabled={profile.available === false}
-                onClick={() => setSelectedId(profile.id)}
-              >
-                <strong>{profile.id}</strong>
-                <span>
-                  {profile.mutable ? "Custom" : "Built in"}
-                  {profile.available === false &&
-                    ` · ${unavailableMessage(profile)}`}
-                </span>
-              </button>
-            ))}
+            {profiles.map((profile) => {
+              const missing = unenforced(profile, security);
+              return (
+                <button
+                  key={profile.id}
+                  type="button"
+                  aria-pressed={selectedId === profile.id}
+                  className={`profile-list-item ${selectedId === profile.id ? "current" : ""}`}
+                  disabled={missing.length > 0}
+                  onClick={() => setSelectedId(profile.id)}
+                >
+                  <strong>{profile.id}</strong>
+                  <span>
+                    {profile.builtin ? "Built in" : "Custom"}
+                    {missing.length > 0 &&
+                      ` · This agent cannot enforce ${missing.join(", ")}`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
         <Button
@@ -251,7 +192,7 @@ export function ProfileAssignment({
           className="profile-manage-link"
           onClick={onManage}
         >
-          Manage adapter profiles
+          Manage adapters
         </Button>
         {error && (
           <p className="profile-error" role="alert">
@@ -263,11 +204,7 @@ export function ProfileAssignment({
             Cancel
           </Button>
           <Button
-            disabled={
-              busy ||
-              (securitySource === "profile" && !selectedId) ||
-              (securitySource === "runtime-config" && !runtimeConfig?.available)
-            }
+            disabled={busy || (securitySource === "profile" && !selectedId)}
             onClick={() => void assign()}
           >
             Save security source

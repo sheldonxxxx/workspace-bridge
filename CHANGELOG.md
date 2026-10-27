@@ -29,8 +29,8 @@
   `read-only` and `workspace-write-reviewed` profiles move to `read-only` and
   `reviewed`, and routes on an agent-owned custom profile are disabled until
   a Bridge profile is chosen. Codex routes moved to a profile Codex cannot
-  enforce must be switched to `trusted` or `native`. The Manager's profile
-  screens still use the old endpoints until the Manager rework.
+  enforce must be switched to `trusted` or `native`, which the Manager's
+  route security dialog now offers.
 - Breaking: `workspace-bridge support bundle` is removed. Use
   `workspace-bridge doctor --json` and the service and plugin logs.
 
