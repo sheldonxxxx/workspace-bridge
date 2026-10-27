@@ -218,7 +218,7 @@ class CheckRunner:
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS batches (
-              id TEXT PRIMARY KEY, workspace TEXT NOT NULL, run_id TEXT,
+              id TEXT PRIMARY KEY, workspace TEXT NOT NULL, run_id TEXT, worktree_id TEXT,
               state TEXT NOT NULL CHECK(state IN ('running','complete','interrupted')),
               created TEXT NOT NULL, finished TEXT);
             CREATE INDEX IF NOT EXISTS ix_batches_workspace ON batches(workspace, created);
@@ -230,6 +230,8 @@ class CheckRunner:
               truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(batch, seq));
         """)
         self.db.execute("PRAGMA foreign_keys=ON")
+        if "worktree_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(batches)")}:
+            self.db.execute("ALTER TABLE batches ADD COLUMN worktree_id TEXT")
         with self.db:
             # A batch that was running when the Node stopped has no result.
             stamp = _now()
@@ -279,7 +281,8 @@ class CheckRunner:
         os.replace(temporary, path)
         return self.read_config(workspace)
 
-    def start(self, workspace: dict, root: str, names: object, run_id: str | None = None) -> dict:
+    def start(self, workspace: dict, root: str, names: object, run_id: str | None = None,
+              worktree_id: str | None = None) -> dict:
         checks = self.load(workspace)
         if not isinstance(names, list) or not 1 <= len(names) <= MAX_CHECKS or len(set(names)) != len(names) \
                 or any(not isinstance(name, str) for name in names):
@@ -301,8 +304,8 @@ class CheckRunner:
             if active:
                 raise BridgeError(f"Checks {active['id']} are still running in this workspace; "
                                   "read them with their check_id", "checks_busy")
-            self.db.execute("INSERT INTO batches(id,workspace,run_id,state,created) VALUES(?,?,?,?,?)",
-                            (batch, workspace["id"], run_id, "running", _now()))
+            self.db.execute("INSERT INTO batches(id,workspace,run_id,worktree_id,state,created) "
+                            "VALUES(?,?,?,?,?,?)", (batch, workspace["id"], run_id, worktree_id, "running", _now()))
             for seq, (name, item) in enumerate(selected):
                 self.db.execute("INSERT INTO results(batch,seq,name,command,cwd,status) VALUES(?,?,?,?,?,?)",
                                 (batch, seq, name, item["command"], item["cwd"], "pending"))
@@ -376,7 +379,10 @@ def summarize(batch: dict, rows: list[dict]) -> dict:
                for row in rows]
     counts = {status: sum(1 for item in results if item["status"] == status)
               for status in ("passed", "failed", "timed_out", "error", "interrupted")}
-    return {"check_id": batch["id"], "run_id": batch["run_id"], "state": batch["state"],
+    # run_id names the run whose after-run checks these are; worktree_id says
+    # they ran in an isolated run's worktree rather than the workspace.
+    return {"check_id": batch["id"], "run_id": batch["run_id"], "worktree_id": batch["worktree_id"],
+            "state": batch["state"],
             "created": batch["created"], "finished": batch["finished"],
             "passed": counts["passed"],
             "failed": counts["failed"] + counts["timed_out"] + counts["error"] + counts["interrupted"],

@@ -381,7 +381,9 @@ scope; one batch runs per workspace at a time (`checks_busy`).
 Each result has `name`, `command`, `cwd`, `status` (`passed`, `failed`,
 `timed_out`, `error` or `interrupted`), `exit_code`, `duration_ms`, a
 redacted `log_tail` of the last 6,000 characters and `output_bytes`. The batch
-reports `passed` and `failed` counts. Output is the checks' own text and is
+reports `passed` and `failed` counts, `run_id` when these are a run's
+after-run checks, and `worktree_id` when they ran in an isolated run's
+worktree (null for the workspace). Output is the checks' own text and is
 untrusted. Commands run without a shell, with the user's login `PATH`, and
 with Bridge variables removed from the environment. A check that passes its
 timeout is stopped and reported as `timed_out`.

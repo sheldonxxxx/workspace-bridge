@@ -239,7 +239,11 @@ def test_chatgpt_reads_and_checks_an_unapplied_worktree(iso_env):
     _finish(iso_env, run["run_id"])
     checked = _call(iso_env, "run_checks", names=["show"], run_id=run["run_id"], wait_seconds=30)
     assert checked["passed"] == 1 and "two" in checked["results"][0]["log_tail"]
-    assert "one" in _call(iso_env, "run_checks", names=["show"], wait_seconds=30)["results"][0]["log_tail"]
+    assert checked["worktree_id"] == run["isolation"]["worktree_id"] and checked["run_id"] is None
+    reread = _call(iso_env, "run_checks", check_id=checked["check_id"], wait_seconds=0)
+    assert reread["worktree_id"] == checked["worktree_id"]
+    in_workspace = _call(iso_env, "run_checks", names=["show"], wait_seconds=30)
+    assert "one" in in_workspace["results"][0]["log_tail"] and in_workspace["worktree_id"] is None
     with pytest.raises(BridgeError) as caught:
         _call(iso_env, "run_checks", run_id=run["run_id"])
     assert caught.value.code == "invalid_arguments"

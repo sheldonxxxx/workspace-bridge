@@ -476,7 +476,7 @@ class NodeService:
                     # An isolated run's checks run in its worktree, not the workspace.
                     self.worktrees.meta(workspace["id"], WorktreeStore._id(args["worktree_id"]))
                     root = str(self.worktrees.path(workspace["id"], args["worktree_id"]))
-                return runner.start(workspace, root, args.get("names"), run_id)
+                return runner.start(workspace, root, args.get("names"), run_id, args.get("worktree_id"))
             wait_ms = args.get("wait_ms", 0)
             if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 20000:
                 raise BridgeError("wait_ms must be 0 to 20000", "invalid_arguments")

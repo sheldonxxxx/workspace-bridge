@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A Node initialized by 0.3, including the Bridge's embedded Node, is
+  upgraded in place: the first time 1.0 loads it, it gets its own
+  search-cursor secret in `node-config.json`, which 0.3 derived from the
+  removed Node token.
+- `run_checks` results report `worktree_id` when the checks ran in an
+  isolated run's worktree, so a check started with `run_id` no longer looks
+  like a workspace check.
 - **Breaking:** the Manager no longer starts, steers or queues runs. The
   `POST /api/workspaces/{workspace}/jobs/{job_id}/runs`,
   `/api/runs/{run_id}/steer` and `/api/runs/{run_id}/queue` routes and their
