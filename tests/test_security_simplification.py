@@ -399,7 +399,7 @@ def test_direct_instruction_mutual_exclusion_validation(simplified_env):
 @pytest.mark.asyncio
 async def test_direct_instruction_works_over_mcp_tool_surface(simplified_env):
     import httpx
-    from mcp_helpers import McpTransport
+    from mcp_helpers import argument_error, McpTransport
     from workspace_bridge.api import make_mcp
 
     service, ws_id, token, job, native, _ = simplified_env
@@ -426,7 +426,7 @@ async def test_direct_instruction_works_over_mcp_tool_surface(simplified_env):
                 "workspace_id": ws_id, "adapter_id": ADAPTER_ID,
                 "request_id": "mcp-direct-2"}}})
         assert invalid.status_code == 200
-        assert invalid.json()["error"]["code"] == -32602
+        assert "Supply exactly one of job_id or instruction" in argument_error(invalid.json())
 
 
 def test_direct_instruction_identity_is_keyed_by_adapter_and_request():

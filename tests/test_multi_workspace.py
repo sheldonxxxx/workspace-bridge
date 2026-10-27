@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from mcp_helpers import McpTransport
+from mcp_helpers import argument_error, McpTransport
 from workspace_bridge.api import make_admin, make_mcp, TOOLS, Handoff
 from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
@@ -54,7 +54,7 @@ async def test_single_route_many_workspaces(env):
 
 async def test_workspace_id_is_required_even_with_one_mapping(env):
     r = await request(env, "read_file", {"path": "README.md"})
-    assert r.json()["error"]["code"] == -32602
+    assert "workspace_id: Field required" in argument_error(r.json())
     for name, (model, _, _, _) in TOOLS.items():
         assert ("workspace_id" in model.model_json_schema().get("required", [])) == (name not in {"list_workspaces"})
 

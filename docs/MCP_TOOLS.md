@@ -18,7 +18,12 @@ arguments. A request without an `id` is a notification and is never executed;
 | Handoffs | `save_handoff`, `list_handoffs` |
 | Agent runs | `list_targets`, `start_run`, `list_runs`, `read_run`, `run_log`, `send_run_input`, `cancel_run`, `answer_interaction`, `apply_run`, `discard_run` |
 
-All arguments are strictly typed and unknown fields rejected. The read tools
+All arguments are strictly typed and unknown fields rejected. A tool failure,
+including arguments that fail validation, comes back as a tool result with
+`isError: true` and a JSON body `{"error": code, "message": text}`, so the
+model can read it and retry; invalid arguments use the code
+`invalid_arguments` and name each failing field and why, never the rejected
+value. Only an unknown tool name is a JSON-RPC error. The read tools
 are marked read-only and idempotent. `apply_patch`, `undo_edit`, `start_run`,
 `send_run_input`, `answer_interaction`, `apply_run` and `discard_run` are
 marked destructive. The agent run tools that reach a runtime are marked

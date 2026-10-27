@@ -18,7 +18,7 @@ from workspace_bridge.api import TOOLS, make_mcp
 from workspace_bridge.embedded_skill import read_project_lead_skill
 from workspace_bridge.media import (ImageReadResult, MAX_IMAGE_RESPONSE_BYTES, MAX_INPUT_BYTES,
                                     MAX_PIXELS, MAX_PREVIEW_BYTES, read_image, sniff_image)
-from mcp_helpers import McpTransport, LEGACY, MODERN, PREFIX
+from mcp_helpers import argument_error, McpTransport, LEGACY, MODERN, PREFIX
 from workspace_bridge.security import BridgeError, HANDOFF, MAX_FILE, SafeRoot, digest
 from workspace_bridge.service import Service
 
@@ -429,7 +429,7 @@ async def test_every_protocol_returns_actual_native_image(env, version):
                                   {"write_scope": "workspace"}, {"representation": None}])
 async def test_invalid_image_api_arguments(env, args):
     response = await rpc(env, {"path": "image.png", **args})
-    assert response.json()["error"]["code"] == -32602
+    argument_error(response.json())
 
 
 async def test_native_image_requires_valid_token_and_enablement(env):

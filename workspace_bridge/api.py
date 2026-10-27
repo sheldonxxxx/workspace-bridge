@@ -545,6 +545,15 @@ def _tool_error(code: str, message: str) -> mcp_types.CallToolResult:
     return _tool_result(json.dumps({"error": code, "message": message}), True)
 
 
+def _argument_problem(error: dict) -> str:
+    """Where and why one argument failed, never echoing the rejected value (it may be a secret)."""
+    where = ".".join(map(str, error["loc"])) or "arguments"
+    if error["type"] == "union_tag_invalid":
+        # Pydantic's message quotes the rejected tag.
+        return f"{where}: expected one of {error['ctx']['expected_tags']}"
+    return f"{where}: {error['msg']}"
+
+
 class _Credential:
     """Reject requests without a valid Bridge token before the MCP layer reads them."""
 
@@ -591,9 +600,9 @@ def make_mcp(service: Service, port: int = 8765):
         try:
             arguments = TOOLS[name][0].model_validate(params.arguments or {}).model_dump()
         except ValidationError as exc:
-            # Do not echo rejected values (they may contain secrets).
-            locations = [".".join(map(str, e["loc"])) for e in exc.errors()[:5]]
-            raise MCPError(INVALID_PARAMS, "Invalid tool arguments: " + ", ".join(locations)) from None
+            # A tool error, not a protocol error, so the model reads it and retries.
+            return _tool_error("invalid_arguments", "Invalid tool arguments: " + "; ".join(
+                _argument_problem(e) for e in exc.errors(include_input=False, include_url=False)[:5]))
         ident = arguments.pop("workspace_id", None)
         if name == "read_file":
             arguments["start_line"] = arguments.pop("offset")

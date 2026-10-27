@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 
@@ -44,3 +45,12 @@ class McpTransport(httpx.ASGITransport):
             self._stop.set()
             await self._task
             self._task = None
+
+
+def argument_error(body: dict) -> str:
+    """Assert a tools/call reply is a readable invalid_arguments tool error; return its message."""
+    result = body["result"]
+    assert result["isError"] is True
+    error = json.loads(result["content"][0]["text"])
+    assert error["error"] == "invalid_arguments"
+    return error["message"]

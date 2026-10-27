@@ -8,7 +8,7 @@ import pytest
 
 from workspace_bridge.api import DESTRUCTIVE_TOOLS, TOOLS, make_mcp
 from workspace_bridge.embedded_skill import read_project_lead_skill
-from mcp_helpers import McpTransport, LEGACY, MODERN, PREFIX
+from mcp_helpers import argument_error, McpTransport, LEGACY, MODERN, PREFIX
 from workspace_bridge.security import BridgeError, HANDOFF, MAX_WRITE, digest
 from workspace_bridge.service import Service
 
@@ -381,7 +381,7 @@ async def test_http_patch_read_and_destructive_annotations(env, version):
         assert bad['result']['isError']
         bad = await rpc('tools/call', 'apply_patch', dict(message=message, changes=[
             {'op': 'edit', 'path': NOTE, 'old': 'world', 'new': 'bad'}]))
-        assert bad['error']['code'] == -32602
+        assert 'changes.0.edit.sha256: Field required' in argument_error(bad)
 
 
 @pytest.mark.parametrize('kind', ['secret', 'excluded'])

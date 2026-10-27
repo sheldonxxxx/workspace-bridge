@@ -17,7 +17,7 @@ from workspace_bridge import plan_files
 from workspace_bridge.api import DESTRUCTIVE_TOOLS, Handoff, TOOLS, make_mcp
 from workspace_bridge.media import (IMAGE_MIME_TYPES, MAX_IMAGE_BASE64_CHARS,
                                     MAX_IMAGE_REQUEST_BYTES, MAX_INPUT_BYTES)
-from mcp_helpers import McpTransport, MODERN, PREFIX, VERSIONS
+from mcp_helpers import argument_error, McpTransport, MODERN, PREFIX, VERSIONS
 from workspace_bridge.security import BridgeError, digest
 
 
@@ -267,7 +267,7 @@ async def test_large_image_upload_and_publication_over_http(env, payload, versio
         too_large_text = await rpc(client, env, version, "apply_patch", {
             "message": "Add a large note.",
             "changes": [{"op": "create", "path": "blocked.md", "content": "x" * (1024 * 1024 + 1)}]})
-        assert too_large_text.json()["error"]["code"] == -32602
+        argument_error(too_large_text.json())
         assert not (env["root"] / "blocked.md").exists()
 
 

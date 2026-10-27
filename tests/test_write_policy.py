@@ -13,7 +13,7 @@ import pytest
 from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.security import BridgeError, HANDOFF, SafeRoot, digest, write_allowed
 from workspace_bridge.service import Service
-from mcp_helpers import McpTransport, LEGACY, MODERN, PREFIX
+from mcp_helpers import argument_error, McpTransport, LEGACY, MODERN, PREFIX
 
 
 def call(e, name, **args):
@@ -239,7 +239,7 @@ async def test_generic_tool_http_contract_and_no_permission_override(env,version
         new = {'op': 'create', 'path': 'source.md', 'content': 'hello'}
         for field,value in [('write_scope','workspace'),('force',True),('allow_source',True)]:
             r=await patch(new, **{field:value})
-            assert r['error']['code']==-32602
+            argument_error(r)
         assert (await patch(new))['result']['isError']
         scope(env,'workspace')
         result=(await patch(new))['result']

@@ -3,7 +3,7 @@ import json
 import time
 import httpx
 import pytest
-from mcp_helpers import McpTransport
+from mcp_helpers import argument_error, McpTransport
 from workspace_bridge.api import make_admin, make_mcp, TOOLS, AdminSessionStore
 
 @pytest.fixture
@@ -56,9 +56,23 @@ async def test_unknown_and_invalid_calls(env, mcp):
         r = await rpc(mcp, env, "tools/call", {"name":"execute_shell", "arguments":{"command":"rm -rf /"}})
         assert r.json()["error"]["code"] == -32602
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"README.md", "workspace":"other"}})
-        assert r.json()["error"]["code"] == -32602
+        assert "workspace: Extra inputs are not permitted" in argument_error(r.json())
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"../secret"}})
         assert r.json()["result"]["isError"] is True
+
+async def test_invalid_arguments_name_the_problem_without_echoing_values(env, mcp):
+    secret = "sk-" + "A" * 40
+    async with mcp:
+        r = await rpc(mcp, env, "tools/call", {"name": "apply_patch", "arguments": {
+            "workspace_id": env["id"], "message": "Note.", "changes": [{"op": secret, "path": "a.md"}]}})
+        tag = argument_error(r.json())
+        assert "changes.0: expected one of 'edit', 'create', 'move', 'delete'" in tag
+        r = await rpc(mcp, env, "tools/call", {"name": "save_handoff", "arguments": {
+            "workspace_id": env["id"], "request_id": secret + "!", "title": "t", "goal": "g",
+            "plan": "p", "acceptance": "a"}})
+        message = argument_error(r.json())
+        assert message.startswith("Invalid tool arguments: request_id: String should match pattern")
+        assert secret not in tag and secret not in message
 
 async def test_notifications_no_write_and_invalid_batch(env, mcp):
     async with mcp:

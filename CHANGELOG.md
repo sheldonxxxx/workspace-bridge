@@ -6,6 +6,11 @@
   upgraded in place: the first time 1.0 loads it, it gets its own
   search-cursor secret in `node-config.json`, which 0.3 derived from the
   removed Node token.
+- Tool arguments that fail validation now come back as a tool error
+  (`isError: true`, code `invalid_arguments`) naming each failing field and
+  why, instead of a JSON-RPC `-32602` error the model could not see. The
+  rejected values are never echoed. An unknown tool name is still a
+  JSON-RPC error.
 - `run_checks` results report `worktree_id` when the checks ran in an
   isolated run's worktree, so a check started with `run_id` no longer looks
   like a workspace check.

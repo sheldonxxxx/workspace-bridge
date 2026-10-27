@@ -8,7 +8,7 @@ import sys
 import httpx
 import pytest
 
-from mcp_helpers import McpTransport
+from mcp_helpers import argument_error, McpTransport
 from workspace_bridge.api import TOOLS, make_mcp
 from workspace_bridge.security import BridgeError
 
@@ -416,5 +416,5 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
         invalid = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "git_diff", "arguments": {"workspace_id": env["id"],
                                                                   "mode": "head", "ref": "HEAD~1"}}})
-        assert invalid.json()["error"]["code"] == -32602
+        argument_error(invalid.json())
     assert len(TOOLS) == 24
