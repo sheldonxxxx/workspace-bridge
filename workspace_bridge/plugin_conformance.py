@@ -95,6 +95,7 @@ class Kit:
         self.security = sp.wire(PROFILE_ID, self.rules)
         self.descriptor = None
         self.conversation: dict | None = None
+        self.created: set[str] = set()        # every conversation id the kit made
         self.runs: dict[str, dict] = {}       # native run id -> last snapshot
         self.selector: str | None = None
         self.waiting: dict | None = None      # run held on an interaction
@@ -219,12 +220,27 @@ class Kit:
         codes.append(_refused(lambda: self.client.create_conversation({
             "workspaceId": self.workspace_id, "directory": str(self.workspace)}),
             "A conversation without a security block"))
+        native_block = {"workspaceId": self.workspace_id, "directory": str(self.workspace),
+                        "security": {"source": "native"}}
         if "native_security" not in self.manifest["features"]:
-            codes.append(_refused(lambda: self.client.create_conversation({
-                "workspaceId": self.workspace_id, "directory": str(self.workspace),
-                "security": {"source": "native"}}),
-                "Native security from a plugin without native_security"))
-        return "refused: " + ", ".join(codes)
+            codes.append(_refused(lambda: self.client.create_conversation(native_block),
+                                  "Native security from a plugin without native_security"))
+            return "refused: " + ", ".join(codes)
+        native = self.client.create_conversation(native_block)
+        self.created.add(native["id"])
+        if native.get("securityBinding") != {"source": "native"}:
+            raise Fail("A native conversation did not echo native security")
+        # A conversation keeps its security source; the Bridge starts a new
+        # one when a route switches. Refused before any agent turn starts.
+        payload = self._payload(REPLY_PROMPT.format(word="NO"))
+        try:
+            started = self.client.start_run(native["id"], payload)
+        except RuntimeRejected as exc:
+            codes.append(exc.code)
+        else:
+            self.client.cancel(started["id"])
+            raise Fail("A profile run started on a native conversation")
+        return "refused: " + ", ".join(codes) + "; native conversation echoed native"
 
     def check_root(self) -> str:
         outside = self.base / "outside"
@@ -247,6 +263,7 @@ class Kit:
                 or not _echo_matches(self.security, conversation.get("securityBinding"))):
             raise Fail("Conversation did not echo its workspace and security binding")
         self.conversation = conversation
+        self.created.add(conversation["id"])
         current = self.client.conversation(conversation["id"])
         if current.get("workspaceId") != self.workspace_id or current.get("status") != "idle":
             raise Fail("A new conversation must read back idle in its workspace")
@@ -326,7 +343,7 @@ class Kit:
         if not events:
             raise Fail("No events were pushed for the runs")
         for event in events:
-            if event["conversationId"] != self.conversation["id"]:
+            if event["conversationId"] not in self.created:
                 raise Fail("An event names a conversation the kit never created")
             if event["runId"]:
                 snapshot = self.client.run(event["runId"])

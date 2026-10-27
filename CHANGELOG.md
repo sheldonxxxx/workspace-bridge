@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Claude Code routes can use native security: runs keep Claude Code's own
+  tools and permission settings, and each permission prompt becomes a Bridge
+  interaction. The plugin's new `permission_mode` setting picks the mode, for
+  example `--set permission_mode=auto` for auto mode, which Claude Code does
+  not take from `defaultMode` under its SDK. Bypass mode stays disabled.
+- `adapter set <adapter-id> --set KEY=VALUE` changes an adapter's plugin
+  settings in place, keeping its ID and routes.
 - `workspace-bridge plugin test <manifest|id>` runs the plugin conformance
   kit in a temporary folder: protocol checks by default, and with `--live`
   runs, interactions, events, recovery without replay, and continuation.

@@ -469,15 +469,16 @@ example, accepts `trusted` but not `read-only` or `reviewed`. See
 [Security on every run](RUNTIME_PROTOCOL.md#security-on-every-run).
 
 Approved shell commands run with the host user's authority. Claude Code loads
-the host's Claude settings, hooks, skills, and MCP servers unless
-`adapter init --claude-setting-sources` narrows them. See
+the host's Claude settings, hooks, skills, and MCP servers unless the plugin's
+`setting_sources` setting narrows them. See
 [Runtimes](RUNTIMES.md).
 
-Codex routes may instead follow Codex's native security: the thread runs under
-the effective native configuration, and each native approval becomes a Bridge
+Codex and Claude Code routes may instead follow the agent's native security:
+Codex runs under its effective configuration, and Claude Code under its loaded
+settings in the plugin's `permission_mode` (for example `auto`) or the
+settings' `defaultMode`. Each native permission prompt becomes a Bridge
 interaction. Switching a route between a profile and native security needs a
-fresh conversation. Native security is unsupported for Pi, Claude Code, and
-OpenCode.
+fresh conversation. Native security is unsupported for Pi and OpenCode.
 
 ## Writable handoff notes
 

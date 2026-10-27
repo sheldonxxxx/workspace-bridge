@@ -16,7 +16,7 @@ from workspace_bridge import security_profiles as sp
 from workspace_bridge import wbrp
 from workspace_bridge.claude_host_adapter import (
     AdapterFailure, ClaudeHostAdapter, _normalize_claude_usage,
-    allowed_tools, decide_tool_use, parse_setting_sources)
+    allowed_tools, decide_tool_use, parse_permission_mode, parse_setting_sources)
 from workspace_bridge.plugin_host import invoke
 
 READ_ONLY = sp.BUILTINS["read-only"]
@@ -205,7 +205,8 @@ _SECURITY: dict[str, dict] = {}
 
 
 def _conversation(adapter, workspace, profile="read-only", rules=None):
-    block = sp.wire(profile, rules if rules is not None else sp.BUILTINS[profile])
+    block = ({"source": "native"} if profile == "native" else
+             sp.wire(profile, rules if rules is not None else sp.BUILTINS[profile]))
     created = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace), "security": block})
     _SECURITY[created["id"]] = block
@@ -329,6 +330,14 @@ def test_setting_sources_parsing():
             parse_setting_sources(bad)
 
 
+def test_permission_mode_parsing():
+    assert parse_permission_mode(None) is None
+    assert parse_permission_mode("auto") == "auto"
+    for bad in ("", "bypassPermissions", "Auto", 3):
+        with pytest.raises(AdapterFailure):
+            parse_permission_mode(bad)
+
+
 def test_allowed_tools_follow_profile():
     meta = ["Agent", "Task", "Skill", "TodoWrite", "ToolSearch"]
     assert allowed_tools(READ_ONLY) == ["Read", "Glob", "Grep"] + meta
@@ -391,7 +400,7 @@ def test_conversation_creation_rules(claude, tmp_path):
     base = {"workspaceId": "ws_test", "directory": str(workspace)}
     tampered = sp.wire("read-only", READ_ONLY)
     tampered["profile"]["rules"] = {**READ_ONLY, "shell": "allow"}
-    for security in (tampered, {"source": "native"}, None):
+    for security in (tampered, {"source": "native", "extra": 1}, None):
         with pytest.raises(AdapterFailure) as raised:
             adapter.create_conversation({**base, "security": security})
         assert raised.value.code == "invalid_profile"
@@ -1117,3 +1126,76 @@ def test_plugin_queue_and_steer_return_receipts(claude):
     assert sdk.clients[0].prompts == ["first", "correct", "queued"]
 
 
+
+
+# -- native security -------------------------------------------------------
+
+def test_native_runs_follow_claude_codes_own_permission_settings(claude):
+    adapter, workspace, sdk = claude
+    outcome = {}
+
+    async def asking(client):
+        session = client.options.session_id or client.options.resume
+        sdk.sessions.add(session)
+        yield SystemMessage("init", {"session_id": session})
+        context = types.SimpleNamespace(tool_use_id="tu-n", title=None)
+        # Claude Code asks only what its own settings leave open; any tool
+        # it asks about, even one a profile would allow, reaches the Bridge.
+        outcome["result"] = await client.options.can_use_tool(
+            "Read", {"file_path": "notes.txt"}, context)
+        yield ResultMessage(result="ok")
+
+    sdk.scenario = asking
+    conversation = _conversation(adapter, workspace, "native")
+    assert conversation["securityBinding"] == {"source": "native"}
+    started = adapter.start_run(conversation["id"], {
+        "security": {"source": "native"}, "input": _text()})
+    assert started["securityBinding"] == {"source": "native"}
+    options = sdk.clients[-1].options
+    # No permission mode, tool list, MCP restriction or profile hook: the
+    # settings' defaultMode (acceptEdits, for example) and Claude's tools apply.
+    assert options.permission_mode is None
+    assert not hasattr(options, "tools") and not hasattr(options, "hooks")
+    assert not hasattr(options, "strict_mcp_config")
+    assert json.loads(options.settings) == {"permissions": {
+        "disableBypassPermissionsMode": "disable"}}
+    pending = _wait(lambda: adapter.interactions(started["id"])["interactions"])[0]
+    assert pending["resource"] == "notes.txt"
+    approve = next(item["id"] for item in pending["choices"] if item["semantic"] == "approve")
+    adapter.resolve(pending["id"], {"choiceId": approve})
+    assert _terminal(adapter, started["id"])["outcome"] == "succeeded"
+    assert outcome["result"].behavior == "allow"
+    assert adapter.conversation(conversation["id"])["securityBinding"] == {"source": "native"}
+
+
+def test_a_configured_permission_mode_applies_to_native_runs_only(tmp_path):
+    root = tmp_path / "projects"
+    workspace = root / "app"
+    workspace.mkdir(parents=True)
+    sdk = make_sdk()
+    adapter = ClaudeHostAdapter(tmp_path / "state", root, sdk=sdk, _runtime_env={},
+                                permission_mode="auto")
+    try:
+        native = _conversation(adapter, workspace, "native")
+        run = adapter.start_run(native["id"], {"security": {"source": "native"},
+                                               "input": _text()})
+        # Claude Code ignores defaultMode auto from settings under the SDK.
+        assert sdk.clients[-1].options.permission_mode == "auto"
+        _terminal(adapter, run["id"])
+        profiled = _conversation(adapter, workspace)
+        adapter.start_run(profiled["id"], {"security": _SECURITY[profiled["id"]],
+                                           "input": _text()})
+        assert sdk.clients[-1].options.permission_mode == "default"
+    finally:
+        adapter.close()
+
+
+def test_a_conversation_keeps_the_security_source_it_started_with(claude):
+    adapter, workspace, _ = claude
+    native = _conversation(adapter, workspace, "native")
+    profiled = _conversation(adapter, workspace, "trusted")
+    for conversation, security in ((native, sp.wire("trusted", TRUSTED)),
+                                   (profiled, {"source": "native"})):
+        with pytest.raises(AdapterFailure) as raised:
+            adapter.start_run(conversation["id"], {"security": security, "input": _text()})
+        assert raised.value.code == "security_source_changed"

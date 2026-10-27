@@ -241,7 +241,8 @@ def _claude() -> PluginServer:
     from .claude_host_adapter import ClaudeHostAdapter, parse_setting_sources
     return PluginServer(lambda p: ClaudeHostAdapter(
         Path(p["state"]), Path(p["projectsRoot"]), binary=_setting(p, "binary"),
-        setting_sources=parse_setting_sources(_setting(p, "setting_sources"))))
+        setting_sources=parse_setting_sources(_setting(p, "setting_sources")),
+        permission_mode=_setting(p, "permission_mode")))
 
 
 def _codex() -> PluginServer:

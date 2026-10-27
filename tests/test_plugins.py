@@ -1,6 +1,8 @@
 """Agent Protocol v2: Node-supervised stdio plugins."""
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
@@ -12,6 +14,7 @@ from conftest import attach_test_node
 from workspace_bridge.adapter_events import validate_event_page
 from workspace_bridge.api import Handoff
 from workspace_bridge.cli import initialize
+from workspace_bridge.node_cli import add_plugin_commands, run_plugin_command
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.plugin_protocol import (builtin_manifests, to_rpc,
                                               validate_manifest)
@@ -99,6 +102,19 @@ def test_plugin_adapter_fields_are_validated(node, tmp_path):
     updated = service.save_adapter({"settings": {"mode": "busy"}}, row["id"])
     assert updated["revision"] != row["revision"]
     assert service.save_adapter({"name": "Renamed"}, row["id"])["revision"] == updated["revision"]
+
+
+def test_adapter_set_changes_only_the_named_settings(node):
+    service, projects = node
+    row = add(service, projects, mode="busy", big="1")
+    parser = argparse.ArgumentParser()
+    add_plugin_commands(parser.add_subparsers(dest="command"))
+    run_plugin_command(service, parser.parse_args(
+        ["adapter", "set", row["id"], "--set", "mode=", "--set", "big=2"]))
+    assert json.loads(service.adapter(row["id"])["settings"]) == {"big": "2"}
+    with pytest.raises(BridgeError, match="settings accept only"):
+        run_plugin_command(service, parser.parse_args(
+            ["adapter", "set", row["id"], "--set", "binary=/bin/sh"]))
 
 
 def test_requests_round_trip_and_errors_keep_their_v1_meaning(node):

@@ -28,7 +28,7 @@ A plugin adapter has no endpoint, token or service; add one with
 
 | Plugin | Command the Node runs | Settings |
 |---|---|---|
-| `claude` | `python -m workspace_bridge.plugin_host claude` (needs the `claude` extra) | `binary`, `setting_sources` |
+| `claude` | `python -m workspace_bridge.plugin_host claude` (needs the `claude` extra) | `binary`, `setting_sources`, `permission_mode` |
 | `codex` | `python -m workspace_bridge.plugin_host codex` | none |
 | `opencode` | `python -m workspace_bridge.plugin_host opencode` | `binary` |
 | `pi` | `workspace-bridge-pi-adapter --stdio` (npm package) | `pi_binary`, `agent_dir` |
@@ -60,7 +60,11 @@ to use a different Claude Code executable instead. The adapter uses the Node
 user's existing Claude Code login; no provider credential is stored by the
 Bridge or the Node. Run `claude` once on that host and sign in before adding
 the adapter. `--set setting_sources=...` picks the settings layers to load:
-`user`, `project`, `local` (default, all three), or `none`. If the SDK is missing, the
+`user`, `project`, `local` (default, all three), or `none`.
+`--set permission_mode=auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`)
+sets the Claude Code permission mode for routes under native security; unset,
+the loaded settings' `defaultMode` applies, except `auto`, which Claude Code
+honours only when passed this way. If the SDK is missing, the
 descriptor fails closed with an install hint instead of starting runs.
 Each run starts one Claude Code process for that prompt and resumes the
 adapter-created session for continuations, so idle conversations survive an

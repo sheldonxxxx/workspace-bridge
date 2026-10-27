@@ -203,7 +203,10 @@ How each plugin enforces the rules:
 - **Claude Code**: a closed built-in tool list, plus a pre-tool hook that
   judges every tool call, sub-agent and MCP calls included. Edits never reach
   `.claude` or `.mcp.json`, and `extensions: deny` keeps MCP servers from
-  starting.
+  starting. With native security, Claude Code keeps its own tools and
+  permission settings in the plugin's `permission_mode` (or the settings'
+  `defaultMode`), and each permission prompt it raises becomes an
+  interaction. Bypass mode stays disabled either way.
 - **Pi**: the trusted permission extension judges every built-in tool call, and
   tools the rules can never allow are not offered. A continuation under a new
   revision reopens the idle session from its session file with the new rules.

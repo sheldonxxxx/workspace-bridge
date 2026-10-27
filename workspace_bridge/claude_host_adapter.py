@@ -9,13 +9,18 @@ an adapter restart while active runs are marked interrupted and never replayed.
 
 Claude Code runs as it does in the terminal: user, project and local settings,
 CLAUDE.md, skills, sub-agents, plugins and MCP servers load from disk (the
-layers are chosen with ``WB_CLAUDE_SETTING_SOURCES``). Security stays
-Bridge-managed and is enforced here: every run carries the Bridge profile's
-rules, and they give a closed built-in tool list, a ``PreToolUse`` hook that
-evaluates every tool call
-including sub-agent and MCP calls, and a ``can_use_tool`` callback that turns
-``ask`` decisions into Bridge interactions. Settings can add behavior but
-cannot widen the profile, and edits never reach ``.claude`` or ``.mcp.json``.
+layers are chosen with ``WB_CLAUDE_SETTING_SOURCES``). A run under a Bridge
+profile is enforced here: the profile's rules give a closed built-in tool
+list, a ``PreToolUse`` hook that evaluates every tool call including
+sub-agent and MCP calls, and a ``can_use_tool`` callback that turns ``ask``
+decisions into Bridge interactions. Settings can add behavior but cannot
+widen the profile, and edits never reach ``.claude`` or ``.mcp.json``.
+
+A run under ``native`` security follows Claude Code's own permission settings
+instead, in the permission mode the ``permission_mode`` setting names (``auto``,
+for example) or else the one its ``defaultMode`` names; every permission prompt
+Claude Code raises becomes a Bridge interaction. Bypass mode stays disabled
+either way.
 Hooks and MCP servers configured in a loaded layer run with the host user's
 authority, as they do in the CLI.
 """
@@ -130,6 +135,7 @@ _CONFIG_FILES = frozenset({".mcp.json"})
 
 SETTING_SOURCES = ("user", "project", "local")
 DEFAULT_SETTING_SOURCES = SETTING_SOURCES
+NATIVE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk")
 MAX_SHELL_COMMAND_CHARS = 16384
 _PATH_INPUT_KEYS = ("file_path", "notebook_path", "path")
 _GLOB_CHARS = frozenset("*?[]{}")
@@ -155,6 +161,21 @@ def parse_setting_sources(raw: Any) -> tuple[str, ...]:
         raise AdapterFailure("Claude setting sources must be none or a list of "
                              "user, project and local")
     return tuple(source for source in SETTING_SOURCES if source in items)
+
+
+def parse_permission_mode(raw: Any) -> str | None:
+    """Parse the Claude Code permission mode for native routes, e.g. ``auto``.
+
+    Unset leaves the loaded settings' ``defaultMode`` in charge. Claude Code
+    ignores a ``defaultMode`` of ``auto`` from settings under the SDK, so auto
+    mode needs this. Bypass mode is never accepted.
+    """
+    if raw is None:
+        return None
+    if raw not in NATIVE_PERMISSION_MODES:
+        raise AdapterFailure("Claude permission mode must be one of "
+                             + ", ".join(NATIVE_PERMISSION_MODES))
+    return raw
 
 
 def allowed_tools(rules: dict) -> list[str]:
@@ -375,11 +396,12 @@ def _claude_cli_version(executable: str, env: dict | None) -> str:
 class _RunState:
     """Process-local driver state for one live run."""
 
-    def __init__(self, run_id: str, conversation_id: str, cwd: str, rules: dict,
+    def __init__(self, run_id: str, conversation_id: str, cwd: str, rules: dict | None,
                  expected_session: str):
         self.run_id = run_id
         self.conversation_id = conversation_id
         self.cwd = cwd
+        # None under native security: Claude Code's own settings decide.
         self.rules = rules
         self.expected_session = expected_session
         self.client: Any = None
@@ -403,6 +425,7 @@ class _RunState:
 class ClaudeHostAdapter:
     def __init__(self, state: Path, projects_root: Path, *, sdk: Any = None,
                  binary: str | None = None, setting_sources: Any = None,
+                 permission_mode: str | None = None,
                  _runtime_env: dict | None | bool = False,
                  _login_path_resolver: Any | None = None):
         self.state = state.resolve()
@@ -422,6 +445,7 @@ class ClaudeHostAdapter:
         self._sdk = sdk
         self._binary = binary
         self.setting_sources = parse_setting_sources(setting_sources)
+        self.permission_mode = parse_permission_mode(permission_mode)
         self._plan_type: str | None = None
         self.db = sqlite3.connect(self.state / "claude-adapter.sqlite3",
                                   check_same_thread=False)
@@ -433,7 +457,8 @@ class ClaudeHostAdapter:
             id TEXT PRIMARY KEY, session TEXT NOT NULL UNIQUE,
             workspace TEXT NOT NULL, cwd TEXT NOT NULL,
             profile TEXT NOT NULL, revision TEXT NOT NULL,
-            started INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL);
+            started INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'profile');
           CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY, conversation TEXT NOT NULL REFERENCES conversations(id),
             client_run TEXT, input_hash TEXT, security_binding TEXT,
@@ -460,6 +485,10 @@ class ClaudeHostAdapter:
             input_hash TEXT NOT NULL, status TEXT NOT NULL,
             UNIQUE(run,request_id));
         """)
+        if "source" not in {row["name"] for row in
+                            self.db.execute("PRAGMA table_info(conversations)")}:
+            self.db.execute(
+                "ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'")
         os.chmod(self.state / "claude-adapter.sqlite3", 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
@@ -793,8 +822,10 @@ class ClaudeHostAdapter:
         return self._session_present(owned) or not owned["started"]
 
     @staticmethod
-    def _security(body: dict) -> tuple[str, str, dict]:
-        """The profile a conversation or run carries; every run names one."""
+    def _security(body: dict) -> tuple[str, str, dict] | None:
+        """The profile a conversation or run carries, or ``None`` for native security."""
+        if body.get("security") == {"source": "native"}:
+            return None
         try:
             return profiles.from_wire(body.get("security"))
         except Exception as exc:  # BridgeError from validation
@@ -803,6 +834,8 @@ class ClaudeHostAdapter:
 
     @staticmethod
     def _binding(owned: dict) -> dict:
+        if owned.get("source") == "native":
+            return {"source": "native"}
         return {"source": "profile", "profile": {"id": owned["profile"],
                                                  "revision": owned["revision"]}}
 
@@ -811,20 +844,22 @@ class ClaudeHostAdapter:
         if not isinstance(workspace, str) or not workspace or len(workspace) > 100:
             raise AdapterFailure("Invalid workspace id")
         cwd = self._cwd(body.get("directory"))
-        profile_id, revision, _rules = self._security(body)
+        security = self._security(body)
+        profile_id, revision = (security[0], security[1]) if security else ("", "")
+        owned = {"source": "profile" if security else "native",
+                 "profile": profile_id, "revision": revision}
         self._sdk_module()
         conversation_id = _id("conv_")
         session = str(uuid.uuid4())
         with self.lock, self.db:
             self.db.execute(
-                "INSERT INTO conversations(id,session,workspace,cwd,profile,revision,started,created) "
-                "VALUES(?,?,?,?,?,?,0,?)",
-                (conversation_id, session, workspace, cwd, profile_id, revision, _now()))
+                "INSERT INTO conversations(id,session,workspace,cwd,profile,revision,started,"
+                "created,source) VALUES(?,?,?,?,?,?,0,?,?)",
+                (conversation_id, session, workspace, cwd, profile_id, revision, _now(),
+                 owned["source"]))
             self._emit("conversation.created", conversation_id)
         return {"id": conversation_id, "runtime": RUNTIME_ID, "nativeId": session,
-                "workspaceId": workspace,
-                "securityBinding": {"source": "profile", "profile": {
-                    "id": profile_id, "revision": revision}},
+                "workspaceId": workspace, "securityBinding": self._binding(owned),
                 "status": "idle"}
 
     def conversation(self, conversation_id: str) -> dict:
@@ -913,8 +948,14 @@ class ClaudeHostAdapter:
             "model": body.get("model"), "reasoning": body.get("reasoning")},
             sort_keys=True).encode()).hexdigest()
         model, effort = self._validate_model(body.get("model"), body.get("reasoning"))
-        profile_id, revision, rules = self._security(body)
+        security = self._security(body)
         owned = self._conversation(conversation_id)
+        # The Bridge starts a fresh conversation when a route switches between
+        # a profile and native security, so a run never changes the source.
+        if (security is None) != (owned.get("source") == "native"):
+            raise AdapterFailure("This conversation started under a different security "
+                                 "source; start a new conversation", 409,
+                                 "security_source_changed")
         admission = self._admission.setdefault(owned["id"], threading.Lock())
         admission.acquire()
         try:
@@ -936,18 +977,20 @@ class ClaudeHostAdapter:
             owned["resume"] = bool(owned["started"] or self._session_present(owned))
             run_id = _id("run_")
             now = _now()
-            owned["profile"], owned["revision"] = profile_id, revision
+            if security is not None:
+                owned["profile"], owned["revision"] = security[0], security[1]
             binding = json.dumps(self._binding(owned), sort_keys=True,
                                  separators=(",", ":"))
             with self.lock, self.db:
                 self.db.execute("UPDATE conversations SET profile=?,revision=? WHERE id=?",
-                                (profile_id, revision, owned["id"]))
+                                (owned["profile"], owned["revision"], owned["id"]))
                 self.db.execute(
                     "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,"
                     "phase,active_state,outcome,result,error,usage,created,updated) "
                     "VALUES(?,?,?,?,?,'starting',NULL,NULL,'','',NULL,?,?)",
                     (run_id, owned["id"], client_run_id, input_hash, binding, now, now))
-            state = _RunState(run_id, owned["id"], owned["cwd"], rules, owned["session"])
+            state = _RunState(run_id, owned["id"], owned["cwd"],
+                              security[2] if security else None, owned["session"])
             try:
                 options = self._run_options(state, owned, model, effort)
             except AdapterFailure:
@@ -1003,19 +1046,30 @@ class ClaudeHostAdapter:
                 return sdk.PermissionResultAllow()
             return await self._ask(state, tool_name, tool_input, context, loop)
 
+        async def ask_bridge(tool_name: str, tool_input: dict, context: Any) -> Any:
+            # Native security: Claude Code calls this only for what its own
+            # permission settings would ask the user about.
+            return await self._ask(state, tool_name, tool_input, context, loop)
+
         kwargs: dict[str, Any] = {
-            "cwd": state.cwd, "tools": allowed_tools(state.rules),
-            "can_use_tool": can_use_tool, "verbatim_prompts": True,
+            "cwd": state.cwd, "can_use_tool": can_use_tool, "verbatim_prompts": True,
             # The Claude Code system prompt and its CLAUDE.md, skill and agent
-            # loading, as in the CLI. MCP servers start only when the profile
-            # permits extensions; the hook gates every call either way.
+            # loading, as in the CLI.
             "system_prompt": {"type": "preset", "preset": "claude_code"},
-            "strict_mcp_config": state.rules["extensions"] == "deny",
             "settings": json.dumps({"permissions": {
                 "disableBypassPermissionsMode": "disable"}}),
-            "hooks": {"PreToolUse": [sdk.HookMatcher(matcher=None, hooks=[pre_tool_use])]},
             "stderr": self._stderr_sink,
         }
+        if state.rules is None:
+            # Without a configured mode the settings' defaultMode applies.
+            kwargs.update(can_use_tool=ask_bridge, permission_mode=self.permission_mode)
+        else:
+            # MCP servers start only when the profile permits extensions; the
+            # hook gates every call either way.
+            kwargs.update(
+                tools=allowed_tools(state.rules),
+                strict_mcp_config=state.rules["extensions"] == "deny",
+                hooks={"PreToolUse": [sdk.HookMatcher(matcher=None, hooks=[pre_tool_use])]})
         if owned.get("resume"):
             kwargs["resume"] = owned["session"]
         else:

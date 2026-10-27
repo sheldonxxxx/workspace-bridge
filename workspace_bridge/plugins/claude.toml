@@ -7,7 +7,10 @@ description = "Claude Code through the Claude Agent SDK"
 # Every security profile rule is enforced by the plugin on each tool call.
 enforces = ["read_inside", "read_outside", "write_inside", "write_outside", "shell",
             "web", "extensions", "protected", "external_roots", "commands"]
-features = ["steer", "queue", "events", "usage_limits"]
+# native_security: a route may run Claude Code under its own permission settings.
+features = ["steer", "queue", "events", "usage_limits", "native_security"]
 # binary: path to the claude CLI; setting_sources: comma-separated list of
-# user, project, local (which Claude Code settings files to load).
-settings = ["binary", "setting_sources"]
+# user, project, local (which Claude Code settings files to load);
+# permission_mode: default, acceptEdits, plan, auto or dontAsk for native routes
+# (unset follows the settings' defaultMode).
+settings = ["binary", "setting_sources", "permission_mode"]

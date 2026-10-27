@@ -215,6 +215,9 @@ adapter add ...` instead. `--projects-root` defaults to the Node's only
 allowed root and must stay inside the allowed roots. Plugin settings are
 passed with `--set`, for example `--set binary=/opt/homebrew/bin/claude` or
 `--set setting_sources=user`; `plugin list` shows each plugin's settings.
+`adapter set <adapter-id> --set KEY=VALUE` changes them later, keeping the
+adapter ID and its routes (`KEY=` clears one); the plugin restarts, and runs
+active on it are interrupted.
 Pi needs the npm package `workspace-bridge-pi-host-adapter` installed so its
 `workspace-bridge-pi-adapter` command is on the Node's `PATH`. The Manager
 can create the same adapters through `POST /api/adapters` with a `plugin`

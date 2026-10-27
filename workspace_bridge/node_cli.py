@@ -118,7 +118,7 @@ def add_plugin_commands(sub) -> None:
     plugin_add.add_argument("manifest", type=Path)
     add_kit_arguments(plugin_sub.add_parser(
         "test", help="Run the conformance kit against a plugin manifest or plugin id"))
-    adapter = sub.add_parser("adapter", help="Add, list, test or remove agent adapters run as plugins")
+    adapter = sub.add_parser("adapter", help="Add, change, list, test or remove agent adapters run as plugins")
     adapter.set_defaults(plugin_group="adapter")
     adapter_sub = adapter.add_subparsers(dest="adapter_command", required=True)
     add = adapter_sub.add_parser("add", help="Add an adapter that runs a plugin under this Node")
@@ -127,6 +127,10 @@ def add_plugin_commands(sub) -> None:
     add.add_argument("--projects-root", help="Folder the agent may work in; defaults to the only allowed root")
     add.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                      help="Plugin setting, e.g. binary=/opt/homebrew/bin/claude (repeatable)")
+    change = adapter_sub.add_parser("set", help="Change an adapter's plugin settings")
+    change.add_argument("adapter_id")
+    change.add_argument("--set", action="append", required=True, metavar="KEY=VALUE",
+                        help="Plugin setting to change; KEY= clears it (repeatable)")
     adapter_sub.add_parser("list", help="List this Node's adapters")
     test = adapter_sub.add_parser("test", help="Start the plugin and print its descriptor")
     test.add_argument("adapter_id")
@@ -213,6 +217,12 @@ def run_plugin_command(node: NodeService, args) -> dict | None:
         return node.save_adapter({"name": args.name, "plugin": args.plugin,
                                   "projects_root": args.projects_root,
                                   "settings": _settings(args.set)})
+    if args.adapter_command == "set":
+        # Settings not named keep their values; a changed configuration
+        # restarts the plugin.
+        current = json.loads(node.adapter(args.adapter_id)["settings"] or "{}")
+        return node.save_adapter({"settings": {**current, **_settings(args.set)}},
+                                 args.adapter_id)
     if args.adapter_command == "list":
         return node.list_adapters()
     if args.adapter_command == "test":

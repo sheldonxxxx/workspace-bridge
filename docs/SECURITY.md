@@ -32,7 +32,7 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, or arbitrary command surface is exposed as an MCP tool. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
 - `RuntimeType` (`pi`, `codex`, or `claude`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_agent_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff through the normal Node write policy, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
 - Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security source. Every run carries the rules of its route's [security profile](#security-profiles), and the plugin echoes the profile ID and revision it enforces; a mismatch fails the run before any prompt. Each run records its rules in an immutable `effective_security` snapshot. Interactions require a live exact request, not merely a persisted ID.
-- Claude Code loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority. The Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the plugin never edits them, and `--claude-setting-sources` can drop the project and local layers.
+- Claude Code loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority. The Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the plugin never edits them, and the plugin's `setting_sources` setting can drop the project and local layers.
 - Per-adapter model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass a configured policy, or act on arbitrary adapter conversations. An unconfigured policy is a governance choice, not a failure: models are then unrestricted by Bridge policy and the runtime selects its own default.
 - HTTP Node tokens are plaintext in private Bridge SQLite; agent plugins have no tokens. Both state databases are mode `0600` and their containing directories are private. Normal list/detail/status APIs return `has_token` only; add/edit forms do not read tokens back, and blank update fields preserve them. Node and plugin responses are scrubbed before they reach models, profiles, run data, diagnostics, events, logs, or errors. Backups remain sensitive.
 - Fresh writable state creates schema v4 directly (including per-run native token usage). Existing v4 state receives narrow in-place upgrades only when a release needs them (for example, `0.2.0` widens the runtime-type constraint to accept `claude`), inside one transaction that preserves rows and indexes. Pre-v4 state is rejected as `state_schema_incompatible` and is never altered; use a fresh state path for it.
@@ -65,7 +65,7 @@ as `.env.example` excepted), and the root `checks.toml` are always protected.
 
 `ask` pauses the run until someone answers the interaction. A route names one
 profile, or `native` for a plugin that can follow the agent's own security
-(Codex). A route is refused when its plugin cannot enforce every restrictive
+(Codex and Claude Code). A route is refused when its plugin cannot enforce every restrictive
 rule of the profile: Codex, for example, keeps reads, web access, and
 extensions inside its read-only sandbox ungated, so it accepts `trusted` and
 `native` but not `read-only` or `reviewed`. A run keeps the rules it started
@@ -73,6 +73,16 @@ with, and an edit reaches the next run, including a continuation. Before
 saving an edit that loosens a profile, or that a routed plugin cannot enforce,
 the Manager lists the affected rules and routes and asks for confirmation. A
 profile in use cannot be deleted.
+
+Under `native`, the agent's own permission settings decide, and every
+permission prompt the agent raises becomes a Bridge interaction. Codex follows
+its effective configuration (sandbox, approval policy, reviewer). Claude Code
+runs with its own tools and loaded settings in the mode set by the plugin's
+`permission_mode` setting (`default`, `acceptEdits`, `plan`, `auto`, or
+`dontAsk`) or else by the settings' `permissions.defaultMode`. Claude Code
+ignores a `defaultMode` of `auto` when driven through its SDK, so auto mode
+needs `--set permission_mode=auto`. Bypass mode stays disabled. In auto mode
+Claude Code's classifier, not the Bridge, decides what runs unasked.
 
 Each plugin enforces the rules itself, in its own way; see
 [Security on every run](RUNTIME_PROTOCOL.md#security-on-every-run). None of
