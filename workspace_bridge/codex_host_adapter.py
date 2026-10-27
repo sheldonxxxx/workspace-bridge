@@ -35,6 +35,7 @@ from typing import Any
 from .codex_rpc import CodexRpc, CodexRpcError, sanitize_diagnostic
 from .login_path import runtime_env_with_login_path, safe_summary
 from . import security_profiles as profiles
+from .run_roots import run_directory
 from .security import redact
 
 
@@ -345,6 +346,7 @@ def _codex_cli_version(executable: Any, env: dict | None = None) -> str:
 
 class CodexHostAdapter:
     def __init__(self, state: Path, projects_root: Path, *, rpc: CodexRpc | None = None,
+                 worktrees_root: Path | None = None,
                  _exit_process: Any | None = None,
                  _login_path_resolver: Any | None = None,
                  _runtime_env: dict | None | bool = False):
@@ -362,6 +364,7 @@ class CodexHostAdapter:
         self.projects_root = projects_root.resolve(strict=True)
         if not self.projects_root.is_dir():
             raise ValueError("Projects root must be a directory")
+        self.worktrees_root = worktrees_root
         self.db = sqlite3.connect(self.state / "codex-adapter.sqlite3", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -647,10 +650,7 @@ class CodexHostAdapter:
         if not isinstance(requested, str) or not requested:
             raise AdapterFailure("Workspace directory is required")
         try:
-            cwd = Path(requested).resolve(strict=True)
-            if not cwd.is_dir() or not cwd.is_relative_to(self.projects_root):
-                raise ValueError()
-            return str(cwd)
+            return run_directory(requested, self.projects_root, self.worktrees_root)
         except (OSError, RuntimeError, ValueError):
             raise AdapterFailure("Workspace directory is outside the configured projects root") from None
 

@@ -20,6 +20,7 @@ from .keyed_locks import KeyedLocks
 from .checkpoint_store import CheckpointStore
 from .checks import CheckRunner
 from .plan_files import PlanStore
+from .worktrees import WorktreeStore
 from . import edit_journal
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
@@ -37,16 +38,22 @@ from . import __version__
 
 
 CHECKPOINT_OPERATIONS = {
-    "checkpoint_capture": frozenset({"checkpoint_id", "budget_ms", "max_files", "max_bytes"}),
+    "checkpoint_capture": frozenset({"checkpoint_id", "budget_ms", "max_files", "max_bytes", "worktree_id"}),
     "checkpoint_changes": frozenset({"from_id", "to_id", "offset", "limit"}),
     "checkpoint_diff": frozenset({"from_id", "to_id", "path", "offset", "max_bytes"}),
     "checkpoint_purge": frozenset({"checkpoint_ids", "everything"}),
     "checkpoint_stats": frozenset(),
 }
+WORKTREE_OPERATIONS = {
+    "worktree_create": frozenset({"worktree_id"}),
+    "worktree_commit": frozenset({"worktree_id"}),
+    "worktree_apply": frozenset({"worktree_id", "message"}),
+    "worktree_remove": frozenset({"worktree_id"}),
+}
 CHECK_OPERATIONS = {
     "checks_config": frozenset(),
     "set_checks_config": frozenset({"text"}),
-    "start_checks": frozenset({"names", "run_id"}),
+    "start_checks": frozenset({"names", "run_id", "worktree_id"}),
     "read_checks": frozenset({"check_id", "wait_ms"}),
 }
 
@@ -190,10 +197,14 @@ class NodeService:
         if not read_only:
             add_plugin_adapters(self.db)
         self.browser = Browser(self)
-        self.plugins = PluginRegistry(self.state / "plugins")
+        self.plugins = PluginRegistry(self.state / "plugins", worktrees_root=self.state / "worktrees")
         self._checkpoints = None
         self._journal = None
         self._checks = None
+        self.worktrees = WorktreeStore(self.state)
+        if not read_only:
+            # Plugins resolve this folder when they start, so it must exist.
+            self.worktrees.ensure_root()
 
     @property
     def journal(self) -> edit_journal.EditJournal:
@@ -328,14 +339,14 @@ class NodeService:
         return {"status": "ok", "protocol": 1, "node_version": __version__,
                 "release": node_release(), "capabilities": [
             "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks",
-            "plan-files"],
+            "plan-files", "worktrees"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
     WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file", "apply_patch",
                                   "undo_edit", "publish_handoff_artifacts",
-                                  "set_checks_config"})
+                                  "set_checks_config", "worktree_apply"})
 
     def workspace_call(self, operation: str, body: dict):
         if operation in self.WRITE_OPERATIONS:
@@ -511,6 +522,10 @@ class NodeService:
                 # an ad hoc request runs commands that can change files.
                 if run_id is None and workspace["write_scope"] != "workspace":
                     raise BridgeError("Running checks needs the edit write scope", "policy_denied")
+                if args.get("worktree_id") is not None:
+                    # An isolated run's checks run in its worktree, not the workspace.
+                    self.worktrees.meta(workspace["id"], WorktreeStore._id(args["worktree_id"]))
+                    root = str(self.worktrees.path(workspace["id"], args["worktree_id"]))
                 return runner.start(workspace, root, args.get("names"), run_id)
             wait_ms = args.get("wait_ms", 0)
             if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 20000:
@@ -530,8 +545,15 @@ class NodeService:
                 raise BridgeError("Invalid checkpoint arguments", "invalid_arguments")
             store = self.checkpoints
             if operation == "checkpoint_capture":
+                worktree_id = args.pop("worktree_id", None)
+                if worktree_id is None:
+                    with self.safe_root(ws) as safe:
+                        return store.capture(safe, ws, **args)
                 with self.safe_root(ws) as safe:
-                    return store.capture(safe, ws, **args)
+                    repository = self.worktrees.repository(safe, workspace["id"], worktree_id)
+                with SafeRoot(str(self.worktrees.path(workspace["id"], worktree_id)), None,
+                              safe.extra) as tree:
+                    return store.capture(tree, ws, repository=repository, **args)
             if operation == "checkpoint_changes":
                 return store.changes(ws, **args)
             if operation == "checkpoint_diff":
@@ -547,6 +569,23 @@ class NodeService:
             with self.safe_root(ws) as safe:
                 data, _ = safe.read(path, artifact=True)
             return {"data": __import__("base64").b64encode(data).decode("ascii")}
+        if operation in WORKTREE_OPERATIONS:
+            if self.read_only:
+                raise BridgeError("Worktrees are unavailable in read-only mode", "isolation_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != WORKTREE_OPERATIONS[operation]:
+                raise BridgeError("Invalid worktree arguments", "invalid_arguments")
+            if operation == "worktree_apply":
+                if workspace.get("write_scope") != "workspace":
+                    raise BridgeError("Applying a run needs the edit write scope", "policy_denied")
+                with self.safe_root(ws) as safe:
+                    return self.worktrees.apply(safe, self.journal, ws, args["worktree_id"], args["message"])
+            with self.safe_root(ws) as safe:
+                if operation == "worktree_create":
+                    return self.worktrees.create(safe, ws, args["worktree_id"])
+                if operation == "worktree_remove":
+                    return self.worktrees.remove(safe, ws, args["worktree_id"])
+                return self.worktrees.commit(safe, ws, args["worktree_id"])
         if operation == "write_plan":
             if self.read_only:
                 raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")
@@ -648,7 +687,8 @@ class NodeService:
                 # What the Bridge needs to refuse a profile this plugin
                 # cannot enforce, and to offer the agent's own security.
                 view["security"] = {"enforces": manifest["enforces"],
-                                    "native": "native_security" in manifest["features"]}
+                                    "native": "native_security" in manifest["features"],
+                                    "worktrees": "worktrees" in manifest["features"]}
             adapters.append(view)
         return {"adapters": adapters}
 
@@ -843,9 +883,11 @@ class NodeService:
                     raise BridgeError("Runtime directory must match the Node workspace root", "root_denied")
             if operation == "create_conversation":
                 payload = arguments.get("payload")
+                # A run in isolation works in a worktree this Node made for the workspace.
                 if (not isinstance(payload, dict)
                         or payload.get("workspaceId") != workspace.get("id")
-                        or payload.get("directory") != root):
+                        or (payload.get("directory") != root
+                            and not self.worktrees.owns(workspace["id"], payload.get("directory")))):
                     raise BridgeError("Runtime conversation must use the authoritative Node workspace",
                                       "root_denied")
         # Keep the authoritative revision check and native client construction

@@ -33,7 +33,13 @@ workspace source; backups may exclude it, which only loses old run diffs.
 Workspace settings in the Manager show checkpoint storage and can clear it.
 The Node's `handoffs/` folder holds read-only copies of handoff plans that
 agents can re-read; the Bridge keeps the originals and restores a copy at each
-run start, so backups may skip it.
+run start, so backups may skip it. The Node's `worktrees/` folder holds the
+checkouts of isolated runs, each with a `wb/<worktree_id>` branch in its
+workspace's repository; apply, discard or 14 idle days remove both. Back it up
+only if unapplied agent work matters to you. To remove one by hand, run `git
+worktree remove --force <path>` and `git branch -D wb/<worktree_id>` in the
+workspace; `apply_run` then fails with `worktree_unavailable`, and
+`discard_run` marks the run's worktree discarded.
 The Node's `edit-journal.sqlite3` holds the earlier content of files changed by
 `apply_patch`, kept 30 days or up to 500 MiB per workspace; it is as
 sensitive as the source it copies, and losing it only loses undo.

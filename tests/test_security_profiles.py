@@ -172,7 +172,7 @@ def test_route_refuses_a_profile_its_agent_cannot_enforce(env):
     codex = create_test_adapter(service, env["node_id"], {"name": "Codex", "runtime_type": "codex"})
     assert adapter_security(service.adapter_registry.get(codex["id"])) == {
         "enforces": sorted(["write_inside", "write_outside", "protected", "commands"]),
-        "native": True}
+        "native": True, "worktrees": True}
     with pytest.raises(BridgeError) as caught:
         _route(env, codex["id"], profile_id="reviewed")
     assert caught.value.code == "security_unavailable"

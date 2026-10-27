@@ -329,8 +329,12 @@ plugin's stdout; logs go to stderr, which the Node keeps in a size-capped
 `plugin.log`.
 
 1. The Node sends `initialize` with `{protocol: 2, state, projectsRoot,
-   settings, adapterId}`. `state` is a private folder for the plugin;
-   `settings` holds only the keys the manifest lists, plus `log_level`. The
+   worktreesRoot, settings, adapterId}`. `state` is a private folder for the
+   plugin; `settings` holds only the keys the manifest lists, plus `log_level`.
+   `worktreesRoot` is the Node's folder of run worktrees: a plugin that
+   declares the `worktrees` feature accepts a conversation `directory` that
+   is exactly `<worktreesRoot>/<workspace>/<worktree>`, besides folders under
+   `projectsRoot`, and nothing else under `worktreesRoot`. The
    plugin answers `{protocol: 2, instanceId}` once it is ready, even if its
    native runtime is not usable yet; that is reported per request.
 2. Requests use these methods, with path parameters and query values as
@@ -368,7 +372,8 @@ settings = ["binary"]     # setting keys the plugin accepts
 # Profile rules the plugin enforces; a route refuses profiles that restrict others.
 enforces = ["read_inside", "read_outside", "write_inside", "write_outside", "shell",
             "web", "extensions", "protected", "external_roots", "commands"]
-# Informational, except native_security: it lets a route use the agent's own security.
+# Informational, except native_security (a route may use the agent's own security)
+# and worktrees (runs may use isolation: "worktree").
 features = ["steer", "queue"]
 ```
 

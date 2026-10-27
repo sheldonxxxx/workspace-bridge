@@ -222,13 +222,13 @@ profile's shell, external-path, and write rules before routing it.
 
 ## Run checkpoints
 
-Run checkpoints are the only stored copy of workspace source. The owning Node
-keeps them in `checkpoints/` under its private state directory, which can never
-overlap a workspace. Content is limited to what `read_file` may return: the same
+Run checkpoints and [run worktrees](#run-worktrees) are the only stored copies
+of workspace source. The owning Node keeps checkpoints in `checkpoints/` under
+its private state directory, which can never overlap a workspace. Content is limited to what `read_file` may return: the same
 built-in deny list, workspace exclusions and 512 KiB per-file limit, read through
-the same no-symlink descriptor checks. Git writes only that store; the
-workspace and its `.git` are never written, and Git runs with fixed arguments,
-no hooks and no user or system configuration.
+the same no-symlink descriptor checks. Git writes only that store; checkpoints never write the
+workspace or its `.git`, and Git runs with fixed arguments, no hooks and no user
+or system configuration.
 
 A file deleted or rewritten in the workspace stays readable through run diffs
 until retention removes its checkpoints (14 days, or sooner once a workspace
@@ -237,6 +237,28 @@ workspace's checkpoints in the Manager to delete them from disk. Diffs are
 redacted like `git_diff`, which is not a DLP guarantee. The Bridge stores only
 checkpoint IDs, statuses, error codes and changed path names. Support bundles
 never include checkpoints.
+
+## Run worktrees
+
+A run started with `isolation: "worktree"` is the one case where the Node
+writes to a workspace's `.git`. It adds objects for a snapshot commit, the
+branch `refs/heads/wb/<worktree_id>` and a `.git/worktrees/` entry, and checks
+the files out under `worktrees/` in its private state. It never changes the
+workspace's working files, index, `HEAD` or any other ref, and removes the
+branch and worktree on apply, discard or after 14 days unused. Git runs with
+the same fixed arguments and neutralized configuration as Git evidence, with
+hooks disabled, signing off and a fixed author identity. The snapshot leaves out
+ignored files, workspace exclusions and the built-in deny list, so `.env` files
+and other denied paths never reach the branch or the agent's worktree.
+
+Plugins receive the Node's worktrees folder and accept a run folder there only
+when it is a worktree directly under a workspace's folder; the Node also checks
+that it made that worktree for the workspace before a conversation starts.
+`apply_run` writes through the edit journal with the same exclusions, deny list,
+size limits and journal as `apply_patch`, refuses symlinks and submodules, and
+changes nothing when any target file differs from the snapshot. Isolation keeps
+the agent's edits out of the workspace; it is not an OS sandbox, and the
+agent's own security profile still decides what it may touch elsewhere.
 
 ## Diagnostics and Doctor
 

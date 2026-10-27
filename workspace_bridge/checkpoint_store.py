@@ -171,10 +171,16 @@ class CheckpointStore:
     # -- capture ----------------------------------------------------------
 
     @staticmethod
-    def _listings(safe: SafeRoot, deadline: float) -> tuple[set[str], set[str], set[str], bool]:
-        """Read-only tracked and ignored listings; empty for non-Git workspaces."""
+    def _listings(safe: SafeRoot, deadline: float, repository: tuple | None = None
+                  ) -> tuple[set[str], set[str], set[str], bool]:
+        """Read-only tracked and ignored listings; empty for non-Git workspaces.
+
+        A run's worktree passes its own ``repository``: its ``.git`` is a file
+        that the workspace layout check refuses.
+        """
         try:
-            repository = GitEvidence._repository(safe)
+            if repository is None:
+                repository = GitEvidence._repository(safe)
         except BridgeError:
             return set(), set(), set(), False
         if repository is None:
@@ -261,7 +267,8 @@ class CheckpointStore:
         return entries, skipped, truncated
 
     def capture(self, safe: SafeRoot, ws: dict, checkpoint_id: str, *, budget_ms: int = 15000,
-                max_files: int = DEFAULT_MAX_FILES, max_bytes: int = DEFAULT_MAX_BYTES) -> dict:
+                max_files: int = DEFAULT_MAX_FILES, max_bytes: int = DEFAULT_MAX_BYTES,
+                repository: tuple | None = None) -> dict:
         workspace_id = _validate_id(ws.get("id"), _WORKSPACE_ID, "workspace identity")
         _validate_id(checkpoint_id, _CHECKPOINT_ID, "checkpoint id")
         if (type(budget_ms) is not int or not 1000 <= budget_ms <= 120000
@@ -274,7 +281,7 @@ class CheckpointStore:
             if existing is not None:
                 return self._summary(existing, workspace_id)
             repo = self._ensure_repo(workspace_id)
-            tracked, ignored_files, ignored_dirs, listing_ok = self._listings(safe, deadline)
+            tracked, ignored_files, ignored_dirs, listing_ok = self._listings(safe, deadline, repository)
             entries, walk_skipped, truncated = self._walk(safe, deadline, ignored_files, ignored_dirs)
             # Tracked files first, so a cap drops untracked noise before source.
             entries.sort(key=lambda item: (item["path"] not in tracked, item["path"]))

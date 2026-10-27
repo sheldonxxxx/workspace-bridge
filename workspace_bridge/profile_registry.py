@@ -28,7 +28,8 @@ def adapter_security(row: dict) -> dict:
         value = {}
     enforces = value.get("enforces")
     enforces = sorted({key for key in enforces if key in sp.KEYS}) if isinstance(enforces, list) else []
-    return {"enforces": enforces, "native": value.get("native") is True}
+    return {"enforces": enforces, "native": value.get("native") is True,
+            "worktrees": value.get("worktrees") is True}
 
 
 class ProfileRegistry:

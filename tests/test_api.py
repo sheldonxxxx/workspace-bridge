@@ -22,7 +22,7 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) == 31
+        assert len(tools) == len(TOOLS) == 33
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)

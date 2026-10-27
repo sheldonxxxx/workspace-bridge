@@ -22,6 +22,7 @@ import threading
 import time
 
 from . import security_profiles as profiles
+from .run_roots import run_directory
 from .claude_host_adapter import AdapterFailure, _clean, _id, _now
 from .opencode_transport import NativeTransport
 
@@ -112,9 +113,10 @@ def permission_effect(rules, action):
 
 class OpenCodeHostAdapter:
     def __init__(self, state: Path, projects_root: Path, *, binary=None,
-                 transport=None, environment=None):
+                 transport=None, environment=None, worktrees_root: Path | None = None):
         self.state = Path(state).resolve()
         self.projects_root = Path(projects_root).resolve(strict=True)
+        self.worktrees_root = worktrees_root
         if not self.projects_root.is_dir() or self.state.is_relative_to(self.projects_root) or self.projects_root.is_relative_to(self.state):
             raise AdapterFailure('Keep adapter state outside the projects root')
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -370,10 +372,7 @@ class OpenCodeHostAdapter:
         if not isinstance(requested, str) or not requested:
             raise AdapterFailure('Workspace directory is required')
         try:
-            cwd = Path(requested).resolve(strict=True)
-            if not cwd.is_dir() or not cwd.is_relative_to(self.projects_root):
-                raise ValueError()
-            return str(cwd)
+            return run_directory(requested, self.projects_root, self.worktrees_root)
         except (OSError, ValueError, RuntimeError):
             raise AdapterFailure('Workspace directory is outside the configured projects root') from None
 

@@ -1,6 +1,6 @@
 # MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 31 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 33 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
@@ -338,12 +338,14 @@ The result also has `chatgpt_edits`: the `apply_patch` and `undo_edit` journal
 entries made between the run's pre checkpoint and its end, each with `edit_id`,
 `kind`, `state`, `created`, `message` and `paths`, plus the combined `paths`.
 Where those paths also appear in the run diff, ChatGPT and the agent both
-changed them. `status` is `unavailable` when the Node's journal cannot be read.
+changed them. `status` is `unavailable` when the Node's journal cannot be read,
+and `not_applicable` for an [isolated run](#isolated-runs), whose checkpoints
+cover only its worktree.
 
 The owning Node captures checkpoints into its own private Git store, reading
 files with the same exclusions, built-in deny list and 512 KiB per-file limit as
 `read_file`. A Git workspace's `.gitignore` rules also apply, tracked files are
-captured first, and the workspace and its `.git` are never written. A larger
+captured first, and checkpoints never write the workspace or its `.git`. A larger
 file, or a file beyond the per-checkpoint cap (10,000 files or 256 MiB), is
 recorded as a placeholder and reported as `not_captured`, so it reads as
 changed rather than deleted. Symlinks, hard-linked and special files are skipped.
@@ -402,7 +404,7 @@ scope. The Manager edits both at `GET`/`PUT /api/workspaces/{workspace}/checks`
 ```text
 list_agent_adapters(workspace_id)
 list_agent_models(workspace_id, adapter_id, query="", limit=25)
-start_agent_run(workspace_id, adapter_id, request_id, job_id=null, instruction=null, model=null, parent_run_id=null, continue_from_run_id=null)
+start_agent_run(workspace_id, adapter_id, request_id, job_id=null, instruction=null, model=null, parent_run_id=null, continue_from_run_id=null, isolation=null)
 list_agent_runs(workspace_id, adapter_id=null, offset=0, limit=20)
 read_agent_run(workspace_id, run_id)
 cancel_agent_run(workspace_id, run_id)
@@ -414,6 +416,8 @@ read_agent_interaction(workspace_id, run_id, interaction_id)
 respond_agent_interaction(workspace_id, run_id, interaction_id, response, decided_by, reason)
 list_agent_activities(workspace_id, run_id, offset=0, limit=50)
 read_agent_activity(workspace_id, run_id, activity_id)
+apply_run(workspace_id, run_id)
+discard_run(workspace_id, run_id)
 ```
 
 `steer_agent_run` sends a correction to active work. Codex and Pi use native
@@ -445,6 +449,7 @@ Call `list_agent_adapters` first. It returns only configured AdapterInstances
 owned by the selected workspace's authoritative Node, including sanitized
 `adapter_id`, display name, `node_id`/`node_name`, `runtime_type`, route and
 adapter enablement, default flag, default model, effective security summary,
+supported `isolation` modes,
 canonical readiness, and a bounded `descriptor` summary (`status`, safe `code`
 on failure, `features` plus instance/adapter/native versions on success).
 Descriptor diagnostics are observability only and never change `available`/
@@ -612,6 +617,57 @@ registration.
 A run's final result is what the agent reported. It is unverified evidence: audit
 current source with the general tools. This server does not independently run tests
 and exposes no arbitrary command tool.
+
+### Isolated runs
+
+`start_agent_run` with `isolation: "worktree"` runs the agent in its own Git
+worktree instead of the workspace, so the user's files, index and branch stay
+untouched until ChatGPT applies the result. The owning Node:
+
+- builds a snapshot commit of the workspace's current files in a temporary
+  index (committed, uncommitted and untracked files; ignored files, admin
+  exclusions and built-in denied paths such as `.env` are left out), so the
+  workspace's index and `HEAD` never change;
+- creates branch `wb/<worktree_id>` at that commit and a worktree for it in the
+  Node's private state, with Git hooks disabled;
+- starts the agent's conversation there, and the prompt names the worktree, its
+  branch, and that ignored files such as installed dependencies are absent.
+
+Isolation needs a workspace that is the top level of a plain Git repository
+(`isolation_unavailable` otherwise) and a plugin that reports worktree support:
+`list_agent_adapters` lists the modes each adapter supports in `isolation`. The default, `none` (or
+omitting `isolation`), works in the workspace itself.
+
+A continuation keeps its source run's isolation and keeps working in the same
+worktree, so every run in one conversation builds on the last. Pass the same
+`isolation` value or omit it; a different value fails with
+`isolation_mismatch`, and continuing after the worktree was applied, discarded
+or removed fails with `worktree_unavailable`. Checkpoints and after-run checks
+of an isolated run cover its worktree, so `git_diff` with `mode=run` shows what
+the agent changed there. When each run ends, the Node also commits the
+worktree's state to its branch, for anyone who wants to read it with Git.
+
+`read_agent_run` reports `isolation`: `{"mode": "none"}` for an ordinary run,
+or `mode: "worktree"` with `worktree_id`, `branch`, `path`, `base` (the snapshot
+commit), `state` (`creating`, `active`, `applied`, `discarded`, `expired` or
+`failed`), and once applied the `edit_id`.
+
+`apply_run` copies the changes between the snapshot and the worktree's current
+state into the workspace as one edit-journal entry, so `undo_edit` with the
+returned `edit_id` reverts it. It needs the edit write scope and fails with
+`run_active` while a run in that worktree is still working. Every changed file
+in the workspace must still match the snapshot (or already match the result);
+otherwise nothing changes and `apply_conflict` lists the paths. Excluded and
+denied paths, symlinks, submodules and files over the read limit are refused,
+and one apply takes at most 1000 files and 64 MiB. Afterwards the Node removes
+the worktree and its branch. The result has the `edit_id`, the changed `files`,
+`already_applied` (paths that already matched the run's result) and the
+updated `isolation`; calling it again returns `isolation` with `repeated: true`.
+
+`discard_run` removes the worktree and its branch without touching the
+workspace; it needs no write scope, and repeating it returns `repeated: true`. The Node only ever changes
+`refs/heads/wb/*` and the worktrees it created. A worktree with no run for 14
+days is removed and reported as `expired`.
 
 ## Example sequence (pseudocode)
 

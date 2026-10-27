@@ -23,10 +23,10 @@ EXPECTED = {'list_workspaces', 'workspace_info',
             'list_agent_executions', 'read_agent_execution',
             'read_agent_interaction', 'respond_agent_interaction',
             'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff', 'run_checks',
-            'apply_patch', 'undo_edit'}
+            'apply_patch', 'undo_edit', 'apply_run', 'discard_run'}
 MUTATING = {'prepare_handoff', 'write_file', 'write_image', 'edit_file', 'apply_patch', 'undo_edit', 'run_checks',
             'start_agent_run', 'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
-            'respond_agent_interaction'}
+            'respond_agent_interaction', 'apply_run', 'discard_run'}
 
 
 def publish(env, payload):

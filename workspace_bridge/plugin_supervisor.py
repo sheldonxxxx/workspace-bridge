@@ -76,11 +76,13 @@ class PluginProcess:
     """One supervised plugin child process for one adapter instance."""
 
     def __init__(self, adapter_id: str, manifest: dict, state: Path, *,
-                 projects_root: str, settings: dict, log_level: str | None = None):
+                 projects_root: str, settings: dict, log_level: str | None = None,
+                 worktrees_root: str | None = None):
         self.adapter_id = adapter_id
         self.manifest = manifest
         self.state = state
         self.projects_root = projects_root
+        self.worktrees_root = worktrees_root
         self.settings = settings
         self.log_level = log_level
         self._lock = threading.Lock()          # start/stop
@@ -136,11 +138,14 @@ class PluginProcess:
                          daemon=True).start()
         # A plugin that answers initialize is running, even if its native
         # runtime is not usable yet; that is reported per request.
+        params = {"protocol": PROTOCOL, "state": str(self.state / "state"),
+                  "projectsRoot": self.projects_root, "settings": self.settings,
+                  "adapterId": self.adapter_id}
+        if self.worktrees_root:
+            # Runs in isolation work in Node-owned worktrees under this folder.
+            params["worktreesRoot"] = self.worktrees_root
         try:
-            ready = self._call(process, "initialize", {
-                "protocol": PROTOCOL, "state": str(self.state / "state"),
-                "projectsRoot": self.projects_root, "settings": self.settings,
-                "adapterId": self.adapter_id}, INITIALIZE_TIMEOUT)
+            ready = self._call(process, "initialize", params, INITIALIZE_TIMEOUT)
         except BaseException:
             self._stop_process(process)
             self._failed()
@@ -304,8 +309,9 @@ class PluginProcess:
 class PluginRegistry:
     """The Node's running plugins, keyed by adapter id and configuration revision."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, worktrees_root: Path | None = None):
         self.root = root
+        self.worktrees_root = worktrees_root
         self._lock = threading.Lock()
         self._processes: dict[str, tuple[str, PluginProcess]] = {}
 
@@ -320,7 +326,8 @@ class PluginRegistry:
             settings = json.loads(row.get("settings") or "{}")
             process = PluginProcess(row["id"], manifest, self.root / row["id"],
                                     projects_root=row["projects_root"], settings=settings,
-                                    log_level=settings.get("log_level"))
+                                    log_level=settings.get("log_level"),
+                                    worktrees_root=str(self.worktrees_root) if self.worktrees_root else None)
             self._processes[row["id"]] = (row["revision"], process)
         if stale is not None:
             # Stopping can take seconds; callers may hold the Node lock.

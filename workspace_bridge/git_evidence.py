@@ -279,9 +279,14 @@ def _git_binary() -> str | None:
     return resolved if stat.S_ISREG(st.st_mode) and os.access(resolved, os.X_OK) else None
 
 
-def _run(binary: str, safe: SafeRoot, git_dir: str, command: list[str], *,
-         timeout: float, output_limit: int, overrides: tuple[str, ...] = ()) -> bytes:
-    """Run one fixed Git subcommand with bounded pipes and a minimal environment."""
+def _run(binary: str, safe: SafeRoot | None, git_dir: str, command: list[str], *,
+         timeout: float, output_limit: int, overrides: tuple[str, ...] = (),
+         cwd: str | None = None, env_extra: dict[str, str] | None = None) -> bytes:
+    """Run one fixed Git subcommand with bounded pipes and a minimal environment.
+
+    The work tree is the current directory: ``safe.path`` unless ``cwd`` names
+    another Node-owned folder, such as a run's worktree.
+    """
     argv = [binary, "--no-pager", "--git-dir", git_dir, "--work-tree", ".",
             "-c", "core.fsmonitor=false", "-c", "core.quotepath=false",
             "-c", "core.pager=cat", *overrides, *command]
@@ -299,9 +304,10 @@ def _run(binary: str, safe: SafeRoot, git_dir: str, command: list[str], *,
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_ALLOW_PROTOCOL": "",
+        **(env_extra or {}),
     }
     try:
-        process = subprocess.Popen(argv, cwd=safe.path, env=env, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(argv, cwd=cwd or safe.path, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    close_fds=True, start_new_session=True)
     except (OSError, ValueError):

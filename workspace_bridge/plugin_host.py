@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from .codex_rpc import sanitize_diagnostic
+from .run_roots import optional_root
 from .plugin_protocol import (MAX_LINE, METHODS, PROTOCOL, encode, error_payload,
                               raise_for_error)
 
@@ -240,7 +241,8 @@ def _setting(params: dict, key: str) -> str | None:
 def _claude() -> PluginServer:
     from .claude_host_adapter import ClaudeHostAdapter, parse_setting_sources
     return PluginServer(lambda p: ClaudeHostAdapter(
-        Path(p["state"]), Path(p["projectsRoot"]), binary=_setting(p, "binary"),
+        Path(p["state"]), Path(p["projectsRoot"]), worktrees_root=optional_root(p.get("worktreesRoot")),
+        binary=_setting(p, "binary"),
         setting_sources=parse_setting_sources(_setting(p, "setting_sources")),
         permission_mode=_setting(p, "permission_mode")))
 
@@ -248,7 +250,8 @@ def _claude() -> PluginServer:
 def _codex() -> PluginServer:
     from .codex_host_adapter import CodexHostAdapter
     from .codex_rpc import CodexRpcError
-    return PluginServer(lambda p: CodexHostAdapter(Path(p["state"]), Path(p["projectsRoot"])),
+    return PluginServer(lambda p: CodexHostAdapter(Path(p["state"]), Path(p["projectsRoot"]),
+                                                   worktrees_root=optional_root(p.get("worktreesRoot"))),
                         unavailable=(CodexRpcError,))
 
 
@@ -258,7 +261,8 @@ def _opencode() -> PluginServer:
 
     def build(p: dict):
         adapter = OpenCodeHostAdapter(Path(p["state"]), Path(p["projectsRoot"]),
-                                      binary=_setting(p, "binary"))
+                                      binary=_setting(p, "binary"),
+                                      worktrees_root=optional_root(p.get("worktreesRoot")))
         holder["adapter"] = adapter
 
         def supervise():

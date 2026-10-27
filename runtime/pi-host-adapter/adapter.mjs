@@ -315,8 +315,9 @@ const SESSION_CHANGES = {
 
 export class PiAdapter {
   constructor({ projectsRoot, agentDir, piUsable = true, piVersion = "",
-                createSessionFn = null, listModelsFn = null, onLog = null }) {
+                createSessionFn = null, listModelsFn = null, onLog = null, worktreesRoot = null }) {
     this.projectsRoot = projectsRoot;
+    this.worktreesRoot = worktreesRoot;
     this.agentDir = agentDir;
     this.piUsable = piUsable;
     this.piVersion = piVersion;
@@ -411,7 +412,7 @@ export class PiAdapter {
 
   recoverExecutions(binding) {
     try {
-      if (!binding || resolveSessionDir(this.projectsRoot, binding.directory) !== binding.directory) {
+      if (!binding || resolveSessionDir(this.projectsRoot, binding.directory, undefined, this.worktreesRoot) !== binding.directory) {
         throw new Error("Execution audit binding changed");
       }
       return this._openExecutionJournal(binding, { requireExisting: true }).snapshot();
@@ -432,7 +433,7 @@ export class PiAdapter {
     if (!entry) return null;
     let canonical;
     try {
-      canonical = resolveSessionDir(this.projectsRoot, directory);
+      canonical = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     } catch {
       throw new AdapterError("directory does not match the session workspace", 400, "rejected");
     }
@@ -562,7 +563,7 @@ export class PiAdapter {
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
     }
-    const cwd = resolveSessionDir(this.projectsRoot, directory);
+    const cwd = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     const snapshot = this._snapshotPolicy(options);
     // 3C2 extension snapshot: validated alongside the permission snapshot
     // (default-empty when the Bridge sends no extension policy). Enabled
@@ -999,7 +1000,7 @@ export class PiAdapter {
   }
 
   async listModels(directory) {
-    resolveSessionDir(this.projectsRoot, directory);
+    resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
     }
@@ -1040,7 +1041,7 @@ export class PiAdapter {
   _permissionEntry(sessionId, directory) {
     let canonical;
     try {
-      canonical = resolveSessionDir(this.projectsRoot, directory);
+      canonical = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     } catch {
       throw new AdapterError("directory does not match the session workspace", 400, "rejected");
     }

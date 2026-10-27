@@ -55,9 +55,20 @@ def _body(job: dict, docs: dict[str, str]) -> str:
             + where + "\n\n" + sections + "\n===== end of handoff =====\n")
 
 
-def agent_prompt(root: str, job: dict) -> str:
-    """The prompt a run starts with."""
-    head = f"Work only in this project: {json.dumps(root)}. "
+def _isolation(worktree: dict) -> str:
+    return (f"This run works in a separate Git worktree on branch {json.dumps(worktree['branch'])}, made "
+            "from the project's current files. Your changes reach the project only if ChatGPT applies them "
+            "after review. Ignored files, such as installed dependencies and .env files, are not in the "
+            "worktree; install what the checks need inside it, and do not touch the original project "
+            "folder. Do not commit, switch branches or rewrite history. ")
+
+
+def agent_prompt(root: str, job: dict, worktree: dict | None = None) -> str:
+    """The prompt a run starts with; ``worktree`` names an isolated run's own checkout."""
+    project = worktree["path"] if worktree is not None else root
+    head = f"Work only in this project: {json.dumps(project)}. "
+    if worktree is not None:
+        head += _isolation(worktree)
     docs = documents(job)
     if docs is None:
         folder = legacy_folder(root, job["id"])

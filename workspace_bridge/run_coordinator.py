@@ -23,6 +23,7 @@ from .manager_events import RunEventHub
 from .keyed_locks import KeyedLocks
 from .run_checkpoints import RunCheckpoints
 from .run_checks import RunChecks
+from .run_worktrees import RunWorktrees
 from . import handoffs
 from .schema_upgrade import add_interaction_decisions
 
@@ -253,6 +254,7 @@ class RunCoordinator:
                     "Bridge state is incomplete for schema v4; use a fresh state path",
                     "state_schema_incompatible")
             add_interaction_decisions(service.db)
+        self.worktrees = RunWorktrees(self, read_only=read_only)
         self.checkpoints = RunCheckpoints(self, read_only=read_only)
         self.run_checks = RunChecks(self, read_only=read_only)
 
@@ -652,8 +654,8 @@ class RunCoordinator:
                               "reasoning_unavailable")
         return effort
 
-    def _prompt(self, ws: dict, job: dict) -> str:
-        return handoffs.agent_prompt(str(ws["root"]), job)
+    def _prompt(self, ws: dict, job: dict, worktree: dict | None = None) -> str:
+        return handoffs.agent_prompt(str(ws["root"]), job, worktree)
 
     def _run_row(self, ws: dict, run_id: str) -> dict:
         with self.service.lock:
@@ -692,19 +694,23 @@ class RunCoordinator:
 
     def start(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
               model: str | None = None, parent_run_id: str | None = None,
-              continue_from_run_id: str | None = None, images: list[dict] | None = None) -> dict:
+              continue_from_run_id: str | None = None, images: list[dict] | None = None,
+              isolation: str | None = None) -> dict:
         # Both Manager and MCP admission must observe the same idempotency
         # and idle-conversation selection before submitting a native run.
         # Both are scoped to one workspace route.
         with self.admission_lock(ws["id"], adapter_id):
             return self._start_locked(ws, adapter_id, job_id, request_id,
-                                      model, parent_run_id, continue_from_run_id, images)
+                                      model, parent_run_id, continue_from_run_id, images, isolation)
 
     def _start_locked(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
                       model: str | None, parent_run_id: str | None,
-                      continue_from_run_id: str | None, images: list[dict] | None = None) -> dict:
+                      continue_from_run_id: str | None, images: list[dict] | None = None,
+                      isolation: str | None = None) -> dict:
         from .run_images import validate_images
         images = validate_images(images)
+        if isolation not in (None, "none", "worktree"):
+            raise BridgeError("isolation must be none or worktree", "invalid_arguments")
         # Refresh the authoritative Node inventory and prove the Node is
         # reachable before resolving an adapter or making any native runtime
         # call.  A stale Bridge cache must never turn a Node outage into a
@@ -733,12 +739,17 @@ class RunCoordinator:
             if (existing["adapter_id"] != adapter_id or existing["handoff"] != job_id
                     or existing["continue_from"] != continue_from_run_id
                     or existing["parent_run"] != parent_run_id
-                    or (model is not None and existing["model"] != model)):
+                    or (model is not None and existing["model"] != model)
+                    or (isolation is not None
+                        and (isolation == "worktree") != (self.worktrees.for_run(existing["id"]) is not None))):
                 raise BridgeError("request_id has different content", "conflict")
             return {**self._public(dict(existing)), "idempotent": True}
         adapter_info = self.service.adapter_registry.get(adapter_id, require_enabled=True)
         if adapter_info["node_id"] != ws["node_id"]:
             raise BridgeError("Adapter belongs to another Node", "adapter_node_mismatch")
+        if isolation == "worktree" and continue_from_run_id is None and not self.worktrees.supported(adapter_info):
+            raise BridgeError("This agent's plugin cannot work in a worktree; update the Node or start "
+                              "without isolation", "isolation_unavailable")
         node_info = self.service.node_registry.get(ws["node_id"])
         authority = {"node_id": node_info["id"], "node_revision": node_info["revision"],
                      "adapter_id": adapter_id, "adapter_revision": adapter_info["revision"]}
@@ -759,11 +770,21 @@ class RunCoordinator:
                                           "continue": continue_from_run_id or "", "images": images},
                                          sort_keys=True).encode())
         conversation = None
+        worktree = None
         if continue_from_run_id:
             source = self._run_row(ws, continue_from_run_id)
             if source["adapter_id"] != adapter_id or source["phase"] != "terminal":
                 raise BridgeError("Continuation source is unavailable",
                                   "continuation_unavailable")
+            # A conversation keeps the folder it started in: an isolated
+            # one continues in its worktree, an ordinary one in the workspace.
+            worktree = self.worktrees.for_run(continue_from_run_id)
+            if (isolation == "worktree") if worktree is None else (isolation == "none"):
+                raise BridgeError("A continuation keeps its source run's isolation; omit isolation "
+                                  "or start a fresh run", "isolation_mismatch")
+            if worktree is not None and worktree["state"] != "active":
+                raise BridgeError(f"The source run's worktree was {worktree['state']}; start a fresh run",
+                                  "worktree_unavailable")
             # Any terminal outcome may continue (succeeded, failed,
             # cancelled, interrupted): ownership is proven below against the
             # live adapter, not by the historical outcome, model, or
@@ -828,16 +849,24 @@ class RunCoordinator:
         if conversation is None:
             descriptor = adapter.descriptor()
             self._validate_submission_authority(ws, authority, binding)
-            native_conversation = adapter.create_conversation({
-                "workspaceId": ws["id"], "directory": str(ws["root"]),
-                "security": binding,
-            })
-            if (native_conversation.get("workspaceId") != ws["id"]
-                    or not _echo_matches(binding, native_conversation.get("securityBinding"))
-                    or not isinstance(native_conversation.get("id"), str)
-                    or not native_conversation["id"]):
-                raise BridgeError("Runtime conversation binding is invalid",
-                                  "binding_mismatch")
+            if isolation == "worktree":
+                worktree = self.worktrees.create(ws)
+            try:
+                native_conversation = adapter.create_conversation({
+                    "workspaceId": ws["id"],
+                    "directory": worktree["path"] if worktree is not None else str(ws["root"]),
+                    "security": binding,
+                })
+                if (native_conversation.get("workspaceId") != ws["id"]
+                        or not _echo_matches(binding, native_conversation.get("securityBinding"))
+                        or not isinstance(native_conversation.get("id"), str)
+                        or not native_conversation["id"]):
+                    raise BridgeError("Runtime conversation binding is invalid",
+                                      "binding_mismatch")
+            except BaseException:
+                if worktree is not None:
+                    self.worktrees.abandon(worktree, ws)
+                raise
             conversation = {"id": _id("conv_"), "workspace": ws["id"],
                             "node_id": node_info["id"], "node_revision": node_info["revision"],
                             "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"],
@@ -892,13 +921,15 @@ class RunCoordinator:
                 if images:
                     self.service.db.execute("INSERT INTO agent_run_images(run,refs) VALUES(?,?)", (bridge_run_id, json.dumps(images, sort_keys=True)))
                 self.checkpoints.begin_locked(bridge_run_id, ws["id"], node_info["id"])
+                if worktree is not None:
+                    self.worktrees.link_locked(bridge_run_id, worktree["id"])
             self.run_events.publish(bridge_run_id)
             # Bounded and best effort: a capture failure is recorded on the
             # run's checkpoint and never prevents the native start.
             self.checkpoints.capture_pre(ws, bridge_run_id)
             try:
                 run_payload = {
-                    "input": [{"type": "text", "text": self._prompt(ws, job)}],
+                    "input": [{"type": "text", "text": self._prompt(ws, job, worktree)}],
                     "clientRunId": bridge_run_id,
                     "security": run_binding,
                 }
@@ -1015,6 +1046,7 @@ class RunCoordinator:
         with self.service.lock:
             image_row = self.service.db.execute("SELECT refs,metadata FROM agent_run_images WHERE run=?", (run["id"],)).fetchone()
             native_conversation = self.service.db.execute("SELECT native_id FROM agent_conversations WHERE id=?", (run["conversation"],)).fetchone()
+            worktree = self.worktrees.for_run_locked(run["id"])
         return {"run_id": run["id"], "conversation_id": run["conversation"],
                 "node_id": run["node_id"], "node_name": node_name[:80],
                 "node_revision": run["node_revision"],
@@ -1034,6 +1066,7 @@ class RunCoordinator:
                 "images": json.loads(image_row["metadata"] or image_row["refs"]) if image_row else [],
                 "runtime_conversation_id": native_conversation["native_id"] if native_conversation else None,
                 "effective_security": effective_security,
+                "isolation": self.worktrees.view(worktree) if worktree else {"mode": "none"},
                 "error": run["error"], "created": run["created"],
                 "updated": run["updated"]}
 

@@ -51,6 +51,7 @@ from typing import Any
 from .codex_rpc import sanitize_diagnostic
 from .login_path import runtime_env_with_login_path, safe_summary
 from . import security_profiles as profiles
+from .run_roots import run_directory
 from .security import redact
 
 
@@ -427,7 +428,8 @@ class ClaudeHostAdapter:
                  binary: str | None = None, setting_sources: Any = None,
                  permission_mode: str | None = None,
                  _runtime_env: dict | None | bool = False,
-                 _login_path_resolver: Any | None = None):
+                 _login_path_resolver: Any | None = None,
+                 worktrees_root: Path | None = None):
         self.state = state.resolve()
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
@@ -442,6 +444,7 @@ class ClaudeHostAdapter:
         self.projects_root = projects_root.resolve(strict=True)
         if not self.projects_root.is_dir():
             raise ValueError("Projects root must be a directory")
+        self.worktrees_root = worktrees_root
         self._sdk = sdk
         self._binary = binary
         self.setting_sources = parse_setting_sources(setting_sources)
@@ -778,10 +781,7 @@ class ClaudeHostAdapter:
         if not isinstance(requested, str) or not requested:
             raise AdapterFailure("Workspace directory is required")
         try:
-            cwd = Path(requested).resolve(strict=True)
-            if not cwd.is_dir() or not cwd.is_relative_to(self.projects_root):
-                raise ValueError()
-            return str(cwd)
+            return run_directory(requested, self.projects_root, self.worktrees_root)
         except (OSError, RuntimeError, ValueError):
             raise AdapterFailure(
                 "Workspace directory is outside the configured projects root") from None

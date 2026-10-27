@@ -97,7 +97,8 @@ class RunCheckpoints:
         try:
             result = self._node(row, timeout=PRE_BUDGET_MS / 1000 + 10).workspace(
                 "checkpoint_capture", ws,
-                {"checkpoint_id": row["pre_id"], "budget_ms": PRE_BUDGET_MS})
+                {"checkpoint_id": row["pre_id"], "budget_ms": PRE_BUDGET_MS,
+                 **self.coordinator.worktrees.checkpoint_args(run_id)})
             status, error = result["status"], None
         except Exception as exc:  # noqa: BLE001 - evidence must never block a run
             status, error = "unavailable", _code(exc, "checkpoint_capture")
@@ -161,9 +162,12 @@ class RunCheckpoints:
             return
         try:
             ws = self._workspace(row)
+            # An isolated run's files are in its worktree; record them on its branch too.
+            self.coordinator.worktrees.commit_quietly(row["run"], ws)
             result = self._node(row, timeout=POST_BUDGET_MS / 1000 + 5).workspace(
                 "checkpoint_capture", ws,
-                {"checkpoint_id": row["post_id"], "budget_ms": POST_BUDGET_MS})
+                {"checkpoint_id": row["post_id"], "budget_ms": POST_BUDGET_MS,
+                 **self.coordinator.worktrees.checkpoint_args(row["run"])})
         except Exception as exc:  # noqa: BLE001 - retried with backoff, then reported
             attempts = row["attempts"] + 1
             if attempts >= MAX_ATTEMPTS:
@@ -358,7 +362,11 @@ class RunCheckpoints:
         The snapshot diff includes them, so a review needs them listed apart.
         Times come from the Node's journal and the Bridge's run row; a remote
         Node's clock skew can shift an edit at the very edge of the window.
+        An isolated run's snapshots cover only its worktree, which ChatGPT's
+        edits never touch.
         """
+        if self.coordinator.worktrees.for_run(row["run"]) is not None:
+            return {"status": "not_applicable", "reason": "isolated_run"}
         try:
             listed = self._node(row).workspace("list_edits", self._workspace(row), {
                 "offset": 0, "limit": 100, "since": row["created"], "until": row["terminal_at"]})

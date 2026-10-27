@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Use only in ChatGPT web sessions connected to the Workspace Bridge app to plan coding tasks in mapped workspaces, delegate to a less-capable coding model, and audit the results. Do not use in local Codex, Codex CLI, IDE agents, or direct local repository work, including after context loss; use native local tools there.
-version: 3.8.0
+version: 3.9.0
 ---
 
 # Project lead
@@ -99,6 +99,16 @@ conversation; otherwise the call fails closed. Start fresh when the security
 source changes, the user wants clean context, or continuation is rejected; a
 continuation never silently becomes a fresh run.
 
+**Isolation.** Pass `isolation: "worktree"` when the user is editing the same
+project, when another run is working in it, or when the change is risky or
+exploratory and the user may not want it. The agent then works in its own Git
+worktree (branch `wb/...`) and the workspace stays untouched until you call
+`apply_run`; `discard_run` drops the work. It needs a Git workspace and an
+adapter whose `isolation` list in `list_agent_adapters` includes `worktree`; on `isolation_unavailable`, ask
+before running without isolation. Continuations stay in the same worktree, so
+corrective follow-ups build on the earlier run; keep `isolation` unchanged or
+omit it.
+
 Tell the agent to stop rather than guess through contradictions, expand scope, or
 repeat failed checks, and to reply with a summary, affected paths,
 actual check commands/outcomes, unrun checks, and risks. No special report files or JSON schema.
@@ -167,6 +177,14 @@ and inspection guides, not proof. Delivery status says nothing about the outcome
    configured names when the workspace allows it. These are observed results;
    the agent's own test claims are not.
 5. Check acceptance criteria and plausible regressions.
+6. For an isolated run (`isolation.mode` is `worktree`), the workspace does not
+   have the agent's changes yet, so `read_file` and `git_status` show the old
+   code; the run diff is the review. After every follow-up in that worktree has
+   finished, accept with `apply_run` (needs the edit scope), then verify the
+   applied source and run checks; `undo_edit` with its `edit_id` reverts it.
+   On `apply_conflict`, the listed workspace files changed since the worktree
+   was made: tell the user rather than overwrite them. Reject with
+   `discard_run`. Never apply without having read the diff.
 
 Also look for failures, PATH or tool problems, permission friction, retries, hangs,
 redundant work, scope drift, fallbacks, and heavy token or runtime use. Classify

@@ -301,7 +301,7 @@ def test_logs_do_not_contain_document_content_or_paths(env):
 
 def test_skill_and_tools_describe_bridge_handoffs_and_manual_review():
     skill=read_project_lead_skill()
-    assert skill['version']=='3.8.0'
+    assert skill['version']=='3.9.0'
     for value in ['write_file','edit_file','expected_sha256','Bridge state','re-read and reconcile','No special report files','run_checks','Audit using normal tools']:
         assert value in skill['content']
     for name in ['write_file','edit_file']:
@@ -326,7 +326,7 @@ async def test_http_write_edit_read_and_destructive_annotations(env,version):
             return response.json()
         tools=(await rpc('tools/list'))['result']['tools']
         for t in tools:
-            assert t['annotations']['destructiveHint']==(t['name'] in ['write_file','write_image','edit_file','apply_patch','undo_edit','start_agent_run','respond_agent_interaction','steer_agent_run','queue_agent_run'])
+            assert t['annotations']['destructiveHint']==(t['name'] in ['write_file','write_image','edit_file','apply_patch','undo_edit','start_agent_run','respond_agent_interaction','steer_agent_run','queue_agent_run','apply_run','discard_run'])
         def value(r):
             assert not r['result']['isError'],r
             return json.loads(r['result']['content'][0]['text'])

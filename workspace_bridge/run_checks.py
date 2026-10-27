@@ -206,11 +206,14 @@ class RunChecks:
                 self._finish(row, "unavailable", error="checks_unconfigured")
                 return
             budget = sum(configured[name]["timeout_seconds"] for name in names) + DEADLINE_SLACK
-            started = client.workspace("start_checks", ws, {"names": names, "run_id": row["run"]})
+            started = client.workspace("start_checks", ws, {
+                "names": names, "run_id": row["run"],
+                **self.coordinator.worktrees.checkpoint_args(row["run"])})
         except Exception as exc:  # noqa: BLE001 - retried, then reported as unavailable
             attempts = row["attempts"] + 1
             code = _code(exc)
-            if attempts >= START_ATTEMPTS or code in ("checks_unconfigured", "unknown_check", "invalid_checks"):
+            if attempts >= START_ATTEMPTS or code in ("checks_unconfigured", "unknown_check",
+                                                      "invalid_checks", "worktree_unavailable"):
                 self._finish(row, "unavailable", error=code)
                 return
             with self.service.lock, self.service.db:

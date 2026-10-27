@@ -17,7 +17,7 @@ import { PiAdapter } from "./adapter.mjs";
 import { checkPiBinary, isAgentDirAllowed, loadConfig } from "./config.mjs";
 import { createLogger } from "./logging.mjs";
 import { applyLoginPathResult, resolveLoginPathSync } from "./login-path.mjs";
-import { canonicalizeProjectsDir } from "./paths.mjs";
+import { canonicalizeProjectsDir, canonicalizeWorktreesDir } from "./paths.mjs";
 import { serveStdio } from "./stdio.mjs";
 
 export function createLog(env = process.env) {
@@ -86,6 +86,7 @@ export function buildStdioAdapter(params, env = process.env) {
   if (!built.agentDirOk) throw new Error("Pi agent directory is not allowed");
   return new PiAdapter({
     projectsRoot: built.projectsRoot,
+    worktreesRoot: canonicalizeWorktreesDir(params.worktreesRoot),
     agentDir: built.config.agentDir,
     piUsable: built.piCheck.usable && built.agentDirOk,
     piVersion: built.piCheck.version,

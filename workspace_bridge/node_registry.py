@@ -244,7 +244,8 @@ class NodeRegistry:
             adapter = {**adapter, "security": json.dumps({
                 "enforces": sorted({key for key in enforces if isinstance(key, str)})
                 if isinstance(enforces, list) else [],
-                "native": security.get("native") is True}, sort_keys=True)}
+                "native": security.get("native") is True,
+                "worktrees": security.get("worktrees") is True}, sort_keys=True)}
             adapters.append((adapter_id, adapter))
         now = _now()
         revision_changed = False

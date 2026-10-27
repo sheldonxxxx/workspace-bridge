@@ -24,9 +24,16 @@
   failed.
 - `git_diff` with `mode=run` lists the `apply_patch` edits ChatGPT made
   during the run as `chatgpt_edits`.
-- The project-lead skill (3.8.0) covers read-only and edit workspaces,
+- `start_agent_run` takes `isolation: "worktree"`: the agent works in its own
+  Git worktree on a `wb/<id>` branch, made from the workspace's current files
+  without touching its index, branch or working files. Continuations keep the
+  same worktree. New MCP tools `apply_run` (copies the changes into the
+  workspace as one edit that `undo_edit` reverts, all or nothing on conflict)
+  and `discard_run`; unused worktrees are removed after 14 days. Plugins that
+  declare the `worktrees` feature receive `worktreesRoot` in `initialize`.
+- The project-lead skill (3.9.0) covers read-only and edit workspaces,
   Bridge-stored handoffs and their read-only plan folder, `run_checks` and
-  after-run checks in the audit.
+  after-run checks in the audit, and isolated runs.
 - New MCP tools `apply_patch` and `undo_edit`. `apply_patch` edits, creates,
   moves and deletes up to 50 files (1 MiB of text) in one step: every
   existing file needs its current hash, and all changes apply or none do. It

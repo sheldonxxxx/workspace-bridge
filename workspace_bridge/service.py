@@ -15,7 +15,7 @@ from .event_broker import EventBroker
 from .notifications import (NotificationChannel, NotificationManager,
                             notification_channels_from_environment,
                             notification_manager_from_environment, _safe_label)
-from .profile_registry import ProfileRegistry
+from .profile_registry import ProfileRegistry, adapter_security
 from .run_coordinator import RunCoordinator
 from .adapter_registry import AdapterRegistry
 from .schema_upgrade import (add_node_transports, store_handoffs_in_bridge,
@@ -57,7 +57,7 @@ NEUTRAL_AGENT_TOOLS = frozenset({
     "read_agent_run", "cancel_agent_run", "steer_agent_run", "queue_agent_run",
     "list_agent_executions", "read_agent_execution",
     "read_agent_interaction", "respond_agent_interaction",
-    "list_agent_activities", "read_agent_activity",
+    "list_agent_activities", "read_agent_activity", "apply_run", "discard_run",
 })
 
 
@@ -329,6 +329,7 @@ class Service:
                 "available": bool(route.get("ready")),
                 "bound": bool(route), "default_model": route.get("default_model"),
                 "effective_security": route.get("effective_security"),
+                "isolation": ["none", "worktree"] if adapter_security(row)["worktrees"] else ["none"],
                 "readiness": route.get("readiness", "unbound"),
                 "descriptor": descriptor})
         return {"workspace_id": ws["id"], "node_id": ws["node_id"], "adapters": adapters}
@@ -340,7 +341,8 @@ class Service:
                         request_id: str = "", model: str | None = None,
                         parent_run_id: str | None = None,
                         continue_from_run_id: str | None = None,
-                        instruction: str | None = None, images: list[dict] | None = None) -> dict:
+                        instruction: str | None = None, images: list[dict] | None = None,
+                        isolation: str | None = None) -> dict:
         """Start a run from a prepared handoff or a bounded direct instruction.
 
         Exactly one of job_id / instruction is accepted. A direct
@@ -359,13 +361,14 @@ class Service:
             raise BridgeError("A run request_id is required", "invalid_arguments")
         return self._start_agent_run_body(
             ws, adapter_id, job_id, request_id, model, parent_run_id,
-            continue_from_run_id, instruction, images)
+            continue_from_run_id, instruction, images, isolation)
 
     def _start_agent_run_body(self, ws: dict, adapter_id: str, job_id: str | None,
                               request_id: str, model: str | None,
                               parent_run_id: str | None,
                               continue_from_run_id: str | None,
-                              instruction: str | None, images: list[dict] | None = None) -> dict:
+                              instruction: str | None, images: list[dict] | None = None,
+                              isolation: str | None = None) -> dict:
         """Run-admission body (normal runtime/security gates only)."""
         self.require_workspace_route(ws, adapter_id)
         if instruction:
@@ -374,7 +377,7 @@ class Service:
                 ws, adapter_id, request_id, instruction)["id"]
         return self.run_coordinator.start(
             ws, adapter_id, job_id, request_id, model, parent_run_id,
-            continue_from_run_id, images=images)
+            continue_from_run_id, images=images, isolation=isolation)
 
     @staticmethod
     def direct_instruction_request_id(adapter_id: str, request_id: str) -> str:
@@ -1051,6 +1054,15 @@ class Service:
         self.require_edit(ws)
         return self.node_registry.client(ws["node_id"]).workspace("undo_edit", ws, {"edit_id": edit_id})
 
+    def apply_run(self, ws: dict, run_id: str) -> dict:
+        """Copy an isolated run's worktree changes into the workspace as one undoable edit."""
+        self.require_edit(ws)
+        return self.run_coordinator.worktrees.apply(ws, run_id)
+
+    def discard_run(self, ws: dict, run_id: str) -> dict:
+        """Remove an isolated run's worktree and branch without touching the workspace."""
+        return self.run_coordinator.worktrees.discard(ws, run_id)
+
     def run_checks(self, ws: dict, names: list[str] | None = None, check_id: str | None = None,
                    wait_seconds: int = 30) -> dict:
         return self.run_coordinator.run_checks.run(ws, names=names, check_id=check_id,
@@ -1220,7 +1232,7 @@ class Service:
     # Tools that change workspace files serialize per workspace, so a
     # checked write never interleaves with another write or a policy change.
     WORKSPACE_WRITES = frozenset({"write_file", "write_image", "edit_file", "apply_patch",
-                                  "undo_edit", "prepare_handoff"})
+                                  "undo_edit", "prepare_handoff", "apply_run", "discard_run"})
     RUN_INPUTS = frozenset({"steer_agent_run", "queue_agent_run", "respond_agent_interaction"})
 
     def _tool_queue(self, ws_id: str | None, name: str, args: dict):
@@ -1279,6 +1291,7 @@ class Service:
             "git_status": self.git_status,
             "git_diff": self.git_diff,
             "run_checks": self.run_checks,
+            "apply_run": self.apply_run, "discard_run": self.discard_run,
         }
         if name not in methods:
             raise BridgeError("Unknown tool", "unknown_tool")
