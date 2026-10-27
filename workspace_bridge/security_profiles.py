@@ -39,6 +39,10 @@ MAX_SHELL_COMMAND_CHARS = 16384
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 _PATTERN_CHARS = re.compile(r"[A-Za-z0-9_.\-/*?\[\]!+@#%^()=:,{} ]+")
 _SHELL_SPLIT = re.compile(r"&&|\|\||[;&|\n()`]|\$\(")
+# ``zsh -lc '<script>'`` and the like: a shell running a script given inline.
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_SCRIPT_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+_MAX_SHELL_NESTING = 4
 
 BUILTINS: dict[str, dict] = {
     "read-only": {
@@ -338,17 +342,73 @@ def _matches_prefix(segment: str, prefix: str) -> bool:
     return segment == prefix or segment.startswith(prefix + " ")
 
 
-def command_mode(rules: dict, command: Any) -> tuple[str, str]:
+def _shell_words(text: str) -> list[str] | None:
+    """POSIX-style words of ``text``, or ``None`` when its quoting is unbalanced."""
+    words: list[str] = []
+    word: list[str] = []
+    quote = ""
+    started = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            else:
+                word.append(char)
+        elif quote == '"':
+            if char == '"':
+                quote = ""
+            elif char == "\\" and index + 1 < len(text) and text[index + 1] in '"\\$`':
+                index += 1
+                word.append(text[index])
+            else:
+                word.append(char)
+        elif char in "'\"":
+            quote, started = char, True
+        elif char == "\\":
+            if index + 1 == len(text):
+                return None
+            index += 1
+            word.append(text[index])
+        elif char in " \t\n":
+            if word or started:
+                words.append("".join(word))
+            word, started = [], False
+        else:
+            word.append(char)
+        index += 1
+    if quote:
+        return None
+    if word or started:
+        words.append("".join(word))
+    return words
+
+
+def _runs_script(words: list[str]) -> bool:
+    return (len(words) >= 2 and os.path.basename(words[0]) in _SHELLS
+            and _SCRIPT_FLAG.fullmatch(words[1]) is not None)
+
+
+def command_mode(rules: dict, command: Any, _depth: int = 0) -> tuple[str, str]:
     """``(mode, reason)`` for one shell command; never raises.
 
     A deny or ask rule applies when its prefix starts any simple command in
     the line, so ``cd x && git push`` still meets a ``git push`` rule. An
     allow rule applies only when every simple command in the line has an
-    allow rule; otherwise the shell mode decides.
+    allow rule; otherwise the shell mode decides. A line that is only a shell
+    running an inline script, such as ``zsh -lc 'git push'``, is judged by
+    its script; a script nested deeper hides its commands, so it asks at
+    least whenever the profile has ask or deny command rules.
     """
     if (not isinstance(command, str) or not command.strip()
             or len(command) > MAX_SHELL_COMMAND_CHARS or "\x00" in command):
         return "deny", "Shell command is missing or too long"
+    whole = _shell_words(command)
+    if (whole is not None and len(whole) == 3 and _runs_script(whole)
+            and _depth < _MAX_SHELL_NESTING):
+        return command_mode(rules, whole[2], _depth + 1)
+    guarded = any(rule["mode"] != "allow" for rule in rules["commands"])
     segments = [" ".join(part.split()) for part in _SHELL_SPLIT.split(command)]
     segments = [segment for segment in segments if segment]
     restrictive = "allow"
@@ -358,6 +418,10 @@ def command_mode(rules: dict, command: Any) -> tuple[str, str]:
         # Leading environment assignments do not change which program runs.
         while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0]):
             words = words[1:]
+        if guarded and _runs_script(words):
+            restrictive = stricter(restrictive, "ask")
+            covered = False
+            continue
         segment = " ".join(words)
         matches = [rule for rule in rules["commands"] if _matches_prefix(segment, rule["prefix"])]
         best = max(matches, key=lambda rule: len(rule["prefix"]), default=None)

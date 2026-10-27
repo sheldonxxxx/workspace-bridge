@@ -92,6 +92,27 @@
      "mode": "allow"
     }
    ]
+  },
+  "gated": {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "git push",
+     "mode": "deny"
+    },
+    {
+     "prefix": "echo wb",
+     "mode": "ask"
+    }
+   ]
   }
  },
  "canonical": [
@@ -870,6 +891,66 @@
    "profile": "custom",
    "command": "npm testing",
    "mode": "ask"
+  },
+  {
+   "profile": "gated",
+   "command": "/bin/zsh -lc 'echo wb > wb.txt'",
+   "mode": "ask"
+  },
+  {
+   "profile": "gated",
+   "command": "/bin/zsh -lc 'ls -la'",
+   "mode": "allow"
+  },
+  {
+   "profile": "gated",
+   "command": "bash -c 'cd app && git push'",
+   "mode": "deny"
+  },
+  {
+   "profile": "gated",
+   "command": "bash -lc \"git status\"",
+   "mode": "allow"
+  },
+  {
+   "profile": "gated",
+   "command": "zsh -lc 'bash -c \"git push\"'",
+   "mode": "deny"
+  },
+  {
+   "profile": "gated",
+   "command": "sh -c git\\ push",
+   "mode": "deny"
+  },
+  {
+   "profile": "gated",
+   "command": "cd app && bash -c 'make'",
+   "mode": "ask"
+  },
+  {
+   "profile": "gated",
+   "command": "sh -c 'unbalanced",
+   "mode": "ask"
+  },
+  {
+   "profile": "gated",
+   "command": "bash script.sh",
+   "mode": "allow"
+  },
+  {
+   "profile": "trusted",
+   "command": "cd app && bash -c 'git push'",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "/bin/zsh -lc 'git push origin main'",
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "command": "/bin/zsh -lc 'npm test && git status'",
+   "mode": "allow"
   }
  ],
  "layout": {

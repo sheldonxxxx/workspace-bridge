@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -221,6 +222,9 @@ class AdapterFailure(Exception):
 PROFILE_THREAD_SETTINGS = {"permissions": ":read-only", "approvalPolicy": "on-request",
                            "approvalsReviewer": "user"}
 _MAX_FILE_CHANGE_ITEMS = 512
+# Thread states with no turn running. Codex leaves a thread in systemError
+# after a failed turn, and the next turn starts normally from there.
+_IDLE_THREAD = frozenset({"idle", "systemError"})
 
 
 _MAX_SAFE_INTEGER = 9007199254740991
@@ -371,7 +375,8 @@ class CodexHostAdapter:
             source TEXT NOT NULL DEFAULT 'profile',
             applied_revision TEXT NOT NULL DEFAULT '', security_snapshot TEXT,
             permission_revision TEXT NOT NULL DEFAULT '',
-            approval_revision TEXT NOT NULL DEFAULT '');
+            approval_revision TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS conversation_replacements (
             previous TEXT PRIMARY KEY REFERENCES conversations(id),
             replacement TEXT NOT NULL REFERENCES conversations(id),
@@ -434,6 +439,10 @@ class CodexHostAdapter:
         if "approval_revision" not in conversation_columns:
             self.db.execute(
                 "ALTER TABLE conversations ADD COLUMN approval_revision TEXT NOT NULL DEFAULT ''")
+        for column in ("model", "effort"):
+            if column not in conversation_columns:
+                self.db.execute(
+                    f"ALTER TABLE conversations ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_client_run "
                         "ON runs(conversation,client_run) WHERE client_run IS NOT NULL")
         self.db.execute("INSERT OR IGNORE INTO run_turns(run,turn,ordinal) "
@@ -742,16 +751,22 @@ class CodexHostAdapter:
         if security is not None:
             self._check_profile_thread(native, "started")
         profile_id, revision = (security[0], security[1]) if security else ("", "")
+        # A turn's model and effort stay on the thread for later turns, so runs
+        # that choose neither are sent the ones the thread started with.
+        model = native.get("model") if isinstance(native.get("model"), str) else ""
+        effort = (native.get("reasoningEffort")
+                  if isinstance(native.get("reasoningEffort"), str) else "")
         owned = {"id": _id("conv_"), "source": "profile" if security else "native",
                  "profile": profile_id, "revision": revision}
         with self.lock, self.db:
             self.db.execute(
                 "INSERT INTO conversations"
                 "(id,thread,workspace,cwd,profile,revision,created,source,applied_revision,"
-                "permission_revision) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "permission_revision,model,effort) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (owned["id"], thread, workspace, cwd, profile_id, revision, _now(),
                  owned["source"], revision,
-                 PROFILE_THREAD_SETTINGS["permissions"] if security is not None else ""))
+                 PROFILE_THREAD_SETTINGS["permissions"] if security is not None else "",
+                 model[:260], effort[:20]))
             self._emit("conversation.created", owned["id"])
         return {"id": owned["id"], "runtime": "codex", "nativeId": thread,
                 "workspaceId": workspace, "securityBinding": self._binding(owned),
@@ -761,6 +776,14 @@ class CodexHostAdapter:
         owned = self._conversation(conversation_id)
         if self._is_invalidated(owned):
             raise AdapterFailure("Conversation is unavailable", 404, "not_found")
+        status = self._thread_status(owned)
+        return {"id": owned["id"], "runtime": "codex", "nativeId": owned["thread"],
+                "workspaceId": owned["workspace"],
+                "status": "idle" if status in _IDLE_THREAD else status,
+                "securityBinding": self._binding(owned)}
+
+    def _thread_status(self, owned: dict) -> str | None:
+        """The owned thread's status, resuming it first when Codex has not loaded it."""
         profile_thread = owned.get("source", "profile") == "profile"
         try:
             native = self.rpc.call("thread/read", {"threadId": owned["thread"],
@@ -787,9 +810,7 @@ class CodexHostAdapter:
                 status = ((resumed.get("thread") or {}).get("status") or {}).get("type")
         elif (native.get("thread") or {}).get("id") != owned["thread"]:
             raise AdapterFailure("Thread identity changed", 502, "binding_mismatch")
-        return {"id": owned["id"], "runtime": "codex", "nativeId": owned["thread"],
-                "workspaceId": owned["workspace"], "status": status,
-                "securityBinding": self._binding(owned)}
+        return status
 
     def _run(self, run_id: str) -> dict:
         with self.lock:
@@ -994,16 +1015,9 @@ class CodexHostAdapter:
                     (conversation_id,)).fetchone()
                 if busy:
                     raise AdapterFailure("Conversation is busy", 409, "conversation_busy")
-            try:
-                native = self.rpc.call("thread/read", {"threadId": owned["thread"],
-                                                       "includeTurns": False})
-            except CodexRpcError as exc:
-                raise AdapterFailure(_clean(str(exc), 300), 502,
-                                     "runtime_unavailable") from None
-            if ((native.get("thread") or {}).get("status") or {}).get("type") != "idle":
+            # After a restart Codex has not loaded the thread; resume it first.
+            if self._thread_status(owned) not in _IDLE_THREAD:
                 raise AdapterFailure("Conversation is not idle", 409, "conversation_busy")
-            if (native.get("thread") or {}).get("id") != owned["thread"]:
-                raise AdapterFailure("Thread identity changed", 502, "binding_mismatch")
 
             # The thread's sandbox was fixed when it started, so a
             # conversation cannot move between a profile and native Codex.
@@ -1069,6 +1083,10 @@ class CodexHostAdapter:
                 if security is not None:
                     self._run_rules[run_id] = security[2]
             params["threadId"] = owned["thread"]
+            if owned.get("model") and "model" not in params:
+                params["model"] = owned["model"]
+                if owned.get("effort") and "effort" not in params:
+                    params["effort"] = owned["effort"]
             try:
                 result = self.rpc.call("turn/start", params, timeout=45)
                 turn = (result.get("turn") or {}).get("id")
@@ -1171,7 +1189,12 @@ class CodexHostAdapter:
                                 self._notification(event, {
                                     "threadId": owned["thread"], "turnId": run["turn"],
                                     "item": item})
-                        if turn.get("status") in ("completed", "interrupted", "failed"):
+                        # Just after turn/start Codex can list the new turn as
+                        # interrupted with no completion time; only a turn it
+                        # finished, or one too old for that race, is final.
+                        age = time.time() - datetime.fromisoformat(run["created"]).timestamp()
+                        if (turn.get("status") in ("completed", "interrupted", "failed")
+                                and (turn.get("completedAt") is not None or age > 30)):
                             self._notification("turn/completed", {
                                 "threadId": owned["thread"], "turn": turn})
                         break
@@ -1184,7 +1207,7 @@ class CodexHostAdapter:
                             thread_state = {}
                         status = ((thread_state.get("thread") or {}).get("status") or {}).get("type")
                         age = time.time() - datetime.fromisoformat(run["created"]).timestamp()
-                        if status == "idle" and age > 30:
+                        if status in _IDLE_THREAD and age > 30:
                             with self.lock, self.db:
                                 latest = self._run(run_id)
                                 if latest["phase"] == "active" and latest["turn"] == run["turn"]:
@@ -1770,7 +1793,8 @@ class CodexHostAdapter:
         if method == "item/commandExecution/requestApproval":
             command = params.get("command")
             if isinstance(command, list):
-                command = " ".join(str(part) for part in command)
+                # Quoted, so an argv like [zsh, -lc, script] keeps its script whole.
+                command = shlex.join(str(part) for part in command)
             return profiles.command_mode(rules, command)[0]
         with self.lock:
             paths = self._file_changes.get(params.get("itemId"))

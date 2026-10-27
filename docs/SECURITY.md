@@ -51,7 +51,10 @@ or `allow` for reading and writing inside and outside the workspace, the
 shell, web access, and extensions (MCP servers and plugins). It can also list
 `protected` paths, `external_roots` outside the workspace with their own read
 and write modes, and `commands` rules that decide shell commands by prefix
-before the shell mode applies. Paths under `.git`, `.env` files (templates such
+before the shell mode applies. A command that is only a shell running an
+inline script, such as `zsh -lc 'git push'` (the form Codex runs every
+command in), is judged by its script; a script nested further inside a line
+asks at least when the profile has ask or deny command rules. Paths under `.git`, `.env` files (templates such
 as `.env.example` excepted), and the root `checks.toml` are always protected.
 
 | Profile | Reads | Writes | Shell, web, extensions |

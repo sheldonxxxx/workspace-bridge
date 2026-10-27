@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed: shell command rules now apply to commands wrapped in a shell, such
+  as `zsh -lc 'git push'`. Codex runs every command this way, so its ask and
+  deny command rules were not enforced before.
+- Fixed: a Codex conversation accepts new runs after a failed turn and after
+  a restart, and a run that names no model uses the thread's own model
+  instead of the last run's.
 - Breaking: agents run only as Node-supervised plugins. The HTTP adapter
   services are gone: the `workspace-bridge adapter` command (init, serve,
   show-token, service, open-session, reclaim-session), the

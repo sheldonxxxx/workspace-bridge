@@ -47,6 +47,10 @@ const TEMPLATE_SUFFIXES = [".example", ".sample", ".template"];
 const PATTERN_CHARS = /^[A-Za-z0-9_.\-/*?[\]!+@#%^()=:,{} ]+$/;
 const SHELL_SPLIT = /&&|\|\||[;&|\n()`]|\$\(/;
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=[^]*$/;
+// `zsh -lc '<script>'` and the like: a shell running a script given inline.
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const SCRIPT_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
+const MAX_SHELL_NESTING = 4;
 // Python's str.split()/strip() whitespace, so both sides cut text alike.
 const PY_SPACE = "\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 const PY_SPACES = new RegExp(`[${PY_SPACE}]+`);
@@ -416,17 +420,65 @@ function matchesPrefix(segment, prefix) {
   return segment === prefix || segment.startsWith(`${prefix} `);
 }
 
+// POSIX-style words of `text`, or null when its quoting is unbalanced.
+function shellWords(text) {
+  const chars = Array.from(text);
+  const words = [];
+  let word = [];
+  let quote = "";
+  let started = false;
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+    if (quote === "'") {
+      if (char === "'") quote = "";
+      else word.push(char);
+    } else if (quote === '"') {
+      if (char === '"') quote = "";
+      else if (char === "\\" && index + 1 < chars.length && '"\\$`'.includes(chars[index + 1])) {
+        index += 1;
+        word.push(chars[index]);
+      } else word.push(char);
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+    } else if (char === "\\") {
+      if (index + 1 === chars.length) return null;
+      index += 1;
+      word.push(chars[index]);
+    } else if (char === " " || char === "\t" || char === "\n") {
+      if (word.length || started) words.push(word.join(""));
+      word = [];
+      started = false;
+    } else word.push(char);
+  }
+  if (quote) return null;
+  if (word.length || started) words.push(word.join(""));
+  return words;
+}
+
+function runsScript(words) {
+  return words.length >= 2 && SHELLS.has(words[0].split("/").pop()) && SCRIPT_FLAG.test(words[1]);
+}
+
 // [mode, reason] for one shell command; never throws.
 //
 // A deny or ask rule applies when its prefix starts any simple command in
 // the line, so `cd x && git push` still meets a `git push` rule. An allow
 // rule applies only when every simple command in the line has an allow
-// rule; otherwise the shell mode decides.
-export function commandMode(rules, command) {
+// rule; otherwise the shell mode decides. A line that is only a shell
+// running an inline script, such as `zsh -lc 'git push'`, is judged by its
+// script; a script nested deeper hides its commands, so it asks at least
+// whenever the profile has ask or deny command rules.
+export function commandMode(rules, command, depth = 0) {
   if (typeof command !== "string" || !pyStrip(command)
       || codePoints(command) > MAX_SHELL_COMMAND_CHARS || command.includes("\0")) {
     return ["deny", "Shell command is missing or too long"];
   }
+  const whole = shellWords(command);
+  if (whole !== null && whole.length === 3 && runsScript(whole) && depth < MAX_SHELL_NESTING) {
+    return commandMode(rules, whole[2], depth + 1);
+  }
+  const guarded = rules.commands.some((rule) => rule.mode !== "allow");
   const segments = command.split(SHELL_SPLIT).map((part) => pyWords(part).join(" ")).filter(Boolean);
   let restrictive = "allow";
   let covered = segments.length > 0;
@@ -434,6 +486,11 @@ export function commandMode(rules, command) {
     const words = raw.split(" ");
     // Leading environment assignments do not change which program runs.
     while (words.length && ENV_ASSIGNMENT.test(words[0])) words.shift();
+    if (guarded && runsScript(words)) {
+      restrictive = stricter(restrictive, "ask");
+      covered = false;
+      continue;
+    }
     const segment = words.join(" ");
     let best = null;
     for (const rule of rules.commands) {

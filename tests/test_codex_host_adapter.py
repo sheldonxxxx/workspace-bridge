@@ -44,6 +44,9 @@ class FakeCodexRpc:
         # Optional account quota read (account/rateLimits/read).
         self.rate_limits = None
         self.rate_limits_error = None
+        # What thread/start reports as the thread's model and effort, if anything.
+        self.thread_model = None
+        self.turns = []
 
     def permission_profiles(self, cwd):
         self.calls.append(("permissionProfile/list", {"cwd": cwd}))
@@ -81,7 +84,8 @@ class FakeCodexRpc:
                             config.get("approvals_reviewer") or "user"),
                         "sandboxPolicy": {"type": "workspaceWrite"}}
             self.thread_settings[thread_id] = settings
-            return {"thread": {"id": thread_id}, "cwd": params["cwd"], **settings}
+            return {"thread": {"id": thread_id}, "cwd": params["cwd"], **settings,
+                    **(self.thread_model or {})}
         if method == "thread/read":
             return {"thread": {"id": params["threadId"],
                                "status": {"type": self.status}}}
@@ -150,7 +154,7 @@ class FakeCodexRpc:
         if method == "turn/interrupt":
             return {}
         if method == "thread/turns/list":
-            return {"data": []}
+            return {"data": self.turns}
         if method == "account/rateLimits/read":
             if self.rate_limits_error:
                 raise CodexRpcError(self.rate_limits_error)
@@ -815,3 +819,72 @@ def test_conversation_4xx_not_logged_as_5xx(codex_adapter, caplog):
     assert kind == "error" and error["data"] == {"status": 409, "code": "profile_mismatch"}
     assert not [record for record in caplog.records
                 if "plugin request failed" in record.getMessage()]
+
+
+def test_failed_turn_leaves_the_conversation_ready_for_the_next_run(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    rpc.status = "systemError"
+    assert adapter.conversation(conversation["id"])["status"] == "idle"
+    run = adapter.start_run(conversation["id"], {
+        "security": _SECURITY[conversation["id"]], "input": [{"type": "text", "text": "Again"}]})
+    assert run["phase"] == "active"
+
+
+def test_runs_without_a_model_use_the_threads_own_model(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    rpc.thread_model = {"model": "gpt-test", "reasoningEffort": "medium"}
+    conversation = new_conversation(adapter, workspace)
+    security = _SECURITY[conversation["id"]]
+    first = adapter.start_run(conversation["id"], {
+        "security": security, "model": "gpt-other", "input": [{"type": "text", "text": "One"}]})
+    finish_fake_run(adapter, rpc, conversation, first)
+    adapter.start_run(conversation["id"], {
+        "security": security, "input": [{"type": "text", "text": "Two"}]})
+    starts = [params for method, params in rpc.calls if method == "turn/start"]
+    # Codex keeps a turn's model for later turns, so the default is sent explicitly.
+    assert (starts[0]["model"], "effort" in starts[0]) == ("gpt-other", False)
+    assert (starts[1]["model"], starts[1]["effort"]) == ("gpt-test", "medium")
+
+
+def test_a_just_started_turn_listed_as_interrupted_stays_active(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {
+        "security": _SECURITY[conversation["id"]], "input": [{"type": "text", "text": "Go"}]})
+    rpc.turns = [{"id": run["nativeId"], "status": "interrupted", "completedAt": None,
+                  "items": []}]
+    assert adapter.run(run["id"])["phase"] == "active"
+    rpc.turns[0]["completedAt"] = 1793060979
+    assert adapter.run(run["id"])["outcome"] == "interrupted"
+
+
+def test_a_run_after_a_restart_resumes_the_unloaded_thread(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    rpc.status = "notLoaded"
+    run = adapter.start_run(conversation["id"], {
+        "security": _SECURITY[conversation["id"]], "input": [{"type": "text", "text": "Go on"}]})
+    assert run["phase"] == "active"
+    methods = [method for method, _ in rpc.calls]
+    assert methods.index("thread/resume") < methods.index("turn/start")
+
+
+def test_rules_see_through_the_shell_codex_wraps_commands_in(codex_adapter):
+    adapter, workspace, rpc = codex_adapter
+    rules = sp.validate({**TRUSTED, "commands": [{"prefix": "git push", "mode": "deny"}]})
+    conversation = new_conversation(adapter, workspace, "team", rules)
+    adapter.start_run(conversation["id"], {
+        "security": _SECURITY[conversation["id"]],
+        "input": [{"type": "text", "text": "Work"}]})
+    ids = {"threadId": "native-thread-1", "turnId": "native-turn-1",
+           "availableDecisions": ["accept", "decline", "cancel"]}
+    adapter._request(1, "item/commandExecution/requestApproval",
+                     {**ids, "command": "/bin/zsh -lc 'git push origin main'"})
+    adapter._request(2, "item/commandExecution/requestApproval",
+                     {**ids, "command": ["/bin/zsh", "-lc", "cd app && git push"]})
+    adapter._request(3, "item/commandExecution/requestApproval",
+                     {**ids, "command": "/bin/zsh -lc 'git status'"})
+    assert rpc.responses == [(1, {"decision": "decline"}, None),
+                             (2, {"decision": "decline"}, None),
+                             (3, {"decision": "accept"}, None)]
