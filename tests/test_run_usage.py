@@ -598,7 +598,7 @@ def test_bridge_rejects_malformed_native_usage(modern_env):
         service.run_coordinator._persist_snapshot(run, bad, [], [])
 
 
-def test_bridge_schema_v4_fail_fast(tmp_path, payload):
+def test_bridge_schema_v5_fail_fast(tmp_path, payload):
     parent = tmp_path / "projects"
     parent.mkdir()
     root = parent / "alpha"
@@ -608,7 +608,7 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     try:
         assert service.db.execute(
-            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "4"
+            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "5"
         columns = {row["name"] for row in service.db.execute(
             "PRAGMA table_info(agent_runs)")}
         assert "token_usage" in columns
@@ -626,20 +626,20 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
     with pytest.raises(BridgeError) as exc:
         Service(legacy, cfg, run_coordinator_background=False)
     assert exc.value.code == "state_schema_incompatible"
-    # A v4 database that is structurally incomplete (agent_runs without
+    # A v5 database that is structurally incomplete (agent_runs without
     # token_usage) fails closed instead of being silently migrated.
     import sqlite3
     incomplete = tmp_path / "incomplete-state"
     incomplete.mkdir()
     conn = sqlite3.connect(incomplete / "bridge.sqlite3")
     conn.execute("CREATE TABLE bridge_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute("INSERT INTO bridge_meta VALUES('schema_version','4')")
+    conn.execute("INSERT INTO bridge_meta VALUES('schema_version','5')")
     conn.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL, revision TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL)")
     conn.execute("CREATE TABLE node_adapters (adapter_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, name TEXT NOT NULL, runtime_type TEXT NOT NULL, base_url TEXT NOT NULL DEFAULT '', revision TEXT NOT NULL, enabled INTEGER NOT NULL, has_token INTEGER NOT NULL, last_seen TEXT NOT NULL)")
     conn.execute("CREATE TABLE workspace_routes (workspace TEXT NOT NULL, adapter_id TEXT NOT NULL, enabled INTEGER NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, security_source TEXT, profile_id TEXT, profile_revision TEXT, updated TEXT NOT NULL, PRIMARY KEY(workspace, adapter_id))")
     conn.execute("CREATE TABLE adapter_model_policies (adapter_id TEXT PRIMARY KEY, enabled_models_json TEXT NOT NULL, default_model TEXT NOT NULL, reasoning_defaults_json TEXT NOT NULL, updated TEXT NOT NULL)")
     conn.execute("CREATE TABLE agent_conversations (id TEXT PRIMARY KEY, workspace TEXT NOT NULL, node_id TEXT NOT NULL, node_revision TEXT NOT NULL, adapter_id TEXT NOT NULL, runtime_type TEXT NOT NULL, adapter_revision TEXT NOT NULL, native_id TEXT NOT NULL, profile TEXT NOT NULL, revision TEXT NOT NULL, instance_id TEXT NOT NULL, created TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'profile', security_snapshot TEXT, permission_revision TEXT NOT NULL DEFAULT '', approval_revision TEXT NOT NULL DEFAULT '', replacement_reason TEXT, UNIQUE(adapter_id,native_id))")
-    # agent_runs without the v4 token_usage column.
+    # agent_runs without the token_usage column.
     conn.execute("CREATE TABLE agent_runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, workspace TEXT NOT NULL, node_id TEXT NOT NULL, node_revision TEXT NOT NULL, adapter_id TEXT NOT NULL, runtime_type TEXT NOT NULL, adapter_revision TEXT NOT NULL, handoff TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL, continue_from TEXT, parent_run TEXT, native_id TEXT, model TEXT NOT NULL, reasoning TEXT, phase TEXT NOT NULL, active_state TEXT, outcome TEXT, result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', effective_security TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, UNIQUE(workspace,adapter_id,request_id))")
     conn.commit()
     conn.close()

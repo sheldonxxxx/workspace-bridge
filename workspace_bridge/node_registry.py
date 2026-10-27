@@ -173,15 +173,14 @@ class NodeRegistry:
                     revision_changed = True
             for adapter_id, adapter in adapters:
                 self.service.db.execute(
-                    "INSERT INTO node_adapters(adapter_id,node_id,name,runtime_type,base_url,revision,enabled,has_token,last_seen,security) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(adapter_id) DO UPDATE SET "
-                    "name=excluded.name,runtime_type=excluded.runtime_type,base_url=excluded.base_url,"
-                    "revision=excluded.revision,enabled=excluded.enabled,has_token=excluded.has_token,"
+                    "INSERT INTO node_adapters(adapter_id,node_id,name,runtime_type,revision,enabled,last_seen,security) "
+                    "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(adapter_id) DO UPDATE SET "
+                    "name=excluded.name,runtime_type=excluded.runtime_type,"
+                    "revision=excluded.revision,enabled=excluded.enabled,"
                     "last_seen=excluded.last_seen,security=excluded.security",
                     (adapter_id, node_id, adapter.get("name", "Adapter"),
-                     adapter.get("runtime_type", "pi"), adapter.get("base_url", ""), adapter.get("revision", ""),
-                     int(bool(adapter.get("enabled"))), int(bool(adapter.get("has_token"))), now,
-                     adapter["security"]))
+                     adapter.get("runtime_type", "pi"), adapter.get("revision", ""),
+                     int(bool(adapter.get("enabled"))), now, adapter["security"]))
             self.service.db.execute("UPDATE node_adapters SET enabled=0 WHERE node_id=? AND last_seen<>?",
                                     (node_id, now))
         if revision_changed:

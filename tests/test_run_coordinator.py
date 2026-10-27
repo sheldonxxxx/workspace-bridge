@@ -260,7 +260,6 @@ def modern_env(tmp_path, payload):
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "trusted")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test")
     job = service.call(ws_id, token, "save_handoff",
@@ -326,8 +325,8 @@ def test_two_pi_instances_start_and_persist_as_distinct_destinations(modern_env,
     node_service = service._node_transport_services[ws["node_id"]]
     for adapter_id in ids:
         stored = node_service.db.execute(
-            "SELECT kind,token FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
-        assert (stored["kind"], stored["token"]) == ("plugin", "")
+            "SELECT plugin FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
+        assert stored["plugin"] == "pi"
     assert "token" not in service.adapter_registry.get(ids[0])
     assert "token" not in service.adapter_registry.get(ids[1])
     local_native.close()
@@ -591,7 +590,6 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         ws_id = service.add_workspace("Alpha", str(root), [], node_record["id"])["workspace"]["id"]
         token = service.manage_bridge("rotate_token")["token"]
         service.manage_workspace(ws_id, "enable")
-        service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
         ws = service.workspace(ws_id)
         service.set_workspace_route(ws, ADAPTER_ID, True, "trusted")
         service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test", ws)
@@ -962,7 +960,6 @@ def test_workspace_route_defaults_off_for_new_workspace(tmp_path):
     try:
         ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
         service.manage_workspace(ws_id, "enable")
-        service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
         service.adapter_registry.get(ADAPTER_ID)
         assert service.workspace_route_policy(service.workspace(ws_id))["routes"] == {}
         with pytest.raises(BridgeError) as exc:

@@ -142,7 +142,6 @@ def initialize(state: Path, mcp_port: int, admin_port: int,
 def enable_local_node(state: Path, roots: list[str], name: str = "This machine") -> dict:
     """Create the Node embedded in this Bridge and register it; no Node service needed."""
     from .node_cli import initialize_node
-    from .schema_upgrade import add_node_transports
     if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
         raise BridgeError("Node name must contain 1 to 80 characters")
     db = sqlite3.connect(state / "bridge.sqlite3", timeout=10)
@@ -150,7 +149,6 @@ def enable_local_node(state: Path, roots: list[str], name: str = "This machine")
     try:
         if db.execute("SELECT name FROM sqlite_master WHERE name='nodes'").fetchone() is None:
             raise BridgeError("Start the Bridge once before enabling the local Node")
-        add_node_transports(db)
         if db.execute("SELECT 1 FROM nodes WHERE transport='local'").fetchone():
             raise BridgeError("This Bridge already has a local Node")
         if db.execute("SELECT 1 FROM nodes WHERE name=? COLLATE NOCASE", (name.strip(),)).fetchone():
@@ -159,8 +157,8 @@ def enable_local_node(state: Path, roots: list[str], name: str = "This machine")
         node_id = "node_" + secrets.token_hex(12)
         stamp = datetime.now(timezone.utc).isoformat()
         with db:
-            db.execute("INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated,"
-                       "transport,public_key) VALUES(?,?,'','',1,?,?,?,'local','')",
+            db.execute("INSERT INTO nodes(id,name,enabled,revision,created,updated,"
+                       "transport) VALUES(?,?,1,?,?,?,'local')",
                        (node_id, name.strip(), "rev_" + secrets.token_hex(16), stamp, stamp))
     finally:
         db.close()
@@ -175,7 +173,6 @@ def create_pairing_offline(state: Path, config: dict, name: str, replace: bool) 
     """
     from .node_gateway import create_pairing
     from .pairing import format_pairing, gateway_fingerprint
-    from .schema_upgrade import add_node_transports
     settings = gateway_settings(config)
     fingerprint = gateway_fingerprint(state)
     db = sqlite3.connect(state / "bridge.sqlite3", timeout=10)
@@ -183,7 +180,6 @@ def create_pairing_offline(state: Path, config: dict, name: str, replace: bool) 
     try:
         if db.execute("SELECT name FROM sqlite_master WHERE name='nodes'").fetchone() is None:
             raise BridgeError("Start the Bridge once before pairing a Node")
-        add_node_transports(db)
         code, expires = create_pairing(db, name, replace=replace)
     finally:
         db.close()
@@ -320,7 +316,7 @@ def _doctor(state: Path, *, offline: bool, as_json: bool) -> int:
     except BridgeError as exc:
         report = failure_report(mode="offline" if offline else "live",
                                 code=exc.code,
-                                summary=("Bridge state is incompatible with schema v4; use a fresh state path."
+                                summary=("Bridge state is incompatible with schema v5; use a fresh state path."
                                          if exc.code == "state_schema_incompatible"
                                          else "Private Bridge state database could not be opened."))
         _print_doctor(report, as_json)

@@ -63,7 +63,6 @@ def iso_env(tmp_path, payload):
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     service.manage_workspace(ws_id, "set_write_scope", write_scope="workspace")
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "trusted")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test")

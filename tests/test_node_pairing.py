@@ -112,7 +112,7 @@ def paired(tmp_path):
 def test_paired_node_serves_files_and_git_without_a_node_port(paired):
     service, node_id = paired["service"], paired["node_id"]
     node = service.node_registry.get(node_id)
-    assert (node["transport"], node["base_url"], node["token"]) == ("paired", "", "")
+    assert node["transport"] == "paired"
     assert node["revision"] == pairing.node_revision(node["public_key"])
     config = load_node_config(paired["node_state"])
     assert config["bridge"]["node_id"] == node_id

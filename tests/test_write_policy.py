@@ -75,13 +75,7 @@ def test_default_is_read_only_and_handoffs_still_work(env, payload):
     assert job['state']=='prepared' and not (env['root']/HANDOFF).exists()
 
 
-def test_old_handoff_scope_becomes_read_only(env):
-    svc=env['service']
-    with svc.lock, svc.db:
-        svc.db.execute("UPDATE workspaces SET write_scope='handoff' WHERE id=?",(env['id'],))
-    from workspace_bridge.schema_upgrade import store_handoffs_in_bridge
-    store_handoffs_in_bridge(svc.db)
-    assert svc.workspace(env['id'])['write_scope']=='none'
+def test_handoff_is_not_a_write_scope(env):
     with pytest.raises(BridgeError) as exc: scope(env,'handoff')
     assert exc.value.code=='invalid_arguments'
 

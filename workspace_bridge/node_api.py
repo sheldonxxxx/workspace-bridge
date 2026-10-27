@@ -114,14 +114,13 @@ def _route(service, method: str, path: str, raw: bytes) -> tuple[int, object]:
             # Saved-adapter probes are explicit configuration checks;
             # runtime calls use the revision-pinned envelope below.
             # Honor supplied form values so edits test the new input:
-            # blank token reuses the saved token (handled by service).
             try:
                 try:
                     body = _body(raw, limit)
                 except BridgeError:
                     body = {}
                 payload = {key: body[key] for key in
-                           ("name", "runtime_type", "base_url", "token", "enabled")
+                           ("name", "runtime_type", "enabled")
                            if key in body}
                 payload["adapter_id"] = adapter_id
                 return 200, service.test_adapter(payload)

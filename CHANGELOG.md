@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Breaking:** the Bridge state is schema v5, created whole on first start.
+  State from 0.3 or earlier 1.0 builds is refused with
+  `state_schema_incompatible`; use a fresh state path. The in-place upgrade
+  code, the HTTP Node and adapter columns (`base_url`, tokens), the
+  workspace-wide agent switch and the `handoff` write scope are
+  gone.
 - A Node initialized by 0.3, including the Bridge's embedded Node, is
   upgraded in place: the first time 1.0 loads it, it gets its own
   search-cursor secret in `node-config.json`, which 0.3 derived from the
@@ -27,8 +33,7 @@
   `save_handoff.attachments` by its `sha256` without a `path`, and the plan
   folder gets a read-only copy under `attachments/` for the agent; a
   workspace image still takes its `path` and is referenced in place.
-  Handoffs saved by 0.3 in the workspace folder are still listed but can no
-  longer be read or run: save them again. The folder itself stays hidden.
+  Handoffs saved by 0.3 are not carried over.
 - **Breaking:** the MCP endpoint runs on the official MCP Python SDK
   (`mcp` 2.2) and serves both the 2025 protocol versions and 2026-07-28.
   The tool surface is 24 tools under new names: `grep` (was `grep_files`),

@@ -5,8 +5,7 @@ conversation is still owned and idle; model change on continuation; benign
 Node/adapter revision drift with an owned idle conversation; missing/unowned
 conversations failing before any prompt; optional model governance (native
 default, explicit live model, configured allowlist); route readiness and
-default selection without a policy; the retired workspace-wide agent_enabled
-gate; and direct-instruction auto-handoff idempotency/mutual exclusion.
+default selection without a policy; and direct-instruction auto-handoff idempotency/mutual exclusion.
 """
 from __future__ import annotations
 
@@ -28,7 +27,7 @@ from test_run_coordinator import ADAPTER_ID, DirectAdapter, _finish_test_run, mo
 
 @pytest.fixture
 def simplified_env(tmp_path, payload):
-    """modern_env without a Bridge model policy and without agent_enabled."""
+    """modern_env without a Bridge model policy."""
     parent = tmp_path / "projects"
     parent.mkdir()
     root = parent / "alpha"
@@ -49,8 +48,6 @@ def simplified_env(tmp_path, payload):
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
-    # No set_agent_enabled call: the workspace-wide legacy switch stays OFF
-    # (column default 0) and must not gate runs.
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True,
                                 "trusted")
     job = service.call(ws_id, token, "save_handoff",
@@ -281,17 +278,6 @@ def test_reasoning_default_only_for_configured_policy(simplified_env, monkeypatc
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "with-reasoning"})
     assert captured[-1]["reasoning"] == "low"
     assert second["reasoning"] == "low"
-
-
-def test_agent_enabled_false_does_not_block_runs(simplified_env):
-    service, ws_id, token, job, native, _ = simplified_env
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=False)
-    with service.lock:
-        assert service.db.execute("SELECT agent_enabled FROM workspaces WHERE id=?",
-                                  (ws_id,)).fetchone()["agent_enabled"] == 0
-    started = service.call(ws_id, token, "start_run", {
-        "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "switch-off"})
-    assert started["phase"] == "active"
 
 
 def _direct_instruction(service, ws_id, token, request_id, instruction, **extra):

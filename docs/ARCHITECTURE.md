@@ -77,8 +77,6 @@ Component responsibilities:
 - `claude_host_adapter.py`: Claude Code host adapter over the Claude Agent
   SDK with adapter-owned sessions, a closed tool list, and a pre-tool
   permission hook.
-- `schema_upgrade.py`: in-place SQLite constraint upgrades for existing
-  Bridge and Node state.
 - `runtime/pi-host-adapter/`: Pi adapter around natively hosted Pi sessions,
   including its trusted permission extension.
 - `notifications.py`: Bridge-owned semantic events, durable per-channel

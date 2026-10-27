@@ -154,7 +154,7 @@ class NodeClient:
     def test_adapter(self, adapter_id: str, config: dict | None = None) -> dict:
         body: dict = {"adapter_id": adapter_id}
         if isinstance(config, dict):
-            for key in ("name", "runtime_type", "base_url", "token", "enabled"):
+            for key in ("name", "runtime_type", "enabled"):
                 if key in config:
                     body[key] = config[key]
         return self._request("POST", "/v1/adapters/" + adapter_id + "/test", body)

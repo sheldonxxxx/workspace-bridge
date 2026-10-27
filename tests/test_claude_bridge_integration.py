@@ -87,7 +87,6 @@ def claude_env(tmp_path, payload):
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "reviewed")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["default"], "default")
     job = service.call(ws_id, token, "save_handoff",

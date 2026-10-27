@@ -36,8 +36,8 @@ def register_test_node(service: Service, name: str, *, enabled: bool = True) -> 
     node_id, now = "node_" + secrets.token_hex(12), datetime.now(timezone.utc).isoformat()
     with service.lock, service.db:
         service.db.execute(
-            "INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated,transport,public_key) "
-            "VALUES(?,?,'','',?,?,?,?,'paired','')",
+            "INSERT INTO nodes(id,name,enabled,revision,created,updated,transport) "
+            "VALUES(?,?,?,?,?,?,'paired')",
             (node_id, name, int(enabled), "rev_" + secrets.token_hex(16), now, now))
     return service.node_registry.public(service.node_registry.get(node_id))
 

@@ -8,7 +8,6 @@ import pytest
 
 from admin_helpers import admin_cookie
 from workspace_bridge.api import make_admin
-from workspace_bridge.schema_upgrade import add_interaction_decisions
 from workspace_bridge.security import BridgeError
 
 from test_run_coordinator import ADAPTER_ID, modern_env, _finish_test_run, _persist_pending_interaction  # noqa: F401
@@ -125,21 +124,6 @@ def test_runs_waiting_on_an_answer_are_listed_first(modern_env):
     _finish_test_run(service, native, ws_id, waiting)
     listed = service.call(ws_id, token, "list_runs", {})["runs"]
     assert [item["run_id"] for item in listed] == ["run_newer", waiting]
-
-
-def test_decision_columns_are_added_to_existing_state():
-    db = sqlite3.connect(":memory:")
-    db.execute("CREATE TABLE agent_interactions (id TEXT PRIMARY KEY, run TEXT NOT NULL, "
-               "native_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, "
-               "payload TEXT NOT NULL, response TEXT, created TEXT NOT NULL, "
-               "updated TEXT NOT NULL, UNIQUE(run,native_id))")
-    db.execute("INSERT INTO agent_interactions VALUES('i','r','n','choice','resolved','{}',"
-               "'{}','t','t')")
-    add_interaction_decisions(db)
-    add_interaction_decisions(db)
-    columns = [row[1] for row in db.execute("PRAGMA table_info(agent_interactions)")]
-    assert columns[-3:] == ["decided_by", "reason", "decided"]
-    assert db.execute("SELECT decided_by FROM agent_interactions").fetchone() == (None,)
 
 
 @pytest.mark.asyncio

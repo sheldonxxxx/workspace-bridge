@@ -103,8 +103,8 @@ def redeem_pairing(db: sqlite3.Connection, code: str, public_key: str) -> dict:
         else:
             node_id = "node_" + secrets.token_hex(12)
             try:
-                db.execute("INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated,"
-                           "transport,public_key) VALUES(?,?,'','',1,?,?,?,'paired',?)",
+                db.execute("INSERT INTO nodes(id,name,enabled,revision,created,updated,"
+                           "transport,public_key) VALUES(?,?,1,?,?,?,'paired',?)",
                            (node_id, row["name"], revision, stamp, stamp, public_key))
             except sqlite3.IntegrityError:
                 raise BridgeError("Node name is already in use", "pairing_rejected") from None

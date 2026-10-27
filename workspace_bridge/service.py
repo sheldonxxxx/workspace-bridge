@@ -17,8 +17,6 @@ from .notifications import (NotificationChannel, NotificationManager,
 from .profile_registry import ProfileRegistry, adapter_security
 from .run_coordinator import RunCoordinator
 from .adapter_registry import AdapterRegistry
-from .schema_upgrade import (add_node_transports, store_handoffs_in_bridge,
-                             unify_security_profiles, widen_runtime_type_check)
 from . import handoffs
 from .node_gateway import NodeGateway, create_pairing
 from .node_registry import NodeRegistry
@@ -104,25 +102,34 @@ class Service:
                                   "state_schema_incompatible")
             self.db.executescript("""
           CREATE TABLE bridge_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-          INSERT INTO bridge_meta(key,value) VALUES('schema_version','4');
+          INSERT INTO bridge_meta(key,value) VALUES('schema_version','5');
           PRAGMA journal_mode=WAL;
           CREATE TABLE nodes (
             id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-            base_url TEXT NOT NULL, token TEXT NOT NULL,
             enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision TEXT NOT NULL,
+            created TEXT NOT NULL, updated TEXT NOT NULL,
+            transport TEXT NOT NULL CHECK(transport IN ('paired','local')),
+            public_key TEXT NOT NULL DEFAULT '',
+            connected_at TEXT NOT NULL DEFAULT '', last_seen TEXT NOT NULL DEFAULT '',
+            disconnected_at TEXT NOT NULL DEFAULT '');
+          CREATE TABLE node_pairings (
+            id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+            replace_node TEXT, created TEXT NOT NULL, expires TEXT NOT NULL,
+            used TEXT, node_id TEXT);
+          CREATE TABLE security_profiles (
+            id TEXT PRIMARY KEY, rules TEXT NOT NULL, revision TEXT NOT NULL,
             created TEXT NOT NULL, updated TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, node_id TEXT NOT NULL REFERENCES nodes(id),
             root TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 0,
             token_hash TEXT NOT NULL, excludes TEXT NOT NULL, created TEXT NOT NULL,
-            write_scope TEXT NOT NULL DEFAULT 'none' CHECK(write_scope IN ('none','handoff','workspace')),
-            agent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(agent_enabled IN (0,1)));
+            write_scope TEXT NOT NULL DEFAULT 'none' CHECK(write_scope IN ('none','workspace')));
           CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
             request_id TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL,
             state TEXT NOT NULL, created TEXT NOT NULL,
-            documents TEXT NOT NULL, content TEXT, plan_folder TEXT, uploads TEXT, UNIQUE(workspace, request_id));
+            documents TEXT NOT NULL, content TEXT NOT NULL, plan_folder TEXT, uploads TEXT, UNIQUE(workspace, request_id));
           CREATE TABLE IF NOT EXISTS gateway (
             id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 0, updated TEXT NOT NULL);
@@ -137,9 +144,8 @@ class Service:
           CREATE TABLE node_adapters (
             adapter_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id),
             name TEXT NOT NULL, runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude','opencode')),
-            base_url TEXT NOT NULL DEFAULT '',
             revision TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
-            has_token INTEGER NOT NULL CHECK(has_token IN (0,1)), last_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
             security TEXT NOT NULL DEFAULT '{}');
           CREATE TABLE workspace_routes (
             workspace TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -162,26 +168,21 @@ class Service:
         else:
             if "bridge_meta" not in tables:
                 self.db.close()
-                raise BridgeError("Bridge state is not schema v4; use a fresh state path",
+                raise BridgeError("Bridge state is not schema v5; use a fresh state path",
                                   "state_schema_incompatible")
             version = self.db.execute(
                 "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()
-            if version is None or version["value"] != "4":
+            if version is None or version["value"] != "5":
                 self.db.close()
-                raise BridgeError("Bridge state is not schema v4; use a fresh state path",
+                raise BridgeError("Bridge state is not schema v5; use a fresh state path",
                                   "state_schema_incompatible")
             required = {"nodes", "node_adapters", "workspace_routes", "adapter_model_policies"}
             if not required.issubset(tables):
                 self.db.close()
-                raise BridgeError("Bridge state is incomplete for schema v4; use a fresh state path",
+                raise BridgeError("Bridge state is incomplete for schema v5; use a fresh state path",
                                   "state_schema_incompatible")
-            if not read_only:
-                widen_runtime_type_check(self.db, "node_adapters")
         if not read_only:
             self.db.execute("PRAGMA journal_mode=WAL")
-            add_node_transports(self.db)
-            unify_security_profiles(self.db)
-            store_handoffs_in_bridge(self.db)
         if read_only:
             channels = notification_channels
             if channels is None:
@@ -549,9 +550,8 @@ class Service:
     def require_workspace_route(self, ws: dict, adapter_id: str) -> None:
         """Exact enabled same-Node WorkspaceRoute is the execution gate.
 
-        The legacy workspace-wide agent_enabled column is no longer part of
-        run admission; per-route enablement and the enabled adapter on the
-        same authoritative Node remain required.
+        Per-route enablement and the enabled adapter on the same
+        authoritative Node are required.
         """
         adapter = self.adapter_registry.get(adapter_id, require_enabled=True)
         if adapter["node_id"] != ws["node_id"]:
@@ -836,7 +836,7 @@ class Service:
         # Do not disclose disabled workspace names, absolute paths, or credentials.
         with self.lock:
             count = self.db.execute("SELECT count(*) FROM workspaces WHERE enabled=1").fetchone()[0]
-            rows = self.db.execute("SELECT id,name,write_scope,agent_enabled FROM workspaces WHERE enabled=1 ORDER BY name,id LIMIT ? OFFSET ?",
+            rows = self.db.execute("SELECT id,name,write_scope FROM workspaces WHERE enabled=1 ORDER BY name,id LIMIT ? OFFSET ?",
                                    (limit, offset)).fetchall()
             items = [{"workspace_id": r["id"], "name": r["name"],
                       "agent_execution": "per-route",
@@ -933,21 +933,16 @@ class Service:
         return self.keyed_locks.hold(("workspace", ident))
 
     def manage_workspace(self, ident: str, operation: str, excludes: list[str] | None = None,
-                         write_scope: str | None = None, agent_enabled: bool | None = None) -> dict:
+                         write_scope: str | None = None) -> dict:
         with self.workspace_lock(ident):
             ws = self.workspace(ident, False)
             if write_scope is not None and operation not in ("set_write_scope", "set_settings"):
                 raise BridgeError("write_scope requires set_write_scope or set_settings", "invalid_arguments")
-            if agent_enabled is not None and operation != "set_agent_enabled":
-                raise BridgeError("agent_enabled requires set_agent_enabled", "invalid_arguments")
             if operation in {"set_write_scope", "set_settings"} and write_scope not in BRIDGE_WRITE_SCOPES:
                 raise BridgeError("write_scope must be none (read-only) or workspace (edit)", "invalid_arguments")
             if operation in {"set_settings", "set_excludes"}:
                 validate_excludes(excludes)
-            if operation == "set_agent_enabled" and not isinstance(agent_enabled, bool):
-                raise BridgeError("agent_enabled must be a boolean", "invalid_arguments")
-            if operation not in {"enable", "disable", "set_write_scope", "set_settings",
-                                 "set_agent_enabled", "set_excludes"}:
+            if operation not in {"enable", "disable", "set_write_scope", "set_settings", "set_excludes"}:
                 raise BridgeError("Unknown management operation")
             # Node calls happen before, never inside, the database transaction.
             if operation in {"set_write_scope", "set_settings", "set_excludes"}:
@@ -964,8 +959,6 @@ class Service:
                 "set_write_scope": ("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident)),
                 "set_settings": ("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
                                  (write_scope, encoded(excludes or []).decode(), ident)),
-                "set_agent_enabled": ("UPDATE workspaces SET agent_enabled=? WHERE id=?",
-                                      (1 if agent_enabled else 0, ident)),
                 "set_excludes": ("UPDATE workspaces SET excludes=? WHERE id=?",
                                  (encoded(excludes or []).decode(), ident)),
             }
@@ -1079,8 +1072,6 @@ class Service:
         (or always, for the Manager); otherwise list_handoffs pages PROMPT.md."""
         summary = {"id": job["id"], "title": job["title"], "state": job["state"], "created": job["created"],
                    "completion_tracking": "not_tracked"}
-        if not job.get("content"):
-            return {**summary, "stored": "workspace_folder", "note": handoffs.UNSUPPORTED}
         docs = handoffs.documents(job)
         prompt = handoffs.manual_prompt(ws["root"], job)
         summary.update({"stored": "bridge", "documents": {
@@ -1101,8 +1092,6 @@ class Service:
         failure unless ``required``: the plan stays in Bridge state and the
         prompt carries its full text either way.
         """
-        if not job.get("content"):
-            return None
         try:
             folder = self.node_registry.client(ws["node_id"]).workspace("write_plan", ws, {
                 "job_id": job["id"], "documents": handoffs.documents(job),

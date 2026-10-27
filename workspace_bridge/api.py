@@ -727,10 +727,9 @@ class AddWorkspace(Input):
     excludes: list[str] = Field(default_factory=list, max_length=40)
 
 class ManageWorkspace(Input):
-    operation: Literal["enable", "disable", "set_excludes", "set_write_scope", "set_settings", "set_agent_enabled"]
+    operation: Literal["enable", "disable", "set_excludes", "set_write_scope", "set_settings"]
     excludes: list[str] | None = Field(default=None, max_length=40)
     write_scope: Literal["none", "workspace"] | None = None
-    agent_enabled: bool | None = None
 
 
 class WorkspaceRouteUpdate(Input):

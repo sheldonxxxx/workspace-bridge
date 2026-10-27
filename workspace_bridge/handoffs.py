@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 
-from .security import BridgeError
 
 DOCUMENTS = ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md")
 PROMPT_DOCUMENT = "PROMPT.md"
@@ -30,17 +29,9 @@ _MANUAL_REPORT = (
     "commit, push or delete unrelated files unless the handoff explicitly permits it. Stop when complete.")
 
 
-# Handoffs 0.3 wrote into the workspace have no stored text.
-UNSUPPORTED = ("This handoff was saved by 0.3 in the workspace folder, which is no longer read; "
-               "save it again with save_handoff")
-
-
 def documents(job: dict) -> dict[str, str]:
     """The stored document text."""
-    content = job.get("content")
-    if not content:
-        raise BridgeError(UNSUPPORTED, "unsupported_handoff")
-    return json.loads(content)
+    return json.loads(job["content"])
 
 
 def _body(job: dict, docs: dict[str, str]) -> str:

@@ -27,7 +27,6 @@ from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, decode_image_upload, 
 from .security import (BridgeError, MAX_OUTPUT, SafeRoot, allowed, digest,
                        redact, validate_excludes)
 from .wbrp import RuntimeClient
-from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
 from .plugin_protocol import builtin_manifests, load_manifest
 from .plugin_supervisor import PluginRegistry
 from . import __version__
@@ -65,20 +64,16 @@ def _inside(path: Path, parent: Path) -> bool:
 
 
 def _public_adapter(row: dict) -> dict:
-    view = {"id": row["id"], "name": row["name"],
-            "runtime_type": row["runtime_type"], "base_url": row["base_url"],
+    return {"id": row["id"], "name": row["name"], "runtime_type": row["runtime_type"],
             "enabled": bool(row["enabled"]), "revision": row["revision"],
             "created": row["created"], "updated": row["updated"],
-            "has_token": bool(row["token"]), "kind": row.get("kind", "http")}
-    if view["kind"] == "plugin":
-        view.update(plugin=row["plugin"], projects_root=row["projects_root"],
-                    settings=json.loads(row.get("settings") or "{}"))
-    return view
+            "plugin": row["plugin"], "projects_root": row["projects_root"],
+            "settings": json.loads(row.get("settings") or "{}")}
 
 
 PLUGIN_SETTING_LIMIT = 4096
-HTTP_REMOVED_MESSAGE = ("HTTP adapters were removed; add the agent as a plugin with "
-                        "`workspace-bridge node adapter add <plugin> --name <name>`")
+PLUGIN_REQUIRED_MESSAGE = ("Add the agent as a plugin with "
+                           "`workspace-bridge node adapter add <plugin> --name <name>`")
 
 
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
@@ -176,13 +171,14 @@ class NodeService:
               CREATE TABLE runtime_adapters (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude','opencode')),
-                base_url TEXT NOT NULL, token TEXT NOT NULL,
                 enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision TEXT NOT NULL,
-                created TEXT NOT NULL, updated TEXT NOT NULL);
+                created TEXT NOT NULL, updated TEXT NOT NULL,
+                plugin TEXT NOT NULL, projects_root TEXT NOT NULL,
+                settings TEXT NOT NULL DEFAULT '{}');
               CREATE TABLE node_workspaces (
                 id TEXT PRIMARY KEY, root TEXT NOT NULL UNIQUE,
                 excludes TEXT NOT NULL, write_scope TEXT NOT NULL
-                  CHECK(write_scope IN ('none','handoff','workspace')),
+                  CHECK(write_scope IN ('none','workspace')),
                 created TEXT NOT NULL, updated TEXT NOT NULL);
             """)
             self.db.commit()
@@ -190,10 +186,6 @@ class NodeService:
         elif not {"runtime_adapters", "node_workspaces"}.issubset(tables):
             self.db.close()
             raise BridgeError("Node state schema is incompatible", "state_schema_incompatible")
-        if tables and not read_only:
-            widen_runtime_type_check(self.db, "runtime_adapters")
-        if not read_only:
-            add_plugin_adapters(self.db)
         self.browser = Browser(self)
         self.plugins = PluginRegistry(self.state / "plugins", worktrees_root=self.state / "worktrees")
         self._checkpoints = None
@@ -705,9 +697,9 @@ class NodeService:
         try:
             with self.lock, self.db:
                 self.db.execute(
-                    "INSERT INTO runtime_adapters(id,name,runtime_type,base_url,token,enabled,revision,"
-                    "created,updated,kind,plugin,projects_root,settings) "
-                    "VALUES(?,?,?,'','',?,?,?,?,'plugin',?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "INSERT INTO runtime_adapters(id,name,runtime_type,enabled,revision,"
+                    "created,updated,plugin,projects_root,settings) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                     "name=excluded.name,enabled=excluded.enabled,revision=excluded.revision,"
                     "updated=excluded.updated,projects_root=excluded.projects_root,"
                     "settings=excluded.settings",
@@ -727,29 +719,9 @@ class NodeService:
         if not isinstance(payload, dict):
             raise BridgeError("Adapter object required", "invalid_arguments")
         current = self.adapter(adapter_id) if adapter_id else None
-        if current is not None and current.get("kind", "http") != "plugin":
-            return self._save_legacy_adapter(payload, current)
         if current is None and "plugin" not in payload:
-            raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
+            raise BridgeError(PLUGIN_REQUIRED_MESSAGE, "invalid_arguments")
         return self._save_plugin_adapter(payload, current)
-
-    def _save_legacy_adapter(self, payload: dict, current: dict) -> dict:
-        """A 0.3 HTTP adapter can only be renamed, disabled or deleted now."""
-        if set(payload) - {"name", "enabled"}:
-            raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
-        name = payload.get("name", current["name"])
-        enabled = payload.get("enabled", bool(current["enabled"]))
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
-            raise BridgeError("Invalid adapter name", "invalid_arguments")
-        if not isinstance(enabled, bool):
-            raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        try:
-            with self.lock, self.db:
-                self.db.execute("UPDATE runtime_adapters SET name=?,enabled=?,updated=? WHERE id=?",
-                                (name.strip(), int(enabled), _now(), current["id"]))
-        except sqlite3.IntegrityError:
-            raise BridgeError("Adapter name is already in use", "conflict") from None
-        return _public_adapter(self.adapter(current["id"]))
 
     def delete_adapter(self, adapter_id: str) -> dict:
         self.adapter(adapter_id)
@@ -761,11 +733,7 @@ class NodeService:
     def test_adapter(self, payload: dict) -> dict:
         if not isinstance(payload, dict) or not isinstance(payload.get("adapter_id"), str):
             raise BridgeError("Save the plugin adapter, then test it by id", "invalid_arguments")
-        saved = self.adapter(payload["adapter_id"])
-        if saved.get("kind", "http") != "plugin":
-            return {"success": False, "runtime_type": saved["runtime_type"],
-                    "code": "adapter_removed", "message": HTTP_REMOVED_MESSAGE}
-        return self._test_plugin_adapter(saved)
+        return self._test_plugin_adapter(self.adapter(payload["adapter_id"]))
 
     def _test_plugin_adapter(self, row: dict) -> dict:
         try:
@@ -825,8 +793,6 @@ class NodeService:
             adapter_row = self.adapter(adapter_id, require_enabled=True)
             if expected_revision != adapter_row["revision"]:
                 raise BridgeError("The Node adapter configuration changed", "adapter_changed")
-            if adapter_row.get("kind", "http") != "plugin":
-                raise BridgeError(HTTP_REMOVED_MESSAGE, "adapter_removed")
             client = self.plugin_client(adapter_row,
                                         timeout=10 if operation == "usage_limits" else 30)
         args = arguments

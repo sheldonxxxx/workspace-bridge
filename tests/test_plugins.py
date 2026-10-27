@@ -95,7 +95,6 @@ def test_plugin_adapter_fields_are_validated(node, tmp_path):
         service.save_adapter({"name": "x", "plugin": "nope"})
     assert unknown.value.code == "unknown_plugin"
     row = add(service, projects)
-    assert row["kind"] == "plugin" and row["base_url"] == "" and not row["has_token"]
     assert row["projects_root"] == str(projects)
     # Changing settings rotates the revision, so runs bound to the old
     # configuration are recognised as changed.
@@ -300,9 +299,9 @@ async def test_manager_api_lists_plugins_and_creates_a_plugin_adapter(env):
             "settings": {"setting_sources": "user"}})
         assert created.status_code == 201, created.text
         body = created.json()
-        assert body["runtime_type"] == "claude" and body["base_url"] == ""
+        assert body["runtime_type"] == "claude"
         bad = await http.post("/api/adapters", headers={"Cookie": cookie}, json={
             "node_id": env["node_id"], "name": "x", "plugin": "claude", "token": "t"})
         assert bad.status_code == 400
     row = env["node"]["service"].adapter(body["id"])
-    assert row["kind"] == "plugin" and row["projects_root"] == str(env["parent"])
+    assert row["plugin"] == "claude" and row["projects_root"] == str(env["parent"])

@@ -25,7 +25,6 @@ from .run_checkpoints import RunCheckpoints
 from .run_checks import RunChecks
 from .run_worktrees import RunWorktrees
 from . import handoffs
-from .schema_upgrade import add_interaction_decisions
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -242,18 +241,14 @@ class RunCoordinator:
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
         """)
-            # Bridge schema v4 has no migration framework. Fresh state already
-            # includes agent_runs.token_usage above; a v3 database is rejected
-            # by Service before this point. A v4 database that is
-            # structurally incomplete fails closed here instead of being
-            # silently migrated.
+            # There is no migration framework: a state whose tables predate
+            # this schema fails closed instead of being migrated.
             columns = {row["name"] for row in service.db.execute(
                 "PRAGMA table_info(agent_runs)")}
             if "token_usage" not in columns:
                 raise BridgeError(
-                    "Bridge state is incomplete for schema v4; use a fresh state path",
+                    "Bridge state is incomplete for schema v5; use a fresh state path",
                     "state_schema_incompatible")
-            add_interaction_decisions(service.db)
         self.worktrees = RunWorktrees(self, read_only=read_only)
         self.checkpoints = RunCheckpoints(self, read_only=read_only)
         self.run_checks = RunChecks(self, read_only=read_only)

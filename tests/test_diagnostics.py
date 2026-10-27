@@ -75,7 +75,6 @@ def ready_workspace(env, name="Alpha"):
     service = env["service"]
     ws_id = service.add_workspace(name, str(root), []) ["workspace"]["id"]
     service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     if not service.bridge_status()["configured"]:
         service.manage_bridge("rotate_token")
     ws = service.workspace(ws_id)
@@ -163,7 +162,6 @@ def test_plugin_adapters_have_no_token_and_deletion_is_blocked(diagnostic_env):
     adapter_id = next(iter(env["adapters"]))
     public = service.list_adapters()
     assert all("token" not in item for item in public["adapters"])
-    assert not any(item["has_token"] for item in public["adapters"])
     with pytest.raises(BridgeError, match="workspace routes"):
         service.adapter_registry.delete(adapter_id)
     assert service.workspace_route_policy(ws)["routes"][adapter_id]["enabled"]
@@ -214,14 +212,14 @@ async def test_adapter_admin_crud_is_strict_and_plugin_only(diagnostic_env):
         assert created.status_code == 201, created.text
         adapter_id = created.json()["id"]
         saved = await client.get(f"/api/adapters/{adapter_id}", headers=headers)
-        assert saved.status_code == 200 and saved.json()["has_token"] is False
+        assert saved.status_code == 200
         updated = await client.patch(f"/api/adapters/{adapter_id}", headers=headers,
                                      json={"name": "Renamed Codex"})
         assert updated.status_code == 200
         with diagnostic_env["node"]["service"].lock:
             row = diagnostic_env["node"]["service"].db.execute(
-                "SELECT kind,token FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
-        assert (row["kind"], row["token"]) == ("plugin", "")
+                "SELECT plugin FROM runtime_adapters WHERE id=?", (adapter_id,)).fetchone()
+        assert row["plugin"] == "codex"
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -268,7 +266,7 @@ def test_fresh_state_schema_and_private_mode(tmp_path):
                 "agent_conversations", "agent_runs", "agent_interactions",
                 "agent_activities"} <= tables
         assert service.db.execute(
-            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "4"
+            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "5"
         assert (state / "bridge.sqlite3").stat().st_mode & 0o777 == 0o600
     finally:
         service.close()

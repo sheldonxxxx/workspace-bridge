@@ -218,7 +218,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         adapters = service.adapter_registry.rows()[:MAX_ADAPTERS + 1]
         routes = [dict(row) for row in service.db.execute(
             "SELECT r.*,w.name AS workspace_name,w.root,w.node_id,w.enabled AS workspace_enabled,"
-            "w.write_scope,w.agent_enabled,a.name AS adapter_name,a.runtime_type,"
+            "w.write_scope,a.name AS adapter_name,a.runtime_type,"
             "a.enabled AS adapter_enabled,a.revision AS adapter_revision,a.node_id AS adapter_node_id,"
             "n.name AS node_name,n.enabled AS node_enabled,n.revision AS node_revision "
             "FROM workspace_routes r JOIN workspaces w ON w.id=r.workspace "
@@ -325,10 +325,6 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         out.add("workspace.enabled", "workspaces",
                 "pass" if ws["enabled"] else "action_required",
                 "Workspace mapping is enabled." if ws["enabled"] else "Workspace mapping is disabled.",
-                workspace_id=wid)
-        out.add("workspace.agent_execution", "workspaces", "pass",
-                "Agent execution is governed by the exact enabled workspace route; "
-                "the legacy workspace-wide agent switch is no longer a run gate.",
                 workspace_id=wid)
         # Handoffs live in Bridge state, so either scope can plan and run.
         out.add("workspace.write_scope", "workspaces", "pass",
