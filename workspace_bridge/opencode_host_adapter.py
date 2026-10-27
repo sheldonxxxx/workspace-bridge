@@ -21,18 +21,14 @@ import sqlite3
 import threading
 import time
 
-from .claude_host_adapter import (AdapterFailure, PROFILE_ID_RE, PROFILES,
-    _clean, _id, _now, _validate_profile_config, _MAX_CUSTOM_PROFILES)
+from . import security_profiles as profiles
+from .claude_host_adapter import AdapterFailure, _clean, _id, _now
 from .opencode_transport import NativeTransport
 
 RUNTIME_ID = 'opencode'
 _PLUGIN_ID = 'workspace-bridge.permissions.v1'
 
 
-def _profile_revision(profile_id, config):
-    payload = {'version': 1, 'id': profile_id, 'wrapper': config,
-               'plugin': sha256((Path(__file__).with_name('opencode_permission_plugin') / 'index.mjs').read_bytes()).hexdigest()}
-    return sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 _READ = {'read', 'glob', 'grep', 'list', 'ls'}
 _EDIT = {'write', 'edit', 'multiedit', 'apply_patch', 'patch'}
 _SHELL = {'shell', 'bash'}
@@ -40,7 +36,8 @@ _WEB = {'webfetch', 'websearch', 'execute'}
 _META = {'skill', 'subagent', 'task', 'question', 'form', 'todo', 'todowrite', 'todoread'}
 
 
-def tool_decision(config, cwd, tool, args, *, registered_extension=False):
+def tool_decision(rules, cwd, tool, args, *, registered_extension=False):
+    """Decide one OpenCode tool call against a run's profile rules."""
     if not isinstance(tool, str) or not isinstance(args, dict):
         return 'deny'
     category = ('read' if tool in _READ else 'edits' if tool in _EDIT else
@@ -48,45 +45,69 @@ def tool_decision(config, cwd, tool, args, *, registered_extension=False):
                 'meta' if tool in _META else 'extensions' if registered_extension else None)
     if category is None:
         return 'deny'
-    effect = 'allow' if category in ('read', 'meta') else config[category]
-    if effect == 'deny':
-        return effect
-    if category in ('read', 'edits'):
-        paths = [args[k] for k in ('path', 'filePath', 'file_path', 'directory') if k in args]
-        patch = args.get('patchText', args.get('patch'))
-        if tool in ('apply_patch', 'patch'):
-            if not isinstance(patch, str):
-                return 'deny'
-            paths += re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
-                                patch, flags=re.M)
-        if tool in _EDIT | {'read', 'grep'} and not paths:
-            return 'deny'
-        for raw in paths:
-            if not isinstance(raw, str) or not raw or len(raw) > 4096 or '\0' in raw:
-                return 'deny'
-            resolved = Path(raw if os.path.isabs(raw) else os.path.join(cwd, raw)).resolve()
-            if not resolved.is_relative_to(Path(cwd)):
-                return 'deny'
-            # Native recursive grep includes hidden files and has no exclusion
-            # input. Limit content searches to an explicitly admitted file.
-            if tool == 'grep' and not resolved.is_file():
-                return 'deny'
-            parts = resolved.relative_to(cwd).parts
-            if '.git' in parts or any(p == '.env' or p.startswith('.env.') and not p.endswith(
-                    ('.example', '.sample', '.template')) for p in parts):
-                return 'deny'
-            if category == 'edits' and ('.opencode' in parts or '.agents' in parts or
-                    any(p in ('opencode.json', 'opencode.jsonc') for p in parts)):
-                return 'deny'
-        if tool == 'glob':
-            pattern = args.get('pattern')
-            if not isinstance(pattern, str) or '..' in pattern.split('/') or pattern.startswith(('/', '~')):
-                return 'deny'
+    if category == 'meta':
+        return 'allow'
+    if category in ('web', 'extensions'):
+        return rules[category]
     if category == 'shell':
-        command = args.get('command')
-        if not isinstance(command, str) or not command or len(command) > 16384:
+        return profiles.command_mode(rules, args.get('command'))[0]
+    write = category == 'edits'
+    paths = [args[k] for k in ('path', 'filePath', 'file_path', 'directory') if k in args]
+    patch = args.get('patchText', args.get('patch'))
+    if tool in ('apply_patch', 'patch'):
+        if not isinstance(patch, str):
             return 'deny'
+        paths += re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
+                            patch, flags=re.M)
+    if tool in _EDIT | {'read', 'grep'} and not paths:
+        return 'deny'
+    if tool == 'glob':
+        pattern = args.get('pattern')
+        if not isinstance(pattern, str) or not pattern or '..' in pattern.split('/'):
+            return 'deny'
+        if pattern.startswith(('/', '~')):
+            prefix = []
+            for part in pattern.split('/'):
+                if any(char in '*?[]{}' for char in part):
+                    break
+                prefix.append(part)
+            paths.append('/'.join(prefix) or '/')
+    if not paths:
+        paths.append('.')
+    effect = 'allow'
+    for raw in paths:
+        if not isinstance(raw, str) or not raw or len(raw) > 4096 or '\0' in raw:
+            return 'deny'
+        resolved = Path(raw if os.path.isabs(raw) else os.path.join(cwd, raw)).resolve()
+        # Native recursive grep includes hidden files and has no exclusion
+        # input. Limit content searches to an explicitly admitted file.
+        if tool == 'grep' and not resolved.is_file():
+            return 'deny'
+        if write and resolved.is_relative_to(Path(cwd)):
+            parts = resolved.relative_to(cwd).parts
+            if '.opencode' in parts or '.agents' in parts or any(
+                    p in ('opencode.json', 'opencode.jsonc') for p in parts):
+                return 'deny'
+        mode = profiles.path_mode(rules, cwd, raw, write=write)[0]
+        if mode == 'deny':
+            return 'deny'
+        effect = profiles.stricter(effect, mode)
     return effect
+
+
+def permission_effect(rules, action):
+    """Coarse answer for OpenCode's own permission check; ``/tool`` decides precisely."""
+    if action in ('edit', 'write'):
+        return min(rules['write_inside'], rules['write_outside'],
+                   key=('allow', 'ask', 'deny').index)
+    if action in ('shell', 'bash'):
+        modes = [rules['shell']] + [rule['mode'] for rule in rules['commands']]
+        return min(modes, key=('allow', 'ask', 'deny').index)
+    if action in _WEB:
+        return rules['web']
+    if action in ('read', 'glob', 'grep', 'skill', 'subagent', 'question', 'todo'):
+        return 'allow'
+    return rules['extensions']
 
 
 class OpenCodeHostAdapter:
@@ -112,7 +133,6 @@ class OpenCodeHostAdapter:
         self.db.executescript('''
           PRAGMA journal_mode=WAL;
           CREATE TABLE IF NOT EXISTS identity(id TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS security_profiles(id TEXT PRIMARY KEY,config TEXT,revision TEXT);
           CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,session TEXT UNIQUE,
             workspace TEXT,cwd TEXT,profile TEXT,revision TEXT,started INTEGER DEFAULT 0,
             created TEXT,owner TEXT DEFAULT 'bridge');
@@ -129,6 +149,9 @@ class OpenCodeHostAdapter:
             run TEXT,request_id TEXT,mode TEXT,input_hash TEXT,status TEXT,message TEXT UNIQUE,
             UNIQUE(run,request_id));
         ''')
+        if 'rules' not in {r[1] for r in self.db.execute('PRAGMA table_info(conversations)')}:
+            with self.db:
+                self.db.execute("ALTER TABLE conversations ADD COLUMN rules TEXT NOT NULL DEFAULT '{}'")
         os.chmod(self.state / 'opencode-adapter.sqlite3', 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
@@ -228,21 +251,20 @@ class OpenCodeHostAdapter:
                         self.db.execute('SELECT 1 FROM conversations WHERE session=?', (s,)).fetchone()), None)
         if row is None or row['cwd'] != cwd:
             return {'effect': 'deny'}
-        config, revision, _ = self._profile_definition(row['profile'])
-        if revision != row['revision']:
+        try:
+            # The rules of the conversation's latest run, which also govern a
+            # session handed off to a human until the Bridge reclaims it.
+            rules = profiles.validate(json.loads(row['rules']))
+        except Exception:
             return {'effect': 'deny'}
         if path == '/permission':
-            action = body.get('action', '')
-            category = ('edits' if action in ('edit', 'write') else 'shell' if action in (
-                'shell', 'bash') else 'web' if action in _WEB else 'extensions' if action not in (
-                'read', 'glob', 'grep', 'skill', 'subagent', 'question', 'todo') else None)
-            effect = config[category] if category else 'allow'
+            effect = permission_effect(rules, body.get('action', ''))
             # Bridge wrapper approvals happen at execute.before. Native project
             # rules can still ask independently; manual ownership uses native ask.
             return {'effect': 'allow' if effect == 'ask' and row['owner'] == 'bridge' else effect}
         if path != '/tool':
             return {'effect': 'deny'}
-        effect = tool_decision(config, cwd, body.get('tool'), body.get('input'), registered_extension=body.get('registeredExtension') is True)
+        effect = tool_decision(rules, cwd, body.get('tool'), body.get('input'), registered_extension=body.get('registeredExtension') is True)
         if effect != 'ask' or row['owner'] == 'human':
             return {'effect': 'allow' if effect == 'ask' else effect}
         with self.lock:
@@ -290,7 +312,7 @@ class OpenCodeHostAdapter:
             'displayName': 'OpenCode', 'adapterVersion': OPENCODE_ADAPTER_VERSION,
             'nativeVersion': self.native.version or 'unknown', 'instanceId': self.instance_id},
             'features': {k: 1 for k in ('models', 'conversations', 'runs', 'activities',
-                'interactions', 'events', 'securityRebind', 'steering', 'queueing',
+                'interactions', 'events', 'steering', 'queueing',
                 'inputControls', 'imageInput')}, 'release': opencode_release()}
 
     def models(self, workspace_id=None):
@@ -310,112 +332,6 @@ class OpenCodeHostAdapter:
                 'defaultReasoningEffort': None,
                 'default': item['id'] == default.get('id') and item['providerID'] == default.get('providerID')})
         return {'models': models}
-
-    def _profile_definition(self, profile_id: str) -> tuple[dict, str, bool]:
-        if profile_id in PROFILES:
-            config = dict(PROFILES[profile_id])
-            return config, _profile_revision(profile_id, config), False
-        with self.lock:
-            row = self.db.execute("SELECT config,revision FROM security_profiles WHERE id=?",
-                                  (profile_id,)).fetchone()
-        if row is None:
-            raise AdapterFailure("Unknown security profile", 409, "profile_mismatch")
-        try:
-            config = _validate_profile_config(json.loads(row["config"]))
-        except (ValueError, TypeError, AdapterFailure):
-            raise AdapterFailure("Security profile is invalid", 409, "profile_mismatch") from None
-        revision = _profile_revision(profile_id, config)
-        if revision != row["revision"]:
-            raise AdapterFailure("Security profile changed", 409, "profile_mismatch")
-        return config, revision, True
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> dict:
-        if (workspace_id is None) != (directory is None):
-            raise AdapterFailure("Workspace ID and directory must be supplied together")
-        if workspace_id is not None:
-            if not isinstance(workspace_id, str) or not workspace_id or len(workspace_id) > 100:
-                raise AdapterFailure("Invalid workspace id")
-            self._cwd(directory)
-        if workspace_id is not None:
-            self._workspaces[workspace_id] = self._cwd(directory)
-        enforcement = ["tool-allowlist", "permission-hook", "interactive-approval"]
-        rows = [{"id": key, "revision": _profile_revision(key, dict(value)),
-                 "definitionRevision": _profile_revision(key, dict(value)),
-                 "config": dict(value), "mutable": False, "enforcement": enforcement}
-                for key, value in PROFILES.items()]
-        with self.lock:
-            custom = self.db.execute(
-                "SELECT id,config,revision FROM security_profiles ORDER BY id").fetchall()
-        for row in custom:
-            try:
-                config = _validate_profile_config(json.loads(row["config"]))
-            except (ValueError, TypeError, AdapterFailure):
-                continue
-            revision = _profile_revision(row["id"], config)
-            if revision != row["revision"]:
-                continue
-            rows.append({"id": row["id"], "revision": revision,
-                         "definitionRevision": revision, "config": config,
-                         "mutable": True, "enforcement": enforcement})
-        if workspace_id is not None:
-            available = True
-            try:
-                self._activate(self._workspaces[workspace_id])
-            except AdapterFailure:
-                available = False
-            for row in rows:
-                row["available"] = available
-                if not available:
-                    row["unavailableReason"] = "Trusted permission plugin is unavailable"
-        return {"profiles": rows}
-
-    def save_profile(self, body: dict) -> dict:
-        profile_id = body.get("id")
-        if (not isinstance(profile_id, str) or not PROFILE_ID_RE.fullmatch(profile_id)
-                or profile_id in PROFILES):
-            raise AdapterFailure("Choose a new profile ID using lowercase letters, numbers, _ or -")
-        config = _validate_profile_config(body.get("config"))
-        expected = body.get("expectedRevision")
-        if expected is not None and not isinstance(expected, str):
-            raise AdapterFailure("Invalid expected revision")
-        revision = _profile_revision(profile_id, config)
-        with self.lock, self.db:
-            existing = self.db.execute(
-                "SELECT revision FROM security_profiles WHERE id=?", (profile_id,)).fetchone()
-            if (existing is None and expected is not None) or (
-                    existing is not None and existing["revision"] != expected):
-                raise AdapterFailure("Security profile changed; reload it", 409,
-                                     "profile_mismatch")
-            if existing is None and self.db.execute(
-                    "SELECT COUNT(*) FROM security_profiles").fetchone()[0] >= _MAX_CUSTOM_PROFILES:
-                raise AdapterFailure("Too many security profiles")
-            if existing is not None and self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            self.db.execute("INSERT INTO security_profiles(id,config,revision) VALUES(?,?,?) "
-                            "ON CONFLICT(id) DO UPDATE SET config=excluded.config,"
-                            "revision=excluded.revision",
-                            (profile_id, json.dumps(config, sort_keys=True), revision))
-        return {"id": profile_id, "revision": revision, "definitionRevision": revision,
-                "config": config, "mutable": True}
-
-    def delete_profile(self, profile_id: str) -> dict:
-        if profile_id in PROFILES:
-            raise AdapterFailure("Built-in profiles cannot be deleted", 409, "conflict")
-        with self.lock, self.db:
-            if self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            deleted = self.db.execute("DELETE FROM security_profiles WHERE id=?",
-                                      (profile_id,)).rowcount
-        if not deleted:
-            raise AdapterFailure("Security profile not found", 404, "not_found")
-        return {"deleted": profile_id}
 
     def activities(self, run_id: str) -> dict:
         self._run(run_id)
@@ -469,6 +385,15 @@ class OpenCodeHostAdapter:
         return dict(row)
 
     @staticmethod
+    def _security(body):
+        """The profile a conversation or run carries; every run names one."""
+        try:
+            return profiles.from_wire(body.get('security'))
+        except Exception as exc:
+            raise AdapterFailure(_clean(str(exc), 200) or 'Security profile is invalid',
+                                 400, 'invalid_profile') from None
+
+    @staticmethod
     def _binding(row):
         return {'source': 'profile', 'profile': {'id': row['profile'], 'revision': row['revision']}}
 
@@ -504,16 +429,13 @@ class OpenCodeHostAdapter:
         if not isinstance(workspace, str) or not workspace or len(workspace) > 100:
             raise AdapterFailure('Invalid workspace id')
         cwd = self._cwd(body.get('directory'))
-        profile = body.get('securityProfile', {})
-        config, revision, _ = self._profile_definition(profile.get('id'))
-        if profile.get('revision') != revision:
-            raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
+        profile_id, revision, rules = self._security(body)
         self._workspaces[workspace] = cwd
         self._activate(cwd)
         ident, session = _id('conv_'), _id('ses_')
         with self.lock, self.db:
-            self.db.execute('INSERT INTO conversations(id,session,workspace,cwd,profile,revision,created) VALUES(?,?,?,?,?,?,?)',
-                (ident, session, workspace, cwd, profile['id'], revision, _now()))
+            self.db.execute('INSERT INTO conversations(id,session,workspace,cwd,profile,revision,rules,created) VALUES(?,?,?,?,?,?,?,?)',
+                (ident, session, workspace, cwd, profile_id, revision, profiles.canonical_json(rules), _now()))
         # Store identity before the native create. An ambiguous create is never
         # repeated and cannot accidentally attach an existing user's session.
         self.native.request('POST', '/api/session', {'id': session,
@@ -526,27 +448,9 @@ class OpenCodeHostAdapter:
         row = self._conversation(ident)
         self._verify(row)
         return {'id': ident, 'runtime': RUNTIME_ID, 'nativeId': row['session'],
-            'workspaceId': row['workspace'], 'securityProfile': self._binding(row)['profile'],
+            'workspaceId': row['workspace'],
             'securityBinding': self._binding(row), 'status': 'active' if self._is_busy(ident) else 'idle',
             'ownership': row['owner']}
-
-    def rebind_conversation(self, ident, binding):
-        if not isinstance(binding, dict) or binding.get('source') != 'profile':
-            raise AdapterFailure('Named security profile is required')
-        row = self._conversation(ident)
-        if self._is_busy(ident):
-            raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
-        self._verify(row)
-        profile = binding.get('profile', {})
-        _, revision, _ = self._profile_definition(profile.get('id'))
-        if profile.get('revision') != revision:
-            raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
-        self._activate(row['cwd'])
-        # Explicit rebind is also the idle reclaim boundary after native handoff.
-        with self.lock, self.db:
-            self.db.execute("UPDATE conversations SET profile=?,revision=?,owner='bridge' WHERE id=?",
-                            (profile['id'], revision, ident))
-        return self.conversation(ident)
 
     def _run(self, ident):
         with self.lock:
@@ -606,6 +510,7 @@ class OpenCodeHostAdapter:
         if not isinstance(client, str) or not client or len(client) > 200:
             raise AdapterFailure('Client run id is required')
         digest = sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        profile_id, revision, rules = self._security(body)
         with self.lock:
             old = self.db.execute('SELECT * FROM runs WHERE conversation=? AND client_run=?', (ident, client)).fetchone()
             if old:
@@ -614,13 +519,10 @@ class OpenCodeHostAdapter:
                 return self._run_public(dict(old))
             row = self._conversation(ident)
             if row['owner'] != 'bridge':
-                raise AdapterFailure('Native session requires explicit idle security rebind', 409, 'ownership_changed')
+                raise AdapterFailure('Native session is handed off; reclaim it when idle', 409, 'ownership_changed')
             if self._is_busy(ident):
                 raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
             self._verify(row)
-            _, revision, _ = self._profile_definition(row['profile'])
-            if revision != row['revision']:
-                raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
             self._activate(row['cwd'])
             catalog = self.models(row['workspace'])['models']
             selector = body.get('model')
@@ -644,7 +546,10 @@ class OpenCodeHostAdapter:
             log = self._log(row['session'])
             seq = max((e.get('durable', {}).get('seq', e.get('seq', 0)) for e in log), default=0)
             run_id, message, now = _id('run_'), _id('msg_'), _now()
+            row.update(profile=profile_id, revision=revision)
             with self.db:
+                self.db.execute('UPDATE conversations SET profile=?,revision=?,rules=? WHERE id=?',
+                                (profile_id, revision, profiles.canonical_json(rules), ident))
                 self.db.execute('INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,message,log_seq,phase,created,updated) VALUES(?,?,?,?,?,?,?,\'starting\',?,?)',
                     (run_id, ident, client, digest, json.dumps(self._binding(row)), message, seq, now, now))
         for index, item in enumerate(body['input']):
@@ -1014,10 +919,15 @@ class OpenCodeHostAdapter:
                 self._finish(run['id'], 'orphaned', 'native_recovery_unconfirmed')
 
     def reclaim(self, ident):
+        """Take a handed-off session back for Bridge runs at an idle boundary."""
         row = self._conversation(ident)
-        _, revision, _ = self._profile_definition(row['profile'])
-        return self.rebind_conversation(ident, {'source': 'profile',
-            'profile': {'id': row['profile'], 'revision': revision}})
+        if self._is_busy(ident):
+            raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
+        self._verify(row)
+        self._activate(row['cwd'])
+        with self.lock, self.db:
+            self.db.execute("UPDATE conversations SET owner='bridge' WHERE id=?", (ident,))
+        return self.conversation(ident)
 
     def handoff(self, ident):
         row = self._conversation(ident)

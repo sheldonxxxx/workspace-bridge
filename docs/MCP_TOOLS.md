@@ -378,11 +378,10 @@ foreign, or busy conversations still fail closed before any prompt. The
 handoff ID is not required to match the source run. Endpoint/token edits that
 move the runtime fail closed at the ownership proof instead of silently
 starting a fresh conversation; renaming an adapter
-does not change its connection revision. A named-profile ID/revision change
-requires idle security rebind: a valid descriptor without `securityRebind`
-fails with `continuation_security_rebind_unsupported`, while descriptor
-transport/validation failure fails with `continuation_descriptor_unavailable`
-(sanitized, never masquerading as unsupported) before any prompt or rebind.
+does not change its connection revision. Every run carries the route's current
+profile rules, so a profile edit applies to a continuation with no extra step.
+Switching the route between a profile and native security fails the
+continuation with `security_source_changed` before any prompt.
 
 `read_agent_run` includes `phase`, `active_state`, `outcome`, bounded result,
 sanitized error, notification delivery summary, pending `interactions`, and
@@ -460,7 +459,12 @@ stored native conversation on the current same-Node adapter and requires it to
 exist, belong to this workspace, and be idle before sending any prompt; after
 that proof it refreshes only the conversation's current Node/adapter metadata
 and never rewrites historical run evidence. Missing, foreign, mismatched, or
-busy conversations fail closed before any prompt (`conversation_busy`). A named-profile ID/revision change may continue the same Bridge/runtime conversation via an idle security rebind when the adapter advertises `securityRebind`; the next prompt is sent only after the target binding is proven, prior runs keep their immutable `effective_security`, and a bounded `security_binding_rebound` activity records only old/new source/profile IDs/revisions and conversation IDs. Adapters without `securityRebind` fail such a transition with `continuation_security_rebind_unsupported` before any prompt. An ambiguous failed rebind may invalidate the runtime conversation, requiring a fresh conversation; a proven rebind is recorded before the next start, so even a failed start retains the rebound activity. Adapters persist an in-progress rebind marker before native mutation; an incomplete marker after restart refuses ownership. Security-source changes fail explicit continuation with `continuation_security_source_changed` instead of silently starting a fresh conversation; an ordinary fresh run without `continue_from_run_id` remains allowed under the new binding. Fresh named-profile runs use the live observed adapter profile revision. Same-source `runtime-config` drift may still refresh via the adapter (thread update or explicit runtime-owned replacement). Continuation fails closed without silently starting a fresh conversation. Each run owns only
+busy conversations fail closed before any prompt (`conversation_busy`). Each
+run carries the route's current profile rules, and prior runs keep their
+immutable `effective_security`. Switching the route between a profile and
+native security fails explicit continuation with `security_source_changed`
+instead of silently starting a fresh conversation; an ordinary fresh run
+without `continue_from_run_id` remains allowed. Each run owns only
 the activities and results recorded for that iteration. The caller must select
 the exact adapter explicitly; Bridge does not silently switch destinations after
 failure.

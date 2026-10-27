@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .node_client import NodeRuntimeAdapterProxy
+from .profile_registry import adapter_security
 from .security import BridgeError
 
 ADAPTER_ID_RE = re.compile(r"^adapter_[0-9a-f]{24}$")
@@ -67,7 +68,8 @@ class AdapterRegistry:
                 "runtime_type": row["runtime_type"], "base_url": row.get("base_url", ""),
                 "enabled": bool(row["enabled"]),
                 "revision": row["revision"], "last_seen": row.get("last_seen"),
-                "has_token": bool(row.get("has_token"))}
+                "has_token": bool(row.get("has_token")),
+                "security": adapter_security(row)}
 
     def client(self, adapter_id: str, *, require_enabled: bool = False,
                timeout: float = 30, workspace: dict | None = None) -> NodeRuntimeAdapterProxy:

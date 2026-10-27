@@ -170,7 +170,7 @@ class AgentStartRun(Input):
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$", description="Idempotency key; an exact retry returns the same run and conversation and reuses the same audit handoff. Never replays across AdapterInstances.")
     model: str | None = Field(default=None, max_length=260, description="Optional exact canonical selector from list_agent_models for this adapter. Omit to use the adapter's configured default, or its native default when no Bridge model policy exists.")
     parent_run_id: RunID | None = Field(default=None, description="Optional prior run id for traceability. When continue_from_run_id is supplied it defaults to that run and a different explicit value is rejected with continuation_parent_mismatch; without continuation it only records lineage.")
-    continue_from_run_id: RunID | None = Field(default=None, description="Optional terminal run whose conversation is reused for a NEW prepared handoff in the same workspace; the new handoff prompt is sent. Requires the same adapter and compatible security; ownership is proven live by reading or rebinding the stored native conversation, which must exist on the current same-Node adapter, belong to this workspace, and be idle (missing/unowned/busy fail closed before any prompt). Historical outcome, model, and Node/adapter revision drift do not block a proven continuation, and the model may change. A named-profile change may rebind at an idle boundary when the adapter advertises securityRebind; security-source changes fail with continuation_security_source_changed and adapters without rebind support fail with continuation_security_rebind_unsupported instead of starting fresh; runtime-config drift may refresh via the adapter. Implies parent_run_id.")
+    continue_from_run_id: RunID | None = Field(default=None, description="Optional terminal run whose conversation is reused for a NEW prepared handoff in the same workspace; the new handoff prompt is sent. Requires the same adapter; ownership is proven live by reading the stored native conversation, which must exist on the current same-Node adapter, belong to this workspace, and be idle (missing/unowned/busy fail closed before any prompt). Historical outcome, model, and Node/adapter revision drift do not block a proven continuation, and the model may change. The new run carries the route's current security profile. Implies parent_run_id.")
 
     @model_validator(mode="after")
     def _exactly_one_start_target(self) -> "AgentStartRun":
@@ -275,7 +275,7 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "read_handoff": (Artifact, "Read TASK.md, CONTEXT.md or ACCEPTANCE.md. Use normal source browsing to audit the agent result. No completion report files are required.", True, True),
     "list_agent_adapters": (Empty, "List sanitized AdapterInstances and exact workspace-route availability plus bounded descriptor diagnostics (status/features/versions or safe code; observability only, never changes readiness). Runtime type describes protocol behavior; adapter_id selects the destination. Never infer a target from runtime type.", True, True),
     "list_agent_models": (AgentModelQuery, "Read models from one exact AdapterInstance. Returns exact selectors, the adapter's Bridge policy state (a configured allowlist/default, or unrestricted-by-Bridge-policy with the runtime's own default), and discovery/policy scope. A query filters candidates; it never selects a model.", True, True),
-    "start_agent_run": (AgentStartRun, "Start a run on the explicitly selected AdapterInstance when its exact enabled same-Node workspace route is available. Supply exactly one of job_id (a prepared handoff owned by this workspace) or instruction (a bounded direct instruction; the Bridge publishes a minimal auditable handoff through the normal Node write policy, deterministically derived from the adapter_id + request_id domain, and starts it). The server builds the prompt from the handoff; no arbitrary prompt channel or path is added. Returns adapter_id, runtime_type, model and conversation. Model resolution: a configured adapter policy enforces its allowlist/default; with no Bridge policy, an omitted model means the runtime's native default and an explicit model must be in the live catalog. A NEW prepared handoff may continue a terminal run's conversation with continue_from_run_id; ownership is proven live by reading or rebinding the stored native conversation, which must exist on the current same-Node adapter, belong to this workspace, and be idle (missing/unowned/busy fail closed before any prompt). Historical outcome, model, and Node/adapter revision drift do not block a proven continuation, and the model may change. A named-profile change may rebind at an idle boundary when the adapter advertises securityRebind; security-source changes fail with continuation_security_source_changed, missing rebind support fails with continuation_security_rebind_unsupported, and descriptor transport/validation failure fails with continuation_descriptor_unavailable instead of starting fresh; continuation implies parent lineage.", False, True),
+    "start_agent_run": (AgentStartRun, "Start a run on the explicitly selected AdapterInstance when its exact enabled same-Node workspace route is available. Supply exactly one of job_id (a prepared handoff owned by this workspace) or instruction (a bounded direct instruction; the Bridge publishes a minimal auditable handoff through the normal Node write policy, deterministically derived from the adapter_id + request_id domain, and starts it). The server builds the prompt from the handoff; no arbitrary prompt channel or path is added. Returns adapter_id, runtime_type, model and conversation. Model resolution: a configured adapter policy enforces its allowlist/default; with no Bridge policy, an omitted model means the runtime's native default and an explicit model must be in the live catalog. A NEW prepared handoff may continue a terminal run's conversation with continue_from_run_id; ownership is proven live by reading the stored native conversation, which must exist on the current same-Node adapter, belong to this workspace, and be idle (missing/unowned/busy fail closed before any prompt). Historical outcome, model, and Node/adapter revision drift do not block a proven continuation, and the model may change. Every run carries the route's current security profile, which the agent enforces for that run; continuation implies parent lineage.", False, True),
     "list_agent_runs": (AgentRunList, "List this workspace's runs across configured AdapterInstances (newest first) with adapter_id, name, runtime_type, model, conversation and timestamps.", True, True),
     "read_agent_run": (AgentRunRef, "Read one run's durable state, bounded result, sanitized error, notification summary and pending interactions. Notification delivery is not run success authority. Agent claims are unverified; audit current source with browsing tools. Read-only.", True, True),
     "cancel_agent_run": (AgentRunRef, "Cancel the native run bound to this workspace and handoff. Mutating and open-world; no arbitrary process kill.", False, True),
@@ -677,7 +677,7 @@ class ManageWorkspace(Input):
 class WorkspaceRouteUpdate(Input):
     enabled: bool
     profile_id: str | None = Field(default=None, max_length=100)
-    security_source: Literal["profile", "runtime-config"] | None = None
+    security_source: Literal["profile", "native"] | None = None
     is_default: bool | None = None
 
 
@@ -751,10 +751,10 @@ class AdapterTest(Input):
     adapter_id: AdapterID
 
 
-class AdapterProfile(Input):
-    id: str = Field(min_length=1, max_length=64)
-    config: dict
+class SecurityProfileSave(Input):
+    rules: dict
     expected_revision: str | None = Field(default=None, max_length=100)
+    confirm: bool = False
 
 
 class AdminSessionStore:
@@ -1101,6 +1101,21 @@ def make_admin(service: Service, port: int = 8766, *,
                         adapter_filter if adapter_filter else None))
                 except BridgeError as exc:
                     return JSONResponse({"error": str(exc) or "Invalid adapter"}, 400)
+            if path == "/api/profiles" and request.method == "GET":
+                return JSONResponse({"profiles": await run_in_threadpool(service.profiles.list)})
+            if path.startswith("/api/profiles/") and path.count("/") == 3:
+                profile_id = path.rsplit("/", 1)[1]
+                if request.method == "GET":
+                    return JSONResponse(await run_in_threadpool(service.profiles.get, profile_id))
+                if request.method == "PUT":
+                    model = SecurityProfileSave.model_validate(await body_json(request))
+                    return JSONResponse(await run_in_threadpool(
+                        lambda: service.profiles.save(
+                            profile_id, model.rules, expected_revision=model.expected_revision,
+                            confirm=model.confirm)))
+                if request.method == "DELETE":
+                    return JSONResponse(await run_in_threadpool(service.profiles.delete, profile_id))
+                return JSONResponse({"error": "Method not allowed"}, 405)
             if path == "/api/adapters":
                 if request.method == "GET":
                     return JSONResponse(await run_in_threadpool(service.list_adapters))
@@ -1156,32 +1171,6 @@ def make_admin(service: Service, port: int = 8766, *,
                     except BridgeError as exc:
                         return JSONResponse({"success": False, "code": exc.code,
                                              "message": "Connection could not be verified."})
-                if leaf == "profiles" and len(parts) == 4 and request.method == "GET":
-                    workspace_id = request.query_params.get("workspace_id")
-                    fresh_value = request.query_params.get("fresh", "0")
-                    if fresh_value not in {"0", "1"}:
-                        return JSONResponse({"error": "fresh must be 0 or 1"}, 400)
-                    ws = (service.workspace(workspace_id, require_enabled=False)
-                          if workspace_id else None)
-                    catalog = await run_in_threadpool(
-                        service.run_coordinator.profile_catalog, adapter_id, ws,
-                        fresh=fresh_value == "1")
-                    return JSONResponse({"adapter_id": adapter_id,
-                                         "profiles": catalog.get("profiles", []),
-                                         "permissionProfiles": catalog.get(
-                                             "permissionProfiles", []),
-                                         "runtimeConfig": catalog.get("runtimeConfig")})
-                if leaf == "profiles" and len(parts) == 4 and request.method == "POST":
-                    model = AdapterProfile.model_validate(await body_json(request))
-                    saved = await run_in_threadpool(
-                        service.run_coordinator.save_profile, adapter_id,
-                        model.id, model.config, model.expected_revision)
-                    return JSONResponse(saved)
-                if leaf == "profiles" and len(parts) == 5 and request.method == "DELETE":
-                    deleted = await run_in_threadpool(
-                        service.run_coordinator.delete_profile, adapter_id,
-                        parts[4])
-                    return JSONResponse(deleted)
                 if leaf == "model-policy" and request.method == "GET":
                     return JSONResponse({"adapter_id": adapter_id,
                                          **service.run_coordinator.model_policy(adapter_id)})
@@ -1381,13 +1370,13 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/nodes/{node_id}/adapters", api, methods=["GET", "POST"]),
         Route("/api/nodes/{node_id}/plugins", api, methods=["GET"]),
         Route("/api/nodes/{node_id}", api, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/profiles", api),
+        Route("/api/profiles/{profile_id}", api, methods=["GET", "PUT", "DELETE"]),
         Route("/api/adapters", api, methods=["GET", "POST"]),
         Route("/api/adapters/test", api, methods=["POST"]),
         Route("/api/adapters/{adapter_id}", api, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/adapters/{adapter_id}/test", api, methods=["POST"]),
         Route("/api/adapters/{adapter_id}/models", api),
-        Route("/api/adapters/{adapter_id}/profiles", api, methods=["GET", "POST"]),
-        Route("/api/adapters/{adapter_id}/profiles/{profile_id}", api, methods=["DELETE"]),
         Route("/api/adapters/{adapter_id}/model-policy", api, methods=["GET", "POST"]),
         Route("/api/adapters/{adapter_id}/usage-limits", api),
         Route("/api/runs/{run_id}", api),

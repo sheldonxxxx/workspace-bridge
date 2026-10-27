@@ -10,6 +10,7 @@ import { PiAdapter } from "../adapter.mjs";
 import { ExecutionStore } from "../execution-store.mjs";
 import { policyRevision, safeDefaultPolicy } from "../policy.mjs";
 import { durableFixture, boundToolHook, flush } from "./durable-fixture.mjs";
+import { securityBlock } from "./security-block.mjs";
 
 const crashChild = fileURLToPath(new URL("./durable-crash-child.mjs", import.meta.url));
 
@@ -58,7 +59,7 @@ for (const [boundary, state, effects, decision] of [
       await assert.rejects(() => protocol.resolve(metadata.interactionId, { choiceId: "always" }),
         { code: "interaction_stale" });
     }
-    const retried = await protocol.startRun(metadata.conversationId, {
+    const retried = await protocol.startRun(metadata.conversationId, { security: securityBlock(),
       input: metadata.input, clientRunId: metadata.clientRunId,
     });
     assert.equal(retried.id, run.id);
@@ -100,8 +101,7 @@ test("real SDK tool hook awaits durable intent and blocks on storage failure wit
   const fixture = durableFixture(root);
   const adapter = new PiAdapter({ projectsRoot: fixture.adapter.projectsRoot, agentDir: fixture.agentDir });
   t.after(() => adapter.shutdown());
-  const policy = { ...safeDefaultPolicy(), write_tools_enabled: true,
-    tools: { ...safeDefaultPolicy().tools, write: "allow" } };
+  const policy = { ...safeDefaultPolicy(), write_inside: "allow" };
   const session = await adapter.createSession(fixture.directory, "real-sdk-gate", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
@@ -128,7 +128,7 @@ test("the intent gate correlates redacted commands and full extension names, the
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixture = durableFixture(root);
   t.after(() => fixture.adapter.shutdown());
-  const policy = { ...safeDefaultPolicy(), shell_mode: "allow" };
+  const policy = { ...safeDefaultPolicy(), shell: "allow" };
   const created = await fixture.adapter.createSession(fixture.directory, "gate", {
     permission_policy: policy, policy_revision: policyRevision(policy),
   });
@@ -190,11 +190,10 @@ test("restart recovery uses the run start floor and excludes older tool calls", 
   const fixture = durableFixture(root);
   const protocol = new PiRuntimeProtocol(fixture.adapter);
   const conversation = await protocol.createConversation({ workspaceId: "workspace-test",
-    directory: fixture.directory, securityProfile: { id: "read-only",
-      revision: protocol.profiles.get("read-only").revision } });
+    directory: fixture.directory, security: securityBlock() });
   const hook = boundToolHook(fixture.transport);
   assert.equal(await hook({ toolCallId: "older-call", toolName: "read", input: { path: "old.txt" } }), undefined);
-  const run = await protocol.startRun(conversation.id, {
+  const run = await protocol.startRun(conversation.id, { security: securityBlock(),
     input: [{ type: "text", text: "Read the new file" }], clientRunId: "next-run",
   });
   assert.equal(await hook({ toolCallId: "owned-call", toolName: "read", input: { path: "new.txt" } }), undefined);

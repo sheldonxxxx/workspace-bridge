@@ -31,8 +31,8 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
 - Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. No delete, rename, shell, or arbitrary command surface is exposed as an MCP tool. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
 - `RuntimeType` (`pi`, `codex`, or `claude`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_agent_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff through the normal Node write policy, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
-- Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security binding. A Bridge-profile conversation records the profile revision discovered from that adapter; revision drift after adapter redeploys does not block routes or runs, and only a missing or unavailable profile fails. A Codex `runtime-config` route instead follows the effective native configuration for that exact adapter and workspace and stores the revision and bounded summary applied to its thread. Pi enforces its trusted permission extension in an isolated profile; Codex uses its native app-server policy; Claude Code is constrained by the adapter with a closed tool list, a pre-tool permission hook that also covers sub-agent and MCP tool calls, and Bridge interactions for approvals. It loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority; the Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the adapter never edits them, and `--claude-setting-sources` can drop the project and local layers. These mechanisms make different claims. Codex confirms the active native profile when the server reports it; a mismatch fails the binding. The Codex read-only profile denies native approval escalation automatically. Interactions require a live exact request, not merely a persisted ID.
-- Local administrators can create, edit, assign, and delete custom security profiles through a Node-owned AdapterInstance. Profile discovery and model policy are not shared between adapters just because they have the same runtime type. Pi profiles expose validated file-tool, external path, protected path, shell, and session-grant controls; Codex profiles expose only a native permission-profile ID, approval policy, and reviewer choices. Claude Code profiles expose only `edits`, `shell`, `web`, and `extensions` modes (`deny`, `ask`, `allow`) and always deny paths outside the workspace, Git internals, and `.env` files. Codex also supports following its native config without a Bridge profile. Codex owns filesystem/network rules and config layering. Discovery, assignment, and diagnostics use the exact workspace context. For runtime-config conversations, an effective security change is applied between turns when Codex accepts and confirms `thread/settings/update`; an active turn retains its captured settings. Unsupported, rejected, or unconfirmed changes use a fresh conversation. For named-profile conversations, an explicit continuation may rebind the same runtime conversation/history to the current live profile at an idle boundary when the adapter advertises `securityRebind`; the new prompt is sent only after the target binding is proven, prior runs keep immutable `effective_security`, and source changes still require a fresh conversation. An ambiguous failed rebind invalidates the runtime conversation (fresh conversation required) rather than running with unproven permissions; a proven rebind is audited before the next start, so a failed start still records the transition. Adapters persist an in-progress rebind marker before native mutation; restart with an incomplete marker refuses ownership. Codex profile-bound starts send the permissions field and omit legacy sandbox; runtime-config starts omit security overrides so Codex resolves its own layers. Pi shell Allow, Claude Code shell Allow or approved shell commands, and Codex full access can run with broad host authority, so the Manager labels those choices explicitly.
+- Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security source. Every run carries the rules of its route's [security profile](#security-profiles), and the plugin echoes the profile ID and revision it enforces; a mismatch fails the run before any prompt. Each run records its rules in an immutable `effective_security` snapshot. Interactions require a live exact request, not merely a persisted ID.
+- Claude Code loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority. The Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the plugin never edits them, and `--claude-setting-sources` can drop the project and local layers.
 - Per-adapter model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass a configured policy, or act on arbitrary adapter conversations. An unconfigured policy is a governance choice, not a failure: models are then unrestricted by Bridge policy and the runtime selects its own default.
 - HTTP Node tokens are plaintext in private Bridge SQLite; agent plugins have no tokens. Both state databases are mode `0600` and their containing directories are private. Normal list/detail/status APIs return `has_token` only; add/edit forms do not read tokens back, and blank update fields preserve them. Node and plugin responses are scrubbed before they reach models, profiles, run data, diagnostics, events, logs, or errors. Backups remain sensitive.
 - Fresh writable state creates schema v4 directly (including per-run native token usage). Existing v4 state receives narrow in-place upgrades only when a release needs them (for example, `0.2.0` widens the runtime-type constraint to accept `claude`), inside one transaction that preserves rows and indexes. Pre-v4 state is rejected as `state_schema_incompatible` and is never altered; use a fresh state path for it.
@@ -42,6 +42,39 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Request type/size bounds, bounded reads/search, output budget, concurrency gate and quotas. File changes during reads and stale context hashes fail rather than silently succeeding.
 - Generated planning document hashes expose local modification when a handoff is read. No runtime test execution, automatic approval gate, stored verdict, or claim of independent verification is provided.
 - No third-party scripts, escaped text rendering, a restrictive CSP, no browser persistent token storage, and no contents/keys in operational events. The UI intentionally does not render project Markdown as HTML.
+
+## Security profiles
+
+Security profiles live in the Bridge and are edited only by a local admin in
+the Manager; no MCP tool reads or changes them. A profile sets `deny`, `ask`,
+or `allow` for reading and writing inside and outside the workspace, the
+shell, web access, and extensions (MCP servers and plugins). It can also list
+`protected` paths, `external_roots` outside the workspace with their own read
+and write modes, and `commands` rules that decide shell commands by prefix
+before the shell mode applies. Paths under `.git`, `.env` files (templates such
+as `.env.example` excepted), and the root `checks.toml` are always protected.
+
+| Profile | Reads | Writes | Shell, web, extensions |
+| --- | --- | --- | --- |
+| `read-only` | Workspace only | None | None |
+| `reviewed` | Workspace; ask outside | Workspace only | Ask |
+| `trusted` | Anywhere | Workspace; ask outside | Allow |
+
+`ask` pauses the run until someone answers the interaction. A route names one
+profile, or `native` for a plugin that can follow the agent's own security
+(Codex). A route is refused when its plugin cannot enforce every restrictive
+rule of the profile: Codex, for example, keeps reads, web access, and
+extensions inside its read-only sandbox ungated, so it accepts `trusted` and
+`native` but not `read-only` or `reviewed`. A run keeps the rules it started
+with, and an edit reaches the next run, including a continuation. Before
+saving an edit that loosens a profile, or that a routed plugin cannot enforce,
+the Manager lists the affected rules and routes and asks for confirmation. A
+profile in use cannot be deleted.
+
+Each plugin enforces the rules itself, in its own way; see
+[Security on every run](RUNTIME_PROTOCOL.md#security-on-every-run). None of
+them is an OS sandbox. Allowing the shell, writes outside the workspace, or
+extensions gives the agent broad host authority.
 
 ## What is excluded by default
 
@@ -159,19 +192,14 @@ their Node with no port, no credential, and the Node's environment minus
 every `WB_*` variable. They do not receive provider credentials from
 Bridge.
 
-Each conversation is bound to one enabled workspace and exact same-Node AdapterInstance, and to either an
-immutable Bridge security profile assignment or the observed native Codex
-configuration. Bridge rechecks the exact WorkspaceRoute, prepared handoff,
-security binding (profile assigned and available with live observed revision for new runs; revision drift does not
-block), and adapter connection
-before a run. For runtime-config conversations, it
-checks for drift and applies or replaces native settings at an idle turn boundary.
-Responses are limited to live,
-adapter-provided interactions and are revalidated by the adapter. Pi, Codex, and Claude Code
-profiles use different native security mechanisms. Neither a runtime profile nor
-a workspace binding should be described as an OS sandbox unless the specific
-runtime provides that guarantee. Pi runs with the host user's authority; review
-its file, external-path, protected-path, and shell controls before allowing writes.
+Each conversation is bound to one enabled workspace and exact same-Node
+AdapterInstance, and to either Bridge security profiles or the agent's native
+security. Bridge rechecks the exact WorkspaceRoute, prepared handoff, profile,
+and adapter connection before a run, and sends the profile's current rules with
+it. Responses are limited to live, adapter-provided interactions and are
+revalidated by the adapter. Neither a profile nor a workspace binding should be
+described as an OS sandbox. Agents run with the host user's authority; review a
+profile's shell, external-path, and write rules before routing it.
 
 ## Run checkpoints
 

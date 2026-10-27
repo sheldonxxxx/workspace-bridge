@@ -4,8 +4,10 @@ The Node starts each plugin as a child process and owns its stdin and
 stdout. Every message is one UTF-8 JSON object on one line. The Node sends
 ``initialize`` first, then named requests; the plugin answers each request by
 id and pushes ``event`` notifications. The resource model (descriptor,
-models, profiles, conversations, runs, interactions, activities) is the same
-as Runtime Protocol v1; only the transport changed: no ports, no tokens.
+models, conversations, runs, interactions, activities) is the same as
+Runtime Protocol v1; only the transport changed: no ports, no tokens. Security
+profiles belong to the Bridge: each run carries the rules the plugin must
+enforce, and the manifest's ``enforces`` list says which rule keys it can.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from . import security_profiles
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, redact
 
@@ -34,12 +37,8 @@ ROUTES: tuple[tuple[str, re.Pattern, str, tuple[str, ...]], ...] = tuple(
         ("GET", r"/v1/descriptor", "descriptor", ()),
         ("GET", r"/v1/models", "models", ()),
         ("GET", r"/v1/usage-limits", "usageLimits", ()),
-        ("GET", r"/v1/profiles", "profiles.list", ()),
-        ("POST", r"/v1/profiles", "profiles.save", ()),
-        ("DELETE", r"/v1/profiles/([^/]+)", "profiles.delete", ("profileId",)),
         ("POST", r"/v1/conversations", "conversations.create", ()),
         ("GET", r"/v1/conversations/([^/]+)", "conversations.get", ("conversationId",)),
-        ("POST", r"/v1/conversations/([^/]+)/security", "conversations.rebind", ("conversationId",)),
         ("POST", r"/v1/conversations/([^/]+)/runs", "runs.start", ("conversationId",)),
         ("GET", r"/v1/conversations/([^/]+)/runs/([^/]+)", "runs.find",
          ("conversationId", "clientRunId")),
@@ -65,9 +64,7 @@ def to_rpc(method: str, path: str, query: dict | None, body: dict | None) -> tup
             for key, value in (query or {}).items():
                 if value is None:
                     continue
-                if key == "fresh":
-                    params[key] = value in ("1", 1, True)
-                elif key in ("after", "waitMs"):
+                if key in ("after", "waitMs"):
                     params[key] = int(value)
                 else:
                     params[key] = value
@@ -165,11 +162,14 @@ def validate_manifest(raw: Any) -> dict:
         value = raw.get(key, [])
         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
             raise bad(f"{key} must be a list of strings")
+    unknown = set(raw.get("enforces", [])) - set(security_profiles.KEYS)
+    if unknown:
+        raise bad("enforces names unknown rule keys: " + ", ".join(sorted(unknown)))
     return {"id": ident, "version": version, "runtime_type": raw["runtime_type"],
             "command": list(command) if command is not None else _python_command([module]),
             "description": str(raw.get("description", ""))[:200],
             "settings": list(settings), "features": list(raw.get("features", [])),
-            "enforces": list(raw.get("enforces", []))}
+            "enforces": sorted(set(raw.get("enforces", [])))}
 
 
 def builtin_manifests() -> dict[str, dict]:

@@ -550,7 +550,18 @@ class NodeService:
         return result
 
     def list_adapters(self) -> dict:
-        return {"adapters": [_public_adapter(row) for row in self.adapters()]}
+        manifests = self.manifests()
+        adapters = []
+        for row in self.adapters():
+            view = _public_adapter(row)
+            manifest = manifests.get(row.get("plugin") or "")
+            if manifest is not None:
+                # What the Bridge needs to refuse a profile this plugin
+                # cannot enforce, and to offer the agent's own security.
+                view["security"] = {"enforces": manifest["enforces"],
+                                    "native": "native_security" in manifest["features"]}
+            adapters.append(view)
+        return {"adapters": adapters}
 
     # -- plugins -----------------------------------------------------------
 
@@ -715,9 +726,7 @@ class NodeService:
                 "protocol": 2, "features": descriptor.features}
 
     def runtime_call(self, adapter_id: str, operation: str, body: dict):
-        allowed_ops = {"descriptor", "models", "profile_catalog", "profiles", "save_profile",
-                       "delete_profile", "create_conversation", "conversation",
-                       "rebind_conversation", "start_run",
+        allowed_ops = {"descriptor", "models", "create_conversation", "conversation", "start_run",
                        "find_run", "run", "cancel", "steer", "queue", "interactions", "resolve",
                        "activities", "activity", "events", "usage_limits"}
         if operation not in allowed_ops or not isinstance(body, dict):
@@ -738,7 +747,7 @@ class NodeService:
             workspace = self.authoritative_workspace(workspace)
             with self.safe_root(workspace) as safe:
                 root = safe.path
-            if operation in {"models", "profile_catalog", "profiles"}:
+            if operation == "models":
                 if arguments.get("workspace_id") != workspace.get("id"):
                     raise BridgeError("Runtime workspace identity mismatch", "invalid_arguments")
                 if arguments.get("directory") not in (None, root):
@@ -772,28 +781,6 @@ class NodeService:
                 result["release"] = value.release
             return result
         if operation == "models": return client.models(args["workspace_id"])
-        if operation == "profile_catalog": return client.profile_catalog(
-            args.get("workspace_id"), args.get("directory"), fresh=bool(args.get("fresh", False)))
-        if operation == "profiles": return client.profiles(
-            args.get("workspace_id"), args.get("directory"), fresh=bool(args.get("fresh", False)))
-        if operation == "save_profile": return client.save_profile(
-            args["profile_id"], args["config"], args.get("expected_revision"))
-        if operation == "delete_profile": return client.delete_profile(args["profile_id"])
-        if operation == "rebind_conversation":
-            binding = args.get("security_binding")
-            conv = args.get("conversation_id")
-            if (not isinstance(conv, str) or not conv or len(conv) > 200
-                    or not isinstance(binding, dict) or binding.get("source") != "profile"
-                    or not isinstance(binding.get("profile"), dict)
-                    or not isinstance(binding["profile"].get("id"), str)
-                    or not binding["profile"]["id"] or len(binding["profile"]["id"]) > 100
-                    or not isinstance(binding["profile"].get("revision"), str)
-                    or not binding["profile"]["revision"]
-                    or len(binding["profile"]["revision"]) > 100
-                    or set(binding) != {"source", "profile"}
-                    or set(binding["profile"]) != {"id", "revision"}):
-                raise BridgeError("Invalid security rebind binding", "invalid_arguments")
-            return client.rebind_conversation(conv, binding)
         if operation == "create_conversation": return client.create_conversation(args["payload"])
         if operation == "conversation": return client.conversation(args["conversation_id"])
         if operation == "start_run":

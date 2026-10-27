@@ -42,24 +42,12 @@ def _models(adapter, params: dict):
     return adapter.models()
 
 
-def _rebind(adapter, params: dict):
-    binding = _body(params).get("securityBinding")
-    if not isinstance(binding, dict):
-        raise ValueError("Invalid security rebind binding")
-    return adapter.rebind_conversation(params["conversationId"], binding)
-
-
 HANDLERS: dict[str, Callable[[Any, dict], Any]] = {
     "descriptor": lambda a, p: a.descriptor(),
     "models": _models,
     "usageLimits": lambda a, p: a.usage_limits(),
-    "profiles.list": lambda a, p: a.profiles(p.get("workspaceId"), p.get("directory"),
-                                             fresh=bool(p.get("fresh", False))),
-    "profiles.save": lambda a, p: a.save_profile(_body(p)),
-    "profiles.delete": lambda a, p: a.delete_profile(p["profileId"]),
     "conversations.create": lambda a, p: a.create_conversation(_body(p)),
     "conversations.get": lambda a, p: a.conversation(p["conversationId"]),
-    "conversations.rebind": _rebind,
     "runs.start": lambda a, p: a.start_run(p["conversationId"], _body(p)),
     "runs.find": lambda a, p: a.find_run(p["conversationId"], p["clientRunId"]),
     "runs.get": lambda a, p: a.run(p["runId"]),

@@ -214,7 +214,7 @@ async def test_manager_stream_bound_snapshot_change_and_unchanged_read(modern_en
     async with connection(app, cookie, query=f"run_id={run_id}".encode()) as (_, queue, _):
         await body(queue)
         service.run_coordinator.run_events.publish(RUN_B)
-        native._request(99, "item/commandExecution/requestApproval", {
+        native._request(99, "item/fileChange/requestApproval", {
             "threadId": "native-thread-1", "turnId": "native-turn-1",
             "reason": "Private approval body", "availableDecisions": ["accept", "decline"]})
         service.run_coordinator.reconcile(service.workspace(ws_id), run_id)

@@ -74,8 +74,6 @@ def test_manifest_validation(change, message):
 def test_v1_paths_map_to_named_methods():
     assert to_rpc("GET", "/v1/conversations/c1/runs/r1", None, None) == (
         "runs.find", {"conversationId": "c1", "clientRunId": "r1"})
-    assert to_rpc("GET", "/v1/profiles", {"workspaceId": "w", "directory": None, "fresh": "1"},
-                  None) == ("profiles.list", {"workspaceId": "w", "fresh": True})
     assert to_rpc("POST", "/v1/runs/r/steer", None, {"a": 1}) == (
         "runs.steer", {"runId": "r", "body": {"a": 1}})
     with pytest.raises(BridgeError):
@@ -240,6 +238,7 @@ def test_a_real_codex_adapter_runs_as_a_plugin_through_the_bridge(tmp_path, payl
         node_service.install_manifest(manifest_file(tmp_path, "fakecodex", "fake_codex.py", ()))
         manifest = node_service.manifests()["fakecodex"]
         manifest["runtime_type"] = "codex"
+        manifest["enforces"] = ["write_inside", "write_outside", "protected", "commands"]
         node_service.manifests = lambda: {"fakecodex": manifest}
         adapter = node_service.save_adapter({"name": "Codex plugin", "plugin": "fakecodex",
                                              "projects_root": str(parent)})
@@ -250,7 +249,7 @@ def test_a_real_codex_adapter_runs_as_a_plugin_through_the_bridge(tmp_path, payl
         ws = service.workspace(ws_id)
         listed = service.list_agent_adapters(ws)["adapters"]
         assert [a["descriptor"]["status"] for a in listed] == ["ok"]
-        service.set_workspace_route(ws, adapter["id"], True, "workspace-write-reviewed")
+        service.set_workspace_route(ws, adapter["id"], True, "trusted")
         service.run_coordinator.set_model_policy(adapter["id"], ["gpt-test"], "gpt-test")
         job = service.call(ws_id, token, "prepare_handoff",
                            Handoff.model_validate(payload).model_dump())

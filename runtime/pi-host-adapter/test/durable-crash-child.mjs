@@ -4,20 +4,19 @@ import path from "node:path";
 import { PiRuntimeProtocol } from "../wbrp.mjs";
 import { safeDefaultPolicy } from "../policy.mjs";
 import { durableFixture, boundToolHook, flush } from "./durable-fixture.mjs";
+import { securityBlock } from "./security-block.mjs";
 
 const [root, boundary] = process.argv.slice(2);
 const { adapter, transport, directory, logs } = durableFixture(root);
 const protocol = new PiRuntimeProtocol(adapter);
 const ask = ["waiting_approval", "after_approval", "failed_approval"].includes(boundary);
-const policy = { ...safeDefaultPolicy(), write_tools_enabled: true,
-  tools: { ...safeDefaultPolicy().tools, write: ask ? "ask" : "allow" },
-  allow_session_always: true };
-const profile = protocol.saveProfile({ id: "durable-test", config: policy });
+const security = securityBlock({ ...safeDefaultPolicy(), write_inside: ask ? "ask" : "allow" },
+  "durable-test");
 const conversation = await protocol.createConversation({ workspaceId: "workspace-test", directory,
-  securityProfile: { id: profile.id, revision: profile.revision } });
+  security });
 const input = [{ type: "text", text: "Run one test write" }];
 const clientRunId = "one-test-run";
-const run = await protocol.startRun(conversation.id, { input, clientRunId });
+const run = await protocol.startRun(conversation.id, { input, clientRunId, security });
 const session = transport.lastSession();
 const entry = adapter.sessions.get(session.sessionId);
 const hook = boundToolHook(transport);

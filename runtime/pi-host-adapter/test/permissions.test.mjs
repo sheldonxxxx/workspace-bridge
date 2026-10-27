@@ -26,16 +26,7 @@ function makeProjects() {
 }
 
 function writablePolicy() {
-  return validatePolicy({
-    version: 3,
-    write_tools_enabled: true,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [".git/**", ".env", ".env.*"],
-    protected_template_exceptions: [".env.example", ".env.sample", ".env.template"],
-    allow_session_always: true,
-    external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  });
+  return validatePolicy({ ...safeDefaultPolicy(), write_inside: "ask" });
 }
 
 function writableOptions() {
@@ -96,7 +87,7 @@ test("read-only v2 session loads the trusted extension without edit/write", asyn
   await adapter.shutdown();
 });
 
-test("v1 policy payloads fail clearly instead of being reinterpreted", async () => {
+test("retired v1 policy payloads are refused", async () => {
   const projects = makeProjects();
   const transport = createFakeTransport();
   const adapter = makeAdapter(projects, transport);
@@ -111,40 +102,10 @@ test("v1 policy payloads fail clearly instead of being reinterpreted", async () 
         protected_template_exceptions: [],
         allow_session_always: true,
       },
-      policy_revision: "0".repeat(64),
+      policy_revision: `prof_${"0".repeat(32)}`,
     }),
-    /coordinated|invalid_policy/i);
+    /is invalid/i);
   assert.equal(transport.created.length, before);
-  await adapter.shutdown();
-});
-
-test("unresolvable or duplicate external roots fail session creation", async () => {
-  const projects = makeProjects();
-  const transport = createFakeTransport();
-  const adapter = makeAdapter(projects, transport);
-  const missing = writablePolicy();
-  missing.external_access = { default_mode: "deny", roots: [{ path: "/no-such-pi-root-xyz", mode: "ask" }] };
-  await assert.rejects(
-    createSession(adapter, projects, projects.appA,
-      { permission_policy: missing, policy_revision: policyRevision(missing) }),
-    /external roots/i);
-  // Canonical duplicates (a symlink alias of the same dir) fail rather
-  // than guess. (Exact string duplicates already fail at validation.)
-  const dupDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dup-"));
-  const dupAlias = `${fs.realpathSync(dupDir)}-alias`;
-  fs.symlinkSync(fs.realpathSync(dupDir), dupAlias);
-  const dup = writablePolicy();
-  dup.external_access = {
-    default_mode: "deny",
-    roots: [
-      { path: fs.realpathSync(dupDir), mode: "allow" },
-      { path: dupAlias, mode: "deny" },
-    ],
-  };
-  await assert.rejects(
-    createSession(adapter, projects, projects.appA,
-      { permission_policy: dup, policy_revision: policyRevision(dup) }),
-    /external roots/i);
   await adapter.shutdown();
 });
 
@@ -161,7 +122,7 @@ test("writable policy loads the trusted extension with edit/write and no bash", 
   assert.ok(created.uiContext);
   assert.deepEqual(created.policy, writablePolicy());
   // Snapshot survives in the entry and is never the raw caller object.
-  assert.equal(entry.permissionPolicy.write_tools_enabled, true);
+  assert.equal(entry.permissionPolicy.write_inside, "ask");
   await adapter.shutdown();
 });
 
@@ -180,7 +141,7 @@ test("supplied policy requires an equal valid revision or creation fails", async
   const before = transport.created.length;
   await assert.rejects(
     createSession(adapter, projects, projects.appA,
-      { permission_policy: policy, policy_revision: "0".repeat(64) }),
+      { permission_policy: policy, policy_revision: `prof_${"0".repeat(32)}` }),
     /mismatch|conflict/i);
   // Missing halves fail closed.
   await assert.rejects(
@@ -190,7 +151,7 @@ test("supplied policy requires an equal valid revision or creation fails", async
     createSession(adapter, projects, projects.appA, { policy_revision: revision }),
     /revision is missing/i);
   // Malformed revision fails closed.
-  for (const bad of ["rev pioneered", "xyz", "0".repeat(63), "0".repeat(65), 42]) {
+  for (const bad of ["rev pioneered", "xyz", "0".repeat(64), `prof_${"0".repeat(31)}`, 42]) {
     await assert.rejects(
       createSession(adapter, projects, projects.appA,
         { permission_policy: policy, policy_revision: bad }),
@@ -199,7 +160,7 @@ test("supplied policy requires an equal valid revision or creation fails", async
   // Invalid policy fails closed even when no revision games are played.
   await assert.rejects(
     createSession(adapter, projects, projects.appA,
-      { permission_policy: { version: 2 }, policy_revision: "0".repeat(64) }),
+      { permission_policy: { version: 2 }, policy_revision: `prof_${"0".repeat(32)}` }),
     /invalid/i);
   assert.equal(transport.created.length, before);
   await adapter.shutdown();
@@ -289,32 +250,6 @@ test("malformed, duplicate, and mismatched selects fail closed", async () => {
   await adapter.shutdown();
 });
 
-test("always is rejected when the session policy disables it", async () => {
-  const projects = makeProjects();
-  const transport = createFakeTransport();
-  const adapter = makeAdapter(projects, transport);
-  const policy = validatePolicy({
-    ...writableOptions().permission_policy, allow_session_always: false,
-  });
-  const session = await createSession(
-    adapter, projects, projects.appA,
-    { permission_policy: policy, policy_revision: policyRevision(policy) });
-  // Extension offers once/reject only in this mode.
-  const { selectPromise, listed } = await askPermission(adapter, projects.appA, session.id, {
-    toolCallId: "call-9", toolName: "edit", args: { path: "notes.txt" },
-    options: [OPTION_ONCE, OPTION_REJECT],
-  });
-  const tracked = trackSelect(selectPromise);
-  assert.equal(listed.length, 1);
-  await assert.rejects(
-    adapter.respondPermission(projects.appA, session.id, listed[0].id, "always"), /always/i);
-  // once still works and resolves the suspended select with once.
-  await adapter.respondPermission(projects.appA, session.id, listed[0].id, "once");
-  await selectPromise;
-  assert.equal(tracked.value, OPTION_ONCE);
-  await adapter.shutdown();
-});
-
 test("permission state is isolated per session", async () => {
   const projects = makeProjects();
   const transport = createFakeTransport();
@@ -367,7 +302,7 @@ test("3D4 live shape: pending carries canonical session_id for the Bridge contra
   // External-read ask policy mirrors the live run: /etc/hosts outside
   // the workspace evaluates to ask (not deny) under default_mode=ask.
   const base = writablePolicy();
-  base.external_access = { default_mode: "ask", roots: [] };
+  base.read_outside = "ask";
   const session = await createSession(adapter, projects, projects.appA,
     { permission_policy: base, policy_revision: policyRevision(base) });
   const liveCallId = "call_01a0c749a17876808c7659bb3c8645c4|fc_01a0c749a17876808c7659bb3c8645c4";

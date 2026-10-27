@@ -15,9 +15,11 @@ from .event_broker import EventBroker
 from .notifications import (NotificationChannel, NotificationManager,
                             notification_channels_from_environment,
                             notification_manager_from_environment, _safe_label)
+from .profile_registry import ProfileRegistry
 from .run_coordinator import RunCoordinator
 from .adapter_registry import AdapterRegistry
-from .schema_upgrade import add_node_transports, widen_runtime_type_check
+from .schema_upgrade import (add_node_transports, unify_security_profiles,
+                             widen_runtime_type_check)
 from .node_gateway import NodeGateway, create_pairing
 from .node_registry import NodeRegistry
 from .keyed_locks import KeyedLocks
@@ -140,13 +142,14 @@ class Service:
             name TEXT NOT NULL, runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude','opencode')),
             base_url TEXT NOT NULL DEFAULT '',
             revision TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
-            has_token INTEGER NOT NULL CHECK(has_token IN (0,1)), last_seen TEXT NOT NULL);
+            has_token INTEGER NOT NULL CHECK(has_token IN (0,1)), last_seen TEXT NOT NULL,
+            security TEXT NOT NULL DEFAULT '{}');
           CREATE TABLE workspace_routes (
             workspace TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             adapter_id TEXT NOT NULL REFERENCES node_adapters(adapter_id),
             enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
             is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
-            security_source TEXT CHECK(security_source IN ('profile','runtime-config')),
+            security_source TEXT CHECK(security_source IN ('profile','native')),
             profile_id TEXT, profile_revision TEXT,
             updated TEXT NOT NULL,
             PRIMARY KEY(workspace, adapter_id));
@@ -180,6 +183,7 @@ class Service:
         if not read_only:
             self.db.execute("PRAGMA journal_mode=WAL")
             add_node_transports(self.db)
+            unify_security_profiles(self.db)
         if read_only:
             channels = notification_channels
             if channels is None:
@@ -194,6 +198,7 @@ class Service:
         self.node_gateway = NodeGateway(self)
         self.node_registry = NodeRegistry(self)
         self.adapter_registry = AdapterRegistry(self)
+        self.profiles = ProfileRegistry(self)
         if not read_only:
             self.node_registry.sync_all()
         self.run_coordinator = RunCoordinator(self,
@@ -426,7 +431,7 @@ class Service:
             node_reachable = False
         with self.lock:
             rows = [dict(row) for row in self.db.execute(
-                "SELECT r.*,a.name,a.runtime_type,a.enabled AS adapter_enabled,a.revision AS adapter_revision,"
+                "SELECT r.*,a.name,a.runtime_type,a.enabled AS adapter_enabled,a.revision AS adapter_revision,a.security,"
                 "a.node_id,n.name AS node_name,n.enabled AS node_enabled,n.revision AS node_revision "
                 "FROM workspace_routes r JOIN node_adapters a ON a.adapter_id=r.adapter_id "
                 "JOIN nodes n ON n.id=a.node_id WHERE r.workspace=? "
@@ -435,64 +440,23 @@ class Service:
         for row in rows:
             adapter_id = row["adapter_id"]
             same_node = row["node_id"] == ws["node_id"]
-            binding = None
-            profile = None
             source = row.get("security_source")
-            if source == "profile" and row.get("profile_id"):
-                profile = {"id": row["profile_id"], "revision": row["profile_revision"]}
-                binding = {"source": "profile", "profile": profile}
-            elif source == "runtime-config":
-                observation = None
-                try:
-                    observation = self.run_coordinator.profile_catalog(
-                        adapter_id, ws, fresh=True).get("runtimeConfig")
-                except Exception:  # noqa: BLE001 - unavailable is a visible blocked state
-                    observation = None
-                binding = {"source": "runtime-config", "revision": row.get("profile_revision"),
-                           "status": (observation.get("status") if isinstance(observation, dict) else "unavailable"),
-                           "observed_revision": (observation.get("revision") if isinstance(observation, dict) else None),
-                           "resolved_summary": (observation.get("resolvedSummary") if isinstance(observation, dict) else None)}
-            profile_state = None
-            observed_profile_revision = None
-            if source == "profile" and profile:
-                try:
-                    catalog = self.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
-                    resolved_profile = next((item for item in catalog.get("profiles", [])
-                                             if item.get("id") == profile["id"]), None)
-                    # Revision drift never blocks: adapter redeploys rotate
-                    # opaque revisions, so only a missing or unavailable
-                    # profile keeps the route from being ready. The stored
-                    # route revision is last-bound evidence; the live catalog
-                    # revision is authoritative for new runs.
-                    if not resolved_profile or resolved_profile.get("available") is False:
-                        profile_state = "unavailable"
-                    elif (isinstance(resolved_profile.get("revision"), str)
-                          and resolved_profile.get("revision")):
-                        observed_profile_revision = resolved_profile["revision"]
-                        profile_state = ("current" if observed_profile_revision == profile["revision"]
-                                         else "stale")
-                    else:
-                        profile_state = "unavailable"
-                except Exception:  # noqa: BLE001 - route stays blocked when freshness is unknown
-                    profile_state = "unavailable"
-            effective_security = None
-            security_ready = False
-            if source == "profile" and profile:
-                effective_security = {"source": "profile", "profile_id": profile["id"],
-                                      "bound_revision": profile["revision"],
-                                      "observed_revision": observed_profile_revision,
-                                      "freshness": profile_state}
-                security_ready = profile_state in {"current", "stale"}
-            elif source == "runtime-config" and binding:
-                effective_security = {"source": "runtime-config", "bound_revision": binding["revision"],
-                    "observed_revision": binding["observed_revision"], "status": binding["status"],
-                    "resolved_summary": binding["resolved_summary"]}
-                # Revision drift never blocks: the observed native config is
-                # authoritative, so only an unready or missing observation does.
-                security_ready = (binding["status"] == "ready" and
-                                  isinstance(binding["observed_revision"], str) and
-                                  bool(binding["observed_revision"]) and
-                                  isinstance(binding["resolved_summary"], dict))
+            profile = ({"id": row["profile_id"]}
+                       if source == "profile" and row.get("profile_id") else None)
+            binding = ({"source": "profile", "profile": profile} if profile
+                       else {"source": "native"} if source == "native" else None)
+            security_error = None
+            try:
+                wire = self.profiles.binding(row, source, row.get("profile_id"))
+                if profile:
+                    profile["revision"] = wire["profile"]["revision"]
+            except BridgeError as exc:
+                security_error = str(exc)
+            effective_security = (None if binding is None else
+                                  {"source": source, "profile_id": profile["id"] if profile else None,
+                                   "revision": profile.get("revision") if profile else None,
+                                   **({"error": security_error} if security_error else {})})
+            security_ready = binding is not None and security_error is None
             model_policy = self.run_coordinator.model_policy(adapter_id)
             blockers = []
             if not same_node: blockers.append("adapter_node_mismatch")
@@ -538,45 +502,29 @@ class Service:
             raise BridgeError("Adapter belongs to another Node", "adapter_node_mismatch")
         with self.lock:
             existing = self.db.execute(
-                "SELECT profile_id,profile_revision,security_source,is_default FROM workspace_routes WHERE workspace=? AND adapter_id=?",
+                "SELECT profile_id,security_source,is_default FROM workspace_routes WHERE workspace=? AND adapter_id=?",
                 (ws["id"], adapter_id)).fetchone()
-        if security_source == "runtime-config":
+        if security_source == "native":
             if profile_id is not None:
-                raise BridgeError("Runtime config binding cannot include a profile ID",
-                                  "invalid_arguments")
-            binding = self.run_coordinator.set_runtime_config(ws, adapter_id)
+                raise BridgeError("A native route cannot name a profile", "invalid_arguments")
             profile_id = ""
-            profile_revision = binding["security_binding"]["revision"]
-            security_source = "runtime-config"
-        elif security_source == "profile":
+        elif security_source == "profile" or (security_source is None and profile_id is not None):
             if not isinstance(profile_id, str) or not profile_id:
                 raise BridgeError("A Bridge profile ID is required", "invalid_arguments")
-            binding = self.run_coordinator.set_profile(ws, adapter_id, profile_id)
-            profile_revision = binding["revision"]
+            self.profiles.get(profile_id)
             security_source = "profile"
         elif security_source is not None:
             raise BridgeError("Invalid route security source", "invalid_arguments")
-        elif profile_id is not None:
-            binding = self.run_coordinator.set_profile(ws, adapter_id, profile_id)
-            profile_revision = binding["revision"]
-            security_source = "profile"
-        elif existing:
-            profile_id, profile_revision, security_source = (
-                existing["profile_id"], existing["profile_revision"], existing["security_source"])
+        elif existing and existing["security_source"]:
+            profile_id, security_source = existing["profile_id"], existing["security_source"]
+        elif enabled:
+            # A route enabled without a choice starts on the safest profile.
+            profile_id, security_source = "read-only", "profile"
         else:
-            profile_id, profile_revision, security_source = None, None, None
-        if enabled and not security_source:
-            adapter = self.run_coordinator.adapter(adapter_id)
-            catalog = self.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
-            safe_profile = next((row for row in catalog.get("profiles", [])
-                                 if row.get("id") == "read-only"
-                                 and row.get("available") is not False
-                                 and isinstance(row.get("revision"), str)), None)
-            if safe_profile is None:
-                raise BridgeError("Choose an available security profile before enabling this route",
-                                  "profile_unconfigured")
-            binding = self.run_coordinator.set_profile(ws, adapter_id, "read-only")
-            profile_id, profile_revision, security_source = "read-only", binding["revision"], "profile"
+            profile_id, security_source = None, None
+        if enabled:
+            # Refuse a route whose agent cannot enforce its profile.
+            self.profiles.binding(adapter_info, security_source, profile_id)
         if is_default is not None and not isinstance(is_default, bool):
             raise BridgeError("is_default must be a boolean", "invalid_arguments")
         make_default = (bool(is_default) if is_default is not None else
@@ -586,15 +534,12 @@ class Service:
         if make_default:
             if not adapter_info["enabled"] or not adapter_info["node_enabled"]:
                 raise BridgeError("Default target must have an enabled Node and adapter", "route_unavailable")
-            if not security_source:
-                raise BridgeError("Default target requires an effective security binding", "security_unavailable")
             try:
                 self.node_registry.client(ws["node_id"], timeout=5).validate_root(
                     ws["root"], json.loads(ws["excludes"]))
             except BridgeError:
                 raise BridgeError("Default target requires an accessible workspace root",
                                   "route_unavailable") from None
-            self.run_coordinator.security_binding(ws, adapter_id)
         with self.lock, self.db:
             if make_default:
                 self.db.execute("UPDATE workspace_routes SET is_default=0 WHERE workspace=?", (ws["id"],))
@@ -604,7 +549,7 @@ class Service:
                 "enabled=excluded.enabled,security_source=excluded.security_source,"
                 "is_default=excluded.is_default,profile_id=excluded.profile_id,profile_revision=excluded.profile_revision,updated=excluded.updated",
                 (ws["id"], adapter_id, int(enabled), int(make_default), security_source,
-                 profile_id, profile_revision, now()))
+                 profile_id, "" if security_source else None, now()))
         self.event(ws["id"], "set_workspace_route", "enabled" if enabled else "disabled")
         return self.workspace_route_policy(ws)
 

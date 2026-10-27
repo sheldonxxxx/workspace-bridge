@@ -111,7 +111,7 @@ flowchart LR
     Bridge["Bridge<br/>workspace authorization,<br/>routes, handoffs,<br/>model policy, run records"]
     Node["Node<br/>root ceiling, files/Git/handoffs,<br/>adapter registry + secrets"]
     Route["WorkspaceRoute<br/>one workspace to one<br/>same-Node adapter ID"]
-    Adapter["AdapterInstance<br/>one destination,<br/>endpoint + token,<br/>profiles + models"]
+    Adapter["AdapterInstance<br/>one destination,<br/>models"]
     Native["Native runtime<br/>Pi sessions / Codex threads / Claude sessions"]
     Bridge -->|"resolve workspace to Node"| Node
     Node -->|"enforce route + binding"| Route
@@ -119,12 +119,13 @@ flowchart LR
     Adapter -->|"Runtime Protocol v1"| Native
 ```
 
-A `RuntimeType` (`pi`, `codex`, or `claude`) names the protocol family; it is not a
+A `RuntimeType` (`pi`, `codex`, `claude`, or `opencode`) names the protocol family; it is not a
 destination. An `AdapterInstance` is one Node-owned destination with its own
 name, endpoint, token, enabled state, and connection revision. A
 `WorkspaceRoute` binds one workspace to one exact same-Node adapter ID with
-enabled/default state and a security binding. Model policy and profile
-discovery are scoped to the adapter instance. There is no implicit cross-Node
+enabled/default state and a security binding: a Bridge security profile or,
+for Codex, the agent's native security. Model policy is scoped to the adapter
+instance; profiles are Bridge-wide and travel with every run. There is no implicit cross-Node
 or runtime-type fallback. The MCP discovery tool returns sanitized adapter
 IDs and exact route availability.
 
@@ -145,9 +146,9 @@ flowchart TB
     Gateway["Shared MCP gateway credential<br/>authorizes all enabled mappings"]
     Admin["Bridge admin credential<br/>Manager only, loopback"]
     NodeCred["Node credential<br/>Bridge SQLite, private"]
-    BridgeDB[("Bridge DB<br/>mappings, routes, policies,<br/>runs, sanitized adapter refs")]
+    BridgeDB[("Bridge DB<br/>mappings, routes, policies,<br/>security profiles, runs,<br/>sanitized adapter refs")]
     NodeDB[("Node DB<br/>roots, files, handoffs,<br/>plugin adapters, runtime state")]
-    AdapterState[("Plugin state in the Node folder<br/>sessions, profiles,<br/>execution evidence")]
+    AdapterState[("Plugin state in the Node folder<br/>sessions,<br/>execution evidence")]
     Internet --- Gateway
     Gateway --> BridgeDB
     Admin --> BridgeDB
@@ -162,16 +163,16 @@ Boundaries:
   [Setup](SETUP.md)); agent plugins have none. One-time output stays local.
 - Bridge DB versus Node DB versus plugin state: the Bridge holds sanitized
   adapter references; the Node holds plugin configuration and data-plane
-  state; each plugin holds native sessions and profiles in its private
-  folder under the Node state. All
+  state; each plugin holds native sessions in its private folder under the
+  Node state. All
   state files are private (`0700` directories, `0600` files).
 - Write scope governs new handoff publication and source mutation; exact
   route enablement governs run admission. One does not imply the other.
-- Runtime profiles are pre-tool policy claims, not necessarily OS sandboxes.
-  Pi runs with the host user's authority through its trusted permission
-  extension; Codex enforces its native permission and approval policy; Claude Code is
-  constrained by its adapter's tool list and permission hook. Review
-  each profile before enabling writes or runs.
+- Security profiles are pre-tool policy enforced by each plugin, not OS
+  sandboxes. Pi uses its trusted permission extension, Claude Code its tool
+  list and permission hook, OpenCode its permission plugin, and Codex its
+  read-only sandbox with approvals the plugin decides from the rules. Agents run
+  with the host user's authority. Review each profile before routing it.
 - Source returned through the tunnel reaches model processing. The tunnel
   removes a public inbound endpoint; it does not keep code local. Exclusions
   and redaction are conservative and heuristic, not complete protection.

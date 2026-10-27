@@ -1,0 +1,1212 @@
+{
+ "about": "Shared security profile vectors; generated from workspace_bridge.security_profiles and checked by tests/test_security_profiles.py and the Pi policy tests. In paths and profiles, /@out is the real path of the out directory of the layout.",
+ "profiles": {
+  "read-only": {
+   "read_inside": "allow",
+   "read_outside": "deny",
+   "write_inside": "deny",
+   "write_outside": "deny",
+   "shell": "deny",
+   "web": "deny",
+   "extensions": "deny",
+   "protected": [],
+   "external_roots": [],
+   "commands": []
+  },
+  "reviewed": {
+   "read_inside": "allow",
+   "read_outside": "ask",
+   "write_inside": "allow",
+   "write_outside": "deny",
+   "shell": "ask",
+   "web": "ask",
+   "extensions": "ask",
+   "protected": [],
+   "external_roots": [],
+   "commands": []
+  },
+  "trusted": {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": []
+  },
+  "custom": {
+   "read_inside": "allow",
+   "read_outside": "ask",
+   "write_inside": "allow",
+   "write_outside": "deny",
+   "shell": "ask",
+   "web": "ask",
+   "extensions": "ask",
+   "protected": [
+    "*.pem",
+    "build/",
+    "secrets/**"
+   ],
+   "external_roots": [
+    {
+     "path": "/@out/shared",
+     "read": "allow",
+     "write": "ask"
+    }
+   ],
+   "commands": [
+    {
+     "prefix": "git push",
+     "mode": "deny"
+    },
+    {
+     "prefix": "git status",
+     "mode": "allow"
+    },
+    {
+     "prefix": "npm test",
+     "mode": "allow"
+    },
+    {
+     "prefix": "rm",
+     "mode": "ask"
+    }
+   ]
+  },
+  "locked": {
+   "read_inside": "allow",
+   "read_outside": "deny",
+   "write_inside": "deny",
+   "write_outside": "deny",
+   "shell": "deny",
+   "web": "deny",
+   "extensions": "deny",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "ls",
+     "mode": "allow"
+    }
+   ]
+  }
+ },
+ "canonical": [
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "deny",
+    "write_inside": "deny",
+    "write_outside": "deny",
+    "shell": "deny",
+    "web": "deny",
+    "extensions": "deny",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "deny",
+    "write_inside": "deny",
+    "write_outside": "deny",
+    "shell": "deny",
+    "web": "deny",
+    "extensions": "deny",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "revision": "prof_47c9bd7cc863cd825ac5c0c7cf2739b7"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "revision": "prof_8c799d9b2c7c56c5415817935152ebc6"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "revision": "prof_b270c02e79df22e728894cd6cc6c2a37"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow",
+    "protected": [
+     "b",
+     "a",
+     "a"
+    ],
+    "external_roots": [],
+    "commands": []
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow",
+    "protected": [
+     "a",
+     "b"
+    ],
+    "external_roots": [],
+    "commands": []
+   },
+   "revision": "prof_27962568d319f429b822b15fe053b777"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [],
+    "commands": [
+     {
+      "prefix": " make\t build ",
+      "mode": "ask"
+     }
+    ]
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [],
+    "commands": [
+     {
+      "prefix": "make build",
+      "mode": "ask"
+     }
+    ]
+   },
+   "revision": "prof_7b3a3d9019c5194ad916daad63c86980"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [
+     {
+      "path": "~/notes",
+      "write": "deny"
+     }
+    ],
+    "commands": []
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "ask",
+    "write_inside": "allow",
+    "write_outside": "deny",
+    "shell": "ask",
+    "web": "ask",
+    "extensions": "ask",
+    "protected": [],
+    "external_roots": [
+     {
+      "path": "~/notes",
+      "write": "deny"
+     }
+    ],
+    "commands": []
+   },
+   "revision": "prof_a7d4787d51bfd85bb8fd468a2acbb149"
+  },
+  {
+   "raw": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow"
+   },
+   "rules": {
+    "read_inside": "allow",
+    "read_outside": "allow",
+    "write_inside": "allow",
+    "write_outside": "ask",
+    "shell": "allow",
+    "web": "allow",
+    "extensions": "allow",
+    "protected": [],
+    "external_roots": [],
+    "commands": []
+   },
+   "revision": "prof_b270c02e79df22e728894cd6cc6c2a37"
+  }
+ ],
+ "invalid": [
+  null,
+  [],
+  {},
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [],
+   "extra": 1
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "maybe",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [
+    "/abs"
+   ],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [
+    "~/x"
+   ],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [
+    "a/../b"
+   ],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [
+    "a|b"
+   ],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [
+    ""
+   ],
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": "x",
+   "external_roots": [],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "rel"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "/a/"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "/a//b"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "/a/../b"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "/a",
+     "mode": "allow"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [
+    {
+     "path": "/a"
+    },
+    {
+     "path": "/a"
+    }
+   ],
+   "commands": []
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "git",
+     "mode": "allow"
+    },
+    {
+     "prefix": "git ",
+     "mode": "deny"
+    }
+   ]
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "a\nb",
+     "mode": "allow"
+    }
+   ]
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "   ",
+     "mode": "allow"
+    }
+   ]
+  },
+  {
+   "read_inside": "allow",
+   "read_outside": "allow",
+   "write_inside": "allow",
+   "write_outside": "ask",
+   "shell": "allow",
+   "web": "allow",
+   "extensions": "allow",
+   "protected": [],
+   "external_roots": [],
+   "commands": [
+    {
+     "prefix": "x"
+    }
+   ]
+  }
+ ],
+ "globs": [
+  {
+   "pattern": "*.pem",
+   "path": "keys/server.pem",
+   "match": true
+  },
+  {
+   "pattern": "*.pem",
+   "path": "server.pem.bak",
+   "match": false
+  },
+  {
+   "pattern": "secrets/**",
+   "path": "secrets/a/b",
+   "match": true
+  },
+  {
+   "pattern": "secrets/**",
+   "path": "app/secrets/a",
+   "match": false
+  },
+  {
+   "pattern": "secrets",
+   "path": "app/secrets/a",
+   "match": true
+  },
+  {
+   "pattern": "build/",
+   "path": "build/out.js",
+   "match": true
+  },
+  {
+   "pattern": "src/*.py",
+   "path": "src/a.py",
+   "match": true
+  },
+  {
+   "pattern": "src/*.py",
+   "path": "src/sub/a.py",
+   "match": false
+  },
+  {
+   "pattern": "**/gen",
+   "path": "a/b/gen/x",
+   "match": true
+  },
+  {
+   "pattern": "data?.csv",
+   "path": "data1.csv",
+   "match": true
+  },
+  {
+   "pattern": "data?.csv",
+   "path": "data10.csv",
+   "match": false
+  },
+  {
+   "pattern": "[!a]*.txt",
+   "path": "b.txt",
+   "match": true
+  },
+  {
+   "pattern": "[!a]*.txt",
+   "path": "a.txt",
+   "match": false
+  },
+  {
+   "pattern": "[ab].md",
+   "path": "b.md",
+   "match": true
+  },
+  {
+   "pattern": "x",
+   "path": "",
+   "match": false
+  },
+  {
+   "pattern": "a.b",
+   "path": "aXb",
+   "match": false
+  }
+ ],
+ "fixed": [
+  {
+   "path": ".git/config",
+   "protected": true
+  },
+  {
+   "path": "src/.git/HEAD",
+   "protected": true
+  },
+  {
+   "path": ".env",
+   "protected": true
+  },
+  {
+   "path": "app/.env.local",
+   "protected": true
+  },
+  {
+   "path": ".env.example",
+   "protected": false
+  },
+  {
+   "path": ".env.sample",
+   "protected": false
+  },
+  {
+   "path": ".env.template",
+   "protected": false
+  },
+  {
+   "path": ".envrc",
+   "protected": false
+  },
+  {
+   "path": "checks.toml",
+   "protected": true
+  },
+  {
+   "path": "sub/checks.toml",
+   "protected": false
+  },
+  {
+   "path": "src/main.py",
+   "protected": false
+  },
+  {
+   "path": ".github/ci.yml",
+   "protected": false
+  }
+ ],
+ "commands": [
+  {
+   "profile": "read-only",
+   "command": "ls",
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "command": "ls -la",
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "command": "cat x && ls",
+   "mode": "deny"
+  },
+  {
+   "profile": "locked",
+   "command": "ls",
+   "mode": "allow"
+  },
+  {
+   "profile": "locked",
+   "command": "ls -la",
+   "mode": "allow"
+  },
+  {
+   "profile": "locked",
+   "command": "cat x && ls",
+   "mode": "deny"
+  },
+  {
+   "profile": "locked",
+   "command": "lsof",
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "command": "ls",
+   "mode": "ask"
+  },
+  {
+   "profile": "reviewed",
+   "command": "",
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "command": "   ",
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "command": "a\u0000b",
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "command": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "mode": "deny"
+  },
+  {
+   "profile": "trusted",
+   "command": "rm -rf build",
+   "mode": "allow"
+  },
+  {
+   "profile": "trusted",
+   "command": "FOO=1 make",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "git status",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "git push origin main",
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "command": "cd app && git push",
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "command": "git  status  -s",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "npm test",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "npm test && git status",
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "command": "npm test; make",
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "command": "rm -rf x",
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "command": "FOO=1 git push",
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "command": "echo $(git push)",
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "command": "git pushx",
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "command": "make | tee log",
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "command": "npm testing",
+   "mode": "ask"
+  }
+ ],
+ "layout": {
+  "dirs": [
+   "ws/src",
+   "ws/secrets",
+   "out/shared/deep"
+  ],
+  "symlinks": {
+   "ws/link_out": "../out",
+   "ws/self": "."
+  }
+ },
+ "paths": [
+  {
+   "profile": "read-only",
+   "path": "src/a.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "read-only",
+   "path": "src/a.py",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": ".",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "read-only",
+   "path": ".",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": "/@out/x",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": "/@out/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": ".env",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": ".env",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": ".git/config",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "read-only",
+   "path": ".git/config",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/a.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/a.py",
+   "write": true,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/new/file.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/new/file.py",
+   "write": true,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/x",
+   "write": false,
+   "mode": "ask"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "link_out/x",
+   "write": false,
+   "mode": "ask"
+  },
+  {
+   "profile": "reviewed",
+   "path": "link_out/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "self/src/a.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "self/src/a.py",
+   "write": true,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "link_out/../ws/src/a.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "link_out/../ws/src/a.py",
+   "write": true,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/../../out/x",
+   "write": false,
+   "mode": "ask"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/../../out/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "~/x",
+   "write": false,
+   "mode": "ask"
+  },
+  {
+   "profile": "reviewed",
+   "path": "~/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "~nobody/x",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "~nobody/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "a\u0000b",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "a\u0000b",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "checks.toml",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "checks.toml",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/checks.toml",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "src/checks.toml",
+   "write": true,
+   "mode": "allow"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/.env",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/.env",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/repo/.git/HEAD",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "reviewed",
+   "path": "/@out/repo/.git/HEAD",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "secrets/key",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "secrets/key",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "keys/a.pem",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "keys/a.pem",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "build/x",
+   "write": false,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "build/x",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/shared/deep/f",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/shared/deep/f",
+   "write": true,
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/shared",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/shared",
+   "write": true,
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/other",
+   "write": false,
+   "mode": "ask"
+  },
+  {
+   "profile": "custom",
+   "path": "/@out/other",
+   "write": true,
+   "mode": "deny"
+  },
+  {
+   "profile": "custom",
+   "path": "src/a.py",
+   "write": false,
+   "mode": "allow"
+  },
+  {
+   "profile": "custom",
+   "path": "src/a.py",
+   "write": true,
+   "mode": "allow"
+  }
+ ]
+}

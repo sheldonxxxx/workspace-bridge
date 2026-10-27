@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { PiAdapter } from "../adapter.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
-import { policyRevision } from "../policy.mjs";
+import { policyRevision, safeDefaultPolicy } from "../policy.mjs";
 import {
   ExecutionJournal, summarizeInput, summarizeResult, summaryRecord,
 } from "../executions.mjs";
@@ -23,18 +23,8 @@ function makeProjects() {
   return { tmp, root: canonicalizeProjectsDir(path.join(tmp, "Projects")), app: fs.realpathSync(app) };
 }
 
-function v3Policy(overrides = {}) {
-  return {
-    version: 3,
-    write_tools_enabled: true,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [".git/**"],
-    protected_template_exceptions: [],
-    allow_session_always: true,
-    external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "ask",
-    ...overrides,
-  };
+function testRules({ shell = "ask", writable = true } = {}) {
+  return { ...safeDefaultPolicy(), write_inside: writable ? "ask" : "deny", shell };
 }
 
 // Verified Pi 0.86.1 bash ToolResult fixtures: success carries
@@ -199,7 +189,7 @@ test("adapter correlation: parallel starts/ends via SDK update the journal obser
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const policy = v3Policy({ shell_mode: "ask", write_tools_enabled: false });
+  const policy = testRules({ shell: "ask", writable: false });
   const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
   const session = await adapter.createSession(projects.app, "t", options);
   const emit = (message) => adapter.sessions.get(session.id).session.emit(message);
@@ -292,7 +282,7 @@ test("session creation returns fingerprint without paths", async () => {
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const policy = v3Policy();
+  const policy = testRules();
   const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
   const session = await adapter.createSession(projects.app, "t", options);
   assert.match(session.enforcement_fingerprint, /^[0-9a-f]{64}$/);
@@ -301,7 +291,7 @@ test("session creation returns fingerprint without paths", async () => {
   await adapter.shutdown();
 });
 
-test("shell_mode=allow bash start persists allow via normalized flow", async () => {
+test("shell=allow bash start persists allow via normalized flow", async () => {
   const projects = makeProjects();
   const transport = createFakeTransport();
   const adapter = new PiAdapter({
@@ -310,7 +300,7 @@ test("shell_mode=allow bash start persists allow via normalized flow", async () 
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const policy = v3Policy({ shell_mode: "allow", write_tools_enabled: false });
+  const policy = testRules({ shell: "allow", writable: false });
   const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
   const session = await adapter.createSession(projects.app, "t", options);
   adapter.sessions.get(session.id).session.emit({ type: "tool_execution_start", toolCallId: "sh-allow", toolName: "bash",
@@ -330,7 +320,7 @@ test("shell_mode=allow bash start persists allow via normalized flow", async () 
   await adapter.shutdown();
 });
 
-test("shell_mode=ask bash start persists ask and survives trusted UI re-evaluation", async () => {
+test("shell=ask bash start persists ask and survives trusted UI re-evaluation", async () => {
   const projects = makeProjects();
   const transport = createFakeTransport();
   const adapter = new PiAdapter({
@@ -339,7 +329,7 @@ test("shell_mode=ask bash start persists ask and survives trusted UI re-evaluati
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const policy = v3Policy({ shell_mode: "ask", write_tools_enabled: false });
+  const policy = testRules({ shell: "ask", writable: false });
   const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
   const session = await adapter.createSession(projects.app, "t", options);
   const entry = adapter.sessions.get(session.id);
@@ -392,7 +382,7 @@ test("shell always decision stays exact-command scoped and deny/malformed stay c
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const policy = v3Policy({ shell_mode: "ask", write_tools_enabled: false });
+  const policy = testRules({ shell: "ask", writable: false });
   const options = { permission_policy: policy, policy_revision: policyRevision(policy) };
   const session = await adapter.createSession(projects.app, "t", options);
   const entry = adapter.sessions.get(session.id);
@@ -427,7 +417,7 @@ test("shell always decision stays exact-command scoped and deny/malformed stay c
   assert.equal(rec.permission_effect, "ask");
   await adapter.shutdown();
 
-  // shell_mode=deny stays denied through the same normalized flow.
+  // shell=deny stays denied through the same normalized flow.
   const transport2 = createFakeTransport();
   const adapter2 = new PiAdapter({
     projectsRoot: projects.root, agentDir: path.join(projects.tmp, "agent-dir"),
@@ -435,7 +425,7 @@ test("shell always decision stays exact-command scoped and deny/malformed stay c
     listModelsFn: transport2.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const denyPolicy = v3Policy({ shell_mode: "deny", write_tools_enabled: false });
+  const denyPolicy = testRules({ shell: "deny", writable: false });
   const session2 = await adapter2.createSession(projects.app, "t",
     { permission_policy: denyPolicy, policy_revision: policyRevision(denyPolicy) });
   const entry2 = adapter2.sessions.get(session2.id);

@@ -575,10 +575,10 @@ def change_admission(service, ws, change):
             service.db.execute("UPDATE workspace_routes SET enabled=0 WHERE workspace=? AND adapter_id=?",
                                (ws["id"], ADAPTER_ID))
         elif change == "profile":
-            service.db.execute("UPDATE workspace_routes SET profile_id='read-only' "
+            service.db.execute("UPDATE workspace_routes SET profile_id='reviewed' "
                                "WHERE workspace=? AND adapter_id=?", (ws["id"], ADAPTER_ID))
         else:
-            service.db.execute("UPDATE workspace_routes SET security_source='runtime-config' "
+            service.db.execute("UPDATE workspace_routes SET security_source='native',profile_id='' "
                                "WHERE workspace=? AND adapter_id=?", (ws["id"], ADAPTER_ID))
 
 
@@ -635,28 +635,3 @@ def test_run_input_rechecks_admission_after_live_binding_read(modern_env, change
         coordinator.input(ws, run_id, "Review now", "changed-input", "steer")
     assert error.value.code == {"node": "node_changed", "route": "route_disabled"}.get(change, "binding_mismatch")
     assert calls == []
-
-
-@pytest.mark.parametrize("change", ["node", "route"])
-def test_continuation_rechecks_authority_after_probe_before_security_rebind(modern_env, change):
-    service, ws_id, _, job, native, _ = modern_env
-    coordinator, ws, run_id = start_run(modern_env, "rebind-admission-" + change)
-    _finish_test_run(service, native, ws_id, run_id)
-    service.set_workspace_route(ws, ADAPTER_ID, True, "read-only")
-    direct = coordinator.adapter(ADAPTER_ID)
-    original_probe = coordinator.probe_descriptor
-    rebind_calls, prompt_calls = [], []
-
-    def changed_probe(adapter):
-        result = original_probe(adapter)
-        change_admission(service, ws, change)
-        return result
-
-    coordinator.probe_descriptor = changed_probe
-    direct.rebind_conversation = lambda *args: rebind_calls.append(args)
-    direct.start_run = lambda *args: prompt_calls.append(args)
-    with pytest.raises(BridgeError) as error:
-        coordinator.start(ws, ADAPTER_ID, job["id"], "changed-rebind-" + change,
-                          continue_from_run_id=run_id)
-    assert error.value.code == {"node": "node_changed", "route": "route_disabled"}[change]
-    assert rebind_calls == [] and prompt_calls == []

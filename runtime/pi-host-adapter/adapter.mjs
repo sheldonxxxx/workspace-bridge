@@ -27,12 +27,13 @@ import {
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { resolveSessionDir } from "./paths.mjs";
 import {
+  REVISION_RE,
   SHELL_TOOL,
-  canonicalizeExternalRoots,
   canonicalJson,
   evaluateToolCall,
   policyRevision,
   safeDefaultPolicy,
+  toolExposure,
   validatePolicy,
 } from "./policy.mjs";
 import { isManagedTool, normalizeToolEnd, normalizeToolStart, normalizeToolUpdate } from "./sdk-events.mjs";
@@ -418,20 +419,13 @@ export class PiAdapter {
     return entry;
   }
 
-  // Resolve the Bridge-delivered permission policy into an immutable
-  // session snapshot (defense in depth: validated AGAIN here, and the
-  // Bridge-supplied revision must equal the recomputed canonical revision).
-  // - neither policy nor revision supplied => read-only safe default
-  //   (legacy Bridge compatibility only; no trusted extension);
-  // - exactly one of policy/revision supplied => fail closed, no session;
-  // - supplied policy invalid, v1/v2, or revision malformed => fail closed
-  //   (older versions need a coordinated Bridge+adapter upgrade; they are
-  //   never silently reinterpreted under v3 semantics);
-  // - revision mismatch against the recomputed canonical revision =>
-  //   fail closed; a different snapshot revision is never silently accepted.
-  // - configured external roots are canonicalized (realpath, existing
-  //   directory) here; canonical duplicates fail session creation.
-  // v3 has no fixed filesystem denies; ordinary configurable policy applies.
+  // Resolve a run's security profile rules into an immutable session
+  // snapshot (validated again here; the supplied revision must equal the
+  // recomputed one):
+  // - neither rules nor revision supplied => the read-only built-in,
+  //   without the trusted extension (direct adapter use only);
+  // - exactly one supplied, invalid rules, or a malformed or different
+  //   revision => fail closed, no session.
   _snapshotPolicy(options) {
     const raw = options && typeof options === "object" ? options.permission_policy : undefined;
     const suppliedRevision = options && typeof options === "object" ? options.policy_revision : undefined;
@@ -445,45 +439,25 @@ export class PiAdapter {
         writable: false,
         shellMode: "deny",
         legacy: true,
-        effectiveRoots: [],
       };
     }
     if (hasPolicy !== hasRevision) {
-      throw new AdapterError("Pi permission policy revision is missing", 400, "invalid_policy");
-    }
-    if (raw && typeof raw === "object" && (raw.version === 1 || raw.version === 2)) {
-      throw new AdapterError(
-        `Pi permission policy v${raw.version} is invalid: requires a coordinated Bridge and adapter upgrade`,
-        400, "invalid_policy");
+      throw new AdapterError("Pi security profile revision is missing", 400, "invalid_policy");
     }
     let policy;
     try {
       policy = validatePolicy(raw);
     } catch {
-      throw new AdapterError("Pi permission policy is invalid", 400, "invalid_policy");
+      throw new AdapterError("Pi security profile is invalid", 400, "invalid_policy");
     }
-    if (typeof suppliedRevision !== "string" || !/^[0-9a-fA-F]{64}$/.test(suppliedRevision)) {
-      throw new AdapterError("Pi permission policy revision is malformed", 400, "invalid_policy");
+    if (typeof suppliedRevision !== "string" || !REVISION_RE.test(suppliedRevision)) {
+      throw new AdapterError("Pi security profile revision is malformed", 400, "invalid_policy");
     }
     const computed = policyRevision(policy);
-    if (suppliedRevision.toLowerCase() !== computed) {
-      throw new AdapterError("Pi permission policy revision mismatch", 409, "conflict");
+    if (suppliedRevision !== computed) {
+      throw new AdapterError("Pi security profile revision mismatch", 409, "conflict");
     }
-    let effectiveRoots;
-    try {
-      effectiveRoots = canonicalizeExternalRoots(policy.external_access.roots);
-    } catch {
-      throw new AdapterError("Pi permission policy external roots are unavailable", 400, "invalid_policy");
-    }
-    // Store the verified (equal) revision.
-    return {
-      policy,
-      revision: computed,
-      writable: policy.write_tools_enabled === true,
-      shellMode: policy.shell_mode || "deny",
-      legacy: false,
-      effectiveRoots,
-    };
+    return { policy, revision: computed, ...toolExposure(policy), legacy: false };
   }
 
   // Resolve the Bridge-delivered extension policy into an immutable
@@ -659,7 +633,6 @@ export class PiAdapter {
       policyRevision: snapshot.revision,
       writable: snapshot.writable,
       shellMode: snapshot.shellMode,
-      effectiveRoots: snapshot.effectiveRoots,
       // Immutable extension snapshot (3C2). Never mutated after
       // creation; extension policy changes apply to new sessions only.
       // Active sessions never hot-reload extensions.
@@ -1077,13 +1050,11 @@ export class PiAdapter {
         code: "extension_tool",
       };
     }
-    // v3: no fixed filesystem denies; ordinary configurable policy applies.
     return evaluateToolCall({
       cwd: entry.cwd,
       policy: entry.permissionPolicy,
       toolName,
       input,
-      effectiveRoots: entry.effectiveRoots || [],
     });
   }
 
@@ -1429,10 +1400,8 @@ export class PiAdapter {
     return entry.journal.head;
   }
 
-  _expectedUiOptions(entry) {
-    return entry.permissionPolicy.allow_session_always
-      ? [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]
-      : [OPTION_ONCE, OPTION_REJECT];
+  _expectedUiOptions() {
+    return [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT];
   }
 
   _publicPending(record) {
@@ -1486,9 +1455,6 @@ export class PiAdapter {
     const record = entry.pendingByPermission.get(pid);
     if (!record || record.sessionId !== String(sessionId)) {
       throw new AdapterError("Permission not found", 404, "not_found");
-    }
-    if (response === "always" && !entry.permissionPolicy.allow_session_always) {
-      throw new AdapterError("Always-allow is disabled by policy", 400, "rejected");
     }
     // The pending record is only honored while the EXACT original
     // preflight still exists and re-evaluates identically. A missing or

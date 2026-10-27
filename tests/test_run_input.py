@@ -45,7 +45,7 @@ def test_disabled_route_cannot_send_input(modern_env, mode):
     service, ws_id, token, _, _, rpc = modern_env
     run = start(modern_env)
     ws = service.workspace(ws_id)
-    service.set_workspace_route(ws, ADAPTER_ID, False, "workspace-write-reviewed")
+    service.set_workspace_route(ws, ADAPTER_ID, False, "trusted")
     before = len(rpc.calls)
     with pytest.raises(BridgeError) as raised:
         service.call(ws_id, token, mode + "_agent_run", {

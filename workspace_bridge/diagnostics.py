@@ -180,13 +180,6 @@ def _adapter_probe(service, row: dict) -> tuple[Descriptor | None, dict | None]:
         return None, {"kind": "unavailable"}
 
 
-def _profile_catalog(service, ws: dict, adapter_id: str) -> dict | None:
-    try:
-        return service.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
-    except Exception:
-        return None
-
-
 def _models(service, ws: dict, adapter_id: str) -> list[dict] | None:
     try:
         rows = service.adapter_registry.client(adapter_id, timeout=3, workspace=ws).models(ws["id"])
@@ -547,9 +540,6 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             futures = {}
             for route in route_probes:
                 key = (route["workspace"], route["adapter_id"])
-                futures[pool.submit(_profile_catalog, service,
-                                    service.workspace(route["workspace"], False),
-                                    route["adapter_id"])] = ("profile", key)
                 futures[pool.submit(_models, service,
                                     service.workspace(route["workspace"], False),
                                     route["adapter_id"])] = ("models", key)
@@ -601,48 +591,28 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
 
         source = route["security_source"]
         profile_id = route["profile_id"] if source == "profile" else None
-        profile_revision = route["profile_revision"] if source == "profile" else None
+        profile_revision = None
         if not source:
             out.add("route.security_binding", "models_profiles", "action_required",
-                    "Workspace route has no security binding.", workspace_id=wid,
+                    "Workspace route has no security profile.", workspace_id=wid,
                     adapter_id=aid, runtime_type=runtime_type)
             blockers.append("route.security_binding")
-        elif source == "runtime-config" and runtime_type != "codex":
-            out.add("route.security_binding", "models_profiles", "action_required",
-                    "Runtime config security requires a Codex adapter.", workspace_id=wid,
-                    adapter_id=aid, runtime_type=runtime_type)
-            blockers.append("route.security_binding")
-        elif offline:
-            out.add("route.security_freshness", "models_profiles", "unknown",
-                    "Route security discovery was not checked offline.", workspace_id=wid,
-                    adapter_id=aid, runtime_type=runtime_type)
-            blockers.append("route.security_freshness")
-        elif source == "runtime-config":
-            native = catalog.get("runtimeConfig") if isinstance(catalog, dict) else None
-            ok = bool(isinstance(native, dict) and native.get("supported") is True
-                      and native.get("available") is True
-                      and isinstance(native.get("revision"), str)
-                      and bool(native.get("revision")))
-            out.add("route.security_freshness", "models_profiles",
-                    "pass" if ok else "action_required",
-                    "Selected Codex adapter security config resolves." if ok else
-                    "Selected Codex adapter security config is unavailable.",
-                    workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
-            if not ok:
-                blockers.append("route.security_freshness")
         else:
-            # Revision drift never blocks: adapter redeploys rotate opaque
-            # revisions, so only a missing or unavailable profile does.
-            rows = catalog.get("profiles", []) if isinstance(catalog, dict) else []
-            current = next((row for row in rows if row.get("id") == profile_id), None)
-            ok = bool(current and current.get("available") is not False)
-            out.add("route.security_freshness", "models_profiles",
-                    "pass" if ok else "action_required",
-                    "Selected adapter profile is assigned and available." if ok else
-                    "Selected adapter profile is missing or unavailable.",
-                    workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
-            if not ok:
-                blockers.append("route.security_freshness")
+            # The Bridge owns profiles, so this needs no agent round trip:
+            # the profile must exist and the agent must enforce its rules.
+            try:
+                wire = service.profiles.binding(
+                    service.adapter_registry.get(aid), source, profile_id)
+                profile_revision = wire.get("profile", {}).get("revision")
+                out.add("route.security_binding", "models_profiles", "pass",
+                        "Route security profile is enforceable by this agent." if source == "profile"
+                        else "Route runs under the agent's native configuration.",
+                        workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
+            except BridgeError as exc:
+                out.add("route.security_binding", "models_profiles", "action_required",
+                        _safe(str(exc), 240, "Route security profile is unusable."),
+                        workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
+                blockers.append("route.security_binding")
 
         if offline:
             out.add("model.default_freshness", "models_profiles", "unknown",

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from workspace_bridge import security_profiles as sp
 from workspace_bridge.api import Handoff, make_admin
 from workspace_bridge.cli import initialize
 from workspace_bridge.codex_host_adapter import (
@@ -21,6 +22,8 @@ from workspace_bridge.wbrp import validate_run_state
 from test_codex_host_adapter import FakeCodexRpc
 from test_run_coordinator import DirectAdapter, modern_env, ADAPTER_ID  # noqa: F401
 from conftest import attach_test_node, create_test_adapter
+
+SECURITY = sp.wire("trusted", sp.BUILTINS["trusted"])
 
 
 # ------------------------------------------------ WBRP trust boundary
@@ -85,15 +88,12 @@ def _codex_conversation_run(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     run = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "Check the project"}]})
     return adapter, rpc, conversation, run
 
@@ -146,6 +146,7 @@ def test_codex_continuation_starts_fresh_boundary(tmp_path):
             "turn": {"id": first["nativeId"], "status": "completed"}})
         rpc.status = "idle"
         second = adapter.start_run(conversation["id"], {
+            "security": SECURITY,
             "input": [{"type": "text", "text": "follow-up"}]})
         assert "usage" not in adapter.run(second["id"])
         adapter._notification("thread/tokenUsage/updated", {
@@ -234,15 +235,12 @@ def test_codex_usage_survives_terminal_failure_and_restart(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     run = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "Failing task"}]})
     adapter._notification("thread/tokenUsage/updated", {
         "threadId": conversation["nativeId"], "turnId": run["nativeId"],
@@ -291,19 +289,16 @@ def test_codex_usage_survives_all_terminal_outcomes(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     try:
         for status, outcome in (("completed", "succeeded"),
                                 ("interrupted", "interrupted"),
                                 ("failed", "failed")):
             conversation = adapter.create_conversation({
                 "workspaceId": "ws_test", "directory": str(workspace),
-                "securityProfile": {"id": "workspace-write-reviewed",
-                                    "revision": profile["revision"]},
+                "security": SECURITY,
             })
             run = adapter.start_run(conversation["id"], {
+                "security": SECURITY,
                 "input": [{"type": "text", "text": f"task {outcome}"}]})
             adapter._notification("thread/tokenUsage/updated", {
                 "threadId": conversation["nativeId"], "turnId": run["nativeId"],
@@ -400,15 +395,12 @@ def test_codex_restart_keeps_continuation_boundary(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     first = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "first"}]})
     adapter._notification("thread/tokenUsage/updated", {
         "threadId": conversation["nativeId"], "turnId": first["nativeId"],
@@ -433,6 +425,7 @@ def test_codex_restart_keeps_continuation_boundary(tmp_path):
         assert restarted.run(first["id"])["usage"] == {
             "inputTokens": 150, "totalTokens": 150}
         second = restarted.start_run(conversation["id"], {
+            "security": SECURITY,
             "input": [{"type": "text", "text": "second"}]})
         restarted._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": second["nativeId"],

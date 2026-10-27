@@ -13,6 +13,24 @@
   kept, but can only be renamed, disabled or deleted; runs on them fail
   with `adapter_removed`. The Manager API accepts only plugin adapters.
   OpenCode's terminal handoff and reclaim commands are removed.
+- Breaking: security profiles move from the agents to the Bridge. A profile
+  sets deny, ask or allow for reads and writes inside and outside the
+  workspace, the shell, web access and extensions, plus protected paths,
+  external roots and shell command rules; the built-ins are `read-only`,
+  `reviewed` and `trusted`. Every run carries its route's current rules and
+  the plugin echoes what it enforces, so a profile edit reaches the next run
+  and continuation with no rebind. Local admins manage profiles at
+  `/api/profiles`; saving an edit that loosens a profile, or that a routed
+  agent cannot enforce, asks for confirmation, and a profile in use cannot be
+  deleted. A route is refused when its agent cannot enforce the profile. The
+  per-adapter profile endpoints, security rebind and the `runtime-config`
+  source are removed; Codex routes use `native` security instead, or a
+  profile its sandbox can enforce (`trusted`). On upgrade, routes on the old
+  `read-only` and `workspace-write-reviewed` profiles move to `read-only` and
+  `reviewed`, and routes on an agent-owned custom profile are disabled until
+  a Bridge profile is chosen. Codex routes moved to a profile Codex cannot
+  enforce must be switched to `trusted` or `native`. The Manager's profile
+  screens still use the old endpoints until the Manager rework.
 - Breaking: `workspace-bridge support bundle` is removed. Use
   `workspace-bridge doctor --json` and the service and plugin logs.
 

@@ -231,9 +231,7 @@ class NodeRuntimeAdapterProxy:
                 raise RuntimeRejected("Runtime rejected the request") from None
             if exc.code in {"not_found", "binding_mismatch", "conversation_busy",
                             "interaction_stale", "model_unavailable", "model_not_enabled",
-                            "security_rebind_unavailable", "profile_mismatch",
-                            "profile_unavailable", "continuation_security_source_changed",
-                            "continuation_security_rebind_unsupported"}:
+                            "invalid_profile", "security_unavailable"}:
                 raise RuntimeRejected("Runtime rejected the request", code=exc.code) from None
             raise
 
@@ -263,32 +261,11 @@ class NodeRuntimeAdapterProxy:
     def models(self, workspace_id: str) -> list[dict]:
         return self._call("models", workspace_id=workspace_id)
 
-    def profile_catalog(self, workspace_id: str | None = None,
-                        directory: str | None = None, *, fresh: bool = False) -> dict:
-        return self._call("profile_catalog", workspace_id=workspace_id,
-                          directory=directory, fresh=fresh)
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> list[dict]:
-        return self._call("profiles", workspace_id=workspace_id,
-                          directory=directory, fresh=fresh)
-
-    def save_profile(self, profile_id: str, config: dict, expected_revision: str | None) -> dict:
-        return self._call("save_profile", profile_id=profile_id, config=config,
-                          expected_revision=expected_revision)
-
-    def delete_profile(self, profile_id: str) -> dict:
-        return self._call("delete_profile", profile_id=profile_id)
-
     def create_conversation(self, payload: dict) -> dict:
         return self._call("create_conversation", payload=payload)
 
     def conversation(self, conversation_id: str) -> dict:
         return self._call("conversation", conversation_id=conversation_id)
-
-    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
-        return self._call("rebind_conversation", conversation_id=conversation_id,
-                          security_binding=security_binding)
 
     def start_run(self, conversation_id: str, payload: dict) -> dict:
         return self._call("start_run", conversation_id=conversation_id, payload=payload)

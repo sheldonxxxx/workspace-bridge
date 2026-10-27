@@ -10,8 +10,9 @@ an adapter restart while active runs are marked interrupted and never replayed.
 Claude Code runs as it does in the terminal: user, project and local settings,
 CLAUDE.md, skills, sub-agents, plugins and MCP servers load from disk (the
 layers are chosen with ``WB_CLAUDE_SETTING_SOURCES``). Security stays
-Bridge-managed and is enforced here: a closed built-in tool list derived from
-the named profile, a ``PreToolUse`` hook that evaluates every tool call
+Bridge-managed and is enforced here: every run carries the Bridge profile's
+rules, and they give a closed built-in tool list, a ``PreToolUse`` hook that
+evaluates every tool call
 including sub-agent and MCP calls, and a ``can_use_tool`` callback that turns
 ``ask`` decisions into Bridge interactions. Settings can add behavior but
 cannot widen the profile, and edits never reach ``.claude`` or ``.mcp.json``.
@@ -44,6 +45,7 @@ from typing import Any
 
 from .codex_rpc import sanitize_diagnostic
 from .login_path import runtime_env_with_login_path, safe_summary
+from . import security_profiles as profiles
 from .security import redact
 
 
@@ -102,17 +104,6 @@ class AdapterFailure(Exception):
 # Security profiles
 # --------------------------------------------------------------------------
 
-PROFILE_CONTRACT_VERSION = 1
-PROFILE_ID_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
-PROFILE_MODES = ("deny", "ask", "allow")
-PROFILE_KEYS = ("edits", "shell", "web", "extensions")
-PROFILES = {
-    "read-only": {"edits": "deny", "shell": "deny", "web": "deny", "extensions": "deny"},
-    "workspace-write-reviewed": {"edits": "ask", "shell": "ask", "web": "deny",
-                                 "extensions": "ask"},
-}
-_MAX_CUSTOM_PROFILES = 98
-
 # Closed built-in tool allowlist. Claude Code extensions (sub-agents, skills,
 # MCP servers, plugins) are available as in the CLI, but every tool call they
 # make, including a sub-agent's, passes this same gate. Meta tools only
@@ -141,7 +132,6 @@ SETTING_SOURCES = ("user", "project", "local")
 DEFAULT_SETTING_SOURCES = SETTING_SOURCES
 MAX_SHELL_COMMAND_CHARS = 16384
 _PATH_INPUT_KEYS = ("file_path", "notebook_path", "path")
-_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 _GLOB_CHARS = frozenset("*?[]{}")
 
 
@@ -167,82 +157,16 @@ def parse_setting_sources(raw: Any) -> tuple[str, ...]:
     return tuple(source for source in SETTING_SOURCES if source in items)
 
 
-def _validate_profile_config(raw: Any) -> dict:
-    """Validate the small Bridge wrapper: one mode per capability category."""
-    if not isinstance(raw, dict) or set(raw) != set(PROFILE_KEYS):
-        raise AdapterFailure(
-            "Claude profile requires exactly edits, shell, web and extensions")
-    config = {}
-    for key in PROFILE_KEYS:
-        value = raw.get(key)
-        if not isinstance(value, str) or value not in PROFILE_MODES:
-            raise AdapterFailure(f"Claude profile {key} must be deny, ask or allow")
-        config[key] = value
-    return config
-
-
-def _profile_revision(profile_id: str, config: dict) -> str:
-    payload = {"version": PROFILE_CONTRACT_VERSION, "id": profile_id, "wrapper": config}
-    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                             ensure_ascii=False).encode()).hexdigest()
-
-
-def allowed_tools(config: dict) -> list[str]:
+def allowed_tools(rules: dict) -> list[str]:
     """Built-in tools offered to the model for one profile (closed list)."""
     tools = list(READ_TOOLS) + list(META_TOOLS)
-    if config["edits"] != "deny":
+    if rules["write_inside"] != "deny" or rules["write_outside"] != "deny":
         tools += EDIT_TOOLS
-    if config["shell"] != "deny":
+    if rules["shell"] != "deny" or any(rule["mode"] != "deny" for rule in rules["commands"]):
         tools += SHELL_TOOLS
-    if config["web"] != "deny":
+    if rules["web"] != "deny":
         tools += WEB_TOOLS
     return tools
-
-
-def _inside(root: str, candidate: str) -> bool:
-    return candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
-
-
-def _protected_reason(relative: str) -> str | None:
-    """Fixed protected paths: Git internals and environment secrets."""
-    parts = [part for part in relative.replace("\\", "/").split("/") if part]
-    if ".git" in parts:
-        return "Git internals are protected"
-    name = parts[-1] if parts else ""
-    if (name == ".env" or name.startswith(".env.")) and not name.endswith(
-            _ENV_TEMPLATE_SUFFIXES):
-        return "Environment files are protected"
-    return None
-
-
-def _resolve_workspace_path(root_real: str, raw: Any, *,
-                            write: bool = False) -> tuple[str | None, str]:
-    """Resolve one tool path against the canonical workspace root.
-
-    Returns ``(resolved, "")`` when the realpath stays inside the workspace and
-    is not protected, otherwise ``(None, reason)``. Symlinks are resolved so a
-    link inside the workspace cannot reach outside it. Missing leaves (a file
-    about to be created) resolve through their existing parent.
-    """
-    if not isinstance(raw, str) or not raw or len(raw) > 4096 or "\x00" in raw:
-        return None, "Tool path is invalid"
-    candidate = raw if os.path.isabs(raw) else os.path.join(root_real, raw)
-    try:
-        resolved = os.path.realpath(candidate)
-    except (OSError, ValueError):
-        return None, "Tool path is invalid"
-    if not _inside(root_real, resolved):
-        return None, "Path is outside the workspace"
-    relative = os.path.relpath(resolved, root_real)
-    reason = _protected_reason("" if relative == "." else relative)
-    if reason:
-        return None, reason
-    if write:
-        parts = [part for part in relative.replace("\\", "/").split("/") if part]
-        if any(part in _CONFIG_DIRS for part in parts) or (
-                parts and parts[-1] in _CONFIG_FILES):
-            return None, "Claude Code configuration is protected"
-    return resolved, ""
 
 
 def _glob_prefix(pattern: str) -> str:
@@ -254,14 +178,23 @@ def _glob_prefix(pattern: str) -> str:
     return "/".join(parts) or "/"
 
 
-def decide_tool_use(config: dict, cwd: str, tool_name: Any,
+def _claude_config(root_real: str, raw: Any) -> bool:
+    """Whether a write would land in Claude Code configuration in the workspace."""
+    resolved = profiles.resolve_path(root_real, raw)
+    if resolved is None or not (resolved == root_real or resolved.startswith(root_real + os.sep)):
+        return False
+    parts = os.path.relpath(resolved, root_real).replace(os.sep, "/").split("/")
+    return any(part in _CONFIG_DIRS for part in parts) or parts[-1] in _CONFIG_FILES
+
+
+def decide_tool_use(rules: dict, cwd: str, tool_name: Any,
                     tool_input: Any) -> tuple[str, str]:
-    """Evaluate one tool call against a profile, failing closed.
+    """Evaluate one tool call against a run's profile rules, failing closed.
 
     Returns ``(decision, reason)`` where decision is ``allow``, ``ask`` or
-    ``deny``. File tools must stay inside the canonical workspace and away from
-    protected paths. The shell tool runs with the host user's authority once
-    permitted; its command text is bounded but never interpreted.
+    ``deny``. File tools are judged per path (inside or outside the
+    workspace, protected paths first); shell commands by the profile's
+    command rules and then its shell mode.
     """
     if isinstance(tool_name, str) and tool_name.startswith(MCP_TOOL_PREFIX):
         category = "extensions" if _MCP_TOOL_RE.fullmatch(tool_name) else None
@@ -272,44 +205,47 @@ def decide_tool_use(config: dict, cwd: str, tool_name: Any,
         return "deny", "Tool is not permitted by this security profile"
     if not isinstance(tool_input, dict):
         return "deny", "Tool input is invalid"
-    mode = "allow" if category in ("read", "meta") else config.get(category, "deny")
-    if mode not in ("allow", "ask"):
-        return "deny", "Tool is disabled by this security profile"
+    if category == "meta":
+        return "allow", ""
+    if category in ("extensions", "web"):
+        mode = rules[category]
+        return mode, "" if mode != "deny" else "Tool is disabled by this security profile"
     try:
         root_real = os.path.realpath(cwd)
     except (OSError, ValueError):
         return "deny", "Workspace directory is unavailable"
-    if category in ("read", "edits"):
-        paths: list[Any] = []
-        for key in _PATH_INPUT_KEYS:
-            if key in tool_input:
-                paths.append(tool_input[key])
-        if tool_name in ("Read", "Edit", "Write") and not paths:
-            return "deny", "Tool path is required"
-        if tool_name == "NotebookEdit" and "notebook_path" not in tool_input:
-            return "deny", "Tool path is required"
-        if tool_name == "Glob":
-            pattern = tool_input.get("pattern")
-            if (not isinstance(pattern, str) or not pattern or len(pattern) > 4096
-                    or "\x00" in pattern):
-                return "deny", "Glob pattern is invalid"
-            if ".." in pattern.replace("\\", "/").split("/"):
-                return "deny", "Glob pattern must not traverse parents"
-            if pattern.startswith("~"):
-                return "deny", "Glob pattern must stay inside the workspace"
-            if pattern.startswith("/"):
-                paths.append(_glob_prefix(pattern))
-        for raw in paths:
-            resolved, reason = _resolve_workspace_path(
-                root_real, raw, write=category == "edits")
-            if resolved is None:
-                return "deny", reason
-    elif tool_name in ("Bash", "Monitor"):
-        command = tool_input.get("command")
-        if (not isinstance(command, str) or not command
-                or len(command) > MAX_SHELL_COMMAND_CHARS):
-            return "deny", "Shell command is missing or too long"
-    return mode, ""
+    if category == "shell":
+        if tool_name in ("Bash", "Monitor"):
+            return profiles.command_mode(rules, tool_input.get("command"))
+        # Output and stop companions act on a shell this run already started.
+        mode = "allow" if rules["shell"] != "deny" or rules["commands"] else "deny"
+        return mode, "" if mode == "allow" else "Shell is disabled by this security profile"
+    write = category == "edits"
+    paths: list[Any] = [tool_input[key] for key in _PATH_INPUT_KEYS if key in tool_input]
+    if tool_name in ("Read", "Edit", "Write") and not paths:
+        return "deny", "Tool path is required"
+    if tool_name == "NotebookEdit" and "notebook_path" not in tool_input:
+        return "deny", "Tool path is required"
+    if tool_name == "Glob":
+        pattern = tool_input.get("pattern")
+        if (not isinstance(pattern, str) or not pattern or len(pattern) > 4096
+                or "\x00" in pattern):
+            return "deny", "Glob pattern is invalid"
+        if ".." in pattern.replace("\\", "/").split("/"):
+            return "deny", "Glob pattern must not traverse parents"
+        if pattern.startswith("/") or pattern.startswith("~"):
+            paths.append(_glob_prefix(pattern))
+    if not paths:
+        paths.append(".")
+    decision, reason = "allow", ""
+    for raw in paths:
+        if write and _claude_config(root_real, raw):
+            return "deny", "Claude Code configuration is protected"
+        mode, why = profiles.path_mode(rules, root_real, raw, write=write)
+        if mode == "deny":
+            return "deny", why
+        decision = profiles.stricter(decision, mode)
+    return decision, reason
 
 
 # --------------------------------------------------------------------------
@@ -439,12 +375,12 @@ def _claude_cli_version(executable: str, env: dict | None) -> str:
 class _RunState:
     """Process-local driver state for one live run."""
 
-    def __init__(self, run_id: str, conversation_id: str, cwd: str, config: dict,
+    def __init__(self, run_id: str, conversation_id: str, cwd: str, rules: dict,
                  expected_session: str):
         self.run_id = run_id
         self.conversation_id = conversation_id
         self.cwd = cwd
-        self.config = config
+        self.rules = rules
         self.expected_session = expected_session
         self.client: Any = None
         self.task: Any = None
@@ -498,8 +434,6 @@ class ClaudeHostAdapter:
             workspace TEXT NOT NULL, cwd TEXT NOT NULL,
             profile TEXT NOT NULL, revision TEXT NOT NULL,
             started INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS security_profiles (
-            id TEXT PRIMARY KEY, config TEXT NOT NULL, revision TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY, conversation TEXT NOT NULL REFERENCES conversations(id),
             client_run TEXT, input_hash TEXT, security_binding TEXT,
@@ -651,7 +585,7 @@ class ClaudeHostAdapter:
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
-                             "securityRebind": 1, "usageLimits": 1,
+                             "usageLimits": 1,
                              "steering": 1, "queueing": 1, "inputControls": 1},
                 "release": claude_release()}
 
@@ -809,105 +743,6 @@ class ClaudeHostAdapter:
     def models(self, workspace_id: str | None = None) -> dict:
         return {"models": self._catalog()}
 
-    # -- profiles ----------------------------------------------------------
-
-    def _profile_definition(self, profile_id: str) -> tuple[dict, str, bool]:
-        if profile_id in PROFILES:
-            config = dict(PROFILES[profile_id])
-            return config, _profile_revision(profile_id, config), False
-        with self.lock:
-            row = self.db.execute("SELECT config,revision FROM security_profiles WHERE id=?",
-                                  (profile_id,)).fetchone()
-        if row is None:
-            raise AdapterFailure("Unknown security profile", 409, "profile_mismatch")
-        try:
-            config = _validate_profile_config(json.loads(row["config"]))
-        except (ValueError, TypeError, AdapterFailure):
-            raise AdapterFailure("Security profile is invalid", 409, "profile_mismatch") from None
-        revision = _profile_revision(profile_id, config)
-        if revision != row["revision"]:
-            raise AdapterFailure("Security profile changed", 409, "profile_mismatch")
-        return config, revision, True
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> dict:
-        if (workspace_id is None) != (directory is None):
-            raise AdapterFailure("Workspace ID and directory must be supplied together")
-        if workspace_id is not None:
-            if not isinstance(workspace_id, str) or not workspace_id or len(workspace_id) > 100:
-                raise AdapterFailure("Invalid workspace id")
-            self._cwd(directory)
-        enforcement = ["tool-allowlist", "permission-hook", "interactive-approval"]
-        rows = [{"id": key, "revision": _profile_revision(key, dict(value)),
-                 "definitionRevision": _profile_revision(key, dict(value)),
-                 "config": dict(value), "mutable": False, "enforcement": enforcement}
-                for key, value in PROFILES.items()]
-        with self.lock:
-            custom = self.db.execute(
-                "SELECT id,config,revision FROM security_profiles ORDER BY id").fetchall()
-        for row in custom:
-            try:
-                config = _validate_profile_config(json.loads(row["config"]))
-            except (ValueError, TypeError, AdapterFailure):
-                continue
-            revision = _profile_revision(row["id"], config)
-            if revision != row["revision"]:
-                continue
-            rows.append({"id": row["id"], "revision": revision,
-                         "definitionRevision": revision, "config": config,
-                         "mutable": True, "enforcement": enforcement})
-        if workspace_id is not None:
-            for row in rows:
-                row["available"] = True
-        return {"profiles": rows}
-
-    def save_profile(self, body: dict) -> dict:
-        profile_id = body.get("id")
-        if (not isinstance(profile_id, str) or not PROFILE_ID_RE.fullmatch(profile_id)
-                or profile_id in PROFILES):
-            raise AdapterFailure("Choose a new profile ID using lowercase letters, numbers, _ or -")
-        config = _validate_profile_config(body.get("config"))
-        expected = body.get("expectedRevision")
-        if expected is not None and not isinstance(expected, str):
-            raise AdapterFailure("Invalid expected revision")
-        revision = _profile_revision(profile_id, config)
-        with self.lock, self.db:
-            existing = self.db.execute(
-                "SELECT revision FROM security_profiles WHERE id=?", (profile_id,)).fetchone()
-            if (existing is None and expected is not None) or (
-                    existing is not None and existing["revision"] != expected):
-                raise AdapterFailure("Security profile changed; reload it", 409,
-                                     "profile_mismatch")
-            if existing is None and self.db.execute(
-                    "SELECT COUNT(*) FROM security_profiles").fetchone()[0] >= _MAX_CUSTOM_PROFILES:
-                raise AdapterFailure("Too many security profiles")
-            if existing is not None and self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            self.db.execute("INSERT INTO security_profiles(id,config,revision) VALUES(?,?,?) "
-                            "ON CONFLICT(id) DO UPDATE SET config=excluded.config,"
-                            "revision=excluded.revision",
-                            (profile_id, json.dumps(config, sort_keys=True), revision))
-        return {"id": profile_id, "revision": revision, "definitionRevision": revision,
-                "config": config, "mutable": True}
-
-    def delete_profile(self, profile_id: str) -> dict:
-        if profile_id in PROFILES:
-            raise AdapterFailure("Built-in profiles cannot be deleted", 409, "conflict")
-        with self.lock, self.db:
-            if self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            deleted = self.db.execute("DELETE FROM security_profiles WHERE id=?",
-                                      (profile_id,)).rowcount
-        if not deleted:
-            raise AdapterFailure("Security profile not found", 404, "not_found")
-        return {"deleted": profile_id}
-
     # -- conversations -----------------------------------------------------
 
     def _cwd(self, requested: Any) -> str:
@@ -958,6 +793,15 @@ class ClaudeHostAdapter:
         return self._session_present(owned) or not owned["started"]
 
     @staticmethod
+    def _security(body: dict) -> tuple[str, str, dict]:
+        """The profile a conversation or run carries; every run names one."""
+        try:
+            return profiles.from_wire(body.get("security"))
+        except Exception as exc:  # BridgeError from validation
+            raise AdapterFailure(_clean(str(exc), 200) or "Security profile is invalid",
+                                 400, "invalid_profile") from None
+
+    @staticmethod
     def _binding(owned: dict) -> dict:
         return {"source": "profile", "profile": {"id": owned["profile"],
                                                  "revision": owned["revision"]}}
@@ -967,17 +811,7 @@ class ClaudeHostAdapter:
         if not isinstance(workspace, str) or not workspace or len(workspace) > 100:
             raise AdapterFailure("Invalid workspace id")
         cwd = self._cwd(body.get("directory"))
-        binding = body.get("securityBinding")
-        if isinstance(binding, dict) and binding.get("source") != "profile":
-            raise AdapterFailure("Claude Code adapters support only named security profiles",
-                                 409, "runtime_config_unavailable")
-        profile = body.get("securityProfile") or {}
-        profile_id = profile.get("id") if isinstance(profile, dict) else None
-        if not isinstance(profile_id, str):
-            raise AdapterFailure("Unknown or changed security profile", 409, "profile_mismatch")
-        _config, revision, _mutable = self._profile_definition(profile_id)
-        if profile.get("revision") != revision:
-            raise AdapterFailure("Unknown or changed security profile", 409, "profile_mismatch")
+        profile_id, revision, _rules = self._security(body)
         self._sdk_module()
         conversation_id = _id("conv_")
         session = str(uuid.uuid4())
@@ -989,64 +823,19 @@ class ClaudeHostAdapter:
             self._emit("conversation.created", conversation_id)
         return {"id": conversation_id, "runtime": RUNTIME_ID, "nativeId": session,
                 "workspaceId": workspace,
-                "securityProfile": {"id": profile_id, "revision": revision},
                 "securityBinding": {"source": "profile", "profile": {
                     "id": profile_id, "revision": revision}},
                 "status": "idle"}
 
     def conversation(self, conversation_id: str) -> dict:
         owned = self._conversation(conversation_id)
-        _config, revision, _mutable = self._profile_definition(owned["profile"])
-        if owned["revision"] != revision:
-            raise AdapterFailure("Conversation security profile changed", 409,
-                                 "profile_mismatch")
         if not self._session_exists(owned):
             raise AdapterFailure("Conversation is unavailable", 404, "not_found")
         binding = self._binding(owned)
         return {"id": owned["id"], "runtime": RUNTIME_ID, "nativeId": owned["session"],
                 "workspaceId": owned["workspace"],
                 "status": "active" if self._is_busy(owned["id"]) else "idle",
-                "securityProfile": binding["profile"], "securityBinding": binding}
-
-    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
-        """Idle-boundary rebind of a named-profile conversation.
-
-        Enforcement is rebuilt from the stored profile for every run, so the
-        rebind only has to prove the conversation is idle and the requested
-        revision is currently defined; the next run is then constrained by it.
-        """
-        if (not isinstance(security_binding, dict)
-                or security_binding.get("source") != "profile"
-                or not isinstance(security_binding.get("profile"), dict)):
-            raise AdapterFailure("Invalid security rebind binding")
-        target = security_binding["profile"]
-        profile_id, revision = target.get("id"), target.get("revision")
-        if not isinstance(profile_id, str) or not isinstance(revision, str):
-            raise AdapterFailure("Invalid security rebind binding")
-        owned = self._conversation(conversation_id)
-        admission = self._admission.setdefault(owned["id"], threading.Lock())
-        if not admission.acquire(blocking=False):
-            raise AdapterFailure("Conversation is busy", 409, "conversation_busy")
-        try:
-            if self._is_busy(owned["id"]):
-                raise AdapterFailure("Conversation is busy", 409, "conversation_busy")
-            if not self._session_exists(owned):
-                raise AdapterFailure("Conversation is unavailable", 404, "not_found")
-            _config, current, _mutable = self._profile_definition(profile_id)
-            if current != revision:
-                raise AdapterFailure("Unknown or changed security profile", 409,
-                                     "profile_mismatch")
-            with self.lock, self.db:
-                self.db.execute("UPDATE conversations SET profile=?,revision=? WHERE id=?",
-                                (profile_id, revision, owned["id"]))
-                self._emit("conversation.security_rebound", owned["id"])
-            owned = self._conversation(owned["id"])
-        finally:
-            admission.release()
-        binding = self._binding(owned)
-        return {"id": owned["id"], "runtime": RUNTIME_ID, "nativeId": owned["session"],
-                "workspaceId": owned["workspace"], "status": "idle",
-                "securityProfile": binding["profile"], "securityBinding": binding}
+                "securityBinding": binding}
 
     # -- runs --------------------------------------------------------------
 
@@ -1124,6 +913,7 @@ class ClaudeHostAdapter:
             "model": body.get("model"), "reasoning": body.get("reasoning")},
             sort_keys=True).encode()).hexdigest()
         model, effort = self._validate_model(body.get("model"), body.get("reasoning"))
+        profile_id, revision, rules = self._security(body)
         owned = self._conversation(conversation_id)
         admission = self._admission.setdefault(owned["id"], threading.Lock())
         admission.acquire()
@@ -1140,25 +930,24 @@ class ClaudeHostAdapter:
                         return self._run_public(dict(previous))
             if self._is_busy(owned["id"]):
                 raise AdapterFailure("Conversation is busy", 409, "conversation_busy")
-            config, revision, _mutable = self._profile_definition(owned["profile"])
-            if revision != owned["revision"]:
-                raise AdapterFailure("Conversation security profile changed", 409,
-                                     "profile_mismatch")
             if not self._session_exists(owned):
                 raise AdapterFailure("Conversation is unavailable", 404, "not_found")
             self._sdk_module()
             owned["resume"] = bool(owned["started"] or self._session_present(owned))
             run_id = _id("run_")
             now = _now()
+            owned["profile"], owned["revision"] = profile_id, revision
             binding = json.dumps(self._binding(owned), sort_keys=True,
                                  separators=(",", ":"))
             with self.lock, self.db:
+                self.db.execute("UPDATE conversations SET profile=?,revision=? WHERE id=?",
+                                (profile_id, revision, owned["id"]))
                 self.db.execute(
                     "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,"
                     "phase,active_state,outcome,result,error,usage,created,updated) "
                     "VALUES(?,?,?,?,?,'starting',NULL,NULL,'','',NULL,?,?)",
                     (run_id, owned["id"], client_run_id, input_hash, binding, now, now))
-            state = _RunState(run_id, owned["id"], owned["cwd"], config, owned["session"])
+            state = _RunState(run_id, owned["id"], owned["cwd"], rules, owned["session"])
             try:
                 options = self._run_options(state, owned, model, effort)
             except AdapterFailure:
@@ -1188,7 +977,7 @@ class ClaudeHostAdapter:
             try:
                 name = hook_input.get("tool_name")
                 decision, reason = decide_tool_use(
-                    state.config, state.cwd, name, hook_input.get("tool_input"))
+                    state.rules, state.cwd, name, hook_input.get("tool_input"))
             except Exception:
                 decision, reason = "deny", "Tool call could not be evaluated"
             output: dict[str, Any] = {"hookEventName": "PreToolUse"}
@@ -1204,7 +993,7 @@ class ClaudeHostAdapter:
 
         async def can_use_tool(tool_name: str, tool_input: dict, context: Any) -> Any:
             try:
-                decision, reason = decide_tool_use(state.config, state.cwd, tool_name,
+                decision, reason = decide_tool_use(state.rules, state.cwd, tool_name,
                                                    tool_input)
             except Exception:
                 decision, reason = "deny", "Tool call could not be evaluated"
@@ -1215,13 +1004,13 @@ class ClaudeHostAdapter:
             return await self._ask(state, tool_name, tool_input, context, loop)
 
         kwargs: dict[str, Any] = {
-            "cwd": state.cwd, "tools": allowed_tools(state.config),
+            "cwd": state.cwd, "tools": allowed_tools(state.rules),
             "can_use_tool": can_use_tool, "verbatim_prompts": True,
             # The Claude Code system prompt and its CLAUDE.md, skill and agent
             # loading, as in the CLI. MCP servers start only when the profile
             # permits extensions; the hook gates every call either way.
             "system_prompt": {"type": "preset", "preset": "claude_code"},
-            "strict_mcp_config": state.config["extensions"] == "deny",
+            "strict_mcp_config": state.rules["extensions"] == "deny",
             "settings": json.dumps({"permissions": {
                 "disableBypassPermissionsMode": "disable"}}),
             "hooks": {"PreToolUse": [sdk.HookMatcher(matcher=None, hooks=[pre_tool_use])]},

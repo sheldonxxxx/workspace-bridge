@@ -296,8 +296,6 @@ class _FakeDescriptorAdapter:
         self.features = dict.fromkeys(CORE_FEATURES, 1) if features is None else features
         self.instance = instance
         self.model_rows = [{"selector": "model-a", "reasoningOptions": ["low"]}]
-        self.profile_rows = [{"id": "reviewed", "revision": "rev-1",
-                              "available": True}]
 
     def descriptor(self):
         return Descriptor(self.runtime_type, self.runtime_type, "0.1.0",
@@ -305,8 +303,6 @@ class _FakeDescriptorAdapter:
                           release=self._release,
                           release_status=self._status)
 
-    def profile_catalog(self, _ws=None, _dir=None, *, fresh=False):
-        return {"profiles": list(self.profile_rows)}
 
     def models(self, workspace_id: str):
         return list(self.model_rows)
@@ -353,7 +349,7 @@ def _ready_workspace(staged_env, adapter_id):
     ws = service.workspace(ws_id)
     service.run_coordinator.set_model_policy(adapter_id, ["model-a"],
                                              "model-a", ws)
-    service.set_workspace_route(ws, adapter_id, True, "reviewed")
+    service.set_workspace_route(ws, adapter_id, True, "trusted")
     return service.workspace(ws_id)
 
 
@@ -501,9 +497,8 @@ def test_run_admission_not_blocked_by_skew(staged_env):
                                                "valid")
     ws = _ready_workspace(staged_env, adapter_id)
     service = staged_env["service"]
-    # Model/profile discovery works despite product skew.
+    # Model discovery works despite product skew.
     assert service.run_coordinator.models(ws, adapter_id)["models"]
-    assert service.run_coordinator.profile_catalog(adapter_id, ws)["profiles"]
     # Route readiness is not blocked by release skew.
     policy = service.workspace_route_policy(ws)
     assert policy["routes"][adapter_id]["ready"] is True
@@ -630,7 +625,6 @@ def test_missing_release_identity_does_not_block_protocol_execution(staged_env):
         assert by_id[adapter_id]["state"] == "unsupported_build"
         assert by_id[adapter_id]["execution_compatible"] is True
         assert service.run_coordinator.models(ws, adapter_id)["models"]
-        assert service.run_coordinator.profile_catalog(adapter_id, ws)["profiles"]
         assert service.workspace_route_policy(ws)["routes"][adapter_id]["ready"] is True
     finally:
         service.adapter_registry.client = original
@@ -650,10 +644,6 @@ def test_structured_descriptor_failure_blocks_start(staged_env):
 
         def models(self, workspace_id: str):
             return [{"selector": "model-a", "reasoningOptions": ["low"]}]
-
-        def profile_catalog(self, _ws=None, _dir=None, *, fresh=False):
-            return {"profiles": [{"id": "reviewed", "revision": "rev-1",
-                                     "available": True}]}
 
     original = service.adapter_registry.client
     service.adapter_registry.client = lambda adapter_id, **kw: (

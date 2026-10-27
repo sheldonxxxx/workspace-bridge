@@ -52,7 +52,7 @@ def simplified_env(tmp_path, payload):
     # No set_agent_enabled call: the workspace-wide legacy switch stays OFF
     # (column default 0) and must not gate runs.
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True,
-                                "workspace-write-reviewed")
+                                "trusted")
     job = service.call(ws_id, token, "prepare_handoff",
                        Handoff.model_validate(payload).model_dump())
     yield service, ws_id, token, job, native, native_rpc

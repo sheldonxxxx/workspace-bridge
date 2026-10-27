@@ -40,18 +40,8 @@ function body(params) {
 export const HANDLERS = {
   descriptor: (p, _params) => p.descriptor(),
   models: (p) => p.models(),
-  "profiles.list": (p) => p.profileList(),
-  "profiles.save": (p, params) => p.saveProfile(body(params)),
-  "profiles.delete": (p, params) => p.deleteProfile(params.profileId),
   "conversations.create": (p, params) => p.createConversation(body(params)),
   "conversations.get": (p, params) => p.conversation(params.conversationId),
-  "conversations.rebind": (p, params) => {
-    const binding = body(params).securityBinding;
-    if (!binding || typeof binding !== "object") {
-      throw new AdapterError("Invalid security rebind binding", 400, "invalid_arguments");
-    }
-    return p.rebindConversation(params.conversationId, binding);
-  },
   "runs.start": (p, params) => p.startRun(params.conversationId, body(params)),
   "runs.find": (p, params) => p.findRun(params.conversationId, params.clientRunId),
   "runs.get": (p, params) => p.run(params.runId),

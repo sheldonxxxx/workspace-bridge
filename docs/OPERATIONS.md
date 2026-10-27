@@ -453,31 +453,31 @@ the Manager remains loopback-only. Aggregate event delivery states are available
 under `mcp_events` in authenticated `/api/status`. Never enable raw HTTP/tunnel
 logging or inspect subscription signing secrets through a public API.
 
-## Runtime profiles
+## Security profiles
 
-Pi runs natively with the host user's authority, so its security profile is
-pre-tool policy rather than an OS sandbox. Profiles control supported file
-tools, external paths, protected paths, shell behavior, and session grants
-through the Pi host adapter's trusted permission extension. A profile
-revision is immutable for each conversation; changes take effect in new
-conversations. Review each profile's scope in the local Manager before
-assigning it. Each adapter instance has its own profile discovery and model
-policy even when two instances share one runtime type. Codex uses a separate
-native permission profile with an approval policy and reviewer; the two
-runtimes' profile claims are not equivalent. Claude Code profiles set
-`edits`, `shell`, `web`, and `extensions` (MCP tools) to `deny`, `ask`, or
-`allow` and are enforced by the adapter's tool list and permission hook;
-approved shell commands run with the host user's authority, and the host's
-Claude settings, hooks, skills, and MCP servers load unless
-`adapter init --claude-setting-sources` narrows them. See [Runtimes](RUNTIMES.md).
+Security profiles live in the Bridge and are edited by a local admin in the
+Manager (`/api/profiles`); no MCP tool reads or changes them. Each route names
+one profile, and every run carries that profile's current rules to the plugin,
+which enforces them as pre-tool policy rather than an OS sandbox. A run keeps
+the rules it started with; an edit reaches the next run, including a
+continuation. Before saving an edit that loosens a profile, or that a routed
+plugin cannot enforce, the Manager lists the affected rules and routes and
+asks for confirmation. A profile in use cannot be deleted. A route is refused
+when its plugin cannot enforce the profile's restrictive rules; Codex, for
+example, accepts `trusted` but not `read-only` or `reviewed`. See
+[Security profiles](SECURITY.md#security-profiles) and
+[Security on every run](RUNTIME_PROTOCOL.md#security-on-every-run).
 
-Codex workspaces may instead follow the effective native configuration
-security settings. The Bridge observes a security-only revision and bounded
-summary, then attempts to update an idle conversation before its next turn.
-A running turn keeps its captured settings. When Codex cannot represent or
-confirm an update, the Bridge starts a fresh conversation that resolves the
-current native configuration. This mode is distinct from assigning a Bridge
-profile and is unsupported for Pi.
+Approved shell commands run with the host user's authority. Claude Code loads
+the host's Claude settings, hooks, skills, and MCP servers unless
+`adapter init --claude-setting-sources` narrows them. See
+[Runtimes](RUNTIMES.md).
+
+Codex routes may instead follow Codex's native security: the thread runs under
+the effective native configuration, and each native approval becomes a Bridge
+interaction. Switching a route between a profile and native security needs a
+fresh conversation. Native security is unsupported for Pi, Claude Code, and
+OpenCode.
 
 ## Writable handoff notes
 

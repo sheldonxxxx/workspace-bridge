@@ -1,6 +1,6 @@
-// Package-owned trusted Pi permission extension (milestone 3C1, policy v3).
+// Package-owned trusted Pi permission extension.
 //
-// Loaded explicitly for EVERY managed v3 session -- including read-only
+// Loaded explicitly for EVERY managed session -- including read-only
 // sessions, so read/grep/find/ls policy, protected patterns, and external
 // rules are enforced in both modes. Since the AgentSession migration it loads as an
 // inline extension factory built by createTrustedPermissionExtension()
@@ -22,14 +22,13 @@
 //   ONLY from adapter preflight/evaluator state, never from this title.
 //   The suspended invocation resumes with the UI response; the LLM never
 //   retries.
-// - Options are shared constants below. "always" is offered only when the
-//   immutable session policy has allow_session_always=true. For bash,
+// - Options are shared constants below; "always" is always offered. For bash,
 //   always stays session-local and exact-command scoped (hash + timeout).
 // - Grants are in-memory exact grantKeys only (file tools: action + exact
 //   target; bash: exact command hash + verified timeout); never persisted
 //   to disk.
 //
-// v3 has no fixed filesystem denies and no command rule list. Any internal
+// The rules come from the run's Bridge security profile. Any internal
 // failure fails closed (blocks the call).
 //
 // 3C2 third-party extensions: this hook governs ONLY Bridge-managed
@@ -126,8 +125,6 @@ function bindToolCall(pi, policy, sessionCwd, onToolIntent = null) {
         // uses the credible toolCallId above.
         return undefined;
       }
-      // v3: no fixed filesystem denies, no command rules; ordinary
-      // configurable policy + shell_mode govern.
       const base = { cwd: sessionCwd, policy, toolName, input };
       const verdict = evaluateToolCall(base);
       if (verdict.effect === "deny") {
@@ -149,9 +146,7 @@ function bindToolCall(pi, policy, sessionCwd, onToolIntent = null) {
         }
         return { block: true, reason: "Approval no longer matches; failing closed" };
       }
-      const options = policy.allow_session_always
-        ? [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]
-        : [OPTION_ONCE, OPTION_REJECT];
+      const options = [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT];
       const title = markerTitle(toolCallId);
       let choice;
       try {
@@ -164,9 +159,6 @@ function bindToolCall(pi, policy, sessionCwd, onToolIntent = null) {
         return { block: true, reason: "Rejected" };
       }
       if (choice === OPTION_REJECT) {
-        return { block: true, reason: "Rejected" };
-      }
-      if (choice === OPTION_ALWAYS && !policy.allow_session_always) {
         return { block: true, reason: "Rejected" };
       }
       // Re-evaluate immediately after approval before allowing execution;

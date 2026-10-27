@@ -84,9 +84,9 @@ test("a failed initialize reports the adapter error without starting", async () 
 
 test("stdio exposes exactly the v2 resource methods", () => {
   assert.deepEqual(Object.keys(HANDLERS).sort(), [
-    "activities.get", "conversations.create", "conversations.get", "conversations.rebind",
-    "descriptor", "interactions.resolve", "models", "profiles.delete", "profiles.list",
-    "profiles.save", "runs.activities", "runs.cancel", "runs.find", "runs.get",
+    "activities.get", "conversations.create", "conversations.get",
+    "descriptor", "interactions.resolve", "models", "runs.activities", "runs.cancel",
+    "runs.find", "runs.get",
     "runs.interactions", "runs.queue", "runs.start", "runs.steer",
   ]);
 });

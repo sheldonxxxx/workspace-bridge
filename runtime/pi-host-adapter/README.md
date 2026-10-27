@@ -27,19 +27,18 @@ Bridge control plane
       -> in-process Pi session (isolated agent dir, pinned Pi dependency)
 ```
 
-The adapter owns its Pi conversations, runs, profiles, interaction requests,
+The adapter owns its Pi conversations, runs, interaction requests,
 and activity snapshots. It never adopts an unrelated Pi session. Workspace
 Bridge owns run authorization and durable cross-runtime records; Pi owns
 native session files, model syntax, and enforcement.
 
 ## Profiles and host authority
 
-The built-in read-only profile allows read tools only. Broader profiles
-enable edit and write tools and ask before shell commands. Custom Pi
-profiles are managed through the local Bridge manager and apply to new
-conversations; an existing conversation keeps its immutable profile
-revision. The trusted permission extension validates each supported file
-and shell action against that profile.
+Security profiles live in the Bridge and arrive with every run. The trusted
+permission extension judges each built-in file and shell tool call against the
+run's rules, and tools the rules can never allow are not offered: the
+built-in `read-only` profile offers read tools only. A run keeps the rules it
+started with; a profile edit reaches the next run.
 
 Pi runs with the host user's authority. These controls are pre-tool policy,
 not an OS sandbox. Review external paths, protected paths, writable tools,
@@ -48,12 +47,14 @@ and shell mode before enabling a profile.
 ## Protocol surface
 
 The plugin answers only the protocol's resource methods: descriptor, models,
-profiles, conversations, runs, interactions, and activities. There is no
+conversations, runs, interactions, and activities. There is no
 health, extension or command method. Logs go to stderr; stdout carries
 protocol lines only.
 
-A conversation is bound to a canonical project directory, model, and
-security profile revision. A run starts only in an idle owned conversation.
+A conversation is bound to a canonical project directory and model. Every
+run carries the Bridge security profile rules it must enforce; a run under a
+new profile revision reopens the idle session with those rules. A run starts
+only in an idle owned conversation.
 On adapter restart, an in-progress run is marked interrupted; the Bridge
 never replays the prompt or adopts an unrelated session.
 

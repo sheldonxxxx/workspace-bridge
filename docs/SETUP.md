@@ -262,7 +262,7 @@ are not accepted by the Manager. Order matters:
    save is rejected. With no policy the adapter is unrestricted by Bridge
    governance and the runtime chooses its own default.
 5. **Routes** per workspace: enable the exact `(workspace_id, adapter_id)`
-   pair and set its security binding. Pi and Claude Code use a Bridge profile;
+   pair and set its security binding. Pi, Claude Code, and OpenCode use a Bridge profile;
    Codex uses either a Bridge profile or its native configuration source. Discovery and
    binding use the exact workspace context.
 

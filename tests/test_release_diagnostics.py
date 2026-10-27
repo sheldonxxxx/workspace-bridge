@@ -15,7 +15,6 @@ class ReleaseAdapter:
         self.runtime_type = runtime_type
         self._release = release
         self.model_rows = [{"selector": "model-a", "reasoningOptions": ["low"]}]
-        self.profile_rows = [{"id": "reviewed", "revision": "rev-1", "available": True}]
         self.features = dict.fromkeys(CORE_FEATURES, 1)
 
     def descriptor(self):
@@ -23,8 +22,6 @@ class ReleaseAdapter:
                           f"native-{self.runtime_type}", self.features,
                           release=self._release)
 
-    def profile_catalog(self, _workspace_id=None, _directory=None, *, fresh=False):
-        return {"profiles": list(self.profile_rows)}
 
     def models(self, workspace_id: str):
         return list(self.model_rows)
@@ -54,10 +51,8 @@ def _ready_workspace(env, adapter_id):
     if not service.bridge_status()["configured"]:
         service.manage_bridge("rotate_token")
     ws = service.workspace(ws_id)
-    client_release = None
-    # Find the fake adapter's release via its descriptor for profile setup.
     service.run_coordinator.set_model_policy(adapter_id, ["model-a"], "model-a", ws)
-    service.set_workspace_route(ws, adapter_id, True, "reviewed")
+    service.set_workspace_route(ws, adapter_id, True, "trusted")
     return service.workspace(ws_id)
 
 

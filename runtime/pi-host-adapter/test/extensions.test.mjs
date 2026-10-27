@@ -720,15 +720,9 @@ async function managedCreate(agentDir, extensionPolicy) {
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const { validatePolicy } = await import("../policy.mjs");
+  const { validatePolicy, safeDefaultPolicy } = await import("../policy.mjs");
   const { policyRevision, canonicalJson } = await import("../policy.mjs");
-  const permission = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  };
+  const permission = safeDefaultPolicy();
   validatePolicy(permission);
   const session = await adapter.createSession(projects.app, "t", {
     permission_policy: permission, policy_revision: policyRevision(permission),
@@ -783,14 +777,8 @@ test("extension tools pass preflight without permission ask when enabled", async
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const { validatePolicy, policyRevision } = await import("../policy.mjs");
-  const permission = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  };
+  const { safeDefaultPolicy, policyRevision } = await import("../policy.mjs");
+  const permission = safeDefaultPolicy();
   const session = await adapter.createSession(projects.app, "t", {
     permission_policy: permission, policy_revision: policyRevision(permission),
     extension_policy: { version: 1, enabled: ["npm:alpha"] },

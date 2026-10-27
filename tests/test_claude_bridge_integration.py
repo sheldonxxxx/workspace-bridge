@@ -31,22 +31,11 @@ class ClaudeDirect:
     def models(self, workspace_id):
         return self.native.models()["models"]
 
-    def profile_catalog(self, workspace_id=None, directory=None, *, fresh=False):
-        if workspace_id is None:
-            return self.native.profiles()
-        return self.native.profiles(workspace_id, directory, fresh=fresh)
-
-    def profiles(self):
-        return self.profile_catalog()["profiles"]
-
     def create_conversation(self, payload):
         return self.native.create_conversation(payload)
 
     def conversation(self, ident):
         return self.native.conversation(ident)
-
-    def rebind_conversation(self, ident, binding):
-        return self.native.rebind_conversation(ident, binding)
 
     def start_run(self, ident, payload):
         return self.native.start_run(ident, payload)
@@ -99,8 +88,7 @@ def claude_env(tmp_path, payload):
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True,
-                                "workspace-write-reviewed")
+    service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "reviewed")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["default"], "default")
     job = service.call(ws_id, token, "prepare_handoff",
                        Handoff.model_validate(payload).model_dump())

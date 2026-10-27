@@ -97,10 +97,9 @@ updates, sharing, and Git snapshots. Only the owned server is stopped.
 An unexpected owned-server exit terminates the plugin so the Node restarts the
 unit and it reconciles journalled state without replay.
 
-The trusted v2 plugin gates every tool and child-session call. Profiles expose
-`edits`, `shell`, `web`, and `extensions`, each `deny`, `ask`, or `allow`.
-File tools stay inside the workspace and protect Git internals, environment
-files, `.opencode`, `.agents`, and `opencode.json`/`opencode.jsonc` edits. An
+The trusted v2 plugin gates every tool and child-session call against the run's
+[security profile](SECURITY.md#security-profiles). Edits never reach
+`.opencode`, `.agents`, or `opencode.json`/`opencode.jsonc`. An
 unknown tool fails closed. Approved shell commands and existing native plugins
 run with the host user's authority; this is not an OS sandbox. A missing or
 failed guard blocks admission. Native saved permissions cannot widen the guard.

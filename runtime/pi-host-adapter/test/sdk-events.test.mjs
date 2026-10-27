@@ -70,7 +70,7 @@ test("bash permission input keeps only bounded exact command+timeout", async () 
   assert.ok(!JSON.stringify([first.input, second.input]).includes("command_sha256"));
   // Evaluator computes the same hash/timeout from the normalized form as
   // from the original Pi args.
-  const { evaluateToolCall, extractBashCommand } = await import("../policy.mjs");
+  const { evaluateToolCall, extractBashCommand, safeDefaultPolicy } = await import("../policy.mjs");
   const fromOrig = extractBashCommand({ command: "echo hi", timeout: 20 });
   const fromNorm = extractBashCommand(first.input);
   assert.equal(fromOrig.ok, true);
@@ -78,13 +78,7 @@ test("bash permission input keeps only bounded exact command+timeout", async () 
   assert.equal(fromNorm.commandHash, fromOrig.commandHash);
   assert.equal(fromNorm.timeoutMs, fromOrig.timeoutMs);
   assert.equal(fromNorm.command, fromOrig.command);
-  const allowPolicy = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "allow",
-  };
+  const allowPolicy = { ...safeDefaultPolicy(), shell: "allow" };
   const vOrig = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash",
     input: { command: "echo hi", timeout: 20 } });
   const vNorm = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash",
@@ -116,14 +110,8 @@ test("malformed and truncated bash inputs fail closed in permission metadata", a
   assert.ok(seen[2].auditInput.command.length <= 16384);
   assert.ok(seen[2].auditInput.command_sha256?.match(/^[0-9a-f]{64}$/));
   // None of the truncated/failed permission inputs can evaluate to allow.
-  const { evaluateToolCall } = await import("../policy.mjs");
-  const allowPolicy = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "allow",
-  };
+  const { evaluateToolCall, safeDefaultPolicy } = await import("../policy.mjs");
+  const allowPolicy = { ...safeDefaultPolicy(), shell: "allow" };
   for (const entry of seen) {
     const verdict = evaluateToolCall({ cwd: "/tmp", policy: allowPolicy, toolName: "bash", input: entry.input });
     assert.equal(verdict.effect, "deny");

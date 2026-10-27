@@ -7,6 +7,7 @@ import threading
 import time
 
 import pytest
+from workspace_bridge import security_profiles as sp
 from workspace_bridge.opencode_host_adapter import OpenCodeHostAdapter
 
 BINARY = os.environ.get('WB_OPENCODE_TEST_BINARY')
@@ -61,9 +62,10 @@ def test_installed_v2_shared_database_plugin_and_local_provider(tmp_path, mode):
     state=tmp_path/'adapter'
     adapter=OpenCodeHostAdapter(state,root,binary=BINARY,environment=environment)
     try:
-        profile=next(p for p in adapter.profiles()['profiles'] if p['id']==('workspace-write-reviewed' if mode=='ask' else 'read-only'))
+        profile_id='reviewed' if mode=='ask' else 'read-only'
+        security=sp.wire(profile_id,sp.BUILTINS[profile_id])
         conv=adapter.create_conversation({'workspaceId':'fixture','directory':str(root),
-            'securityProfile':{'id':profile['id'],'revision':profile['revision']}})
+            'security':security})
         assert adapter.native.version.startswith('2.')
         assert str(root) in adapter.ready
         models=adapter.models('fixture')['models']
@@ -80,7 +82,7 @@ def test_installed_v2_shared_database_plugin_and_local_provider(tmp_path, mode):
                 items += [{'type':'image','mimeType':'image/png','data':base64.b64encode(out.getvalue()).decode()} for _ in range(4 if mode=='images4' else 1)]
         approvals=[]
         run=adapter.start_run(conv['id'],{'clientRunId':'native-acceptance','model':'fixture/fake',
-            'input':items})
+            'security':security,'input':items})
         if mode=='queue':
             assert provider_entered.wait(5)
             adapter.queue(run['id'],{'expectedRunId':run['id'],'requestId':'followup', 'input':[{'type':'text','text':'Follow up after this turn.'}]})
