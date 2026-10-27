@@ -572,6 +572,40 @@ async function mockApi(
       await respond(route, { events: [] });
       return;
     }
+    if (path === "/api/approvals") {
+      const decided = url.searchParams.get("decided_by");
+      const all = [
+        {
+          interaction_id: "int_1",
+          run_id: "run_1",
+          kind: "command",
+          title: "Run npm test",
+          choice_label: "Allow once",
+          choice_id: "allow",
+          decided_by: "chatgpt",
+          reason: "Matches the handoff",
+          decided: "2026-05-01T10:00:00Z",
+        },
+        {
+          interaction_id: "int_2",
+          run_id: "run_1",
+          kind: "command",
+          title: "Delete build folder",
+          choice_label: "Deny",
+          choice_id: "deny",
+          decided_by: "owner",
+          reason: "Not wanted",
+          decided: "2026-05-01T10:05:00Z",
+        },
+      ];
+      await respond(route, {
+        decisions: decided
+          ? all.filter((item) => item.decided_by === decided)
+          : all,
+        next_offset: null,
+      });
+      return;
+    }
     if (path === "/api/runs" && method === "GET") {
       await respond(route, {
         runs: options.runSnapshot ? [snapshotRun] : [],
@@ -1818,4 +1852,17 @@ test("OpenCode can be registered from its Node plugin", async ({ page }) => {
     plugin: "opencode",
     settings: { binary: "/usr/local/bin/opencode" },
   });
+});
+
+test("Audit lists the approval log and filters it by who decided", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Audit");
+  await expect(page.getByText("Run npm test")).toBeVisible();
+  await expect(page.getByText("Delete build folder")).toBeVisible();
+  await page.getByLabel("Decided by").selectOption("chatgpt");
+  await expect(page.getByText("Delete build folder")).toHaveCount(0);
+  await expect(page.getByText(/decided by ChatGPT: Matches/)).toBeVisible();
 });

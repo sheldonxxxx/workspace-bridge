@@ -531,6 +531,27 @@ export function RunInspector({
                     Stop run
                   </Button>
                 )}
+                {current.phase !== "terminal" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      onConfirm({
+                        title: "Abandon this run?",
+                        description:
+                          "Use this when the Node or agent is gone. The run is marked orphaned and its conversation is freed. Nothing is sent to the agent.",
+                        destructive: true,
+                        action: async () => {
+                          await api(`/api/runs/${run.run_id}/abandon`, "POST");
+                          onNotice("Run abandoned.");
+                          onClose();
+                        },
+                      })
+                    }
+                  >
+                    Abandon run
+                  </Button>
+                )}
               </div>
             </>
           )}

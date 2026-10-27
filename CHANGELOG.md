@@ -10,6 +10,8 @@
 - The Manager pairs a Node with a one-time pairing string and adds adapters by
   picking an agent plugin on a Node. The base URL, token, workspace-wide agent
   switch, release and Versions screens of 0.3 are removed.
+- The Manager's Audit page lists the approval log, filtered by who decided
+  (ChatGPT or you), and a run inspector can abandon a run whose Node is gone.
 - The Bridge records each MCP client name and protocol version the first
   time it sees them after a start, in its log and the Manager's event list.
 - **Breaking:** the Bridge state is schema v5, created whole on first start.

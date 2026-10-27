@@ -1206,7 +1206,7 @@ def make_admin(service: Service, port: int = 8766, *,
                             "native_instance": descriptor.instance_id,
                             "adapter_version": descriptor.adapter_version,
                             "native_version": descriptor.native_version,
-                            "protocol": 2, "features": descriptor.features}
+                            "protocol": 1, "features": descriptor.features}
                         return JSONResponse(payload)
                     except BridgeError as exc:
                         return JSONResponse({"success": False, "code": exc.code,

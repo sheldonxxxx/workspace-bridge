@@ -102,6 +102,7 @@ import {
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
+import { ApprovalLog } from "./ApprovalLog";
 import {
   AdapterDialog,
   NodeDialog,
@@ -3205,6 +3206,7 @@ export default function App() {
                   Access and configuration changes will appear here.
                 </Empty>
               )}
+              <ApprovalLog refreshKey={lastUpdated} />
             </div>
           )}
         </main>

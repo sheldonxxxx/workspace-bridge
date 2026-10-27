@@ -197,6 +197,8 @@ async function mockApi(page: Page) {
         diffs.has(key) ? 200 : 400,
       );
     }
+    if (/^\/api\/runs\/[^/]+\/abandon$/.test(path))
+      return respond(route, { phase: "terminal", outcome: "orphaned" });
     const match = path.match(
       /^\/api\/runs\/([^/]+)(?:\/(activities|executions))?$/,
     );
@@ -801,4 +803,17 @@ test("a state hint rereads the snapshot without polling", async ({ page }) => {
   await emit(page, "state.changed");
   await page.clock.runFor(200);
   await expect.poll(() => mock.count("/api/status")).toBeGreaterThan(reads);
+});
+
+test("a run whose Node is gone can be abandoned from the inspector", async ({
+  page,
+}) => {
+  const mock = await mockApi(page);
+  await openAlpha(page);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Abandon run" })
+    .click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect.poll(() => mock.count(`/api/runs/${ALPHA}/abandon`)).toBe(1);
 });
