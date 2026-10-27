@@ -6,8 +6,11 @@
   `prepare_handoff` writes nothing to the project, so handoffs never show in
   `git status`; the run prompt and the copy-paste prompt carry the full TASK,
   CONTEXT and ACCEPTANCE text, and `read_handoff` also serves the copy-paste
-  prompt as `PROMPT.md`. Handoffs published by earlier versions are still
-  read from their `.workspace-handoff/` folder.
+  prompt as `PROMPT.md`. The Node also saves a read-only copy of each plan in
+  its own state and the prompts name that folder, so an agent whose context
+  was compacted can re-read its plan; a run may read its handoff's folder and
+  each run start restores a changed copy. Handoffs published by earlier
+  versions are still read from their `.workspace-handoff/` folder.
 - **Breaking:** the write scope is either read-only (`none`, now the default)
   or edit (`workspace`). Preparing handoffs and starting runs need no write
   scope; editing files, `write_image` and ad hoc `run_checks` need edit.
@@ -21,8 +24,9 @@
   failed.
 - `git_diff` with `mode=run` lists the `apply_patch` edits ChatGPT made
   during the run as `chatgpt_edits`.
-- The project-lead skill (3.7.0) covers read-only and edit workspaces,
-  Bridge-stored handoffs, `run_checks` and after-run checks in the audit.
+- The project-lead skill (3.8.0) covers read-only and edit workspaces,
+  Bridge-stored handoffs and their read-only plan folder, `run_checks` and
+  after-run checks in the audit.
 - New MCP tools `apply_patch` and `undo_edit`. `apply_patch` edits, creates,
   moves and deletes up to 50 files (1 MiB of text) in one step: every
   existing file needs its current hash, and all changes apply or none do. It

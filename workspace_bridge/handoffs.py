@@ -2,7 +2,9 @@
 
 Handoffs live in Bridge state. The agent's prompt and the manual-dispatch
 prompt carry the full TASK, CONTEXT and ACCEPTANCE text, so nothing is
-written into the workspace and nothing appears in git status. Handoffs
+written into the workspace and nothing appears in git status. The Node also
+keeps a read-only copy in its own state (``plan_folder``), which the prompt
+names so an agent that lost its context can re-read the plan. Handoffs
 published by earlier versions (``content`` NULL) still point at their
 documents in the workspace's .workspace-handoff/ folder.
 """
@@ -42,8 +44,15 @@ def legacy_folder(root: str, job_id: str) -> str:
 
 def _body(job: dict, docs: dict[str, str]) -> str:
     sections = "\n\n".join(f"===== {name} =====\n{docs[name].rstrip()}" for name in DOCUMENTS)
+    folder = job.get("plan_folder")
+    if folder:
+        where = (f"The same documents are saved read-only in {json.dumps(folder)}. Re-read TASK.md, "
+                 "CONTEXT.md and ACCEPTANCE.md there whenever you lose context and before you report. "
+                 "Do not edit them.")
+    else:
+        where = "There are no handoff files to open."
     return (f"Handoff {job['id']}: its TASK, CONTEXT and ACCEPTANCE documents follow in full. "
-            "There are no handoff files to open.\n\n" + sections + "\n===== end of handoff =====\n")
+            + where + "\n\n" + sections + "\n===== end of handoff =====\n")
 
 
 def agent_prompt(root: str, job: dict) -> str:

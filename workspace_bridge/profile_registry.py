@@ -169,3 +169,9 @@ class ProfileRegistry:
                               + " rules; choose a profile that allows them or another agent",
                               "security_unavailable")
         return sp.wire(profile_id, profile["rules"])
+
+    def run_binding(self, adapter: dict, binding: dict, plan_folder: str | None) -> dict:
+        """The binding one run carries: the route's, plus read access to its plan files."""
+        if not plan_folder:
+            return binding
+        return sp.grant_read(binding, plan_folder, adapter_security(adapter)["enforces"])

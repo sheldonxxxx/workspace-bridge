@@ -101,7 +101,12 @@ def test_profile_rules_travel_with_every_run_and_reach_continuations(modern_env,
     trusted = sp.BUILTINS["trusted"]
     assert first["effective_security"]["source"] == "profile"
     assert first["effective_security"]["profile_id"] == "trusted"
-    assert first["effective_security"]["revision"] == sp.revision(trusted)
+    assert first["effective_security"]["profile_revision"] == sp.revision(trusted)
+    # The run's rules add read access to its handoff's plan files.
+    folder = first["effective_security"]["plan_folder"]
+    assert first["effective_security"]["rules"]["external_roots"] == [{"path": folder, "read": "allow"}]
+    assert first["effective_security"]["revision"] == sp.revision(
+        {**trusted, "external_roots": [{"path": folder, "read": "allow"}]})
     start = next(params for method, params in rpc.calls if method == "thread/start")
     assert start["permissions"] == ":read-only"
     _finish_test_run(service, native, ws_id, first["run_id"])
@@ -116,7 +121,7 @@ def test_profile_rules_travel_with_every_run_and_reach_continuations(modern_env,
         "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
     assert second["effective_security"]["profile_id"] == "team"
-    assert second["effective_security"]["revision"] == saved["revision"]
+    assert second["effective_security"]["profile_revision"] == saved["revision"]
     assert sum(method == "thread/start" for method, _ in rpc.calls) == threads
     # The first run keeps the security it started with.
     assert service.run_coordinator.read(ws, first["run_id"])["effective_security"][

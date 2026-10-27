@@ -144,7 +144,7 @@ class NodeClient:
                    "edit_file", "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff", "read_handoff_artifact",
                    "hash_files", "publish_handoff_artifacts", "checkpoint_capture",
                    "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats",
-                   "checks_config", "set_checks_config", "start_checks", "read_checks"}
+                   "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan"}
         if operation not in allowed:
             raise BridgeError("Unknown Node workspace operation", "invalid_arguments")
         result = self._request("POST", "/v1/workspaces/" + operation,

@@ -18,8 +18,12 @@ of handoff publication state.
 so a handoff never appears in `git status`, and publishing needs no write scope.
 It returns the handoff id and, when it fits, a `copy_prompt` that carries the
 full text of all three documents; `read_handoff` serves the same prompt as
-`PROMPT.md`. The same `request_id` and content replay the original publication;
-changed content needs a new ID.
+`PROMPT.md`. The owning Node also saves a read-only copy of the three documents
+in its own state, and both prompts name that folder: an agent whose context was
+compacted re-reads its plan there. A run may read its handoff's folder but not
+write it, and each run start restores a changed copy from Bridge state. The
+same `request_id` and content replay the original publication; changed content
+needs a new ID.
 
 The optional `context_hashes` map checks named files only; it does not enumerate
 the project or save old source. Handoffs published by earlier versions stay in

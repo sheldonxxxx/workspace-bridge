@@ -447,6 +447,31 @@ def wire(profile_id: str, rules: dict) -> dict:
         "id": profile_id, "revision": revision(rules), "rules": rules}}
 
 
+def grant_read(binding: dict, folder: str, enforces: list[str] | tuple[str, ...]) -> dict:
+    """A run's binding with read access to one folder outside the workspace.
+
+    Runs use it for their handoff's read-only plan files. Writing there is
+    denied when the plugin enforces ``external_roots``; otherwise the root
+    only loosens reading, which a plugin may safely ignore. Native security
+    and profiles already at their root limit are returned unchanged.
+    """
+    if binding.get("source") != "profile":
+        return binding
+    profile = binding["profile"]
+    rules = json.loads(canonical_json(profile["rules"]))
+    roots = rules["external_roots"]
+    if len(roots) >= MAX_ROOTS or any(root["path"] == folder for root in roots):
+        return binding
+    root = {"path": folder, "read": "allow"}
+    if "external_roots" in enforces:
+        root["write"] = "deny"
+    rules["external_roots"] = [*roots, root]
+    try:
+        return wire(profile["id"], validate(rules))
+    except BridgeError:  # a folder path no profile could name
+        return binding
+
+
 def from_wire(value: Any) -> tuple[str, str, dict]:
     """Validate a run's security block on the plugin side."""
     if not isinstance(value, dict) or value.get("source") != "profile":

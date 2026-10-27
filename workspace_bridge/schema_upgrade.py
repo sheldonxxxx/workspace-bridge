@@ -185,11 +185,14 @@ def store_handoffs_in_bridge(db: sqlite3.Connection) -> None:
 
     Handoffs published before this keep ``content`` NULL; their documents
     stay in the workspace's .workspace-handoff/ folder and are read from there.
+    ``plan_folder`` records where the Node keeps a handoff's read-only copy.
     """
     columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
     scoped = bool(list(db.execute("PRAGMA table_info(workspaces)")))
     with db:
         if columns and "content" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN content TEXT")
+        if columns and "plan_folder" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN plan_folder TEXT")
         if scoped:
             db.execute("UPDATE workspaces SET write_scope='none' WHERE write_scope='handoff'")

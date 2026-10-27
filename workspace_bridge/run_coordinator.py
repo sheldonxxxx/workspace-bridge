@@ -748,6 +748,11 @@ class RunCoordinator:
         selector = self._select_model(ws, adapter_id, model)
         reasoning = self._select_reasoning(ws, adapter_id, selector)
         binding = self.security_binding(ws, adapter_id)
+        # The Node keeps a read-only copy of the plan that this run, and only
+        # this handoff's folder, may read after the agent loses context.
+        plan_folder = self.service.write_plan(ws, job, required=True)
+        job = {**job, "plan_folder": plan_folder}
+        run_binding = self.service.profiles.run_binding(adapter_info, binding, plan_folder)
         request_hash = digest(json.dumps({"job": job_id, "adapter_id": adapter_id,
                                           "model": selector,
                                           "parent": parent_run_id or "",
@@ -863,9 +868,14 @@ class RunCoordinator:
         # initial snapshot are complete; the Service lock stays off the wire.
         with self._run_locks.hold(bridge_run_id):
             timestamp = _now()
-            effective_security = _effective_security(binding, node_id=node_info["id"],
+            effective_security = _effective_security(run_binding, node_id=node_info["id"],
                 node_revision=node_info["revision"], adapter_id=adapter_id,
                 adapter_revision=adapter_info["revision"])
+            if run_binding is not binding:
+                # The run's rules add its plan folder, so its revision differs
+                # from the saved profile's; keep both for the audit trail.
+                effective_security.update(profile_revision=binding["profile"]["revision"],
+                                          plan_folder=plan_folder)
             with self.service.lock, self.service.db:
                 if self._stop.is_set():
                     raise RuntimeUnavailable("Runtime coordination stopped")
@@ -890,7 +900,7 @@ class RunCoordinator:
                 run_payload = {
                     "input": [{"type": "text", "text": self._prompt(ws, job)}],
                     "clientRunId": bridge_run_id,
-                    "security": binding,
+                    "security": run_binding,
                 }
                 # An empty selector means no Bridge model policy and no explicit
                 # request: send no selector so the adapter/native runtime chooses
@@ -909,7 +919,7 @@ class RunCoordinator:
                         self.service.db.execute("UPDATE agent_run_images SET metadata=? WHERE run=?", (json.dumps(native_run.get("inputImages", [])), bridge_run_id))
                 if (native_run.get("clientRunId") != bridge_run_id
                         or native_run.get("conversationId") != conversation["native_id"]
-                        or not _echo_matches(binding, native_run.get("securityBinding"))):
+                        or not _echo_matches(run_binding, native_run.get("securityBinding"))):
                     raise BridgeError("Runtime run binding is invalid", "binding_mismatch")
             except RuntimeRejected as exc:
                 with self.service.lock, self.service.db:

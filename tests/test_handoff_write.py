@@ -301,7 +301,7 @@ def test_logs_do_not_contain_document_content_or_paths(env):
 
 def test_skill_and_tools_describe_bridge_handoffs_and_manual_review():
     skill=read_project_lead_skill()
-    assert skill['version']=='3.7.0'
+    assert skill['version']=='3.8.0'
     for value in ['write_file','edit_file','expected_sha256','Bridge state','re-read and reconcile','No special report files','run_checks','Audit using normal tools']:
         assert value in skill['content']
     for name in ['write_file','edit_file']:

@@ -255,10 +255,15 @@ read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
 `prepare_handoff` stores TASK.md, CONTEXT.md and ACCEPTANCE.md in Bridge state.
 Nothing is written into the workspace, so a handoff never appears in
 `git status`, and it needs no write scope. A run's prompt carries the full text
-of all three documents. The result has `stored: "bridge"` with each document's
-hash and size and, when it fits in 12,000 characters, a `copy_prompt` for
-pasting into a local agent; otherwise `copy_prompt_chars` and a note to read
-`PROMPT.md`. Optional context hashes check specifically named files at
+of all three documents. The owning Node also saves a read-only copy in its own
+state and returns its folder as `plan_folder`; both prompts name it so an agent
+that lost its context can re-read the plan. A run may read that folder and
+nothing else in Node state, and each run start restores any changed copy. A
+Node that cannot save the copy leaves `plan_folder` out at publication, and a
+run then fails with `plan_unavailable` unless the Node predates plan files.
+The result has `stored: "bridge"` with each document's hash and size and,
+when it fits in 12,000 characters, a `copy_prompt` for pasting into a local
+agent; otherwise `copy_prompt_chars` and a note to read `PROMPT.md`. Optional context hashes check specifically named files at
 publication; no source snapshot is captured at publication
 ([run checkpoints](#run-checkpoints) belong to runs). The local agent replies in
 its conversation and the user pastes that reply into ChatGPT. Review uses the
@@ -490,7 +495,10 @@ them, otherwise null. The same canonical run representation is returned by
 admin list/read APIs and MCP run tools; there is no separate usage endpoint.
 It also includes the immutable `node_id`/revision, adapter revision, and
 `effective_security` snapshot used immediately before that run started; this
-snapshot remains historical if workspace settings later change.
+snapshot remains historical if workspace settings later change. When a
+profile-bound run got read access to its handoff's `plan_folder`, the snapshot
+names that folder and keeps the saved profile's `profile_revision` beside the
+run's own `revision`.
 Runs started with checkpoint support include `checkpoint`: overall `status`
 (`pending`, `complete`, `partial`, `unavailable` or `expired`), per-phase status,
 capture time and error code, `late`, `overlapping_runs`, and after the post

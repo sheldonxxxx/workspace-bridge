@@ -19,6 +19,7 @@ from .browse import Browser
 from .keyed_locks import KeyedLocks
 from .checkpoint_store import CheckpointStore
 from .checks import CheckRunner
+from .plan_files import PlanStore
 from . import edit_journal
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
@@ -326,7 +327,8 @@ class NodeService:
         # no package-manager commands.
         return {"status": "ok", "protocol": 1, "node_version": __version__,
                 "release": node_release(), "capabilities": [
-            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks"],
+            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks",
+            "plan-files"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
@@ -545,6 +547,13 @@ class NodeService:
             with self.safe_root(ws) as safe:
                 data, _ = safe.read(path, artifact=True)
             return {"data": __import__("base64").b64encode(data).decode("ascii")}
+        if operation == "write_plan":
+            if self.read_only:
+                raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != {"job_id", "documents"}:
+                raise BridgeError("Invalid plan arguments", "invalid_arguments")
+            return PlanStore(self.state).write(workspace["id"], args["job_id"], args["documents"])
         if operation == "hash_files":
             paths = body["arguments"].get("paths")
             attachments = body["arguments"].get("attachments", [])

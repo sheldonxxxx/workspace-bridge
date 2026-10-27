@@ -47,7 +47,7 @@ def within(child: Path, parent: Path) -> bool:
 
 
 HANDOFF_DOCUMENTS = ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md")
-JOB_COLUMNS = "id,workspace,request_id,request_hash,title,state,created,documents,content"
+JOB_COLUMNS = "id,workspace,request_id,request_hash,title,state,created,documents,content,plan_folder"
 # The Bridge stores 'handoff' only in state from before handoffs left the repo.
 BRIDGE_WRITE_SCOPES = ("none", "workspace")
 # A copyable prompt longer than this is paged with read_handoff instead.
@@ -130,7 +130,7 @@ class Service:
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL REFERENCES workspaces(id),
             request_id TEXT NOT NULL, request_hash TEXT NOT NULL, title TEXT NOT NULL,
             state TEXT NOT NULL, created TEXT NOT NULL,
-            documents TEXT NOT NULL, content TEXT, UNIQUE(workspace, request_id));
+            documents TEXT NOT NULL, content TEXT, plan_folder TEXT, UNIQUE(workspace, request_id));
           CREATE TABLE IF NOT EXISTS gateway (
             id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 0, updated TEXT NOT NULL);
@@ -1086,12 +1086,36 @@ class Service:
         else:
             summary.update({"stored": "bridge", "documents": {
                 name: {"sha256": digest(text.encode()), "bytes": len(text.encode())} for name, text in docs.items()}})
+            if job.get("plan_folder"):
+                summary["plan_folder"] = job["plan_folder"]
         if include_prompt or (include_prompt is None and len(prompt) <= COPY_PROMPT_INLINE):
             summary["copy_prompt"] = prompt
         else:
             summary["copy_prompt_chars"] = len(prompt)
             summary["copy_prompt_note"] = "Read it with read_handoff document PROMPT.md, or copy it in the Manager."
         return summary
+    def write_plan(self, ws: dict, job: dict, *, required: bool = False) -> str | None:
+        """Have the Node save the handoff's read-only copy; return its folder.
+
+        A Node too old to keep plan files returns None, and so does any
+        failure unless ``required``: the plan stays in Bridge state and the
+        prompt carries its full text either way.
+        """
+        docs = handoffs.documents(job)
+        if docs is None:
+            return None
+        try:
+            folder = self.node_registry.client(ws["node_id"]).workspace(
+                "write_plan", ws, {"job_id": job["id"], "documents": docs})["folder"]
+        except BridgeError as exc:
+            if required and exc.code != "not_found":
+                raise
+            return None
+        if folder != job.get("plan_folder"):
+            with self.lock, self.db:
+                self.db.execute("UPDATE jobs SET plan_folder=? WHERE id=? AND workspace=?",
+                                (folder, job["id"], ws["id"]))
+        return folder
     def prepare_handoff(self, ws: dict, payload: dict) -> dict:
         # The request_id check and the insert must not interleave with
         # another publication in the same workspace.
@@ -1151,6 +1175,7 @@ class Service:
                             "VALUES(?,?,?,?,?,?,?,?,?)",
                 (ident, ws["id"], payload["request_id"], request_hash, payload["title"], "prepared", now(),
                  encoded(published).decode(), json.dumps(docs)))
+        self.write_plan(ws, self.job(ws, ident))
         return self.handoff_summary(ws, self.job(ws, ident))
     def list_handoffs(self, ws: dict, offset: int, limit: int, *, include_prompt: bool = False) -> dict:
         with self.lock:

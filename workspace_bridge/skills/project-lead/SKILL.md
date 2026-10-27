@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Use only in ChatGPT web sessions connected to the Workspace Bridge app to plan coding tasks in mapped workspaces, delegate to a less-capable coding model, and audit the results. Do not use in local Codex, Codex CLI, IDE agents, or direct local repository work, including after context loss; use native local tools there.
-version: 3.7.0
+version: 3.8.0
 ---
 
 # Project lead
@@ -56,7 +56,8 @@ and never move acceptance criteria retroactively.
 ## Handoff and dispatch
 Publish with `prepare_handoff`: goal, plan, context, constraints, acceptance.
 Handoffs are kept in Bridge state, never in the workspace, and need no write
-scope; the run prompt and `copy_prompt` carry their full text.
+scope; the run prompt and `copy_prompt` carry their full text and name a
+read-only copy (`plan_folder`) the agent re-reads after losing context.
 Optional `context_hashes` check named files at publication; they are not a baseline.
 For visual context, upload with `write_image` to `.workspace-handoff/attachments/`,
 then pass `path`, `description` and returned `sha256` as `prepare_handoff.attachments`.

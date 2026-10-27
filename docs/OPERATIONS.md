@@ -31,6 +31,9 @@ checkpoints in the Node's `checkpoints/` directory are pruned after 14 days or
 when a workspace's store exceeds 1 GiB. That directory holds copies of
 workspace source; backups may exclude it, which only loses old run diffs.
 Workspace settings in the Manager show checkpoint storage and can clear it.
+The Node's `handoffs/` folder holds read-only copies of handoff plans that
+agents can re-read; the Bridge keeps the originals and restores a copy at each
+run start, so backups may skip it.
 The Node's `edit-journal.sqlite3` holds the earlier content of files changed by
 `apply_patch`, kept 30 days or up to 500 MiB per workspace; it is as
 sensitive as the source it copies, and losing it only loses undo.
