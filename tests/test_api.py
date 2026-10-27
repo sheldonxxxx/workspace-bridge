@@ -32,6 +32,20 @@ async def test_initialize_and_discovery(env, mcp):
             assert "adapter_id" in schemas[name]["properties"]
             assert "runtime" not in schemas[name]["properties"]
 
+async def test_each_client_and_protocol_version_is_recorded_once(env, mcp):
+    def recorded():
+        with env["service"].lock:
+            return [row["outcome"] for row in env["service"].db.execute(
+                "SELECT outcome FROM events WHERE action='mcp_client' ORDER BY id")]
+    async with mcp:
+        for _ in range(2):
+            await rpc(mcp, env, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                               "clientInfo": {"name": "Chat\nGPT <x>", "version": "9"}})
+        await rpc(mcp, env, "tools/list")
+    assert recorded() == ["2025-06-18 Chat?GPT ?x?", "2025-03-26 unknown"]
+    assert env["token"] not in " ".join(recorded())
+
+
 async def test_http_tool_read(env, mcp):
     async with mcp:
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"src/main.py"}})

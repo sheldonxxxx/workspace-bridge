@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The Bridge records each MCP client name and protocol version the first
+  time it sees them after a start, in its log and the Manager's event list.
 - **Breaking:** the Bridge state is schema v5, created whole on first start.
   State from 0.3 or earlier 1.0 builds is refused with
   `state_schema_incompatible`; use a fresh state path. The in-place upgrade

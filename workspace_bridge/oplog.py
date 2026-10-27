@@ -39,14 +39,14 @@ COMPONENT = "bridge"
 # Stable event names emitted by the bridge process.
 EVENTS = frozenset({
     "bridge_ready", "boundary_reject", "request_error", "process_error",
-    "node_link_connected", "node_link_disconnected", "node_link_retry",
+    "node_link_connected", "node_link_disconnected", "node_link_retry", "mcp_client",
 })
 
 # Bounded scalar fields only. IDs/state names/counts/durations/sanitized
 # codes and boolean health flags are acceptable; everything else is dropped.
 ALLOWED_FIELDS = frozenset({
     "workspace_id", "reason", "code", "action", "source", "version",
-    "runtime_configured", "workspace_count", "enabled_count",
+    "runtime_configured", "workspace_count", "enabled_count", "client", "protocol",
 })
 
 _MAX_STR = 200

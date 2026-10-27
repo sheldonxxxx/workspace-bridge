@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import urllib.parse
 from pathlib import Path
 import secrets
@@ -688,10 +689,30 @@ def make_mcp(service: Service, port: int = 8765):
         await run_in_threadpool(service.event, None, method, "completed")
         return result
 
+    seen_clients: set[tuple[str, str]] = set()
+
+    async def note_client(ctx, result):
+        """Log each client name and protocol version once per process, for diagnosis."""
+        if ctx.method == "initialize" and isinstance(result, dict):
+            # The handshake negotiates the version; the context still holds the default.
+            info, version = (ctx.params or {}).get("clientInfo"), result.get("protocolVersion")
+            name = info.get("name") if isinstance(info, dict) else None
+        else:
+            name = getattr(getattr(ctx.session.client_params, "client_info", None), "name", None)
+            version = ctx.protocol_version
+        name = re.sub(r"[^A-Za-z0-9 ._()+/-]", "?", str(name or "unknown"))[:60]
+        key = (name, str(version))
+        if key in seen_clients or len(seen_clients) >= 200:
+            return
+        seen_clients.add(key)
+        _emit_ops(_ops_log, "INFO", "bridge", "mcp_client", client=name, protocol=str(version))
+        await run_in_threadpool(service.event, None, "mcp_client", f"{version} {name}")
+
     async def advertise(ctx, call_next):
         # The SDK sieves legacy initialize results down to the 2025 capability
         # shape, and events are this server's own capability; add both back.
         result = await call_next(ctx)
+        await note_client(ctx, result)
         if ctx.method in ("initialize", "server/discover") and isinstance(result, dict):
             capabilities = result.setdefault("capabilities", {})
             capabilities.setdefault("extensions", {SKILLS_EXTENSION: {}})

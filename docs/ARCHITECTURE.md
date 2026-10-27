@@ -313,6 +313,11 @@ without making an otherwise valid descriptor unavailable.
   is emptied at start past 1 MiB. Foreground `serve` logs to stderr. Logs
   carry bounded IDs, states, counts, and codes only — never prompts, results,
   paths, scopes, credentials, or raw bodies.
+- The first time each MCP client name and protocol version is seen after a
+  start, the Bridge logs an `mcp_client` line and adds an audit event
+  (outcome `<protocol version> <client name>`), so the Manager's event list
+  shows which version ChatGPT negotiates. The name is the client's own
+  `clientInfo.name` (or `unknown`), reduced to a short safe string.
 - Each agent plugin's stderr goes to a private `plugin.log` in its folder,
   capped at 5 MiB with one previous file kept.
 - Runtime extension points: new notification channels implement the channel

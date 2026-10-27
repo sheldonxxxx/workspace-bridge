@@ -29,6 +29,12 @@ async def test_modern_discovery_no_initialize(env):
     assert result['resultType'] == 'complete' and MODERN in result['supportedVersions']
     assert result['_meta'][PREFIX+'serverInfo']['name'] == 'workspace-bridge'
 
+async def test_modern_requests_record_their_protocol_version(env):
+    await modern_call(env)
+    with env['service'].lock:
+        rows = [r['outcome'] for r in env['service'].db.execute("SELECT outcome FROM events WHERE action='mcp_client'")]
+    assert rows == [MODERN + ' unknown']
+
 async def test_modern_tools_list_and_read(env):
     response = await modern_call(env, 'tools/list')
     assert len(response.json()['result']['tools']) == len(TOOLS)
