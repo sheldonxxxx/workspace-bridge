@@ -138,9 +138,9 @@ def test_protocol_schema_native_versions_unchanged():
     repo = Path(__file__).resolve().parent.parent
     pi_lock = json.loads((repo / "runtime" / "pi-host-adapter" / "package-lock.json").read_text())
     assert pi_lock["packages"][""]["version"] == "0.3.0"
-    # Pi native dependency is unchanged.
+    # Pi native dependency is the pinned SDK.
     pi_meta = json.loads((repo / "runtime" / "pi-host-adapter" / "package.json").read_text())
-    assert pi_meta["dependencies"]["@earendil-works/pi-coding-agent"] == "0.87.0"
+    assert pi_meta["dependencies"]["@earendil-works/pi-coding-agent"] == "1.4.0"
 
 
 def _load_manifest_builder():
