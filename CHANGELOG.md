@@ -16,6 +16,10 @@
 - Fixed: shell command rules now apply to commands wrapped in a shell, such
   as `zsh -lc 'git push'`. Codex runs every command this way, so its ask and
   deny command rules were not enforced before.
+- Fixed: an OpenCode conversation accepts new runs after the plugin
+  restarts; they used to fail with "permission plugin is unavailable". A
+  failed OpenCode run now reports OpenCode's own reason, such as a provider
+  usage limit, instead of `native_execution_failed`.
 - Fixed: a Codex conversation accepts new runs after a failed turn and after
   a restart, and a run that names no model uses the thread's own model
   instead of the last run's.

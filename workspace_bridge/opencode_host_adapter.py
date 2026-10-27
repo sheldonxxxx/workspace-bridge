@@ -512,6 +512,12 @@ class OpenCodeHostAdapter:
         digest = sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         profile_id, revision, rules = self._security(body)
         with self.lock:
+            replay = self.db.execute('SELECT 1 FROM runs WHERE conversation=? AND client_run=?', (ident, client)).fetchone()
+        if replay is None:
+            # The permission plugin reports ready through the policy server,
+            # which needs this lock, so activation happens before taking it.
+            self._activate(self._conversation(ident)['cwd'])
+        with self.lock:
             old = self.db.execute('SELECT * FROM runs WHERE conversation=? AND client_run=?', (ident, client)).fetchone()
             if old:
                 if old['input_hash'] != digest:
@@ -523,7 +529,9 @@ class OpenCodeHostAdapter:
             if self._is_busy(ident):
                 raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
             self._verify(row)
-            self._activate(row['cwd'])
+            # The workspace map is memory only; after a restart the catalog
+            # must still come from this conversation's activated location.
+            self._workspaces[row['workspace']] = row['cwd']
             catalog = self.models(row['workspace'])['models']
             selector = body.get('model')
             model = next((m for m in catalog if m['selector'] == selector), None) if selector else next(
@@ -613,7 +621,7 @@ class OpenCodeHostAdapter:
                 terminal = kind.rsplit('.', 1)[-1]
         # Require a durable execution event or a projected idle marker after
         # the exact admitted message. Inactive alone never means success.
-        observed = self._capture_messages(run, owned)
+        observed, native_error = self._capture_messages(run, owned)
         if self._run(run["id"])["phase"] == "terminal":
             return
         terminal = observed or terminal
@@ -625,7 +633,7 @@ class OpenCodeHostAdapter:
                 return
             self._discard_inbox(owned, run)
             self._finish(run['id'], 'cancelled' if run['id'] in self._cancelled else terminal,
-                         '' if terminal == 'succeeded' else 'native_execution_' + terminal)
+                         '' if terminal == 'succeeded' else native_error or 'native_execution_' + terminal)
         elif not records and run['phase'] == 'active':
             active = self.native.request('GET', '/api/session/active').get('data', {})
             inbox = self.native.request('GET', '/api/session/' + owned['session'] + '/inbox').get('data', [])
@@ -642,28 +650,33 @@ class OpenCodeHostAdapter:
         while not any(r.get('id') == run['message'] for r in rows) and response.get('cursor', {}).get('next'):
             if len(rows) >= 2000:
                 self._finish(run['id'], 'orphaned', 'native_history_limit')
-                return None
+                return None, ''
             response = self.native.request('GET', '/api/session/' + owned['session'] + '/message',
                 query={'cursor': response['cursor']['next'], 'limit': 100})
             rows.extend(response.get('data', []))
         rows = list(reversed(rows))
         start = next((i for i, row in enumerate(rows) if row['id'] == run['message']), None)
         if start is None:
-            return
+            return None, ''
         with self.lock:
             admitted = {run['message']} | {r['message'] for r in self.db.execute('SELECT message FROM input_messages WHERE run=?', (run['id'],))}
-        texts, usage, terminal = [], {}, None
+        texts, usage, terminal, error = [], {}, None, ''
         for row in rows[start + 1:]:
             if row.get('type') == 'user':
                 if row['id'] not in admitted:
                     with self.lock, self.db:
                         self.db.execute("UPDATE conversations SET owner='human' WHERE id=?", (owned['id'],))
                     self._finish(run['id'], 'orphaned', 'native_session_taken_over')
-                    return None
+                    return None, ''
                 with self.lock, self.db:
                     self.db.execute("UPDATE input_messages SET status='delivered' WHERE run=? AND message=?", (run['id'], row['id']))
             if row.get('type') == 'idle' and row.get('outcome') in ('succeeded', 'failed', 'interrupted'):
                 terminal = row['outcome']
+                # OpenCode's own explanation, such as a provider usage limit;
+                # only its message, never the provider response body.
+                native = row.get('error')
+                message = native.get('message') if isinstance(native, dict) else None
+                error = _clean(self._scrub(message), 300) if isinstance(message, str) else ''
             if row.get('type') != 'assistant':
                 continue
             for part in row.get('content', []):
@@ -692,7 +705,7 @@ class OpenCodeHostAdapter:
                 (result, serialized_usage, _now(), run['id']))
         if current['result'] != result or current['usage'] != serialized_usage:
             self._emit('run.updated', run['conversation'], run['id'])
-        return terminal
+        return terminal, error
 
     def _upsert_activity(self, run, native_id, kind, status, summary, result):
         with self.lock, self.db:

@@ -21,19 +21,27 @@ class FakeNative:
         self.logs = {}
         self.inbox = {}
         self.calls = []
+        self.queries = []
         self.active = {}
         self.permissions = []
         self.forms = []
         self.fail_prompt = False
         self.adapter = None
+        # Report ready as the real plugin does: from its own thread, through
+        # the adapter's policy server.
+        self.ready_via_policy = False
     def start(self):
         pass
     def close(self):
         pass
     def request(self, method, path, body=None, *, query=None, sse=False):
         self.calls.append((method, path, body))
+        self.queries.append((path, query))
         if path == '/api/location' or path == '/api/agent':
-            if self.adapter:
+            if self.adapter and self.ready_via_policy:
+                threading.Thread(target=self.adapter._policy, args=(
+                    '/ready', {'directory': query['location[directory]']}), daemon=True).start()
+            elif self.adapter:
                 self.adapter.ready.add(query['location[directory]'])
             return {}
         if path == '/api/plugin':
@@ -316,6 +324,35 @@ def test_restart_reconciles_completion_without_resubmitting(tmp_path):
         assert b.run(run['id'])['outcome']=='succeeded'
         assert sum(p.endswith('/prompt') for _,p,_ in native.calls)==1
     finally:b.close()
+
+
+def test_a_continuation_after_restart_waits_for_the_plugin_without_holding_the_lock(tmp_path):
+    root=tmp_path/'work';root.mkdir();native=FakeNative()
+    state=tmp_path/'state'
+    a=OpenCodeHostAdapter(state,root,transport=native);native.adapter=a
+    conv=conversation(a,root);run=start(a,conv)
+    native.complete(conv['nativeId']);wait_terminal(a,run['id']);a.close()
+    b=OpenCodeHostAdapter(state,root,transport=native);native.adapter=b
+    native.ready_via_policy=True
+    try:
+        began=time.monotonic()
+        second=start(b,conv,client_run='after-restart')
+        assert time.monotonic()-began<5 and second['phase']!='terminal'
+        catalog=[q for p,q in native.queries if p=='/api/model']
+        assert catalog[-1]=={'location[directory]':str(root)}
+    finally:b.close()
+
+
+def test_a_failed_run_carries_opencodes_own_message(adapter):
+    a,native,root=adapter
+    conv=conversation(a,root);run=start(a,conv);sid=conv['nativeId']
+    native.messages[sid].append({'id':'msg_idle','type':'idle','outcome':'failed','error':{
+        'type':'provider.free-limit','message':'Free usage limit reached.',
+        'response':{'body':'provider detail that stays out'}}})
+    native.logs[sid].append({'seq':len(native.logs[sid])+1,'type':'session.execution.failed','data':{}})
+    native.active.pop(sid,None)
+    result=wait_terminal(a,run['id'])
+    assert result['outcome']=='failed' and result['error']=='Free usage limit reached.'
 
 
 def test_restart_discards_pending_owned_input_and_stales_interactions(tmp_path):
