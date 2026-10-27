@@ -49,10 +49,6 @@ class EventSubscriptionStore:
 
     def __init__(self, service):
         self.service = service
-        columns = {row["name"] for row in service.db.execute("PRAGMA table_info(mcp_event_subscriptions)")}
-        if "cursor_key" in columns:
-            # Remove the unreleased polling prototype and its obsolete keys.
-            service.db.execute("DROP TABLE mcp_event_subscriptions")
         service.db.executescript("""
           CREATE TABLE IF NOT EXISTS mcp_event_subscriptions (
             id TEXT PRIMARY KEY, principal TEXT NOT NULL, event_name TEXT NOT NULL,

@@ -34,7 +34,3 @@ class RuntimeUnsupported(BridgeError):
 RUNTIME_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 _RUNTIME_ID_RE = re.compile(RUNTIME_ID_PATTERN)
 
-
-def is_valid_runtime_id(value: object) -> bool:
-    """Whether a value has the canonical Runtime Protocol id shape."""
-    return isinstance(value, str) and _RUNTIME_ID_RE.fullmatch(value) is not None

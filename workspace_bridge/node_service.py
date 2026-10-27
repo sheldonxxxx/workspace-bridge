@@ -236,7 +236,7 @@ class NodeService:
             # A read of an isolated run's worktree: same exclusions, the Node's own checkout.
             self.safe_root({key: value for key, value in workspace.items() if key != "worktree_id"}).close()
             self.worktrees.meta(workspace["id"], WorktreeStore._id(workspace["worktree_id"]))
-            return SafeRoot(str(self.worktrees.path(workspace["id"], workspace["worktree_id"])), None,
+            return SafeRoot(str(self.worktrees.path(workspace["id"], workspace["worktree_id"])),
                             validate_excludes(workspace.get("excludes", [])))
         raw = workspace.get("root")
         if not isinstance(raw, str) or not Path(raw).is_absolute() or os.path.normpath(raw) != raw:
@@ -258,7 +258,7 @@ class NodeService:
             raise BridgeError("Node state cannot be exposed through a workspace", "root_denied")
         if path.is_symlink() or not path.is_dir():
             raise BridgeError("Workspace root unavailable", "root_unavailable")
-        return SafeRoot(raw, None, validate_excludes(workspace.get("excludes", [])))
+        return SafeRoot(raw, validate_excludes(workspace.get("excludes", [])))
 
     def validate_root(self, root: str, excludes: list[str] | None = None) -> dict:
         workspace = {"root": root, "excludes": excludes or []}
@@ -493,7 +493,7 @@ class NodeService:
                         return store.capture(safe, ws, **args)
                 with self.safe_root(ws) as safe:
                     repository = self.worktrees.repository(safe, workspace["id"], worktree_id)
-                with SafeRoot(str(self.worktrees.path(workspace["id"], worktree_id)), None,
+                with SafeRoot(str(self.worktrees.path(workspace["id"], worktree_id)),
                               safe.extra) as tree:
                     return store.capture(tree, ws, repository=repository, **args)
             if operation == "checkpoint_changes":

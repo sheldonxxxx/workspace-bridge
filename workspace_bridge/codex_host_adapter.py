@@ -300,29 +300,6 @@ def _extract_codex_total(token_usage: Any) -> dict | None:
     return _normalize_codex_usage(total)
 
 
-def _codex_usage_delta(total: dict, baseline: dict) -> dict | None:
-    """Derive run-scoped deltas as ``total - baseline`` per field.
-
-    ``baseline`` fields missing for a counter are treated as zero (fresh
-    thread); ``total`` fields missing stay absent. Every derived delta must
-    be non-negative; callers must check monotonicity before publishing and
-    never clamp a negative delta into a plausible value.
-    """
-    result: dict[str, int] = {}
-    for field, current in total.items():
-        if field not in _CODEX_USAGE_FIELDS:
-            continue
-        base = baseline.get(field, 0) if isinstance(baseline, dict) else 0
-        if (not isinstance(current, int) or isinstance(current, bool)
-                or not isinstance(base, int) or isinstance(base, bool)):
-            return None
-        delta = current - int(base)
-        if delta < 0:
-            return None
-        result[field] = int(delta)
-    return result or None
-
-
 def _codex_cli_version(executable: Any, env: dict | None = None) -> str:
     """Read a fallback version from the same Codex executable as app-server.
 
@@ -391,7 +368,7 @@ class CodexHostAdapter:
             security_binding TEXT,
             turn TEXT UNIQUE, phase TEXT NOT NULL, active_state TEXT,
             outcome TEXT, result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-            usage TEXT,
+            usage TEXT, usage_baseline TEXT, usage_cumulative TEXT,
             created TEXT NOT NULL, updated TEXT NOT NULL);
           CREATE UNIQUE INDEX IF NOT EXISTS ux_active_conversation
             ON runs(conversation) WHERE phase IN ('starting','active');
@@ -412,45 +389,8 @@ class CodexHostAdapter:
             turn TEXT NOT NULL,
             ordinal INTEGER NOT NULL, PRIMARY KEY(run,turn));
         """)
-        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(runs)")}
-        if "client_run" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN client_run TEXT")
-        if "input_hash" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN input_hash TEXT")
-        if "security_binding" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN security_binding TEXT")
-        if "usage" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN usage TEXT")
-        if "usage_baseline" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN usage_baseline TEXT")
-        if "usage_cumulative" not in columns:
-            self.db.execute("ALTER TABLE runs ADD COLUMN usage_cumulative TEXT")
-        conversation_columns = {row["name"] for row in
-                               self.db.execute("PRAGMA table_info(conversations)")}
-        if "source" not in conversation_columns:
-            self.db.execute(
-                "ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'")
-        if "applied_revision" not in conversation_columns:
-            self.db.execute(
-                "ALTER TABLE conversations ADD COLUMN applied_revision TEXT NOT NULL DEFAULT ''")
-            self.db.execute(
-                "UPDATE conversations SET applied_revision=revision WHERE source='profile'")
-        if "security_snapshot" not in conversation_columns:
-            self.db.execute("ALTER TABLE conversations ADD COLUMN security_snapshot TEXT")
-        if "permission_revision" not in conversation_columns:
-            self.db.execute(
-                "ALTER TABLE conversations ADD COLUMN permission_revision TEXT NOT NULL DEFAULT ''")
-        if "approval_revision" not in conversation_columns:
-            self.db.execute(
-                "ALTER TABLE conversations ADD COLUMN approval_revision TEXT NOT NULL DEFAULT ''")
-        for column in ("model", "effort"):
-            if column not in conversation_columns:
-                self.db.execute(
-                    f"ALTER TABLE conversations ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_client_run "
                         "ON runs(conversation,client_run) WHERE client_run IS NOT NULL")
-        self.db.execute("INSERT OR IGNORE INTO run_turns(run,turn,ordinal) "
-                        "SELECT id,turn,0 FROM runs WHERE turn IS NOT NULL")
         os.chmod(self.state / "codex-adapter.sqlite3", 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
@@ -463,7 +403,6 @@ class CodexHostAdapter:
         self._early_requests: list[tuple[int | str, str, dict]] = []
         self._run_rules: dict[str, dict] = {}
         self._file_changes: dict[str, list[str]] = {}
-        self._settings_updates: dict[str, dict[str, Any]] = {}
         self._queued_inputs: dict[str, list[tuple[str, list[dict]]]] = {}
         self._turn_settings: dict[str, dict] = {}
         self._next_turn_start: set[str] = set()
@@ -1052,33 +991,14 @@ class CodexHostAdapter:
                 if predecessor:
                     baseline_payload = json.dumps(
                         predecessor, sort_keys=True, separators=(",", ":"))
-                try:
-                    self.db.execute(
-                        "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
-                        "active_state,outcome,result,error,usage,usage_baseline,usage_cumulative,created,updated) "
-                        "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',NULL,?,?,?,?)",
-                        (run_id, conversation_id, client_run_id, input_hash,
-                         json.dumps(security_binding, sort_keys=True,
-                                    separators=(",", ":")) if security_binding else None,
-                         baseline_payload, None, now, now))
-                except Exception:
-                    # Older state files always gain the new columns above, but
-                    # fall back to the legacy shape rather than refusing a run.
-                    self.db.execute(
-                        "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
-                        "active_state,outcome,result,error,created,updated) "
-                        "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',?,?)",
-                        (run_id, conversation_id, client_run_id, input_hash,
-                         json.dumps(security_binding, sort_keys=True,
-                                    separators=(",", ":")) if security_binding else None,
-                         now, now))
-                    if baseline_payload is not None:
-                        try:
-                            self.db.execute(
-                                "UPDATE runs SET usage_baseline=? WHERE id=?",
-                                (baseline_payload, run_id))
-                        except Exception:
-                            pass
+                self.db.execute(
+                    "INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,turn,phase,"
+                    "active_state,outcome,result,error,usage,usage_baseline,usage_cumulative,created,updated) "
+                    "VALUES(?,?,?,?,?,NULL,'starting',NULL,NULL,'','',NULL,?,?,?,?)",
+                    (run_id, conversation_id, client_run_id, input_hash,
+                     json.dumps(security_binding, sort_keys=True,
+                                separators=(",", ":")) if security_binding else None,
+                     baseline_payload, None, now, now))
                 if security is not None:
                     self._run_rules[run_id] = security[2]
             params["threadId"] = owned["thread"]
@@ -1675,16 +1595,6 @@ class CodexHostAdapter:
 
     def _notification(self, method: str, params: dict) -> None:
         if not isinstance(params, dict):
-            return
-        if method == "thread/settings/updated":
-            thread = params.get("threadId")
-            if not isinstance(thread, str):
-                return
-            with self.lock:
-                waiter = self._settings_updates.get(thread)
-                if waiter is not None:
-                    waiter["notification"] = params
-                    waiter["event"].set()
             return
         if method == "thread/tokenUsage/updated":
             self._notification_token_usage(params)

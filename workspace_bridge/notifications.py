@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
+from . import __version__
 from .security import BridgeError, redact
 
 DEFAULT_TIMEOUT = 6.0
@@ -46,7 +47,7 @@ STATE_EVENTS = {
 }
 SAFE_KINDS = frozenset({"permission", "question", "choice", "approval",
                         "form", "interaction"})
-BRIDGE_USER_AGENT = "Workspace-Bridge/0.3.0 (+local-admin; notification channel)"
+BRIDGE_USER_AGENT = f"Workspace-Bridge/{__version__} (+local-admin; notification channel)"
 
 
 CHECKS_LABEL = re.compile(r"complete:\d{1,3}:\d{1,3}|unavailable")
@@ -456,9 +457,6 @@ class NotificationManager:
           CREATE INDEX IF NOT EXISTS ix_notification_events_run
             ON notification_events(run_id,occurred_at DESC);
         """)
-        if "checks" not in {row[1] for row in service.db.execute("PRAGMA table_info(notification_events)")}:
-            with service.lock, service.db:
-                service.db.execute("ALTER TABLE notification_events ADD COLUMN checks TEXT NOT NULL DEFAULT ''")
         # A process exit while a channel is in flight is ambiguous. Requeue
         # those intents on restart; persisted sent rows remain untouched.
         with service.lock, service.db:
@@ -536,19 +534,6 @@ class NotificationManager:
     def publish(self, event: NotificationEvent) -> str:
         with self.service.lock, self.service.db:
             event_id, _ = self._record_event_locked(event)
-        return event_id
-
-    def publish_run_event(self, *, run_id: str, workspace_id: str, job_id: str,
-                          adapter_id: str, runtime_type: str,
-                          event_type: str, subject_id: str = "",
-                          request_kind: str = "", action: str = "",
-                          occurred_at: str | None = None) -> str:
-        with self.service.lock, self.service.db:
-            event_id, _ = self.record_run_event_locked(
-                run_id=run_id, workspace_id=workspace_id, job_id=job_id,
-                adapter_id=adapter_id, runtime_type=runtime_type,
-                event_type=event_type, subject_id=subject_id,
-                request_kind=request_kind, action=action, occurred_at=occurred_at)
         return event_id
 
     def wake(self) -> None:

@@ -138,7 +138,7 @@ class OpenCodeHostAdapter:
           CREATE TABLE IF NOT EXISTS identity(id TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,session TEXT UNIQUE,
             workspace TEXT,cwd TEXT,profile TEXT,revision TEXT,started INTEGER DEFAULT 0,
-            created TEXT,owner TEXT DEFAULT 'bridge');
+            created TEXT,owner TEXT DEFAULT 'bridge',rules TEXT NOT NULL DEFAULT '{}');
           CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,conversation TEXT,client_run TEXT,
             input_hash TEXT,security_binding TEXT,message TEXT UNIQUE,log_seq INTEGER DEFAULT 0,
             phase TEXT,active_state TEXT,outcome TEXT,result TEXT DEFAULT '',error TEXT DEFAULT '',
@@ -152,9 +152,6 @@ class OpenCodeHostAdapter:
             run TEXT,request_id TEXT,mode TEXT,input_hash TEXT,status TEXT,message TEXT UNIQUE,
             UNIQUE(run,request_id));
         ''')
-        if 'rules' not in {r[1] for r in self.db.execute('PRAGMA table_info(conversations)')}:
-            with self.db:
-                self.db.execute("ALTER TABLE conversations ADD COLUMN rules TEXT NOT NULL DEFAULT '{}'")
         os.chmod(self.state / 'opencode-adapter.sqlite3', 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)

@@ -54,12 +54,6 @@ def test_unavailable_node_never_falls_back_to_bridge_local_files(env):
     assert exc.value.code == "node_unavailable"
 
 
-def test_safe_root_ignores_historical_identity(env):
-    with SafeRoot(str(env["root"]), (12345, 67890)) as safe:
-        data, _ = safe.read("README.md")
-    assert b"Alpha" in data or b"Remounted" in data
-
-
 def test_containment_and_symlink_escape_stay_enforced(env):
     for path in ("../secret", "src/../../x"):
         with pytest.raises(BridgeError):

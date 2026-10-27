@@ -56,7 +56,7 @@ def setup(tmp_path):
 
     def capture(**kwargs):
         checkpoint_id = "ckp_" + format(next(counter), "024x")
-        with SafeRoot(str(root), None, ws["excludes"]) as safe:
+        with SafeRoot(str(root), ws["excludes"]) as safe:
             return store.capture(safe, ws, checkpoint_id, **kwargs)
 
     return {"store": store, "root": root, "ws": ws, "state": state, "capture": capture}
@@ -189,7 +189,7 @@ def test_incremental_capture_reuses_unchanged_blobs(setup, monkeypatch):
 def test_capture_is_idempotent_for_one_checkpoint_id(setup):
     (setup["root"] / "a.txt").write_text("a\n")
     ws = setup["ws"]
-    with SafeRoot(str(setup["root"]), None, []) as safe:
+    with SafeRoot(str(setup["root"]), []) as safe:
         first = setup["store"].capture(safe, ws, "ckp_" + "f" * 24)
         (setup["root"] / "a.txt").write_text("changed\n")
         again = setup["store"].capture(safe, ws, "ckp_" + "f" * 24)
@@ -267,7 +267,7 @@ def test_unusual_file_names_round_trip(setup):
 
 
 def test_invalid_identifiers_fail_closed(setup):
-    with SafeRoot(str(setup["root"]), None, []) as safe:
+    with SafeRoot(str(setup["root"]), []) as safe:
         with pytest.raises(BridgeError):
             setup["store"].capture(safe, setup["ws"], "../escape")
         with pytest.raises(BridgeError):

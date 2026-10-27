@@ -489,10 +489,6 @@ class ClaudeHostAdapter:
             input_hash TEXT NOT NULL, status TEXT NOT NULL,
             UNIQUE(run,request_id));
         """)
-        if "source" not in {row["name"] for row in
-                            self.db.execute("PRAGMA table_info(conversations)")}:
-            self.db.execute(
-                "ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'profile'")
         os.chmod(self.state / "claude-adapter.sqlite3", 0o600)
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)

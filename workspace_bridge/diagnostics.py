@@ -1,7 +1,6 @@
 """Canonical diagnostics keyed by exact workspace and AdapterInstance routes."""
 from __future__ import annotations
 
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -11,7 +10,7 @@ from typing import Any
 from . import __version__
 from .runtime import RuntimeUnsupported
 from .security import BridgeError, redact
-from .wbrp import CORE_FEATURES, Descriptor
+from .wbrp import Descriptor
 
 STATUSES = frozenset({"pass", "warning", "unknown", "action_required", "failed"})
 SECTIONS = frozenset({"core", "nodes", "workspaces", "adapters", "runnable_routes",

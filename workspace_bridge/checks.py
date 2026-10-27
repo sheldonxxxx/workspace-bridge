@@ -230,8 +230,6 @@ class CheckRunner:
               truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(batch, seq));
         """)
         self.db.execute("PRAGMA foreign_keys=ON")
-        if "worktree_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(batches)")}:
-            self.db.execute("ALTER TABLE batches ADD COLUMN worktree_id TEXT")
         with self.db:
             # A batch that was running when the Node stopped has no result.
             stamp = _now()

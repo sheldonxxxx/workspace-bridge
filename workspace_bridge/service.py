@@ -248,11 +248,6 @@ class Service:
                         "workspace-bridge node --state <node state> pair '<pairing>'. "
                         "Keep it out of chat."}
 
-    def adapter_diagnostics(self) -> dict:
-        """Sanitized health observations keyed by AdapterInstance ID."""
-        modern = self.run_coordinator.diagnostics()
-        return {"configured": sorted(modern), "adapters": modern}
-
     def list_adapters(self) -> dict:
         health = self.run_coordinator.diagnostics()
         adapters = []
@@ -641,10 +636,6 @@ class Service:
             result["adapter_id"] = selected
         return result
 
-    def adapter_policy_summaries(self) -> dict:
-        return {row["id"]: self.run_coordinator.model_policy(row["id"])
-                for row in self.adapter_registry.rows()}
-
     def respond_agent_interaction(self, ws: dict, run_id: str, interaction_id: str,
                                   response: dict, decided_by: str, reason: str) -> dict:
         return self.run_coordinator.resolve(ws, run_id, interaction_id, response,
@@ -759,11 +750,6 @@ class Service:
         with self.lock:
             row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
-    def set_setting(self, key: str, value: str) -> None:
-        with self.lock, self.db:
-            self.db.execute("INSERT INTO settings(key,value,updated) VALUES(?,?,?) "
-                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=excluded.updated",
-                            (key, value, now()))
     def event(self, workspace: str | None, action: str, outcome: str = "ok",
               *, adapter_id: str | None = None, runtime_type: str = ""):
         # Never log file contents, queries, user plans, keys, raw errors, or absolute paths.

@@ -21,7 +21,7 @@ MAX_FILE = 512 * 1024
 MAX_FILES = 10000
 MAX_OUTPUT = 24000
 # Credential, VCS and Bridge-internal names are always denied, including the
-# handoff folder 0.3 kept in workspaces.
+# handoff folder older versions kept in workspaces.
 ALWAYS_DENY_NAMES = frozenset({
     ".git", ".hg", ".svn", ".ssh", ".aws", ".azure", ".kube", ".gnupg",
     ".claude", ".mcp.json", HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc",
@@ -201,24 +201,17 @@ def open_absolute_dir(path: str) -> int:
 
 
 class SafeRoot:
-    def __init__(self, path: str, identity: tuple[int, int] | None = None, extra: list[str] | None = None):
-        # Authorization boundary is the configured canonical path itself.
-        # `identity`, when supplied, is a legacy historical (st_dev, st_ino)
-        # fingerprint retained only for backward-compatible callers and an
-        # optional non-blocking diagnostic. It is never used to gate access:
-        # a reboot/remount that changes device/inode for the same configured
-        # path must remain usable. Per-request containment (canonical path,
-        # O_NOFOLLOW resolution, same-device file checks, excludes, scopes)
-        # is still enforced below.
+    def __init__(self, path: str, extra: list[str] | None = None):
+        # Authorization boundary is the configured canonical path itself, so a
+        # reboot or remount that changes device/inode for the same path stays
+        # usable. Per-request containment (canonical path, O_NOFOLLOW
+        # resolution, same-device file checks, excludes, scopes) is enforced
+        # below.
         self.path = path
         self.fd = open_absolute_dir(path)
         self.extra = extra or []
         st = os.fstat(self.fd)
         self.identity = (st.st_dev, st.st_ino)
-        if identity is not None and self.identity != identity:
-            import logging
-            logging.getLogger("workspace_bridge.root").debug(
-                "workspace root filesystem identity changed for %s", path)
 
     def close(self):
         if self.fd >= 0:

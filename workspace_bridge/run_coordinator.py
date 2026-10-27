@@ -661,11 +661,6 @@ class RunCoordinator:
             raise BridgeError("Run not found in this workspace", "not_found")
         return dict(row)
 
-    def has_run(self, run_id: str) -> bool:
-        with self.service.lock:
-            return self.service.db.execute(
-                "SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone() is not None
-
     def _conversation(self, run: dict) -> dict:
         with self.service.lock:
             if self._stop.is_set():

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .plugin_protocol import to_rpc
-from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
+from .runtime import RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, redact
 
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
@@ -21,7 +21,7 @@ ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
 ACTIVE_STATES = frozenset({"running", "waiting_interaction"})
 OUTCOMES = frozenset({"succeeded", "failed", "cancelled", "interrupted", "orphaned"})
-SECURITY_PROVENANCE = frozenset({"named-profile", "implicit/default", "legacy-sandbox"})
+SECURITY_PROVENANCE = frozenset({"named-profile", "implicit/default"})
 SECURITY_APPROVAL_CATEGORIES = frozenset({
     "untrusted", "on-request", "never", "granular", "default", "other"})
 SECURITY_REVIEWER_CATEGORIES = frozenset({
