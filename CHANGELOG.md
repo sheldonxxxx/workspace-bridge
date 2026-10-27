@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `workspace-bridge plugin test <manifest|id>` runs the plugin conformance
+  kit in a temporary folder: protocol checks by default, and with `--live`
+  runs, interactions, events, recovery without replay, and continuation.
+  It exits non-zero unless the plugin passes.
 - Fixed: shell command rules now apply to commands wrapped in a shell, such
   as `zsh -lc 'git push'`. Codex runs every command this way, so its ask and
   deny command rules were not enforced before.

@@ -591,6 +591,11 @@ def main(argv: list[str] | None = None):
     pairing_create.add_argument("--name", required=True, help="Node display name")
     pairing_create.add_argument("--replace", action="store_true",
                                 help="Re-pair the existing paired Node with this name (new key; its runs stop)")
+    plugin_parser = sub.add_parser("plugin", help="Check agent plugins against Agent Protocol v2")
+    plugin_sub = plugin_parser.add_subparsers(dest="plugin_command", required=True)
+    from .node_cli import add_kit_arguments
+    add_kit_arguments(plugin_sub.add_parser(
+        "test", help="Run the conformance kit against a plugin manifest or built-in plugin id"))
     release = sub.add_parser("release", help="Deterministic release bundle build and validation (release engineering)")
     release_sub = release.add_subparsers(dest="release_command", required=True)
     release_build = release_sub.add_parser("build", help="Build deterministic release bundle")
@@ -646,6 +651,13 @@ def main(argv: list[str] | None = None):
             from .node_cli import main as node_main
             node_main(["--state", str(args.node_state), *args.node_argv])
             return
+        if args.command == "plugin":
+            # The kit runs the plugin in a throwaway folder; no Bridge or
+            # Node state is read or written.
+            from .node_cli import run_kit_command
+            from .plugin_protocol import builtin_manifests
+            run_kit_command(args, builtin_manifests())
+            return
         if args.command == "release":
             if args.release_command == "build":
                 # Release-bundle build never touches Bridge state, admin
@@ -675,7 +687,9 @@ def main(argv: list[str] | None = None):
             local = state / Service.LOCAL_NODE_DIR
             node = NodeService(local, load_node_config(local))
             try:
-                print(json.dumps(run_plugin_command(node, args), indent=2, sort_keys=True))
+                result = run_plugin_command(node, args)
+                if result is not None:
+                    print(json.dumps(result, indent=2, sort_keys=True))
             finally:
                 node.close()
             return

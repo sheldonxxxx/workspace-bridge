@@ -116,6 +116,8 @@ def add_plugin_commands(sub) -> None:
     plugin_sub.add_parser("list", help="List the agent plugins this Node can run")
     plugin_add = plugin_sub.add_parser("add", help="Install a third-party plugin manifest (TOML)")
     plugin_add.add_argument("manifest", type=Path)
+    add_kit_arguments(plugin_sub.add_parser(
+        "test", help="Run the conformance kit against a plugin manifest or plugin id"))
     adapter = sub.add_parser("adapter", help="Add, list, test or remove agent adapters run as plugins")
     adapter.set_defaults(plugin_group="adapter")
     adapter_sub = adapter.add_subparsers(dest="adapter_command", required=True)
@@ -132,8 +134,74 @@ def add_plugin_commands(sub) -> None:
     remove.add_argument("adapter_id")
 
 
-def run_plugin_command(node: NodeService, args) -> dict:
+def add_kit_arguments(parser) -> None:
+    """Arguments of ``plugin test``, the conformance kit."""
+    parser.add_argument("manifest", help="Plugin manifest (TOML) or the id of a known plugin")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="Plugin setting, as for adapter add (repeatable)")
+    parser.add_argument("--model", help="Model for live runs; defaults to the plugin's default model")
+    parser.add_argument("--live", action="store_true",
+                        help="Also send a few short prompts to the agent, on its account")
+    parser.add_argument("--timeout", type=float, default=180,
+                        help="Seconds to wait for each live run (default 180)")
+    parser.add_argument("--keep", action="store_true",
+                        help="Keep the temporary workspace and plugin state for inspection")
+    parser.add_argument("--json", action="store_true", help="Print the report as JSON")
+
+
+def _settings(pairs: list[str]) -> dict:
+    settings = {}
+    for item in pairs:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise BridgeError("--set expects KEY=VALUE", "invalid_arguments")
+        settings[key] = value
+    return settings
+
+
+def run_kit_command(args, manifests: dict[str, dict]) -> None:
+    """Run the conformance kit and print its report; exit 1 unless it passed."""
+    from .plugin_conformance import run_kit
+    from .plugin_protocol import load_manifest
+    path = Path(args.manifest).expanduser()
+    if path.suffix == ".toml" or path.is_file():
+        manifest = load_manifest(path)
+    elif args.manifest in manifests:
+        manifest = manifests[args.manifest]
+    else:
+        raise BridgeError("Unknown plugin; give a manifest file or a known plugin id",
+                          "unknown_plugin")
+    settings = _settings(args.set)
+    unknown = set(settings) - set(manifest["settings"]) - {"log_level"}
+    if unknown:
+        raise BridgeError("Unknown plugin settings: " + ", ".join(sorted(unknown)),
+                          "invalid_arguments")
+    if not 1 <= args.timeout <= 3600:
+        raise BridgeError("--timeout must be between 1 and 3600 seconds", "invalid_arguments")
+
+    def progress(result: dict) -> None:
+        print(f"[{result['status']}] {result['check']}: {result['detail']}", flush=True)
+
+    report = run_kit(manifest, settings=settings, model=args.model, live=args.live,
+                     timeout=args.timeout, keep=args.keep,
+                     progress=None if args.json else progress)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        verdict = "PASSED" if report["passed"] else "NOT PASSED"
+        note = "" if args.live else " (protocol checks only; add --live to run the agent)"
+        print(f"{verdict}: {manifest['id']} {manifest['version']}{note}")
+        if report.get("kept"):
+            print(f"Kept {report['kept']}")
+    if not report["passed"]:
+        raise SystemExit(1)
+
+
+def run_plugin_command(node: NodeService, args) -> dict | None:
     if args.plugin_group == "plugin":
+        if args.plugin_command == "test":
+            run_kit_command(args, node.manifests())
+            return None
         if args.plugin_command == "add":
             manifest = node.install_manifest(args.manifest)
             return {"installed": manifest["id"], "runtime_type": manifest["runtime_type"]}
@@ -142,14 +210,9 @@ def run_plugin_command(node: NodeService, args) -> dict:
                              "description": m["description"]}
                             for m in node.manifests().values()]}
     if args.adapter_command == "add":
-        settings = {}
-        for item in args.set:
-            key, sep, value = item.partition("=")
-            if not sep or not key:
-                raise BridgeError("--set expects KEY=VALUE", "invalid_arguments")
-            settings[key] = value
         return node.save_adapter({"name": args.name, "plugin": args.plugin,
-                                  "projects_root": args.projects_root, "settings": settings})
+                                  "projects_root": args.projects_root,
+                                  "settings": _settings(args.set)})
     if args.adapter_command == "list":
         return node.list_adapters()
     if args.adapter_command == "test":
@@ -236,7 +299,9 @@ def main(argv: list[str] | None = None):
         if args.command in ("plugin", "adapter"):
             node = NodeService(state, config)
             try:
-                print(json.dumps(run_plugin_command(node, args), indent=2, sort_keys=True))
+                result = run_plugin_command(node, args)
+                if result is not None:
+                    print(json.dumps(result, indent=2, sort_keys=True))
             finally:
                 node.close()
             return

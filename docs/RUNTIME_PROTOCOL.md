@@ -377,8 +377,30 @@ process group, with the Node's environment minus every `WB_*` variable.
 
 A second adapter must run against one Bridge coordinator without changing its
 state machine, database schema, MCP schemas, workspace authorization logic,
-or generic admin routes. Conformance tests cover idle-only admission, exact
-interaction routing, opaque models, ownership, and restart reconciliation.
+or generic admin routes. Run the conformance kit on a plugin before adding
+it to a Node:
+
+```sh
+workspace-bridge plugin test path/to/manifest.toml
+workspace-bridge plugin test path/to/manifest.toml --live
+```
+
+The kit starts the plugin in a temporary folder of its own, never a real
+workspace, and exits non-zero unless every check passes or is skipped.
+Without `--live` it runs only the checks that start no agent turn: the
+descriptor, refusal of unknown methods, opaque model selectors, refusal of a
+tampered or missing security block, the projects root, the security echo on
+a new conversation, and ownership (another plugin's or an unknown
+conversation, run or interaction is never adopted). With `--live` it also
+runs the agent and checks idempotent run start, that an unknown model never
+succeeds, that a command its profile asks about pauses on an interaction
+(running it unasked fails), idle-only admission while that interaction
+waits, events that agree with snapshots, recovery after a kill without
+replaying the prompt or the approval, and a continuation afterwards. A live
+check the agent's own choices leave undecided is reported as inconclusive.
+Give a built-in plugin's id (`claude`, `codex`, `opencode`, `pi`) instead of a
+path to test it; `--model`, `--set key=value`, `--timeout`, `--keep` and
+`--json` adjust a run. Live checks use the agent's own login and quota.
 Events are optional and consumed only by adapters that advertise them.
 Adapter-specific management (credentials, packages, process restart) stays
 outside this protocol. Profiles are edited by a local admin in the Bridge
