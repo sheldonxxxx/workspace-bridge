@@ -54,6 +54,11 @@ def load_node_config(state: Path) -> dict:
     config = json.loads(path.read_text())
     if config.get("schema_version") != 1 or not isinstance(config.get("allowed_roots"), list):
         raise BridgeError("Unsupported Node configuration")
+    if not isinstance(config.get("cursor_secret"), str):
+        # 0.3 Nodes keyed cursors off the Node token, which 1.0 no longer has.
+        from .node_link import _write_atomic
+        config["cursor_secret"] = secrets.token_hex(32)
+        _write_atomic(path, json.dumps(config, indent=2).encode())
     return config
 
 

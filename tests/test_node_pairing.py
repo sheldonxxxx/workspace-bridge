@@ -345,6 +345,25 @@ def test_local_node_runs_inside_the_bridge(tmp_path):
         service.close()
 
 
+def test_a_0_3_local_node_gets_a_cursor_secret_on_start(tmp_path):
+    parent = tmp_path / "projects"
+    (parent / "alpha").mkdir(parents=True)
+    state = tmp_path / "bridge-state"
+    config = initialize(state, 8765, 8766)
+    Service(state, config, run_coordinator_background=False).close()
+    enable_local_node(state, [str(parent)])
+    node_config = state / "local-node" / "node-config.json"
+    legacy = json.loads(node_config.read_text())
+    del legacy["cursor_secret"]
+    legacy["node_token_hash"] = "a" * 64
+    node_config.write_text(json.dumps(legacy))
+    Service(state, config, run_coordinator_background=False).close()
+    upgraded = json.loads(node_config.read_text())
+    assert len(upgraded["cursor_secret"]) == 64
+    assert node_config.stat().st_mode & 0o777 == 0o600
+    assert load_node_config(state / "local-node")["cursor_secret"] == upgraded["cursor_secret"]
+
+
 def test_gateway_records_connection_state_for_doctor(paired):
     service, node_id = paired["service"], paired["node_id"]
     row = service.node_registry.get(node_id)
