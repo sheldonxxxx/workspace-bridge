@@ -3,7 +3,7 @@
 // forms, bounds, manifest/conventional extensions, missing/symlink/
 // malformed cases, no path leaks, and the absence of a public inventory route,
 // explicit extension-root loading with auto-discovery off against
-// installed Pi 0.87.0, excludeTools loadout, permission pass-through, and
+// installed Pi 1.4.0, excludeTools loadout, permission pass-through, and
 // generic audit bounds.
 import assert from "node:assert/strict";
 import { test } from "node:test";

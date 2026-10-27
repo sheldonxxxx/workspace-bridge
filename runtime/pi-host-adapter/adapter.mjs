@@ -1,6 +1,6 @@
 // Pi session ownership for the native host adapter.
 //
-// Each Bridge session owns exactly one in-process AgentSession (Pi 0.87.0
+// Each Bridge session owns exactly one in-process AgentSession (Pi 1.4.0
 // direct Node SDK) created in the isolated PI_CODING_AGENT_DIR profile.
 // The map below ties each session id to its owned AgentSession, canonical
 // cwd, immutable permission/extension snapshots, preflight correlation,
@@ -699,7 +699,7 @@ export class PiAdapter {
 
   // Authoritative in-process state read. The session object is owned by
   // this entry, so no drift check is needed; a disposed entry never
-  // reaches here. Includes AgentSession.isRetrying (Pi 0.87.0): logical
+  // reaches here. Includes AgentSession.isRetrying (Pi 1.4.0): logical
   // busy is isStreaming || isRetrying. Fail closed if SDK state access
   // itself throws as today.
   _sdkState(entry, ownedSessionId) {
@@ -815,7 +815,7 @@ export class PiAdapter {
     });
   }
 
-  // Pi 0.87.0 prompt() selects the active native queue at submission time;
+  // Pi 1.4.0 prompt() selects the active native queue at submission time;
   // when the session has just settled it starts the next prompt instead.
   // That decision inside Pi closes the streaming-to-idle race.
   async submitInput(directory, sessionId, text, mode, isCurrent = () => true,
@@ -1145,7 +1145,7 @@ export class PiAdapter {
     if (!entry || !event || typeof event !== "object") return;
     if (entry.disposed) return;
     if (this.sessions.get(String(sessionId)) !== entry) return;
-    // Native transient retry lifecycle (Pi 0.87.0): auto_retry_start/end
+    // Native transient retry lifecycle (Pi 1.4.0): auto_retry_start/end
     // are delivered through this same subscription. They are observed
     // here for sanitized operational logging only; the Bridge never
     // replays prompts and RunCoordinator adds no retry loop.
@@ -1214,7 +1214,7 @@ export class PiAdapter {
     }
   }
 
-  // Sanitized native retry lifecycle observer (Pi 0.87.0
+  // Sanitized native retry lifecycle observer (Pi 1.4.0
   // auto_retry_start/end). Emits a dedicated structured operational event
   // with allowlisted bounded scalar fields only: session_id, attempt,
   // max_attempts, delay_ms, success/state. Never logs errorMessage,

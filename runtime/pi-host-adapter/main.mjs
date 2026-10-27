@@ -1,7 +1,7 @@
 // Entry point for the Pi agent plugin (Agent Protocol v2 over stdio).
 //
 // The supervising Node starts it with --stdio. It owns
-// in-process AgentSession instances (Pi 0.87.0 SDK) for managed Bridge
+// in-process AgentSession instances (Pi 1.4.0 SDK) for managed Bridge
 // sessions. At startup the Pi binary/version is checked safely as a
 // deployment signal: a missing or unusable Pi means degraded health and
 // session creation fails closed. Shutdown disposes owned sessions; only

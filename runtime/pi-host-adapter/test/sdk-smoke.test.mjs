@@ -42,11 +42,11 @@ function noopUi() {
 test("SDK dependency pin matches the installed package", async () => {
   const pkg = JSON.parse(fs.readFileSync(
     new URL("../node_modules/@earendil-works/pi-coding-agent/package.json", import.meta.url), "utf8"));
-  assert.equal(pkg.version, "0.87.0");
+  assert.equal(pkg.version, "1.4.0");
   assert.equal(SDK_VERSION, pkg.version);
   const adapterPkg = JSON.parse(fs.readFileSync(
     new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(adapterPkg.dependencies["@earendil-works/pi-coding-agent"], "0.87.0");
+  assert.equal(adapterPkg.dependencies["@earendil-works/pi-coding-agent"], "1.4.0");
 });
 
 test("real AgentSession creates, persists, and disposes in an isolated profile", async () => {

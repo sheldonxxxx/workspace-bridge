@@ -1,4 +1,4 @@
-// Native retry lifecycle and managed backoff policy (Pi 0.87.0).
+// Native retry lifecycle and managed backoff policy (Pi 1.4.0).
 //
 // - Logical busy is isStreaming || isRetrying; isStreaming=false +
 //   isRetrying=true must read busy, never idle.

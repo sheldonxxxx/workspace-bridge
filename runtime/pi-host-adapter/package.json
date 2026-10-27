@@ -50,10 +50,10 @@
     "wbrp.mjs"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.0"
+    "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "scripts": {
     "start": "node main.mjs",

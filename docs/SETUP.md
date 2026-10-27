@@ -32,7 +32,7 @@ outside mapped projects.
 
 - macOS or Linux (native Windows is unsupported; use WSL2).
 - Python 3.11+ and `uv` are always needed for Workspace Bridge itself.
-  Node 20+ with npm is needed only for the Pi adapter (and for
+  Node 22.19+ with npm is needed only for the Pi adapter (and for
   contributor/web work), not for a Codex-only deployment. Docker
   Engine/Desktop with Compose v2 is needed only if you run the Bridge in a
   container.
