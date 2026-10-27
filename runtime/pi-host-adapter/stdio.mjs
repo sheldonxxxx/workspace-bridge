@@ -112,6 +112,9 @@ export function serveStdio({ input = process.stdin, write, buildAdapter, onLog =
       try {
         adapter = buildAdapter(params);
         protocol = new PiRuntimeProtocol(adapter);
+        // Pushed events: the Node buffers them and serves the Bridge's long poll.
+        protocol.onEvent = (event) => send({ jsonrpc: "2.0", method: "event",
+          params: { instanceId: protocol.instanceId, event } });
         send({ jsonrpc: "2.0", id: message.id,
                result: { protocol: PROTOCOL, instanceId: protocol.instanceId } });
       } catch (error) {

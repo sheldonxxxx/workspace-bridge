@@ -302,6 +302,17 @@ export function aggregatePiUsage(messages) {
   return seen && Object.keys(totals).length ? totals : null;
 }
 
+// Native events that change what a run snapshot shows. Streaming deltas
+// are left out: the snapshot does not change with them.
+const SESSION_CHANGES = {
+  tool_execution_start: "activity",
+  tool_execution_end: "activity",
+  agent_end: "run",
+  agent_settled: "run",
+  auto_retry_start: "run",
+  auto_retry_end: "run",
+};
+
 export class PiAdapter {
   constructor({ projectsRoot, agentDir, piUsable = true, piVersion = "",
                 createSessionFn = null, listModelsFn = null, onLog = null }) {
@@ -320,6 +331,21 @@ export class PiAdapter {
     this.onLog = typeof onLog === "function" ? onLog : null;
     this.sessions = new Map();
     this.instance = randomUUID();
+    // Set by the protocol layer: called with (sessionId, kind) after a
+    // native session changes, so it can push a hint. Never carries content.
+    this.onSessionChange = null;
+  }
+
+  // Deferred so the SDK finishes updating its state (streaming, pending
+  // tools) before anyone reads the session in response to the hint.
+  _notifySessionChange(sessionId, kind) {
+    const listener = this.onSessionChange;
+    if (typeof listener !== "function") return;
+    setImmediate(() => {
+      try {
+        listener(String(sessionId), kind);
+      } catch { /* hints never affect sessions */ }
+    });
   }
 
   get sessionCount() {
@@ -1138,6 +1164,7 @@ export class PiAdapter {
     };
     entry.pendingByToolCall.set(toolCallId, record);
     entry.pendingByPermission.set(permissionId, record);
+    this._notifySessionChange(record.sessionId, "interaction");
     return suspended;
   }
 
@@ -1145,6 +1172,8 @@ export class PiAdapter {
     if (!entry || !event || typeof event !== "object") return;
     if (entry.disposed) return;
     if (this.sessions.get(String(sessionId)) !== entry) return;
+    const change = SESSION_CHANGES[event.type];
+    if (change) this._notifySessionChange(sessionId, change);
     // Native transient retry lifecycle (Pi 1.4.0): auto_retry_start/end
     // are delivered through this same subscription. They are observed
     // here for sanitized operational logging only; the Bridge never

@@ -16,6 +16,9 @@
 - Fixed: shell command rules now apply to commands wrapped in a shell, such
   as `zsh -lc 'git push'`. Codex runs every command this way, so its ask and
   deny command rules were not enforced before.
+- The Pi plugin pushes events: run start and finish, approval requests, tool
+  steps and retries reach the Bridge as they happen instead of on its
+  5-second snapshot sweep.
 - The Pi plugin now uses Pi SDK 1.4.0 and needs Node 22.19 or newer. Pi's
   ChatGPT login (provider `openai`, with models such as `openai/gpt-6-luna`)
   works with it; SDK 0.87 listed no models for that login.

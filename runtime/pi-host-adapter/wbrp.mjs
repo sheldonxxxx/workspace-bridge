@@ -111,7 +111,31 @@ export class PiRuntimeProtocol {
     this.pending = new Map();
     this.inputSubmitting = new Map();
     this.cancelling = new Set();
+    // Events are latency hints with a process-local cursor; snapshots stay
+    // the source of truth. The stdio server sets onEvent to push them.
+    this.cursor = 0;
+    this.onEvent = null;
     this._load();
+    adapter.onSessionChange = (sessionId, kind) => this._sessionChanged(sessionId, kind);
+  }
+
+  _emit(type, run) {
+    if (typeof this.onEvent !== "function") return;
+    this.cursor += 1;
+    try {
+      this.onEvent({ instanceId: this.instanceId, cursor: this.cursor, type,
+        conversationId: run.conversationId, runId: run.id });
+    } catch { /* a lost hint is recovered by the snapshot sweep */ }
+  }
+
+  _sessionChanged(sessionId, kind) {
+    const type = kind === "interaction" ? "interaction.pending"
+      : kind === "activity" ? "activity.updated" : "run.updated";
+    for (const run of this.runs.values()) {
+      if (run.nativeId === sessionId && (run.phase === "starting" || run.phase === "active")) {
+        this._emit(type, run);
+      }
+    }
   }
 
   _load() {
@@ -196,7 +220,7 @@ export class PiRuntimeProtocol {
       nativeVersion: bounded(this.adapter.piVersion, 80), instanceId: this.instanceId,
     }, features: { models: 1, conversations: 1, runs: 1,
       activities: 1, interactions: 1,
-      steering: 1, queueing: 1, inputControls: 1 } };
+      events: 1, steering: 1, queueing: 1, inputControls: 1 } };
     try {
       value.release = piRelease();
     } catch {
@@ -390,6 +414,7 @@ export class PiRuntimeProtocol {
     } finally {
       run.updatedAt = now();
       this._save();
+      this._emit(run.phase === "terminal" ? "run.completed" : "run.started", run);
     }
     return this._publicRun(run);
   }
@@ -567,6 +592,10 @@ export class PiRuntimeProtocol {
       const terminal = collectRunUsage(this.adapter, row.directory, row.sessionId,
         run.usageBase);
       if (terminal) run.usage = terminal;
+      run.updatedAt = now();
+      this._save();
+      this._emit("run.completed", run);
+      return;
     }
     run.updatedAt = now();
     this._save();
@@ -600,6 +629,7 @@ export class PiRuntimeProtocol {
     }
     run.updatedAt = now();
     this._save();
+    this._emit("run.completed", run);
     return this._publicRun(run);
   }
 

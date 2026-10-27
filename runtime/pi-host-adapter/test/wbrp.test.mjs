@@ -279,3 +279,67 @@ test("an unused real Pi SDK conversation recovers without replay", async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Pi protocol pushes numbered hints for its own active runs only", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-pi-wbrp-"));
+  try {
+    const { adapter, directory } = fixture(root);
+    const protocol = new PiRuntimeProtocol(adapter);
+    const events = [];
+    protocol.onEvent = (event) => events.push(event);
+    const conversation = await protocol.createConversation({
+      workspaceId: "ws-one", directory, security: READ_ONLY,
+    });
+    const run = await protocol.startRun(conversation.id, {
+      input: [{ type: "text", text: "Do the task" }], security: READ_ONLY,
+    });
+    adapter.onSessionChange("native-session", "interaction");
+    adapter.onSessionChange("native-session", "activity");
+    adapter.onSessionChange("someone-else", "run");
+    adapter.busy = false;
+    assert.equal((await protocol.run(run.id)).phase, "terminal");
+    adapter.onSessionChange("native-session", "run");
+    assert.deepEqual(events.map((event) => event.type), [
+      "run.started", "interaction.pending", "activity.updated", "run.completed"]);
+    assert.deepEqual(events.map((event) => event.cursor), [1, 2, 3, 4]);
+    for (const event of events) {
+      assert.deepEqual(event, { instanceId: protocol.instanceId, cursor: event.cursor,
+        type: event.type, conversationId: conversation.id, runId: run.id });
+    }
+    assert.equal(protocol.descriptor().features.events, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stdio pushes protocol events as notifications", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-pi-wbrp-"));
+  try {
+    const { adapter, directory } = fixture(root);
+    const input = new PassThrough();
+    const lines = [];
+    serveStdio({ input, write: (line) => lines.push(JSON.parse(line)),
+      buildAdapter: () => adapter, exit: () => {} });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocol: 2 } })}\n`);
+    await settle();
+    const instanceId = lines[0].result.instanceId;
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "conversations.create",
+      params: { body: { workspaceId: "ws", directory, security: READ_ONLY } } })}\n`);
+    await settle();
+    const conversationId = lines.find((line) => line.id === 2).result.id;
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "runs.start",
+      params: { conversationId, body: { input: [{ type: "text", text: "Go" }],
+        security: READ_ONLY } } })}\n`);
+    await settle();
+    const pushed = lines.filter((line) => line.method === "event");
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].params.instanceId, instanceId);
+    assert.equal(pushed[0].params.event.type, "run.started");
+    assert.equal(pushed[0].params.event.conversationId, conversationId);
+    input.end();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
