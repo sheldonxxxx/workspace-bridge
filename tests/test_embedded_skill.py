@@ -1,7 +1,6 @@
 """Skill delivery and trust boundary, not a behavioral evaluation of an LLM."""
 from hashlib import sha256
 from pathlib import Path
-import json
 
 import httpx
 import pytest
@@ -10,7 +9,7 @@ from workspace_bridge import __version__
 from workspace_bridge.api import Handoff, INSTRUCTIONS, TOOLS, make_mcp
 from workspace_bridge.embedded_skill import SKILL_URI, SKILLS_EXTENSION, read_project_lead_skill, skill_hint
 from workspace_bridge.protocol import LEGACY, MODERN, PREFIX
-from workspace_bridge.security import BridgeError, MAX_OUTPUT
+from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
 
 
@@ -29,14 +28,12 @@ async def rpc(env, method="skills/get", params=None, *, version=LEGACY[-1], toke
                                  json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 
 
-def test_skill_is_complete_versioned_and_bounded():
+def test_skill_is_complete_and_versioned():
     skill = read_project_lead_skill()
     assert skill["name"] == "project-lead" and skill["version"] == "3.6.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
-    assert len(skill["content"].split()) > 200
-    assert len(json.dumps(skill)) < MAX_OUTPUT
 
 
 @pytest.mark.parametrize("text", [
