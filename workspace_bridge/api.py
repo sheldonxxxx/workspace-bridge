@@ -111,6 +111,7 @@ class AgentRead(Input):
 
     representation: Literal["auto", "text", "image"] = Field(default="auto", description="auto detects supported raster images and otherwise reads UTF-8 text; image returns a native MCP preview, not text/base64. No PDF/SVG rendering.")
     max_image_dimension: int | None = Field(default=None, ge=256, le=4096, description="Image-only longest-edge cap (default 2048). Output byte cap may shrink further. For images omit offset/limit; first frame only.")
+    run_id: RunID | None = Field(default=None, description="Read an isolated run's unapplied worktree instead of the workspace, with the same exclusions. Fails with not_isolated or worktree_unavailable once applied or discarded.")
 
 class FileWrite(Input):
     path: PathString = Field(description="Workspace-relative file path. Writes need the edit write scope (workspace_info.write_scope workspace); exclusions apply. No absolute paths or traversal.")
@@ -181,6 +182,7 @@ class RunChecks(Input):
                                  description="Read an earlier run_checks call's result instead of starting checks.")
     wait_seconds: int = Field(default=30, ge=0, le=50,
                               description="How long to wait for the checks to finish before returning their current state.")
+    run_id: RunID | None = Field(default=None, description="With names: run the checks in an isolated run's unapplied worktree instead of the workspace. No run may be working in that worktree.")
 
     @model_validator(mode="after")
     def _one_action(self):
@@ -192,10 +194,12 @@ class RunChecks(Input):
 class Directory(Files):
     depth: int = Field(default=1, ge=1, le=4, description="1 = immediate children, up to 4 levels. Root path is the empty string.")
     expected_listing_sha256: HashString | None = None
+    run_id: RunID | None = Field(default=None, description="Read an isolated run's unapplied worktree instead of the workspace, with the same exclusions. Fails with not_isolated or worktree_unavailable once applied or discarded.")
 
 class Glob(Files):
     pattern: str = Field(min_length=1, max_length=256, description="Relative to path. Supports *, ?, [], and **; **/*.py includes root files.")
     expected_listing_sha256: HashString | None = None
+    run_id: RunID | None = Field(default=None, description="Read an isolated run's unapplied worktree instead of the workspace, with the same exclusions. Fails with not_isolated or worktree_unavailable once applied or discarded.")
 
 class Grep(Input):
     pattern: str = Field(min_length=1, max_length=256, description="Line-oriented regex, or literal when fixed_strings=true.")
@@ -206,6 +210,7 @@ class Grep(Input):
     context_lines: int = Field(default=0, ge=0, le=5)
     limit: int = Field(default=40, ge=1, le=100, description="Maximum matching lines; follow next_cursor even when this page has no matches.")
     cursor: str | None = Field(default=None, max_length=2048, description="Opaque continuation for this exact workspace/query. Restart when stale.")
+    run_id: RunID | None = Field(default=None, description="Read an isolated run's unapplied worktree instead of the workspace, with the same exclusions. Fails with not_isolated or worktree_unavailable once applied or discarded.")
 
 
 class AgentModelQuery(Input):

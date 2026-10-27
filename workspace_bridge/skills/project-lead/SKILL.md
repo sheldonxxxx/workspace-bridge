@@ -178,10 +178,14 @@ and inspection guides, not proof. Delivery status says nothing about the outcome
    the agent's own test claims are not.
 5. Check acceptance criteria and plausible regressions.
 6. For an isolated run (`isolation.mode` is `worktree`), the workspace does not
-   have the agent's changes yet, so `read_file` and `git_status` show the old
-   code; the run diff is the review. After every follow-up in that worktree has
-   finished, accept with `apply_run` (needs the edit scope), then verify the
-   applied source and run checks; `undo_edit` with its `edit_id` reverts it.
+   have the agent's changes yet. Review the worktree itself: pass `run_id` to
+   `read_file`, `list_dir`, `glob` and `grep_files` to read whole changed files
+   and search for missed call sites, and to `run_checks` with `names` to run
+   checks there. Without `run_id` these tools read the workspace, and
+   `git_status` always does. Fix defects with a corrective continuation, not
+   by editing the workspace. After every follow-up in that worktree has
+   finished, accept with `apply_run` (needs the edit scope); `undo_edit` with
+   its `edit_id` reverts it.
    On `apply_conflict`, the listed workspace files changed since the worktree
    was made: tell the user rather than overwrite them. Reject with
    `discard_run`. Never apply without having read the diff.

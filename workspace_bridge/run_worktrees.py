@@ -142,6 +142,19 @@ class RunWorktrees:
             raise BridgeError("The run's worktree was applied, discarded or removed", "worktree_unavailable")
         return {"worktree_id": row["id"]}
 
+    def target(self, ws: dict, run_id: str, *, idle: bool = False) -> dict:
+        """Node arguments that point a read or a check at a run's unapplied worktree."""
+        self.coordinator._run_row(ws, run_id)
+        row = self.for_run(run_id)
+        if row is None:
+            raise BridgeError("This run did not work in a worktree; read the workspace instead", "not_isolated")
+        if row["state"] != "active":
+            raise BridgeError(f"The run's worktree is {row['state']}; read the workspace instead",
+                              "worktree_unavailable")
+        if idle:
+            self._settled(ws, run_id)
+        return {"worktree_id": row["id"]}
+
     def commit_quietly(self, run_id: str, ws: dict) -> None:
         """Record a finished run's files on its branch, for anyone reading the branch."""
         row = self.for_run(run_id)

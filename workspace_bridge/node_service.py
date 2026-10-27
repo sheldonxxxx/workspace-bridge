@@ -44,6 +44,8 @@ CHECKPOINT_OPERATIONS = {
     "checkpoint_purge": frozenset({"checkpoint_ids", "everything"}),
     "checkpoint_stats": frozenset(),
 }
+# Reads that may look at an isolated run's worktree instead of the workspace.
+WORKTREE_READS = frozenset({"list_dir", "glob", "grep_files", "read_file"})
 WORKTREE_OPERATIONS = {
     "worktree_create": frozenset({"worktree_id"}),
     "worktree_commit": frozenset({"worktree_id"}),
@@ -242,6 +244,12 @@ class NodeService:
         self.db.close()
 
     def safe_root(self, workspace: dict) -> SafeRoot:
+        if workspace.get("worktree_id") is not None:
+            # A read of an isolated run's worktree: same exclusions, the Node's own checkout.
+            self.safe_root({key: value for key, value in workspace.items() if key != "worktree_id"}).close()
+            self.worktrees.meta(workspace["id"], WorktreeStore._id(workspace["worktree_id"]))
+            return SafeRoot(str(self.worktrees.path(workspace["id"], workspace["worktree_id"])), None,
+                            validate_excludes(workspace.get("excludes", [])))
         raw = workspace.get("root")
         if not isinstance(raw, str) or not Path(raw).is_absolute() or os.path.normpath(raw) != raw:
             raise BridgeError("Canonical workspace root required", "root_invalid")
@@ -365,6 +373,10 @@ class NodeService:
         root = checked.path
         checked.close()
         ws = {**workspace, "root": root}
+        if operation in WORKTREE_READS and isinstance(body.get("arguments"), dict) \
+                and body["arguments"].get("worktree_id") is not None:
+            body = {**body, "arguments": dict(body["arguments"])}
+            ws["worktree_id"] = body["arguments"].pop("worktree_id")
         if operation == "list_dir":
             return self.browser.list_dir(ws, **body["arguments"])
         if operation == "glob":

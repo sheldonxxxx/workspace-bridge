@@ -360,7 +360,7 @@ files.
 ## run_checks
 
 ```text
-run_checks(workspace_id, names=null, check_id=null, wait_seconds=30)
+run_checks(workspace_id, names=null, check_id=null, wait_seconds=30, run_id=null)
 ```
 
 Runs checks the local administrator named for this workspace, such as `test`
@@ -646,6 +646,17 @@ or removed fails with `worktree_unavailable`. Checkpoints and after-run checks
 of an isolated run cover its worktree, so `git_diff` with `mode=run` shows what
 the agent changed there. When each run ends, the Node also commits the
 worktree's state to its branch, for anyone who wants to read it with Git.
+
+Before applying, review the run where it is. `read_file`, `list_dir`, `glob`
+and `grep_files` take an optional `run_id` that reads that run's worktree
+instead of the workspace, with the same exclusions, deny list and redaction;
+listing hashes and search cursors from the worktree and the workspace never
+mix. `run_checks` with `names` and `run_id` runs the configured checks in the
+worktree; it needs the edit write scope like any ad hoc check and fails with
+`run_active` while a run is working there. A `run_id` for an ordinary run fails
+with `not_isolated`, and one whose worktree was applied, discarded or expired
+with `worktree_unavailable`. Write tools always target the workspace: send a
+corrective continuation to change the worktree.
 
 `read_agent_run` reports `isolation`: `{"mode": "none"}` for an ordinary run,
 or `mode: "worktree"` with `worktree_id`, `branch`, `path`, `base` (the snapshot

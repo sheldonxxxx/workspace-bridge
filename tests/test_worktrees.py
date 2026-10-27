@@ -199,6 +199,61 @@ def test_isolated_run_works_apart_and_applies_as_one_undoable_edit(iso_env, monk
     assert caught.value.code == "worktree_unavailable"
 
 
+def test_chatgpt_reads_and_checks_an_unapplied_worktree(iso_env):
+    service, root = iso_env["service"], iso_env["root"]
+    run = _start(iso_env, isolation="worktree")
+    path = Path(run["isolation"]["path"])
+    (path / "app.py").write_text("print('two')\n")
+    (path / "lib").mkdir()
+    (path / "lib" / "helper.py").write_text("def helper():\n    return 'two'\n")
+    (path / ".env").write_text("TOKEN=agent-made\n")
+    # Reads during the run see its live files; the workspace still has the old ones.
+    read = _call(iso_env, "read_file", path="app.py", start_line=1, max_lines=10, expected_sha256=None,
+                 run_id=run["run_id"])
+    assert read["lines"] == [{"line": 1, "text": "print('two')"}]
+    plain = _call(iso_env, "read_file", path="app.py", start_line=1, max_lines=10, expected_sha256=None)
+    assert plain["lines"] == [{"line": 1, "text": "print('one')"}]
+    hits = _call(iso_env, "grep_files", pattern="two", run_id=run["run_id"])
+    assert {item["path"] for item in hits["matches"]} == {"app.py", "lib/helper.py"}
+    assert _call(iso_env, "grep_files", pattern="two")["matches"] == []
+    found = _call(iso_env, "glob", pattern="**/*.py", run_id=run["run_id"])
+    assert {item["path"] for item in found["entries"]} == {"app.py", "lib/helper.py"}
+    listed = _call(iso_env, "list_dir", path="", depth=2, run_id=run["run_id"])
+    names = {item["path"] for item in listed["entries"]}
+    assert "lib/helper.py" in names and ".env" not in names and ".git" not in names
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "read_file", path=".env", start_line=1, max_lines=10, expected_sha256=None,
+              run_id=run["run_id"])
+    assert caught.value.code == "policy_denied" and "agent-made" not in str(caught.value)
+    # A workspace listing's hash never validates a worktree page, and back.
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "list_dir", path="", depth=2, expected_listing_sha256=listed["listing_sha256"])
+    assert caught.value.code == "stale_listing"
+    # Checks wait for the run, then run in the worktree.
+    service.node_registry.client(service.workspace(iso_env["ws_id"])["node_id"]).workspace(
+        "set_checks_config", service.workspace(iso_env["ws_id"]),
+        {"text": '[checks]\nshow = "python3 app.py"\n'})
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "run_checks", names=["show"], run_id=run["run_id"])
+    assert caught.value.code == "run_active"
+    _finish(iso_env, run["run_id"])
+    checked = _call(iso_env, "run_checks", names=["show"], run_id=run["run_id"], wait_seconds=30)
+    assert checked["passed"] == 1 and "two" in checked["results"][0]["log_tail"]
+    assert "one" in _call(iso_env, "run_checks", names=["show"], wait_seconds=30)["results"][0]["log_tail"]
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "run_checks", run_id=run["run_id"])
+    assert caught.value.code == "invalid_arguments"
+    _call(iso_env, "discard_run", run_id=run["run_id"])
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "read_file", path="app.py", start_line=1, max_lines=10, expected_sha256=None,
+              run_id=run["run_id"])
+    assert caught.value.code == "worktree_unavailable"
+    ordinary = _start(iso_env, "plain-1")
+    with pytest.raises(BridgeError) as caught:
+        _call(iso_env, "glob", pattern="*", run_id=ordinary["run_id"])
+    assert caught.value.code == "not_isolated"
+
+
 def test_apply_refuses_when_the_workspace_moved_on(iso_env):
     root = iso_env["root"]
     run = _start(iso_env, isolation="worktree")

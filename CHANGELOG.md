@@ -29,7 +29,9 @@
   without touching its index, branch or working files. Continuations keep the
   same worktree. New MCP tools `apply_run` (copies the changes into the
   workspace as one edit that `undo_edit` reverts, all or nothing on conflict)
-  and `discard_run`; unused worktrees are removed after 14 days. Plugins that
+  and `discard_run`; unused worktrees are removed after 14 days. `read_file`,
+  `list_dir`, `glob`, `grep_files` and `run_checks` take `run_id` to review an
+  unapplied worktree before applying it. Plugins that
   declare the `worktrees` feature receive `worktreesRoot` in `initialize`.
 - The project-lead skill (3.9.0) covers read-only and edit workspaces,
   Bridge-stored handoffs and their read-only plan folder, `run_checks` and

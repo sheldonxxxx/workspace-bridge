@@ -101,7 +101,7 @@ class RunChecks:
     # -- ChatGPT's run_checks ---------------------------------------------------
 
     def run(self, ws: dict, *, names: list[str] | None = None, check_id: str | None = None,
-            wait_seconds: int = 30) -> dict:
+            wait_seconds: int = 30, target: dict | None = None) -> dict:
         if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, int) \
                 or not 0 <= wait_seconds <= MAX_WAIT_SECONDS:
             raise BridgeError(f"wait_seconds must be 0 to {MAX_WAIT_SECONDS}", "invalid_arguments")
@@ -115,7 +115,7 @@ class RunChecks:
             raise BridgeError("Pass names to start checks or check_id to read them, not both",
                               "invalid_arguments")
         if check_id is None:
-            result = client.workspace("start_checks", ws, {"names": names})
+            result = client.workspace("start_checks", ws, {"names": names, **(target or {})})
             check_id = result["check_id"]
         elif not CHECK_ID.fullmatch(check_id):
             raise BridgeError("Invalid check_id", "invalid_arguments")

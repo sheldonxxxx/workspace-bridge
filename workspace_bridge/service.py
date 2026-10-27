@@ -1027,13 +1027,24 @@ class Service:
                 "checks": "run_checks runs only the commands the user named in this workspace's checks.toml on the Node.",
                 "not_supported": (["source writes", "checks"] if scope != "workspace" else []) + ["shell", "arbitrary commands", "Git actions", "unmapped filesystem access", "implicit workspace switching", "tunnel lifecycle control", "stored audit verdicts"]}
     def read_file(self, ws: dict, path: str, start_line: int, max_lines: int, expected_sha256: str | None,
-                  representation: str = "auto", max_image_dimension: int | None = None) -> dict | ImageReadResult:
+                  representation: str = "auto", max_image_dimension: int | None = None,
+                  run_id: str | None = None) -> dict | ImageReadResult:
         if representation not in ("auto", "text", "image"):
             raise BridgeError("Unknown read representation", "invalid_arguments")
         return self.node_registry.client(ws["node_id"]).workspace("read_file", ws, {
             "path": path, "start_line": start_line, "max_lines": max_lines,
             "expected_sha256": expected_sha256, "representation": representation,
-            "max_image_dimension": max_image_dimension})
+            "max_image_dimension": max_image_dimension, **self._run_tree(ws, run_id)})
+
+    def _run_tree(self, ws: dict, run_id: str | None) -> dict:
+        """Point a read at an isolated run's worktree; {} reads the workspace."""
+        return {} if run_id is None else self.run_coordinator.worktrees.target(ws, run_id)
+
+    def _browse(self, operation: str):
+        def call(workspace: dict, run_id: str | None = None, **arguments):
+            return self.node_registry.client(workspace["node_id"]).workspace(
+                operation, workspace, {**arguments, **self._run_tree(workspace, run_id)})
+        return call
     def write_file(self, ws: dict, path: str, content: str, expected_sha256: str | None = None) -> dict:
         self.require_edit(ws)
         return self.node_registry.client(ws["node_id"]).workspace("write_file", ws, {
@@ -1064,9 +1075,13 @@ class Service:
         return self.run_coordinator.worktrees.discard(ws, run_id)
 
     def run_checks(self, ws: dict, names: list[str] | None = None, check_id: str | None = None,
-                   wait_seconds: int = 30) -> dict:
+                   wait_seconds: int = 30, run_id: str | None = None) -> dict:
+        if run_id is not None and not names:
+            raise BridgeError("run_id applies only when starting checks by name", "invalid_arguments")
+        # Checks share the worktree's files, so none start while a run works there.
+        target = {} if run_id is None else self.run_coordinator.worktrees.target(ws, run_id, idle=True)
         return self.run_coordinator.run_checks.run(ws, names=names, check_id=check_id,
-                                                   wait_seconds=wait_seconds)
+                                                   wait_seconds=wait_seconds, target=target)
 
     def list_edits(self, ident: str, offset: int = 0, limit: int = 50) -> dict:
         ws = self.workspace(ident, False)
@@ -1266,9 +1281,8 @@ class Service:
             ws = self.workspace(ws_id)
         methods = {
             "workspace_info": self.info, "read_file": self.read_file,
-            "list_dir": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("list_dir", workspace, arguments),
-            "glob": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("glob", workspace, arguments),
-            "grep_files": lambda workspace, **arguments: self.node_registry.client(workspace["node_id"]).workspace("grep_files", workspace, arguments),
+            "list_dir": self._browse("list_dir"), "glob": self._browse("glob"),
+            "grep_files": self._browse("grep_files"),
             "list_handoffs": self.list_handoffs,
             "read_handoff": self.read_handoff,
             "write_file": self.write_file, "write_image": self.write_image, "edit_file": self.edit_file,

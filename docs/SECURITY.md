@@ -256,7 +256,11 @@ when it is a worktree directly under a workspace's folder; the Node also checks
 that it made that worktree for the workspace before a conversation starts.
 `apply_run` writes through the edit journal with the same exclusions, deny list,
 size limits and journal as `apply_patch`, refuses symlinks and submodules, and
-changes nothing when any target file differs from the snapshot. Isolation keeps
+changes nothing when any target file differs from the snapshot. Reads and
+checks that name a run's `run_id` open that worktree through the same
+no-symlink descriptor checks, exclusions, deny list and redaction as the
+workspace, only while the worktree is unapplied; checks there still need the
+edit write scope. Isolation keeps
 the agent's edits out of the workspace; it is not an OS sandbox, and the
 agent's own security profile still decides what it may touch elsewhere.
 
