@@ -17,8 +17,8 @@ codes are 128-bit, single use, expire after 10 minutes, and are stored only
 as hashes. Requests carrying a browser `Origin` are refused, and repeated
 authentication failures are throttled. The gateway binds loopback unless
 `WB_NODE_GATEWAY_HOST` is set; expose it only on a private network or VPN.
-A paired Node trusts its Bridge fully, exactly as an HTTP Node trusts the
-holder of its token.
+A paired Node trusts its Bridge fully. Nodes open no listening port; the
+embedded Node is called inside the Bridge process.
 
 ## Shared credential scope
 
@@ -29,12 +29,12 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
 - Each Workspace is bound to one authoritative Node. The Node owns the host `allowed_roots` ceiling and validates the canonical node-local root on registration and every data-plane request; Bridge cannot edit that ceiling or inspect a local fallback checkout. Overlapping mappings on one Node are rejected even when disabled, and registrations start disabled.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
-- Local write scope is `none` (read-only, the default) or `workspace` (edit); it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. Workspaces set to the earlier handoff-only scope became read-only. Handoffs are stored in Bridge state, so `prepare_handoff` writes nothing to the workspace and needs no write scope. The Node keeps a read-only copy of each handoff under its state's `handoffs/<workspace>/<job>/`; a profile-bound run gets one extra external root for its own handoff folder, read allowed and, where the plugin enforces external roots, write denied. The run records it as `plan_folder`, with the saved profile's `profile_revision` beside the run's own revision. No other Node state is opened to the agent. Create-only by default; existing files require their current hash. `apply_patch` can also move and delete files under the same scope, exclusions and hash checks, journaling earlier content on the Node for `undo_edit`. No shell or arbitrary command surface is exposed as an MCP tool. `run_checks` runs only commands the local administrator listed in the workspace's `checks.toml`, which the Node keeps in its state outside the project; ChatGPT passes check names, never commands, folders or arguments. Commands start without a shell, with a timeout, Bridge variables removed from the environment, and a bounded, redacted output tail. Ad hoc checks need the edit scope; checks after a run follow route enablement. A configured command runs with the Node's identity, so it is as trusted as the administrator who listed it. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
-- `RuntimeType` (`pi`, `codex`, or `claude`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_agent_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff in Bridge state, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
+- Local write scope is `none` (read-only, the default) or `workspace` (edit); it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. Workspaces set to the earlier handoff-only scope became read-only. Handoffs are stored in Bridge state, so `save_handoff` writes nothing to the workspace and needs no write scope. `upload_image` keeps images by hash in the Node's state, never in the workspace, so it needs no write scope either; each workspace keeps up to 512 MiB of uploads. The Node keeps a read-only copy of each handoff under its state's `handoffs/<workspace>/<job>/`; a profile-bound run gets one extra external root for its own handoff folder, read allowed and, where the plugin enforces external roots, write denied. The run records it as `plan_folder`, with the saved profile's `profile_revision` beside the run's own revision. No other Node state is opened to the agent; uploads named in the handoff are copied read-only into that folder. `apply_patch` is the only file-change tool: creates are exclusive, existing files require their current hash, and moves and deletes follow the same scope, exclusions and hash checks, journaling earlier content on the Node for `undo_edit`. No shell or arbitrary command surface is exposed as an MCP tool. `run_checks` runs only commands the local administrator listed in the workspace's `checks.toml`, which the Node keeps in its state outside the project; ChatGPT passes check names, never commands, folders or arguments. Commands start without a shell, with a timeout, Bridge variables removed from the environment, and a bounded, redacted output tail. Ad hoc checks need the edit scope; checks after a run follow route enablement. A configured command runs with the Node's identity, so it is as trusted as the administrator who listed it. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
+- `RuntimeType` (`pi`, `codex`, `claude` or `opencode`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff in Bridge state, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
 - Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security source. Every run carries the rules of its route's [security profile](#security-profiles), and the plugin echoes the profile ID and revision it enforces; a mismatch fails the run before any prompt. Each run records its rules in an immutable `effective_security` snapshot. Interactions require a live exact request, not merely a persisted ID.
 - Claude Code loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority. The Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the plugin never edits them, and the plugin's `setting_sources` setting can drop the project and local layers.
 - Per-adapter model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass a configured policy, or act on arbitrary adapter conversations. An unconfigured policy is a governance choice, not a failure: models are then unrestricted by Bridge policy and the runtime selects its own default.
-- HTTP Node tokens are plaintext in private Bridge SQLite; agent plugins have no tokens. Both state databases are mode `0600` and their containing directories are private. Normal list/detail/status APIs return `has_token` only; add/edit forms do not read tokens back, and blank update fields preserve them. Node and plugin responses are scrubbed before they reach models, profiles, run data, diagnostics, events, logs, or errors. Backups remain sensitive.
+- Paired Nodes authenticate with keys (only the public key is on the Bridge); agent plugins have no tokens. Both state databases are mode `0600` and their containing directories are private. Normal list/detail/status APIs return `has_token` only and never read a token back. Node and plugin responses are scrubbed before they reach models, profiles, run data, diagnostics, events, logs, or errors. Backups remain sensitive.
 - Fresh writable state creates schema v4 directly (including per-run native token usage). Existing v4 state receives narrow in-place upgrades only when a release needs them (for example, `0.2.0` widens the runtime-type constraint to accept `claude`), inside one transaction that preserves rows and indexes. Pre-v4 state is rejected as `state_schema_incompatible` and is never altered; use a fresh state path for it.
 - All writes reject binary/control content, administrator exclusions, and secret-like text the file did not already hold (existing matches may stay, so such files remain editable). Staging uses private files and complete-content publication, not in-place truncation. Rechecks catch ordinary target/parent changes; they are not a sandbox or a portable atomic compare-and-swap against hostile external writers. Parent folders may remain after a later write failure; read back after an ambiguous I/O failure.
 - Built-in sensitive-name and build-directory exclusions. Credential and version-control names are always denied; an administrator `!name` entry can show only a hidden-by-default generated or dependency name such as `build` or `vendor`. Additional administrator globs are conservative and case-insensitive. Repository ignore files cannot grant access or relax policy.
@@ -146,10 +146,10 @@ Source returned through the tunnel reaches ChatGPT. The tunnel removes a public 
 | Search hits | Up to 100 matching lines per page; continuation within files |
 | Regex matching | 20 ms timeout per line; overall search budget |
 | Tool response | 24,000 serialized result characters before MCP envelope; browse pages budget UTF-8 bytes conservatively |
-| HTTP request body | MCP: 1 MiB except `write_image` (28,027,564 bytes); local management: 96,000 bytes; 10-second body timeout |
-| Handoff text mutation | 256 KiB final/previous file; JSON escaping also counts against the HTTP budget |
-| Handoff image upload | 20 MiB original raster bytes, 40MP; matching MIME/suffix, first-frame decoder validation; original metadata retained, pixels not redacted |
-| Handoff image references | Up to 20 unique paths; context and attachments share a 64 MiB publication-time read budget |
+| HTTP request body | MCP: 1 MiB except `upload_image` (28,027,564 bytes); local management: 96,000 bytes; 10-second body timeout |
+| Text file change | 256 KiB per created or edited file; JSON escaping also counts against the HTTP budget |
+| Handoff image upload | 20 MiB original raster bytes, 40MP, 512 MiB per workspace; matching MIME, first-frame decoder validation; original metadata retained, pixels not redacted |
+| Handoff image references | Up to 20 unique uploads or paths; context and attachments share a 64 MiB publication-time read budget |
 | Source / artifact page | Up to 400 / 200 lines respectively |
 | Handoffs | 100 per workspace |
 | Private-state quota gate | 512 MiB estimated SQLite allocation |
@@ -169,8 +169,7 @@ that widens only the admin listener to `0.0.0.0` and allows those `Host` values
 (`http` + `https` origins). Empty (default) keeps loopback-only and fails
 closed on invalid values. Prefer SSH port-forwarding or VPN; plain HTTP bears
 admin credentials in clear, so use TLS termination and firewall rules when remote
-is unavoidable. Docker additionally requires republishing the admin host port
-beyond `127.0.0.1` to reach LAN.
+is unavoidable.
 
 A disabled mapping retains its history. Token rotation revokes the old token for subsequent calls. Neither action erases copies already returned to ChatGPT, cancels completed reads, or necessarily interrupts work already holding the service lock.
 
@@ -186,27 +185,28 @@ Backups remain sensitive.
 ## Policy-scoped writes and readable notes
 
 Access requires the existing shared credential and an enabled, explicitly selected
-workspace. `read_file` and explicit `.workspace-handoff` scans obey the same filename/administrator
-exclusions. Default source-root scans still skip that folder. Internal staging names
-beginning `.wb-write-` are never caller-addressable and are hidden from tools.
+workspace. `read_file` and every scan obey the same filename and administrator
+exclusions; the `.workspace-handoff` folder 0.3 used stays hidden. Internal staging
+names beginning `.wb-write-` are never caller-addressable and are hidden from tools.
 
 The writer never follows existing symlinks, truncates a hard-linked inode, or
-adds executable permissions to newly created files. New files and replaced
-`.workspace-handoff` files use 0600; source replacements preserve ordinary permissions including execute
-bits, stripping special bits. Parent directories
+adds executable permissions to newly created files. New files use 0600; source
+replacements preserve ordinary permissions including execute bits, stripping
+special bits. Uploads in Node state are read-only (0400). Parent directories
 created by the bridge use 0700. Existing ACLs/extended attributes are not preserved
 by replacing an inode. Host case-sensitivity and filesystem permissions still apply.
 
-No aggregate upload disk quota, version history, automatic pruning or general
-file deletion is added. The 256 KiB bound is per file, not a total disk limit.
+Uploads are capped at 512 MiB per workspace. Deletes go through `apply_patch` with
+the file's current hash and are journaled. The 256 KiB bound is per file, not a
+total disk limit.
 Do not use this as arbitrary storage; configure OS quotas for stricter limits.
 Normal notes and user-pasted returns remain untrusted data, not proof that tests
 ran or that an independent audit occurred.
 
 ## Runtime Protocol agent execution
 
-Bridge-to-Node endpoints and Node tokens are managed in the local Manager and
-stored in private Bridge SQLite. Agents run as plugins: child processes of
+Nodes are paired or embedded; the Bridge stores only a paired Node's public
+key. Agents run as plugins: child processes of
 their Node with no port, no credential, and the Node's environment minus
 every `WB_*` variable. They do not receive provider credentials from
 Bridge.
@@ -235,8 +235,7 @@ until retention removes its checkpoints (14 days, or sooner once a workspace
 store exceeds 1 GiB). Exclusions added later hide paths immediately; clear the
 workspace's checkpoints in the Manager to delete them from disk. Diffs are
 redacted like `git_diff`, which is not a DLP guarantee. The Bridge stores only
-checkpoint IDs, statuses, error codes and changed path names. Support bundles
-never include checkpoints.
+checkpoint IDs, statuses, error codes and changed path names.
 
 ## Run worktrees
 
@@ -300,7 +299,7 @@ are bounded. Linux applies a 1 GiB address-space ceiling; macOS memory isolation
 not claimed. Native decoder failures are sanitized. Keep Pillow updated.
 
 This is resource containment, not an OS/network sandbox. The worker still has the
-service's OS privileges; use a dedicated account/container for hostile files. Never
+service's OS privileges; use a dedicated account for hostile files. Never
 put the bridge installation or virtualenv inside writable mapped projects. Image
 previews exist only in process memory and the response; events contain no image
 bytes, metadata, filenames or hashes. Existing tunnel/client logs are outside that
@@ -312,28 +311,13 @@ Supported animation/multi-page formats return only the first frame/page. No full
 animation review, OCR, external fetch, raw-binary export or exact color/byte fidelity
 is implied. Client-side handling still requires live validation.
 
-## Docker deployment
+## Node authority
 
-The container uses a non-root host UID/GID, read-only root filesystem, a bounded
-noexec/nosuid/nodev temporary filesystem, dropped capabilities and no-new-privileges.
-No privileged mode, Docker socket, host network, cloud API keys or tunnel credential
-is included. Both bridge ports are explicitly host-loopback only; the native Pi
-host adapter has **no** Compose service and publishes **no** port. Use a current
-Docker Engine (28+ avoids the documented old localhost-publication L2 exposure).
-Never attach untrusted services to its Compose network or add a public reverse proxy.
-The Manager stores Bridge-to-Node endpoints and Node tokens in private Bridge
-SQLite. Node-owned adapter endpoints and per-instance tokens stay in the private
-Node SQLite. Docker Desktop/OrbStack commonly use `host.docker.internal`; Linux
-Engine needs a reachable Node URL. Native daemon process tokens and provider
-credentials remain host-side and are never returned by Bridge APIs.
-
-The Bridge container has no workspace data bind. The selected Node controls
+The Bridge has no workspace data access of its own. The selected Node controls
 authorized source writes and checks, and its host identity can access every
 configured `allowed_roots` entry. A Node compromise is not constrained to one
-project; mount only intended projects under a dedicated host root and do
-not use a home/root bind.
-Outbound network access is not disabled by this Compose file. Image pixel secrets
-are still not redacted. The same configured path remains usable after a
-reboot/remount or native-to-container device/inode change; each request
-re-validates the current root and still denies symlink, cross-device and
-exclusion escapes. No security guarantee is inferred merely from containerization.
+project; keep only intended projects under a dedicated allowed root and do not
+allow a home or filesystem root. The same configured path remains usable after
+a reboot or remount; each request re-validates the current root and still
+denies symlink, cross-device and exclusion escapes. Native daemon tokens and
+provider credentials remain host-side and are never returned by Bridge APIs.

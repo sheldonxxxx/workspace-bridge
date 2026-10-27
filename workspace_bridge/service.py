@@ -1093,6 +1093,7 @@ class Service:
             summary["copy_prompt_chars"] = len(prompt)
             summary["copy_prompt_note"] = "Read it with list_handoffs document PROMPT.md, or copy it in the Manager."
         return summary
+
     def write_plan(self, ws: dict, job: dict, *, required: bool = False) -> str | None:
         """Have the Node save the handoff's read-only copy; return its folder.
 

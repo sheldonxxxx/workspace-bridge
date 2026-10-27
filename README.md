@@ -87,38 +87,31 @@ project, and source that ChatGPT reads leaves your machine. Read
 - **Images:** screenshots and other rasters return as native previews.
 - **Local Manager:** a terminal-style admin console for projects, agents,
   routes, models, runs, and diagnostics.
-- **Operations:** `doctor` diagnostics, native services on macOS and Linux, Discord run notifications, and a Docker image.
+- **Operations:** `doctor` diagnostics, user or system services on macOS and Linux, Nodes on other machines that pair and dial out, and Discord run notifications.
 
 Works with ChatGPT through OpenAI's secure MCP tunnel, and with any MCP
 client that supports Streamable HTTP. Runs on macOS, Linux, and WSL2.
 
 ## Quick start (about 10 minutes)
 
-Install the package, then initialize the Bridge and one Node (the local
+Install the package, then initialize the Bridge and one Node (the
 service that owns your files):
 
 ```sh
 uv tool install workspace-bridge
 workspace-bridge init
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects"
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
+workspace-bridge local-node enable --allow-root "$HOME/Projects"
 workspace-bridge serve
 ```
 
-In another terminal, show the Node token. It stays in your terminal; never
-paste it into chat:
-
-```sh
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
-```
-
-Then open the Manager at `http://127.0.0.1:8766/`:
+`local-node enable` runs this machine's Node inside the Bridge and registers
+it; `--allow-root` is the ceiling of folders it may expose. Then open the
+Manager at `http://127.0.0.1:8766/`:
 
 1. Sign in with the temporary bootstrap account (see
    [Setup](docs/SETUP.md#3-credentials-you-will-handle)) and choose your own
    password.
-2. Register the Node with its URL and the token from above.
+2. Check that the local Node shows as connected.
 3. Add a workspace mapping for one project and enable it.
 4. Create the shared gateway credential and generate the tunnel profile.
 5. Connect ChatGPT (or another MCP client) to `/mcp`.
@@ -131,9 +124,11 @@ workspace-bridge doctor
 
 Browsing and manual handoffs work at this point. To let ChatGPT start agent
 runs, add a Claude Code, Codex, OpenCode v2, or Pi adapter on the Node with
-`workspace-bridge node adapter add`; the Node runs it as a plugin. See
-[Runtimes](docs/RUNTIMES.md).
-Full instructions, including Docker, are in [Setup](docs/SETUP.md). If you
+`workspace-bridge local-node adapter add`; the Node runs it as a plugin. See
+[Runtimes](docs/RUNTIMES.md). To keep the Bridge running, install it as a
+service with `workspace-bridge service install`. Projects on another machine
+get a paired Node there.
+Full instructions are in [Setup](docs/SETUP.md). If you
 would rather have a coding agent do the install, point it at
 [Agent setup](docs/AGENT_SETUP.md).
 
@@ -174,7 +169,7 @@ validation status are listed in
 - [Architecture](docs/ARCHITECTURE.md) and [Operations](docs/OPERATIONS.md).
 - [MCP tools](docs/MCP_TOOLS.md), [Runtime Protocol](docs/RUNTIME_PROTOCOL.md),
   [File access](docs/FILE_ACCESS.md), [Images](docs/IMAGE_SUPPORT.md),
-  [Handoff protocol](docs/HANDOFF_PROTOCOL.md), [Docker](docs/DOCKER.md),
+  [Handoff protocol](docs/HANDOFF_PROTOCOL.md),
   [References](docs/REFERENCES.md).
 - [Full documentation index](docs/README.md).
 - [Plugin skill packaging](docs/PLUGIN_SKILL_PACKAGING.md): embed the canonical

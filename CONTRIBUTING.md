@@ -19,8 +19,8 @@ here.
   `runtime/pi-host-adapter/test/*.test.mjs`; browser tests in
   `web/tests/*.spec.ts`.
 - `docs/` — public documentation, indexed by [docs/README.md](docs/README.md).
-- `scripts/` — setup and smoke utilities (for example `configure_docker.py`,
-  `smoke_mcp.py`, `build_release_manifest.py`).
+- `scripts/` — setup and smoke utilities (for example `smoke_mcp.py`,
+  `build_skill_plugin.py`, `check_image_mcp.py`).
 
 ## Setup
 
@@ -65,26 +65,18 @@ uv run workspace-bridge --help
 uv run workspace-bridge release --help
 ```
 
-Doctor checks the selected deployment's private state. For a native Bridge,
-select its actual state directory explicitly:
+Doctor checks the selected deployment's private state. Select its actual state directory explicitly:
 
 ```sh
 uv run workspace-bridge --state /path/to/bridge-state doctor --offline
 ```
 
-For the running Docker Bridge:
-
-```sh
-docker exec workspace-bridge workspace-bridge --state /state doctor --offline
-```
-
-Without `--state`, Doctor checks the default host state, which can be unused
-and unconfigured even while a separate Docker Bridge is working. Offline mode
+Without `--state`, Doctor checks the default host state. Offline mode
 skips Node and adapter probes; use live Doctor for route readiness.
 
 ## Docs expectations
 
-- Source, CLI parsers, package metadata, tests, and Compose files are the
+- Source, CLI parsers, package metadata, and tests are the
   behavioral authority. Verify every setup command against current
   `--help` output and package `bin` entries before documenting it.
 - Keep the public information architecture: README as landing page,

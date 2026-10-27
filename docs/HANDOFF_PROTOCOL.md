@@ -8,17 +8,17 @@ publishing or dispatching a handoff, ChatGPT reports the handoff id and next ste
 directly to the user; it does not need to watch implementation. For manual dispatch,
 the user carries instructions to the agent and can paste its response back into
 ChatGPT for audit. When local agent execution is enabled, ChatGPT starts one bounded
-Runtime Protocol run and reads its result itself. Run state is tracked independently
+run with `start_run` and reads its result itself. Run state is tracked independently
 of handoff publication state.
 
 ## Publish
 
-`prepare_handoff` stores exactly three fixed documents in Bridge state:
+`save_handoff` stores exactly three fixed documents in Bridge state:
 `TASK.md`, `CONTEXT.md`, `ACCEPTANCE.md`. Nothing is written into the workspace,
 so a handoff never appears in `git status`, and publishing needs no write scope.
 It returns the handoff id and, when it fits, a `copy_prompt` that carries the
-full text of all three documents; `read_handoff` serves the same prompt as
-`PROMPT.md`. The owning Node also saves a read-only copy of the three documents
+full text of all three documents; `list_handoffs` with the handoff id and
+`document: "PROMPT.md"` serves the same prompt. The owning Node also saves a read-only copy of the three documents
 in its own state, and both prompts name that folder: an agent whose context was
 compacted re-reads its plan there. A run may read its handoff's folder but not
 write it, and each run start restores a changed copy from Bridge state. The
@@ -26,21 +26,21 @@ same `request_id` and content replay the original publication; changed content
 needs a new ID.
 
 The optional `context_hashes` map checks named files only; it does not enumerate
-the project or save old source. Handoffs published by earlier versions stay in
-their workspace `.workspace-handoff/jobs/` folder; for those, `read_handoff`
-reports a locally modified planning document with `matches_published=false`.
-This is a planning integrity signal, not an automated code-review gate.
+the project or save old source. Handoffs that 0.3 wrote into the workspace's
+`.workspace-handoff/` folder are still listed but can no longer be read or run;
+save them again.
 
-For visual context, upload a raster image with `write_image` under
-`.workspace-handoff/attachments/`, then include its workspace-relative `path`,
-`description` and returned original-file `sha256` in `prepare_handoff.attachments`.
-Existing allowed workspace images can also be referenced using the source hash
-from `read_file`. Up to 20 unique references are validated and checked at publication,
-and recorded in `CONTEXT.md` with their formats, sizes and dimensions. Context and
-attachments share a 64 MiB total read budget. Images remain at their referenced
-paths; publication does not copy or snapshot them. Verify current hashes before
-using them, and stop an implementer before replacing a dispatched reference.
-Uploading an image alone does not publish a job or start an agent.
+For visual context, upload a raster image with `upload_image`; the Node keeps
+it by hash in its own state, never in the workspace. Name the returned
+`sha256` with a `description` and no `path` in `save_handoff.attachments`, and
+the plan folder gets a read-only copy at `attachments/<sha256>.<ext>`. An
+existing allowed workspace image is referenced by its `path` and the source
+hash from `read_file` instead, and stays where it is; stop an implementer
+before replacing a dispatched workspace image. Up to 20 unique references are
+validated and checked at publication, and recorded in `CONTEXT.md` with their
+formats, sizes and dimensions. Context and attachments share a 64 MiB total
+read budget. Uploading an image alone does not publish a job or start an
+agent.
 
 ## Revising a plan
 
@@ -77,11 +77,11 @@ state is not a completion signal.
 
 ## Optional automated run
 
-When an exact same-Node workspace route is enabled, `start_agent_run` requires a
+When an exact same-Node workspace route is enabled, `start_run` requires a
 prepared handoff in the same workspace — or a bounded direct `instruction`,
 which the Bridge publishes as a minimal auditable prepared handoff — and accepts
 no free-form prompt path. A
-run is bound to one Runtime Protocol conversation and stores its exact model
+run is bound to one agent conversation and stores its exact model
 selector (the configured default when `model` is omitted, the runtime's native
 default when no Bridge policy exists, or an explicitly requested live catalog
 selector per the project-lead skill model-choice rule; MCP cannot
@@ -90,7 +90,7 @@ change policy), lifecycle state, timestamps, and notification status. A run may 
 an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
 `interrupted`, and `orphaned`.
 
-`respond_agent_interaction` resolves only a live request with its exact
+`answer_interaction` resolves only a live request with its exact
 adapter-provided choice or validated form answers, once, recording who decided
 and why. The Manager cannot answer; it can request cancellation of a run bound to that conversation. A corrective iteration creates
 a new Bridge run and can reuse a terminal conversation only after live ownership

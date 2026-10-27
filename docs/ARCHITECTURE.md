@@ -1,6 +1,6 @@
 # Architecture
 
-Source-accurate reference for Workspace Bridge `0.3.0`: Bridge control plane
+Source-accurate reference for Workspace Bridge: Bridge control plane
 plus local Manager, authoritative Nodes, Node-supervised agent plugins
 (Claude Code, Codex, OpenCode, Pi), exact workspace routes, Agent Protocol
 v2, optional secure MCP tunnel, native services on macOS and Linux, manual
@@ -32,12 +32,21 @@ flowchart TB
 
 Component responsibilities:
 
-- `api.py`: strict typed tool schemas, MCP adapter (tools plus the skills extension), loopback
-  Manager API.
+- `api.py`: strict typed tool schemas, the MCP server on the official MCP
+  Python SDK (24 tools plus the skills extension), and the loopback Manager
+  API.
 - `service.py`: auth, mappings, Node-routed operations, handoff publication,
   write policy, adapter references, workspace routes.
 - `node_service.py` / `node_api.py`: Node data plane (allowed roots, files,
   images, Git, handoffs, plugin adapters).
+- `edit_journal.py`: the Node's staged, all-or-nothing `apply_patch` and its
+  journal for `undo_edit`.
+- `plan_files.py`: the Node's read-only handoff copies and its
+  content-addressed image uploads, both in Node state.
+- `pairing.py` / `node_gateway.py` / `node_link.py`: pairing strings, the
+  Bridge's TLS Node gateway, and the paired Node's dial-out loop.
+- `os_service.py` / `oplog.py`: one launchd or systemd service definition
+  for the Bridge and the Node, and their size-capped service logs.
 - `node_registry.py` / `node_client.py`: Bridge-side Node inventory and
   bounded Node protocol proxy.
 - `adapter_registry.py`: sanitized Bridge cache of Node-owned instances with
@@ -94,11 +103,11 @@ Component responsibilities:
 
 ## Node transports
 
-The Bridge sends the same `/v1/...` Node requests over one of three
-transports. `http` Nodes listen and check a Node token. `paired` Nodes dial
-the Bridge's TLS Node gateway, authenticate with an Ed25519 key, and answer
-requests over that outbound socket. The `local` Node runs inside the Bridge
-process. All three call one request handler (`node_api.handle`) on the Node,
+The Bridge sends the same `/v1/...` Node requests over one of two
+transports. `paired` Nodes dial the Bridge's TLS Node gateway, authenticate
+with an Ed25519 key, and answer requests over that outbound socket; they open
+no listening port. The `local` (embedded) Node runs inside the Bridge
+process. Both call one request handler (`node_api.handle`) on the Node,
 always from a worker thread. The gateway runs on its own event loop and
 thread, because Bridge worker threads wait on it for replies while sometimes
 holding the service lock. A paired Node's connection revision derives from
@@ -116,12 +125,12 @@ flowchart LR
     Bridge -->|"resolve workspace to Node"| Node
     Node -->|"enforce route + binding"| Route
     Route -->|"select destination"| Adapter
-    Adapter -->|"Runtime Protocol v1"| Native
+    Adapter -->|"Agent Protocol v2 plugin"| Native
 ```
 
 A `RuntimeType` (`pi`, `codex`, `claude`, or `opencode`) names the protocol family; it is not a
 destination. An `AdapterInstance` is one Node-owned destination with its own
-name, endpoint, token, enabled state, and connection revision. A
+name, plugin and settings, enabled state, and connection revision. A
 `WorkspaceRoute` binds one workspace to one exact same-Node adapter ID with
 enabled/default state and a security binding: a Bridge security profile or,
 for Codex, the agent's native security. Model policy is scoped to the adapter
@@ -185,16 +194,16 @@ sequenceDiagram
     participant B as Bridge
     participant N as Node
     participant A as Adapter + native runtime
-    C->>B: prepare_handoff (workspace_id)
-    B->>N: publish TASK/CONTEXT/ACCEPTANCE
-    C->>B: list_agent_adapters (workspace_id)
+    C->>B: save_handoff (workspace_id)
+    B->>N: save read-only TASK/CONTEXT/ACCEPTANCE copy
+    C->>B: list_targets (workspace_id)
     B->>N: proxy descriptor + route readiness
-    C->>B: start_agent_run (workspace_id, adapter_id, job_id)
+    C->>B: start_run (workspace_id, adapter_id, job_id)
     B->>N: admit exact route, model, binding
-    N->>A: Runtime Protocol v1 conversation + run
+    N->>A: Agent Protocol v2 conversation + run
     A-->>B: run snapshot (active, waiting, terminal)
-    B-->>C: read_agent_run (state, evidence, delivery)
-    C->>B: respond_agent_interaction (live choice, decided_by, reason)
+    B-->>C: read_run (state, interactions, evidence, delivery)
+    C->>B: answer_interaction (live choice, decided_by, reason)
     B->>N: forward after liveness recheck
     N->>A: resolve native request
 ```
@@ -221,32 +230,27 @@ all control operations. Loaded history stays available while the newest page
 overlaps it; a disjoint page after a large burst restarts pagination so records
 between the pages remain reachable. See [Runtime Protocol recovery](RUNTIME_PROTOCOL.md#recovery).
 
-## Native versus container control plane
+## Deployment
 
 ```mermaid
 flowchart TB
-    subgraph Native["Native evaluation"]
-        NB["Bridge process<br/>loopback 8765/8766"]
-        NN["Node service<br/>launchd / systemd"]
-        NA["Adapter services<br/>launchd / systemd"]
-        NB --> NN --> NA
+    subgraph Host["Bridge host"]
+        B["Bridge service<br/>loopback 8765/8766"]
+        L["Embedded Node<br/>in the Bridge process"]
+        T["Tunnel client<br/>host process"]
+        T --- B --> L
     end
-    subgraph Container["Persistent deployment"]
-        CB["Bridge container<br/>internal 8765/8766"]
-        CT["Tunnel sidecar<br/>host process"]
-        HN["Node service<br/>host native"]
-        HA["Adapter services<br/>host native"]
-        CT --- CB --> HN --> HA
+    subgraph Other["Other host"]
+        P["Paired Node service<br/>dials the gateway"]
     end
+    P -->|"TLS Node gateway 8767"| B
 ```
 
-Native evaluation runs Bridge, Node, and adapters as host processes on
-loopback. Persistent deployment runs only the Bridge control plane (plus the
-tunnel sidecar) in Compose; Node and adapters stay native with identical
-absolute workspace paths. A loopback-only Node is not reachable from the
-container; Docker Desktop uses an explicit non-loopback Node host with a
-firewall review and the `host.docker.internal` Bridge-side URL. The Manager
-is loopback-only in both modes and is never tunnelled.
+The Bridge and its embedded Node run as one host process; agent plugins are
+its child processes. A Node on another host runs as its own service and
+dials the Bridge's Node gateway, so absolute workspace paths stay those of
+the host that owns them. The Manager is loopback-only and is never
+tunnelled.
 
 ## State ownership and failure domains
 
@@ -264,7 +268,7 @@ is loopback-only in both modes and is never tunnelled.
 - A slow or hung Node or adapter delays only work on the same key. The
   Bridge's database lock covers SQLite statements only and is never held
   across Node or adapter I/O. File writes and handoff publication serialize
-  per workspace, run starts per workspace route, and steer, queue and
+  per workspace, run starts per workspace route, and run input and
   interaction answers per run. Reads, cancels, the Manager and other
   workspaces keep working. The MCP endpoint accepts up to 4 concurrent tool
   calls, so several hung calls can still fill it until their timeouts.
@@ -274,28 +278,25 @@ is loopback-only in both modes and is never tunnelled.
 
 ## Service lifecycle
 
-- macOS: per-user LaunchAgents under `~/Library/LaunchAgents/`, starting
-  after user login and restarting on unexpected exit.
-- Linux: system units under `/etc/systemd/system/`, starting at boot and
-  surviving logout, with `User=`/`Group=` keeping the process non-root as
-  the installing user. Install commands run without leading `sudo`; the
-  backend uses only fixed narrow `sudo` operations. Journal inspection is
-  manual for normal troubleshooting; routine service status does not read
-  journal text.
-- Service artifacts contain only the stable launcher
-  (`workspace-bridge --state <state> serve` or
-  `workspace-bridge node --state <state> serve`), never tokens or project
-  roots. Agent plugins are child processes of the Node, not services. `service status` is read-only and combines OS state with a bounded
-  authenticated health check. `service uninstall` removes only the managed
-  unit; state, tokens, bindings, and logs remain.
-- Root mode is intentional only: a root-owned Node state managed as root
-  runs the Node, and every agent plugin it starts, as root. Mixed-ownership
-  invocations are rejected, never converted.
+- One module, `os_service.py`, writes the service definition for both the
+  Bridge and the Node. The default is a user service: a LaunchAgent under
+  `~/Library/LaunchAgents/` on macOS, a systemd user unit under
+  `~/.config/systemd/user/` on Linux (starting at boot only with lingering
+  enabled). `--root`, run as root, installs a LaunchDaemon or a system unit
+  that starts at boot; the service still runs as the account that owns the
+  state folder.
+- Definitions contain only the launcher (`python -m workspace_bridge.cli
+  --state <state> serve` or the Node equivalent) and `WB_SERVICE=1`, never
+  tokens or project roots, plus a marker line; a definition without the
+  marker is never replaced or removed. Agent plugins are child processes of
+  the Node, not services. `service status` combines OS state with a bounded
+  health check. `service uninstall` removes only the definition; state,
+  keys, bindings, and logs remain.
 
 ## Release identity and skew
 
 Every deployed component exposes a bounded content-addressed identity with
-product `workspace-bridge`, product version `0.3.0`, component name and
+product `workspace-bridge`, the product version, component name and
 version, and a deterministic build ID over production inputs only. The
 product version is the release; the component version is that component's
 own version; adapter and native semantic versions stay separate fields.
@@ -308,12 +309,12 @@ without making an otherwise valid descriptor unavailable.
 
 ## Logging and extension points
 
-- Docker Bridge and tunnel logs use `json-file` rotation (`10m x3`).
-- macOS managed services bound each output stream to a 10 MiB active file
-  plus two 10 MiB archives under private state via a package-owned guard for
-  managed units only. Linux units log to the host journal; retention is the
-  host journald policy. Logs carry bounded IDs, states, counts, and codes
-  only — never prompts, results, paths, scopes, credentials, or raw bodies.
+- A managed service writes its own log, `logs/bridge.log` or `logs/node.log`
+  in its state folder, rotated at 10 MiB with two previous files kept. The
+  service manager's stdout/stderr file only catches what escapes logging and
+  is emptied at start past 1 MiB. Foreground `serve` logs to stderr. Logs
+  carry bounded IDs, states, counts, and codes only — never prompts, results,
+  paths, scopes, credentials, or raw bodies.
 - Each agent plugin's stderr goes to a private `plugin.log` in its folder,
   capped at 5 MiB with one previous file kept.
 - Runtime extension points: new notification channels implement the channel

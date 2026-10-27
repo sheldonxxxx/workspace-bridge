@@ -1,9 +1,9 @@
 # Setup
 
 Single canonical human installation and configuration guide for Workspace
-Bridge `0.3.0`. Follow it top to bottom. For container detail see
-[Docker](DOCKER.md); for daily operation see [Operations](OPERATIONS.md);
-for Pi/Codex/Claude Code specifics see [Runtimes](RUNTIMES.md).
+Bridge. Follow it top to bottom. For daily operation see
+[Operations](OPERATIONS.md); for Pi/Codex/Claude Code specifics see
+[Runtimes](RUNTIMES.md).
 
 If an AI/coding agent is performing this work for you, it follows
 [Agent setup](AGENT_SETUP.md) instead. That runbook states what the agent
@@ -33,9 +33,7 @@ outside mapped projects.
 - macOS or Linux (native Windows is unsupported; use WSL2).
 - Python 3.11+ and `uv` are always needed for Workspace Bridge itself.
   Node 22.19+ with npm is needed only for the Pi adapter (and for
-  contributor/web work), not for a Codex-only deployment. Docker
-  Engine/Desktop with Compose v2 is needed only if you run the Bridge in a
-  container.
+  contributor/web work), not for a Codex-only deployment.
 - Decide: a projects parent that already exists (for example
   `$HOME/Projects`), a Bridge state directory, a Node state directory, and
   distinct host ports in 1024–65535 for MCP and Manager.
@@ -43,10 +41,6 @@ outside mapped projects.
   Bridge `$HOME/.local/state/workspace-bridge`, Node
   `$HOME/.local/state/workspace-bridge-node`. Agent plugins keep their state
   inside the Node state folder.
-
-Docker is optional. Compose builds the Bridge image locally by default, and each
-release also publishes a multiarch image to
-`ghcr.io/sheldonxxxx/workspace-bridge`; see [Docker](DOCKER.md).
 
 ## 2. Install packages
 
@@ -74,125 +68,82 @@ workspace-bridge --state "$HOME/.local/state/workspace-bridge" doctor --offline
 
 ## 3. Credentials you will handle
 
-The Manager uses an admin password; HTTP Node and MCP access use tokens.
-Paired Nodes use keys, and agent plugins need no credential of their own.
-Token creation, storage, and local reveal are distinct steps: reveal commands only read back a stored secret, they do
-not create it. Treat initial creation output as sensitive and local, and
-never paste tokens into chat, project files, or handoffs.
+The Manager uses an admin password and MCP access uses one shared token.
+Paired Nodes use keys, the embedded Node needs nothing, and agent plugins need
+no credential of their own. Treat creation output as sensitive and local, and
+never paste tokens or pairing strings into chat, project files, or handoffs.
 
-| Token | Created / stored | How to reveal / enter locally |
+| Credential | Created / stored | How to use it locally |
 |---|---|---|
 | Manager admin account | Username `admin`; temporary password `admin`; salted scrypt hash in private `admin-account.json` | Sign in locally and change the password on first login; recover with `workspace-bridge reset-admin-password` |
-| Node token | Created during `workspace-bridge node --state <node-state> init`, stored privately in Node state (`node-token`) | Reveal locally with `workspace-bridge node --state <node-state> show-token`; enter in the Manager Node form (or `POST /api/nodes`); stored in private Bridge SQLite (mode `0600`) |
+| Pairing string | `workspace-bridge pairing create --name <node>` on the Bridge host, or `POST /api/nodes/pairings`; single use, valid 10 minutes, shown once | Redeem on the Node host with `workspace-bridge node --state <node-state> pair 'wbpair1:...'`; the Node then keeps its own key |
 | Shared MCP gateway token | Created or rotated by the Manager or `POST /api/bridge {"operation":"rotate_token"}` while serving, or by `workspace-bridge rotate-bridge-token` while stopped; stored in Bridge state | Copy the displayed value locally into the tunnel environment file (mode `0600`) as the `X-Bridge-Token` header; never tunnel the Manager |
 
 Normal list and status APIs report only whether a token exists, never its
-value. Blank token fields on edit preserve the stored value. Rotation of the
-shared gateway credential also enables the gateway; update the one tunnel
-environment and restart the tunnel process.
+value. Rotation of the shared gateway credential also enables the gateway;
+update the one tunnel environment and restart the tunnel process.
 
-## 4. Path A — evaluation (native Bridge on loopback)
+## 4. Bridge and the Node on this machine
 
-Run everything natively on one host. Safe loopback defaults apply.
+The Bridge runs this machine's Node in its own process (the embedded Node),
+so a single host needs no separate Node service:
 
 ```sh
 workspace-bridge init
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects"
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
+workspace-bridge local-node enable --allow-root "$HOME/Projects"
 workspace-bridge serve
 ```
 
-Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password `admin`, change the password, and continue with
-section 6. Keep this terminal attached; stopping it stops the Bridge. To run
-the Bridge persistently instead, stop it and install it as a service, with any
-`WB_*` settings in `bridge.env` in its state folder (see
-[Operations](OPERATIONS.md#service-persistence)):
+`--allow-root` may repeat; it is the ceiling of folders the Node may expose.
+Open `http://127.0.0.1:8766/`, sign in as `admin` with temporary password
+`admin`, change the password, and continue with section 6. The embedded Node
+appears in the Manager with transport `local`. Keep this terminal attached;
+stopping it stops the Bridge. To run the Bridge persistently instead, stop it
+and install it as a service, with any `WB_*` settings in `bridge.env` in its
+state folder (see [Operations](OPERATIONS.md#service-persistence)):
 
 ```sh
 workspace-bridge service install
 workspace-bridge service status
 ```
 
-### Embedded Node and paired remote Nodes
+This installs a user service: a LaunchAgent on macOS, a systemd user unit on
+Linux. `service install --root`, run as root (for example with `sudo`),
+installs a system-wide service that starts at boot instead; the service still
+runs as the account that owns the state folder.
 
-Instead of a separate Node service on the Bridge host, the Bridge can run
-that machine's Node in its own process:
+## 5. Nodes on other machines
 
-```sh
-workspace-bridge local-node enable --allow-root "$HOME/Projects"
-```
-
-Restart `workspace-bridge serve` afterwards. The local Node appears in the
-Manager with transport `local` and needs no URL or token.
-
-A Node on another machine can dial the Bridge instead of listening for it.
-The Bridge's Node gateway (TLS, default port 8767) binds `127.0.0.1` unless
-`WB_NODE_GATEWAY_HOST` names another address, normally the Bridge's VPN
-(for example Tailscale) IP. Set `WB_NODE_GATEWAY_URL` when Nodes should use a
+A Node on another machine dials the Bridge; it opens no inbound port. The
+Bridge's Node gateway (TLS, default port 8767) binds `127.0.0.1` unless
+`WB_NODE_GATEWAY_HOST` names another address, normally the Bridge's VPN (for
+example Tailscale) IP. Set `WB_NODE_GATEWAY_URL` when Nodes should use a
 hostname, such as `wss://bridge.example.ts.net:8767/v1/node-gateway`. Then
-issue a single-use pairing string on the Bridge host (or with
-`POST /api/nodes/pairings` in the Manager API) and redeem it on the Node:
+issue a single-use pairing string on the Bridge host and redeem it on the
+Node:
 
 ```sh
 # Bridge host: valid for 10 minutes, shown once
 workspace-bridge pairing create --name laptop
-# Node host, after node init with its allowed roots:
+```
+
+```sh
+# Node host
 NODE_STATE="$HOME/.local/state/workspace-bridge-node"
+workspace-bridge node --state "$NODE_STATE" init --allow-root "$HOME/Projects"
 workspace-bridge node --state "$NODE_STATE" pair 'wbpair1:...'
-workspace-bridge node --state "$NODE_STATE" service restart
+workspace-bridge node --state "$NODE_STATE" service install
+workspace-bridge node --state "$NODE_STATE" service status
 ```
 
 The pairing string carries the gateway certificate fingerprint, so the first
-connection is already pinned. A paired Node opens no inbound port and its
-Node token is no longer used. It reconnects on its own after network loss
-without affecting runs. To give it a new key, issue
+connection is already pinned, and pairing refuses a Node whose version is
+incompatible with the Bridge. The Node registers itself; it reconnects on its
+own after network loss without affecting runs. To give it a new key, issue
 `pairing create --name laptop --replace` and pair again; runs started under
 the old key become interrupted. `doctor` cannot see paired connections and
-reports them as unknown; check them in the Manager.
-
-## 5. Path B — persistent deployment (container Bridge, native Node)
-
-Run the Bridge control plane in Compose and keep the Node, with its agent
-plugins, native on each data-plane host so absolute workspace paths match.
-Do not add the Node or its agents to Compose. See [Docker](DOCKER.md) for the
-full container reference; this section is the minimal supported flow.
-
-```sh
-cd /path/to/workspace-bridge
-python3 scripts/configure_docker.py --mcp-port 8875 --admin-port 8766
-docker compose config --quiet
-docker compose up -d --build
-docker exec workspace-bridge workspace-bridge --state /state doctor --offline
-```
-
-Fresh state initializes only into an empty directory. A half-deleted state
-directory fails closed; restore or wipe it fully.
-
-Initialize the native Node on its host. Host-only use keeps the loopback
-default; Docker Desktop reachability needs an explicit non-loopback listen
-host plus a host firewall review:
-
-```sh
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" init \
-  --allow-root "$HOME/Projects" --port 8770
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
-```
-
-For Docker Desktop, run the `init` above with `--host 0.0.0.0` instead and
-register the Node in the Manager as `http://host.docker.internal:8770`
-(using your configured port). A Node bound only to `127.0.0.1` is not
-assumed reachable from the Bridge container. Non-loopback binding exposes
-the authenticated Node on host interfaces: use a host firewall or private
-network and never put the Node behind the MCP tunnel.
-
-Save the Node token:
-
-```sh
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" show-token
-```
+reports them as unknown; check them in the Manager. The Node service takes
+`--root` the same way as the Bridge service.
 
 ## 6. Runtime adapters (native, per host)
 
@@ -211,7 +162,7 @@ workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" adapter
 ```
 
 For the Bridge machine's embedded Node use `workspace-bridge local-node
-adapter add ...` instead. `--projects-root` defaults to the Node's only
+adapter add ...` instead of `workspace-bridge node ... adapter add`. `--projects-root` defaults to the Node's only
 allowed root and must stay inside the allowed roots. Plugin settings are
 passed with `--set`, for example `--set binary=/opt/homebrew/bin/claude` or
 `--set setting_sources=user`; `plugin list` shows each plugin's settings.
@@ -228,18 +179,17 @@ Node state folder. The Bridge discovers the adapter on its next refresh.
 ### Platform notes
 
 Agent plugins run as child processes of the Node, as the Node's OS user,
-and are covered by the Node service (section 4). On macOS, privacy controls
+and are covered by the Node or Bridge service. On macOS, privacy controls
 (Files & Folders, external-storage access) can still block a workspace path:
 grant only the required access to the actual executable or interpreter when
 prompted. Full Disk Access is not mandatory when a narrower permission
-suffices. On Linux, check the Node service journal with
-`journalctl -u <unit-name>`; each plugin's own stderr is in its
-`plugin.log`.
+suffices. A service writes its own size-capped log to `logs/` in its state
+folder; each plugin's own stderr is in its `plugin.log`.
 
-Root mode is advanced only and intentional: a root-owned Node state managed
-as root runs the Node, and therefore every agent plugin it starts, as root
-with full filesystem authority. A root invocation against a user-owned state
-is rejected, never converted. See [Operations](OPERATIONS.md).
+A `--root` service still runs the Node, and every agent plugin it starts, as
+the account that owns the Node state. Only a root-owned state runs as root,
+with full filesystem authority; keep that for hosts that need it. See
+[Operations](OPERATIONS.md#service-persistence).
 
 ## 7. Register Node, workspaces, adapters, routes
 
@@ -250,10 +200,8 @@ read `/api/account`, change the password through `/api/account/password`
 (with JSON `current_password` and `new_password`), or sign out. Bearer tokens
 are not accepted by the Manager. Order matters:
 
-1. **Node:** add the Node URL with its token. Native evaluation uses the
-   loopback Node URL; container Bridge uses the host-reachable Node URL from
-   section 5. Embedded and paired Nodes (section 4) register themselves and
-   skip this step.
+1. **Node:** the embedded Node (section 4) and paired Nodes (section 5)
+   register themselves; check that each shows as connected.
 2. **Workspaces:** add one mapping per canonical Node-local root, then enable
    it and set write scope (`none`, the default, is read-only; `workspace`
    lets ChatGPT edit permitted files and run checks; handoffs and runs work
@@ -306,7 +254,7 @@ mcp:
     X-Bridge-Token: env:WORKSPACE_BRIDGE_TOKEN
 ```
 
-4. Run the tunnel with the official client (the bundled helper only prompts
+4. Run the tunnel with the official client (the included helper only prompts
    for secrets and launches that client when you invoke it; it is not an MCP
    tool and the server cannot invoke it).
 5. Connect ChatGPT to the authorized tunnel. The current OpenAI documented
@@ -327,22 +275,12 @@ workspace-bridge doctor --json
 workspace-bridge doctor --offline
 ```
 
-For container Bridge, run Doctor inside the Bridge container so it reads the
-same `/state` and container network context:
-
-```sh
-docker exec workspace-bridge workspace-bridge --state /state doctor
-docker exec workspace-bridge workspace-bridge --state /state doctor --json
-docker exec workspace-bridge workspace-bridge --state /state doctor --offline
-```
-
 Expected: overall `pass`, and every intended workspace/adapter route listed
 as ready with its default model. Offline mode skips adapter and network
 calls; readiness that depends on live freshness is then reported unknown and
-never ready. The Manager uses the same server-side report: only a ready
-exact route enables a prepared-handoff start. If diagnostics cannot refresh,
-the Manager marks readiness unavailable and disables starts while leaving
-other data visible.
+never ready. The Manager uses the same server-side report. If diagnostics
+cannot refresh, the Manager marks readiness unavailable while leaving other
+data visible.
 
 Also validate in a real client conversation with a nonsensitive sample
 project: discovery lists only enabled mappings, wrong-workspace IDs fail,
@@ -356,24 +294,23 @@ host, then explicitly restart its service. A package upgrade never restarts
 anything by itself. The Manager System / Versions view shows component
 versions and compatibility as information only; it performs no installs.
 
-Bridge and Manager (Docker):
-
-```sh
-git pull
-docker compose up -d --build
-```
-
-Node and its Claude Code, Codex and OpenCode plugins (shared Python package),
-plus the Pi plugin if you use it:
+The Bridge, the Node and the Claude Code, Codex and OpenCode plugins share one
+Python package; the Pi plugin is its own npm package:
 
 ```sh
 uv tool upgrade workspace-bridge
 npm install -g workspace-bridge-pi-host-adapter
 workspace-bridge --version
+workspace-bridge service restart
+```
+
+On a host with a paired Node, restart it too:
+
+```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
 ```
 
-Restarting the Node restarts its plugins. These steps do not update the
+Restarting a Node restarts its plugins. These steps do not update the
 native Codex, Claude Code, or Pi CLIs. Restarting interrupts any run in
 flight on that Node, so check for active runs first. See
 [Operations](OPERATIONS.md#manual-upgrades) for details.
@@ -384,25 +321,27 @@ Stop and remove services before deleting state. Service removal preserves
 state, tokens, bindings, and logs; deleting state is the destructive step.
 
 ```sh
+workspace-bridge service uninstall
+```
+
+```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
-docker compose down
 ```
 
 Then, only if you intend to lose local data, remove the state directories
 and the tunnel environment. Back up stopped private state first, preserving
 permissions and SQLite files; Bridge state holds the handoffs.
-Removing containers or units never deletes host bind directories by itself.
 
 ## 12. Troubleshooting first aid
 
 - Doctor reports `action_required` on a fresh Bridge for gateway credential
   and gateway enabled: create the shared credential in the Manager.
-- `service start` refuses an unmanaged unit: reinstall the managed unit
-  (`uninstall` then `install`) so the state-local manifest matches again.
-- Container Bridge cannot reach the Node: the Node URL must be reachable
-  from inside the container (`host.docker.internal` on Docker Desktop, a
-  real host address on Linux Engine). Loopback inside the container is the
-  container itself.
+- `service install` refuses to replace a launchd or systemd definition it
+  did not write (one without its marker line): remove that definition by
+  hand first.
+- A paired Node stays disconnected: check that the Node host reaches the
+  gateway address in `WB_NODE_GATEWAY_URL` (or the gateway host and port),
+  and read `logs/node.log` in the Node state folder.
 - An adapter fails its test: run `workspace-bridge node adapter test
   <adapter-id>` on the Node host and read the `plugin.log` it names.
 - Model saves fail: read the live catalog first; stale selectors are

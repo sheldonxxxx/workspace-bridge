@@ -8,8 +8,7 @@ you want ChatGPT to start bounded Pi runs through Workspace Bridge.
 npm install -g workspace-bridge-pi-host-adapter
 ```
 
-This package owns Pi agent sessions on the host. It is not a service and
-never runs in Docker: a Workspace Bridge Node starts
+This package owns Pi agent sessions on the host. It is not a service: a Workspace Bridge Node starts
 `workspace-bridge-pi-adapter --stdio` as a child process and talks to it over
 Agent Protocol v2 (JSON-RPC on stdin and stdout). It has no port and no
 token. Run without `--stdio`, it prints usage and exits.

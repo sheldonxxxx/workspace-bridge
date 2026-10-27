@@ -48,8 +48,8 @@ labels, quota information, callback destinations or approval responses.
 Events use the canonical `notification_events` IDs and journal, independently
 of Discord. `run.finished` projects recorded notification outcomes; it does not
 invent a new runtime outcome or a blocked event that the coordinator never
-recorded. An event is a signal to read `read_agent_run` and, when relevant,
-`read_agent_interaction` for authoritative current state. When the workspace
+recorded. An event is a signal to read `read_run`, which includes every
+interaction, for authoritative current state. When the workspace
 runs checks after each run, a succeeded or failed run's `run.finished` waits
 for them and carries their counts; the Discord notice shows the same counts.
 Check results and agent claims still need review. A pending interaction may already be stale.

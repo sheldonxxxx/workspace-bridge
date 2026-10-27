@@ -10,8 +10,6 @@ authority; prose never overrides them.
   configuration guide: evaluation and persistent paths, Bridge, Node,
   adapters, Manager routes, tunnel/client connection, verification, updates,
   uninstall. macOS and Linux notes are inline.
-- [Docker](DOCKER.md) — container Bridge control-plane detail. Read after
-  Setup, not instead of it.
 - [Operations](OPERATIONS.md) — state and backups, service management,
   manual upgrades, release identity, logging, notifications,
   recovery, troubleshooting, and validation status.

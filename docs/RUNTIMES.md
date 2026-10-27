@@ -13,7 +13,7 @@ revision. A `WorkspaceRoute` binds one
 workspace to one exact same-Node adapter ID with a security binding. Two
 instances may share a runtime type (for example two Pi plugins with
 different agent directories). MCP callers
-discover instances with `list_agent_adapters` and select by `adapter_id`;
+discover instances with `list_targets` and select by `adapter_id`;
 the runtime type never selects a destination and there is no fallback.
 
 ## Plugin adapters
