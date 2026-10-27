@@ -492,8 +492,9 @@ def test_prepare_handoff_default_and_run_prompt_have_no_blanket_denial(
     assert "secret" in lowered_default
     assert "scope" in lowered_default or "destructive" in lowered_default
     ws = service.workspace(ws_id)
-    prompt = service.run_coordinator._prompt(ws, {"id": job["id"]})
-    lowered_prompt = prompt.lower()
+    prompt = service.run_coordinator._prompt(ws, service.job(ws, job["id"]))
+    # The Bridge's own rules come before the handoff text, which may say anything.
+    lowered_prompt = prompt.split("\n\nHandoff ", 1)[0].lower()
     for denied in ("do not commit", "do not push", "do not tag",
                    "do not publish", "do not deploy"):
         assert denied not in lowered_prompt, denied

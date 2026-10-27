@@ -80,7 +80,8 @@ def test_read_in_every_write_scope_without_any_mutation(env, scope):
     (folder / "shot.png").write_bytes(image_bytes())
     before = {p.relative_to(env["root"]): p.read_bytes() for p in env["root"].rglob("*") if p.is_file()}
     check_preview(read(env))
-    check_preview(read(env, f"{HANDOFF}/shot.png"))
+    with pytest.raises(BridgeError):  # The folder 0.3 kept handoffs in stays hidden.
+        read(env, f"{HANDOFF}/shot.png")
     after = {p.relative_to(env["root"]): p.read_bytes() for p in env["root"].rglob("*") if p.is_file()}
     assert before == after
     assert env["service"].workspace(env["id"])["write_scope"] == scope
@@ -367,10 +368,10 @@ def test_image_read_never_changes_migration_or_writing(env, payload):
     (env["root"] / "image.png").write_bytes(image_bytes())
     read(env)
     assert env["service"].workspace(env["id"]) == before
-    with pytest.raises(BridgeError):
-        env["service"].call(env["id"], env["token"], "upload_image", {
-            "path": ".workspace-handoff/attachments/a.png", "mime_type": "image/png",
-            "data_base64": __import__("base64").b64encode(image_bytes()).decode()})
+    # Uploads go to Node state, so they leave the read-only policy alone.
+    env["service"].call(env["id"], env["token"], "upload_image", {
+        "mime_type": "image/png", "data_base64": __import__("base64").b64encode(image_bytes()).decode()})
+    assert env["service"].workspace(env["id"]) == before
     # Reopening existing state must preserve the explicitly selected no-write policy.
     other = Service(env["state"], env["config"])
     try: assert other.workspace(env["id"])["write_scope"] == "none"

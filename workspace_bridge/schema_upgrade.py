@@ -183,9 +183,9 @@ def add_interaction_decisions(db: sqlite3.Connection) -> None:
 def store_handoffs_in_bridge(db: sqlite3.Connection) -> None:
     """Keep handoff text in Bridge state and drop the handoff-only write scope.
 
-    Handoffs published before this keep ``content`` NULL; their documents
-    stay in the workspace's .workspace-handoff/ folder and are read from there.
-    ``plan_folder`` records where the Node keeps a handoff's read-only copy.
+    Handoffs published by 0.3 keep ``content`` NULL and can no longer be
+    read. ``plan_folder`` records where the Node keeps a handoff's read-only
+    copy, and ``uploads`` the uploaded images it copies there.
     """
     columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
     scoped = bool(list(db.execute("PRAGMA table_info(workspaces)")))
@@ -194,5 +194,7 @@ def store_handoffs_in_bridge(db: sqlite3.Connection) -> None:
             db.execute("ALTER TABLE jobs ADD COLUMN content TEXT")
         if columns and "plan_folder" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN plan_folder TEXT")
+        if columns and "uploads" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN uploads TEXT")
         if scoped:
             db.execute("UPDATE workspaces SET write_scope='none' WHERE write_scope='handoff'")

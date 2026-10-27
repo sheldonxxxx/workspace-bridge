@@ -18,14 +18,14 @@ from .browse import Browser
 from .keyed_locks import KeyedLocks
 from .checkpoint_store import CheckpointStore
 from .checks import CheckRunner
-from .plan_files import PlanStore
+from .plan_files import PlanStore, UploadStore
 from .worktrees import WorktreeStore
 from . import edit_journal
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, decode_image_upload, read_image,
                     selected_read_limit, sniff_image, validate_image)
-from .security import (BridgeError, HANDOFF, MAX_OUTPUT, SafeRoot, allowed, digest, file_text, handoff_allowed,
-                       redact, require_write_path, validate_excludes)
+from .security import (BridgeError, MAX_OUTPUT, SafeRoot, allowed, digest,
+                       redact, validate_excludes)
 from .wbrp import RuntimeClient
 from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
 from .plugin_protocol import builtin_manifests, load_manifest
@@ -340,14 +340,13 @@ class NodeService:
         # only, no installer probing, no login-shell PATH resolution,
         # no package-manager commands.
         return {"status": "ok", "protocol": 1, "node_version": __version__, "capabilities": [
-            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks",
+            "files", "search", "git", "handoff-uploads", "runtime-adapters", "checkpoints", "checks",
             "plan-files", "worktrees"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
-    WRITE_OPERATIONS = frozenset({"write_image", "apply_patch",
-                                  "undo_edit", "publish_handoff_artifacts",
+    WRITE_OPERATIONS = frozenset({"upload_image", "apply_patch", "undo_edit",
                                   "set_checks_config", "worktree_apply"})
 
     def workspace_call(self, operation: str, body: dict):
@@ -427,21 +426,19 @@ class NodeService:
             return {"path": args["path"], "sha256": sha, "lines": selected,
                     "total_lines": len(lines), "next_line": next_line,
                     "redacted": redacted, "trust": "untrusted_project_content"}
-        if operation == "write_image":
-            args = body["arguments"]
-            path = args.get("path")
-            scope = workspace.get("write_scope", "none")
-            require_write_path(path, workspace.get("excludes", []), scope=scope)
-            if not handoff_allowed(path, workspace.get("excludes", [])):
-                raise BridgeError("Image uploads require an allowed handoff path", "policy_denied")
-            if args.get("mime_type") not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"}:
+        if operation == "upload_image":
+            if self.read_only:
+                raise BridgeError("Uploads are unavailable in read-only mode", "plan_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != {"data_base64", "mime_type"}:
+                raise BridgeError("Invalid upload arguments", "invalid_arguments")
+            if args["mime_type"] not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"}:
                 raise BridgeError("Unsupported image MIME type", "invalid_arguments")
-            data = decode_image_upload(args.get("data_base64"))
-            with self.safe_root(ws) as safe:
-                result = safe.write_image(path, data, args["mime_type"],
-                                          args.get("expected_sha256"), write_scope=scope)
-            return {**result, "absolute_path": str(Path(ws["root"]) / path), "write_scope": scope,
-                    "note": "Original image bytes were written. No command was executed or agent started."}
+            data = decode_image_upload(args["data_base64"])
+            result = UploadStore(self.state).save(workspace["id"], data, args["mime_type"])
+            return {**result, "stored": "node_state", "embedded_metadata": "preserved",
+                    "pixel_redaction": "none", "validation": "first_frame_only",
+                    "note": "Kept by the Node, not in the workspace. Name it by sha256 in save_handoff.attachments."}
         if operation in ("apply_patch", "undo_edit"):
             args = body["arguments"]
             if not isinstance(args, dict) or set(args) != (
@@ -514,14 +511,6 @@ class NodeService:
             if operation == "checkpoint_purge":
                 return store.purge(ws, **args)
             return store.stats(ws)
-        if operation == "read_handoff_artifact":
-            args = body["arguments"]
-            path = args["path"]
-            if not handoff_allowed(path, workspace.get("excludes", [])):
-                raise BridgeError("Artifact path outside handoff folder")
-            with self.safe_root(ws) as safe:
-                data, _ = safe.read(path, artifact=True)
-            return {"data": __import__("base64").b64encode(data).decode("ascii")}
         if operation in WORKTREE_OPERATIONS:
             if self.read_only:
                 raise BridgeError("Worktrees are unavailable in read-only mode", "isolation_unavailable")
@@ -543,25 +532,36 @@ class NodeService:
             if self.read_only:
                 raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")
             args = body.get("arguments")
-            if not isinstance(args, dict) or set(args) != {"job_id", "documents"}:
+            if not isinstance(args, dict) or set(args) != {"job_id", "documents", "uploads"}:
                 raise BridgeError("Invalid plan arguments", "invalid_arguments")
-            return PlanStore(self.state).write(workspace["id"], args["job_id"], args["documents"])
+            return PlanStore(self.state).write(workspace["id"], args["job_id"], args["documents"],
+                                               args["uploads"])
         if operation == "hash_files":
             paths = body["arguments"].get("paths")
             attachments = body["arguments"].get("attachments", [])
             if not isinstance(paths, list) or len(paths) > 100 or not isinstance(attachments, list) or len(attachments) > 20:
                 raise BridgeError("Invalid context file list", "invalid_arguments")
             references = {}
+            uploads, seen = {}, set()
             for attachment in attachments:
-                if (not isinstance(attachment, dict) or set(attachment) != {"path", "description", "sha256"}
-                        or not isinstance(attachment["path"], str)
+                # A path names a workspace image; without one, sha256 names an upload.
+                if (not isinstance(attachment, dict)
+                        or set(attachment) - {"path"} != {"description", "sha256"}
+                        or not isinstance(attachment.get("path", ""), str)
                         or not isinstance(attachment["description"], str)
                         or not 1 <= len(attachment["description"]) <= 2000
                         or not isinstance(attachment["sha256"], str)
                         or not re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"])
-                        or attachment["path"] in references):
+                        or attachment.get("path", attachment["sha256"]) in seen):
                     raise BridgeError("Invalid handoff attachment", "invalid_arguments")
-                references[attachment["path"]] = attachment
+                seen.add(attachment.get("path", attachment["sha256"]))
+                if "path" in attachment:
+                    references[attachment["path"]] = attachment
+                else:
+                    name, data = UploadStore(self.state).find(workspace["id"], attachment["sha256"])
+                    metadata = validate_image(data, name, require_suffix=False)
+                    uploads[attachment["sha256"]] = {**attachment, **metadata, "bytes": len(data),
+                                                     "file": "attachments/" + name}
             if any(not isinstance(path, str) for path in paths):
                 raise BridgeError("Invalid context file list", "invalid_arguments")
             paths = list(dict.fromkeys([*paths, *references]))
@@ -585,34 +585,8 @@ class NodeService:
                             raise BridgeError("An attachment changed; re-read before planning", "stale_context")
                         metadata = validate_image(data, path, require_suffix=False)
                         inspected[path] = {**reference, **metadata, "bytes": len(data)}
-            return {"hashes": result, "attachments": [inspected[a["path"]] for a in attachments]}
-        if operation == "publish_handoff_artifacts":
-            args = body["arguments"]
-            files = args.get("files")
-            if not isinstance(files, dict) or len(files) != 3:
-                raise BridgeError("Invalid handoff publication", "invalid_arguments")
-            require_write_path(HANDOFF + "/jobs", workspace.get("excludes", []),
-                               scope=workspace.get("write_scope", "none"))
-            hashes = {}
-            prepared = {}
-            # Validate every document before opening SafeRoot for creation so a
-            # secret or malformed later document cannot leave a partial tree.
-            for name in ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md"):
-                content = files.get(name)
-                if not isinstance(content, str) or not handoff_allowed(
-                        args["base"] + "/" + name, workspace.get("excludes", [])):
-                    raise BridgeError("Invalid handoff publication", "invalid_arguments")
-                try:
-                    data = content.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-                file_text(data)
-                prepared[name] = data
-            with self.safe_root(ws) as safe:
-                for name in ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md"):
-                    data = prepared[name]
-                    hashes[name] = safe.create_artifact(args["base"] + "/" + name, data)
-            return {"hashes": hashes}
+            return {"hashes": result, "attachments": [
+                inspected[a["path"]] if "path" in a else uploads[a["sha256"]] for a in attachments]}
         raise BridgeError("Unknown Node workspace operation", "not_found")
 
     def adapters(self) -> list[dict]:

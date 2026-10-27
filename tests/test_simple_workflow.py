@@ -185,3 +185,22 @@ async def test_manager_only_offers_planning_documents(env, payload):
         for doc in ['BASELINE.json','result/RESULT.md','result/TESTS.json']:
             r = await c.get('/api/workspaces/'+env['id']+'/document',params={'job_id':job['id'],'document':doc})
             assert r.status_code == 400
+
+
+def test_a_handoff_saved_by_0_3_is_listed_but_never_read_or_run(env, payload):
+    from workspace_bridge import handoffs
+    service = env['service']
+    job = publish(env, payload)
+    with service.lock, service.db:
+        service.db.execute("UPDATE jobs SET content=NULL WHERE id=?", (job['id'],))
+    [listed] = service.call(env['id'], env['token'], 'list_handoffs', {})['handoffs']
+    assert listed['stored'] == 'workspace_folder' and 'save it again' in listed['note']
+    assert 'copy_prompt' not in listed and 'path' not in listed
+    with pytest.raises(BridgeError) as exc:
+        service.call(env['id'], env['token'], 'list_handoffs',
+                     {'job_id': job['id'], 'document': 'TASK.md'})
+    assert exc.value.code == 'unsupported_handoff'
+    stored = service.job(service.workspace(env['id']), job['id'])
+    with pytest.raises(BridgeError):
+        handoffs.agent_prompt(str(env['root']), stored)
+    assert service.write_plan(service.workspace(env['id']), stored) is None

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Breaking:** nothing is written to or read from `.workspace-handoff/`
+  any more. `upload_image` takes only `data_base64` and `mime_type`; the Node
+  keeps the image by hash in its own state, so read-only workspaces take
+  uploads too (up to 512 MiB per workspace). Name an upload in
+  `save_handoff.attachments` by its `sha256` without a `path`, and the plan
+  folder gets a read-only copy under `attachments/` for the agent; a
+  workspace image still takes its `path` and is referenced in place.
+  Handoffs saved by 0.3 in the workspace folder are still listed but can no
+  longer be read or run: save them again. The folder itself stays hidden.
 - **Breaking:** the MCP endpoint runs on the official MCP Python SDK
   (`mcp` 2.2) and serves both the 2025 protocol versions and 2026-07-28.
   The tool surface is 24 tools under new names: `grep` (was `grep_files`),

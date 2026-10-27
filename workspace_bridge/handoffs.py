@@ -3,17 +3,15 @@
 Handoffs live in Bridge state. The agent's prompt and the manual-dispatch
 prompt carry the full TASK, CONTEXT and ACCEPTANCE text, so nothing is
 written into the workspace and nothing appears in git status. The Node also
-keeps a read-only copy in its own state (``plan_folder``), which the prompt
-names so an agent that lost its context can re-read the plan. Handoffs
-published by earlier versions (``content`` NULL) still point at their
-documents in the workspace's .workspace-handoff/ folder.
+keeps a read-only copy in its own state (``plan_folder``), with any uploaded
+images under ``attachments/``, which the prompt names so an agent that lost
+its context can re-read the plan.
 """
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from .security import HANDOFF
+from .security import BridgeError
 
 DOCUMENTS = ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md")
 PROMPT_DOCUMENT = "PROMPT.md"
@@ -32,14 +30,17 @@ _MANUAL_REPORT = (
     "commit, push or delete unrelated files unless the handoff explicitly permits it. Stop when complete.")
 
 
-def documents(job: dict) -> dict[str, str] | None:
-    """The stored document text, or None for a handoff kept in the workspace."""
+# Handoffs 0.3 wrote into the workspace have no stored text.
+UNSUPPORTED = ("This handoff was saved by 0.3 in the workspace folder, which is no longer read; "
+               "save it again with save_handoff")
+
+
+def documents(job: dict) -> dict[str, str]:
+    """The stored document text."""
     content = job.get("content")
-    return json.loads(content) if content else None
-
-
-def legacy_folder(root: str, job_id: str) -> str:
-    return str(Path(root) / HANDOFF / "jobs" / job_id)
+    if not content:
+        raise BridgeError(UNSUPPORTED, "unsupported_handoff")
+    return json.loads(content)
 
 
 def _body(job: dict, docs: dict[str, str]) -> str:
@@ -70,11 +71,6 @@ def agent_prompt(root: str, job: dict, worktree: dict | None = None) -> str:
     if worktree is not None:
         head += _isolation(worktree)
     docs = documents(job)
-    if docs is None:
-        folder = legacy_folder(root, job["id"])
-        return (head + f"Read {json.dumps(folder + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md in the same "
-                "folder. Do not edit the handoff documents. " + _RULES +
-                "Report changed files, exact checks and outcomes, and remaining risks.")
     return (head + _RULES + "Report changed files, exact checks and outcomes, and remaining risks.\n\n"
             + _body(job, docs))
 
@@ -83,8 +79,4 @@ def manual_prompt(root: str, job: dict) -> str:
     """The prompt the user copies into a local agent themselves."""
     head = f"Work only in this project: {json.dumps(root)}. "
     docs = documents(job)
-    if docs is None:
-        folder = legacy_folder(root, job["id"])
-        return (head + f"Read {json.dumps(folder + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md. "
-                "Do not edit the handoff documents. " + _RULES + _MANUAL_REPORT)
     return head + _RULES + _MANUAL_REPORT + "\n\n" + _body(job, docs)

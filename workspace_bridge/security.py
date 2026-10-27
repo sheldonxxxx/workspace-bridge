@@ -9,7 +9,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import secrets
 import stat
 import time
 from collections import Counter
@@ -21,7 +20,8 @@ MAX_WRITE = 256 * 1024
 MAX_FILE = 512 * 1024
 MAX_FILES = 10000
 MAX_OUTPUT = 24000
-# Credential, VCS and Bridge-internal names are always denied.
+# Credential, VCS and Bridge-internal names are always denied, including the
+# handoff folder 0.3 kept in workspaces.
 ALWAYS_DENY_NAMES = frozenset({
     ".git", ".hg", ".svn", ".ssh", ".aws", ".azure", ".kube", ".gnupg",
     ".claude", ".mcp.json", HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc",
@@ -128,35 +128,15 @@ def allowed(path: str, extra: list[str] | None = None) -> bool:
     return not _extra_denied(path, ps, denies)
 
 
-def handoff_allowed(path: str, extra: list[str] | None = None, *, allow_root: bool = False) -> bool:
-    """Explicit handoff access only; secret/build names and admin exclusions still win."""
-    try:
-        ps = parts(path)
-    except BridgeError:
-        return False
-    if ps[0] != HANDOFF or (len(ps) == 1 and not allow_root):
-        return False
-    # Internal staging files must never be readable or caller-addressable.
-    if any(p.casefold().startswith(".wb-write-") for p in ps[1:]):
-        return False
-    if len(ps) > 1 and not allowed("/".join(ps[1:]), extra):
-        return False
-    return not _extra_denied(path, ps, _split_excludes(extra)[0])
+WRITE_SCOPES = frozenset({"none", "workspace"})
 
 
-WRITE_SCOPES = frozenset({"none", "handoff", "workspace"})
-
-
-def write_allowed(path: str, extra: list[str] | None = None, *, scope: str = "handoff") -> bool:
+def write_allowed(path: str, extra: list[str] | None = None, *, scope: str = "none") -> bool:
     """Fail closed. Scope is local administrator policy, never an MCP argument."""
-    if scope not in WRITE_SCOPES or scope == "none":
-        return False
-    if handoff_allowed(path, extra):
-        return True
     return scope == "workspace" and allowed(path, extra)
 
 
-def require_write_path(path: str, extra: list[str] | None = None, *, scope: str = "handoff"):
+def require_write_path(path: str, extra: list[str] | None = None, *, scope: str = "none"):
     if not write_allowed(path, extra, scope=scope):
         raise BridgeError("Write denied by workspace write scope or path exclusions", "policy_denied")
 
@@ -274,13 +254,10 @@ class SafeRoot:
         finally:
             os.close(fd)
 
-    def read(self, path: str, *, artifact: bool = False, limit: int = MAX_FILE,
+    def read(self, path: str, *, limit: int = MAX_FILE,
              limit_selector: Callable[[bytes], int] | None = None) -> tuple[bytes, os.stat_result]:
         ps = parts(path)
-        if artifact and ps[0] != HANDOFF:
-            raise BridgeError("Artifact path outside handoff folder")
-        policy = handoff_allowed if ps[0] == HANDOFF else allowed
-        if not policy(path, self.extra):
+        if not allowed(path, self.extra):
             raise BridgeError("Path excluded by workspace policy")
         with self.directory(ps[:-1]) as parent:
             try:
@@ -320,9 +297,7 @@ class SafeRoot:
     def walk(self, path: str = "", max_entries: int = MAX_FILES, *, include_dirs: bool = False,
              depth_limit: int | None = None, metadata: bool = False) -> tuple[list[dict], list[dict]]:
         prefix = parts(path, allow_empty=True)
-        # Root source browsing still omits handoffs; callers select that folder explicitly.
-        policy = (lambda p, e: handoff_allowed(p, e, allow_root=True)) if prefix and prefix[0] == HANDOFF else allowed
-        if prefix and not policy(path, self.extra):
+        if prefix and not allowed(path, self.extra):
             raise BridgeError("Directory excluded by workspace policy")
         entries, skipped = [], []
         count = 0
@@ -343,7 +318,7 @@ class SafeRoot:
                     names.append(ent.name)
             for name in sorted(names):
                 relative = f"{rel}/{name}" if rel else name
-                if not policy(relative, self.extra):
+                if not allowed(relative, self.extra):
                     continue
                 try:
                     st = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -375,134 +350,3 @@ class SafeRoot:
         with self.directory(prefix) as fd:
             visit(fd, path, 0)
         return sorted(entries, key=lambda x: x["path"]), skipped
-
-    def create_artifact(self, path: str, data: bytes) -> str:
-        """Append-only: caller supplies a server-generated fixed artifact path, never user paths."""
-        ps = parts(path)
-        if not handoff_allowed(path, self.extra):
-            raise BridgeError("Invalid or excluded handoff artifact")
-        file_text(data)
-        with self.directory(ps[:-1], create=True) as fd:
-            try:
-                out = os.open(ps[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                              0o600, dir_fd=fd)
-            except FileExistsError:
-                raise BridgeError("Artifact already exists; it was not overwritten", "conflict") from None
-            try:
-                view = memoryview(data)
-                while view:
-                    written = os.write(out, view)
-                    view = view[written:]
-                os.fsync(out)
-            finally:
-                os.close(out)
-            os.fsync(fd)
-        return digest(data)
-
-
-    def write_image(self, path: str, data: bytes, mime_type: str,
-                    expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:
-        from .media import MAX_INPUT_BYTES, validate_image
-        if not handoff_allowed(path, self.extra):
-            raise BridgeError("Image uploads require an allowed handoff path", "policy_denied")
-        result, metadata = self._write_file(
-            path, data, expected_sha256, write_scope=write_scope,
-            validator=lambda raw: validate_image(raw, path, mime_type), max_bytes=MAX_INPUT_BYTES)
-        return {**result, **metadata, "embedded_metadata": "preserved", "pixel_redaction": "none",
-                "validation": "first_frame_only"}
-
-    def _write_file(self, path: str, data: bytes, expected_sha256: str | None, *,
-                    write_scope: str, validator: Callable[[bytes], object], max_bytes: int) -> tuple[dict, object]:
-        """Bounded policy-scoped typed writes; no in-place truncation or link following.
-
-        The service lock serializes bridge calls. Hash checks detect ordinary stale
-        local edits, but no portable compare-and-rename can lock out a hostile same-
-        user process. Stop other writers; this is not an OS sandbox or a filesystem CAS.
-        """
-        require_write_path(path, self.extra, scope=write_scope)
-        if expected_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
-            raise BridgeError("Invalid expected_sha256", "invalid_arguments")
-        if len(data) > max_bytes:
-            raise BridgeError("File exceeds the configured write limit", "too_large")
-        validation = validator(data)  # Validate before creating even a parent directory.
-        ps = parts(path)
-        def signature(st):
-            return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-        with self.directory(ps[:-1], create=expected_sha256 is None) as parent:
-            try:
-                before = os.stat(ps[-1], dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                before = None
-            if before is None:
-                if expected_sha256 is not None:
-                    raise BridgeError("Expected file is missing; re-read before writing", "stale_evidence")
-            else:
-                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_dev != self.identity[0]:
-                    raise BridgeError("Only single-link regular files may be replaced")
-                if expected_sha256 is None:
-                    raise BridgeError("File exists; read it and supply expected_sha256 to replace it", "conflict")
-                previous, observed = self.read(path, limit=max_bytes)
-                if signature(before) != signature(observed) or digest(previous) != expected_sha256:
-                    raise BridgeError("File changed; re-read before writing", "stale_evidence")
-                validator(previous)  # Never replace a file of another content type.
-            temporary = ".wb-write-" + secrets.token_hex(16)
-            staged = False
-            try:
-                out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                              0o600, dir_fd=parent)
-                staged = True
-                try:
-                    view = memoryview(data)
-                    while view:
-                        written = os.write(out, view)
-                        if written <= 0:
-                            raise OSError("Write made no progress")
-                        view = view[written:]
-                    # Source replacement preserves ordinary permission bits (including
-                    # executable bits), never setuid/setgid/sticky. Handoff notes and
-                    # newly created files remain private. ACLs/xattrs are not copied.
-                    mode = (before.st_mode & 0o777) if before is not None and ps[0] != HANDOFF else 0o600
-                    os.fchmod(out, mode)
-                    os.fsync(out)
-                finally:
-                    os.close(out)
-                # Reopen from the pinned root to detect an ordinary moved/replaced parent.
-                with self.directory(ps[:-1]) as current_parent:
-                    a, b = os.fstat(parent), os.fstat(current_parent)
-                    if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-                        raise BridgeError("Parent directory changed; re-read before writing", "stale_evidence")
-                    if before is not None:
-                        previous, observed = self.read(path, limit=max_bytes)
-                        if signature(before) != signature(observed) or digest(previous) != expected_sha256:
-                            raise BridgeError("File changed during write; re-read", "stale_evidence")
-                        try:
-                            os.replace(temporary, ps[-1], src_dir_fd=parent, dst_dir_fd=parent)
-                        except OSError:
-                            raise BridgeError("File replacement failed; read the path before retrying", "write_failed") from None
-                        staged = False
-                    else:
-                        # Publish a complete file without overwriting a concurrently created name.
-                        try:
-                            os.link(temporary, ps[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-                            os.unlink(temporary, dir_fd=parent)
-                        except FileExistsError:
-                            raise BridgeError("File was created concurrently; re-read before writing", "conflict") from None
-                        except OSError:
-                            raise BridgeError("File creation could not be confirmed; read before retrying", "write_failed") from None
-                        staged = False
-                    try:
-                        os.fsync(parent)
-                    except OSError:
-                        raise BridgeError("File write durability could not be confirmed; read before retrying", "write_failed") from None
-            except FileExistsError:
-                raise BridgeError("File was created concurrently; re-read before writing", "conflict") from None
-            except OSError:
-                raise BridgeError("File write could not be confirmed; read the path before retrying", "write_failed") from None
-            finally:
-                if staged:
-                    try:
-                        os.unlink(temporary, dir_fd=parent)
-                    except FileNotFoundError:
-                        pass
-        return {"path": path, "sha256": digest(data), "bytes": len(data),
-                "created": before is None, "previous_sha256": expected_sha256}, validation

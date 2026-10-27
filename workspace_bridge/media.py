@@ -115,7 +115,7 @@ def image_capabilities() -> dict:
 
 def image_write_capabilities() -> dict:
     return {"tool": "upload_image", "formats": list(SUPPORTED_FORMATS),
-            "mime_types": list(IMAGE_MIME_TYPES.values()), "path_prefix": ".workspace-handoff/",
+            "mime_types": list(IMAGE_MIME_TYPES.values()), "stored": "node_state",
             "encoding": "base64", "max_input_bytes": MAX_INPUT_BYTES,
             "max_base64_chars": MAX_IMAGE_BASE64_CHARS, "max_request_bytes": MAX_IMAGE_REQUEST_BYTES,
             "max_pixels": MAX_PIXELS, "bytes": "original", "embedded_metadata": "preserved",

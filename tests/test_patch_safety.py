@@ -180,15 +180,19 @@ def test_existing_binary_content_not_edited(env, raw):
     assert p.read_bytes() == raw
 
 
-def test_explicit_general_browsing_no_default_source_scan_of_handoff(env):
-    note = env['root']/HANDOFF/'notes/plan.md'
+def test_the_folder_0_3_kept_handoffs_in_stays_hidden(env):
+    note = env['root']/HANDOFF/'jobs/job_1/TASK.md'
     note.parent.mkdir(parents=True)
     note.write_text('unique handoff phrase\n')
-    path = HANDOFF + '/notes/plan.md'
+    path = HANDOFF + '/jobs/job_1/TASK.md'
     assert all(not e['path'].startswith(HANDOFF) for e in call(env, 'list_dir', depth=4)['entries'])
     assert not call(env, 'grep', pattern='unique handoff phrase')['matches']
-    assert call(env, 'glob', path=HANDOFF, pattern='**/*.md')['entries'][0]['path'] == path
-    assert call(env, 'grep', path=HANDOFF, pattern='unique handoff phrase')['matches'][0]['path'] == path
+    for tool, args in [('glob', dict(path=HANDOFF, pattern='**/*.md')), ('read_file', dict(path=path, start_line=1, max_lines=20, expected_sha256=None))]:
+        with pytest.raises(BridgeError):
+            call(env, tool, **args)
+    with pytest.raises(BridgeError):
+        write(env, path=HANDOFF + '/jobs/job_1/notes.md')
+    assert note.read_text() == 'unique handoff phrase\n'
 
 
 def test_published_handoff_lives_in_bridge_state_not_the_workspace(env, payload):

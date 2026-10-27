@@ -73,7 +73,7 @@ class NodeClient:
             body, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         from .media import MAX_IMAGE_REQUEST_BYTES
         from .node_api import MAX_PATCH_REQUEST
-        request_limit = {"/v1/workspaces/write_image": MAX_IMAGE_REQUEST_BYTES,
+        request_limit = {"/v1/workspaces/upload_image": MAX_IMAGE_REQUEST_BYTES,
                          "/v1/workspaces/apply_patch": MAX_PATCH_REQUEST}.get(path, 2 * 1024 * 1024)
         if raw_body is not None and len(raw_body) > request_limit:
             raise BridgeError("Node request exceeds the payload limit", "too_large")
@@ -115,9 +115,9 @@ class NodeClient:
                              {"excludes": excludes, "write_scope": write_scope})
 
     def workspace(self, operation: str, workspace: dict, arguments: dict):
-        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_image",
-                   "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff", "read_handoff_artifact",
-                   "hash_files", "publish_handoff_artifacts", "checkpoint_capture",
+        allowed = {"list_dir", "read_file", "glob", "grep_files", "upload_image",
+                   "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff",
+                   "hash_files", "checkpoint_capture",
                    "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats",
                    "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan",
                    "worktree_create", "worktree_commit", "worktree_apply", "worktree_remove"}
@@ -131,9 +131,6 @@ class NodeClient:
             import base64
             return ImageReadResult(result["metadata"], base64.b64decode(result["data"], validate=True),
                                    result["mime_type"])
-        if operation == "read_handoff_artifact" and isinstance(result, dict):
-            import base64
-            return base64.b64decode(result["data"], validate=True)
         return result
 
     def list_adapters(self) -> dict:

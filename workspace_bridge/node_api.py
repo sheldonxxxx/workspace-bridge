@@ -22,7 +22,7 @@ MAX_RESPONSE = 20 * 1024 * 1024
 
 def request_limit(method: str, path: str) -> int:
     """Largest request body accepted for one Node route."""
-    if method == "POST" and path == "/v1/workspaces/write_image":
+    if method == "POST" and path == "/v1/workspaces/upload_image":
         return MAX_IMAGE_REQUEST_BYTES
     if method == "POST" and path == "/v1/workspaces/apply_patch":
         return MAX_PATCH_REQUEST

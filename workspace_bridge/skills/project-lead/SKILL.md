@@ -27,15 +27,15 @@ existing work.
 pagination; optionally set `max_image_dimension` (256–4096, default 2048). Only the
 first frame is shown, metadata is stripped, and visible secrets are not redacted.
 Claim visual inspection only when pixels actually reach you. File edits stay
-text-only. `upload_image` uploads original raster bytes under `.workspace-handoff/attachments/`
-with matching MIME/suffix and strict base64; it needs the edit scope. Uploads preserve
-metadata and do not redact pixels. Creation is exclusive; replacement requires the
-current source hash. No URL fetch is supported.
+text-only. `upload_image` uploads original raster bytes with a matching MIME type and
+strict base64; the Node keeps them in its own state, never in the workspace, so it
+works in read-only workspaces too. Uploads preserve metadata and do not redact pixels.
+No URL fetch is supported.
 
 ## Files and permissions
 Check `workspace_info.write_scope` before writing:
-- `none` (default): read-only. No file writes, image uploads or `run_checks`;
-  handoffs and runs still work.
+- `none` (default): read-only. No file writes or `run_checks`; handoffs, image
+  uploads and runs still work.
 - `workspace`: edit allowed files anywhere in the workspace and run checks.
 
 Scope is an administrator ceiling, not an instruction to edit. Never invent
@@ -59,11 +59,11 @@ Handoffs are kept in Bridge state, never in the workspace, and need no write
 scope; the run prompt and `copy_prompt` carry their full text and name a
 read-only copy (`plan_folder`) the agent re-reads after losing context.
 Optional `context_hashes` check named files at publication; they are not a baseline.
-For visual context, upload with `upload_image` to `.workspace-handoff/attachments/`,
-then pass `path`, `description` and returned `sha256` as `save_handoff.attachments`.
-Existing workspace images can use their `read_file` hash. Up to 20 references are
-checked at publication and recorded in CONTEXT.md, not copied. Stop the
-implementer before replacing dispatched references.
+For visual context, upload with `upload_image`, then pass `description` and the
+returned `sha256` (no `path`) in `save_handoff.attachments`; the image is copied
+into the plan folder's `attachments/` for the agent. An existing workspace image
+takes its `path` and `read_file` hash instead and is referenced in place. Up to 20
+images are checked at publication and listed in CONTEXT.md.
 Use `list_handoffs` to find earlier ones; with `job_id` and `document` it pages
 through one handoff's text.
 

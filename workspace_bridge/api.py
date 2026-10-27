@@ -71,9 +71,9 @@ class Files(Input):
 
 
 class HandoffAttachment(Input):
-    path: PathString = Field(description="Allowed workspace-relative raster image path, including uploaded handoff images. No URLs.")
+    path: PathString | None = Field(default=None, description="An allowed workspace-relative raster image. Omit for an image from upload_image, which sha256 names. No URLs.")
     description: str = Field(min_length=1, max_length=2000, description="Purpose of this reference image for the implementer.")
-    sha256: HashString = Field(description="Original-file SHA-256 from upload_image or read_file; verified at publication.")
+    sha256: HashString = Field(description="The sha256 upload_image returned, or a workspace image's current SHA-256 from read_file; verified at publication.")
 
 
 class Handoff(Input):
@@ -87,14 +87,14 @@ class Handoff(Input):
     context_hashes: dict[PathString, HashString] = Field(default_factory=dict, max_length=100,
         description="Optional hashes for specifically referenced files; checked only at publication. No workspace snapshot.")
     attachments: list[HandoffAttachment] = Field(default_factory=list, max_length=20,
-        description="Existing raster image references, recorded with descriptions and hashes in CONTEXT.md. Upload with upload_image first. No copy or launch.")
+        description="Reference images, recorded with descriptions and hashes in CONTEXT.md. Uploaded images are copied into the handoff's read-only plan folder for the agent; workspace images are referenced in place. No launch.")
 
     @model_validator(mode="after")
     def _unique_attachments(self):
-        paths = [attachment.path for attachment in self.attachments]
-        if len(paths) != len(set(paths)):
-            raise ValueError("Attachment paths must be unique")
-        if any(self.context_hashes.get(a.path, a.sha256) != a.sha256 for a in self.attachments):
+        keys = [attachment.path or attachment.sha256 for attachment in self.attachments]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Attachments must be unique")
+        if any(a.path and self.context_hashes.get(a.path, a.sha256) != a.sha256 for a in self.attachments):
             raise ValueError("Attachment and context hashes must agree")
         return self
 
@@ -120,12 +120,9 @@ class AgentRead(Input):
     run_id: RunID | None = Field(default=None, description="Read an isolated run's unapplied worktree instead of the workspace, with the same exclusions. Fails with not_isolated or worktree_unavailable once applied or discarded.")
 
 class UploadImage(Input):
-    path: PathString = Field(description="Workspace-relative raster filename inside .workspace-handoff/attachments/. This tool never writes source images.")
     data_base64: str = Field(min_length=1, max_length=MAX_IMAGE_BASE64_CHARS,
         description="Base64 of original raster bytes, at most 20 MiB decoded. No data-URL prefix or whitespace.")
-    mime_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"] = Field(description="Must match the decoded image format and filename extension.")
-    expected_sha256: HashString | None = Field(default=None,
-        description="Omit for create-only. Replacing an existing validated image requires its current original-file hash.")
+    mime_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"] = Field(description="Must match the decoded image format.")
 
 
 PATCH_TEXT = 1024 * 1024
@@ -339,7 +336,7 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "read_file": (AgentRead, "Read an allowed workspace file. UTF-8 text returns numbered lines; PNG/JPEG/WebP/GIF/BMP/TIFF return native MCP image previews (first frame only, metadata stripped, visible secrets NOT redacted). Images: omit offset/limit; optional max_image_dimension. Source hash verifies freshness; no PDF or SVG rendering.", True, True),
     "apply_patch": (ApplyPatch, "Change workspace files in one atomic step: edit (exact unique text), create, move, delete. Every existing file needs its current sha256; all changes apply or none do. Needs the edit write scope; exclusions apply; a change that adds new secret-like text is refused, while matches a file already holds may stay. Returns edit_id and the new hashes; the Node journals the earlier content so undo_edit can restore it. No execution.", False, False),
     "undo_edit": (UndoEdit, "Restore the files an apply_patch changed, if each still matches the hash that patch wrote; otherwise nothing changes and the changed paths are listed. Recorded as a new journal entry. Edits expire from the journal after 30 days or past 500 MiB per workspace. No execution.", False, False),
-    "upload_image": (UploadImage, "Upload a validated PNG/JPEG/WebP/GIF/BMP/TIFF image for a handoff, inside .workspace-handoff/attachments/, through the authoritative Node. Needs the edit write scope. MIME and suffix must match bytes; 20 MiB/40MP, first frame validation. Original bytes and embedded metadata are preserved; visible secrets are NOT redacted. Create-only unless current expected_sha256 is supplied. No source image writes, URL fetch, execution or permission changes.", False, False),
+    "upload_image": (UploadImage, "Upload a validated PNG/JPEG/WebP/GIF/BMP/TIFF image for a handoff. The authoritative Node keeps it by hash in its own state, never in the workspace, so read-only workspaces take uploads too; up to 512 MiB of uploads per workspace. Returns sha256: name it in save_handoff.attachments (without a path) and the plan folder gets a read-only copy for the agent. MIME must match bytes; 20 MiB/40MP, first frame validation. Original bytes and embedded metadata are preserved; visible secrets are NOT redacted. No URL fetch, execution or permission changes.", False, True),
     "git_status": (GitStatus, "Read fixed-function Git status for the selected workspace. Shows only paths allowed by workspace policy; excluded changes are aggregate counts. No repository mutation.", True, True),
     "git_diff": (GitDiff, "Read a bounded patch from HEAD, the index, or the worktree for policy-allowed changed paths, or with mode run and run_id the changes between that run's pre and post checkpoints. A run diff covers the run's time window: your own apply_patch edits from that window are listed in chatgpt_edits, overlapping runs in checkpoint.overlapping_runs, and other people's edits are included without attribution. No caller-supplied Git commands, refs, or options; patch content is secret-redacted and paginated.", True, True),
     "run_checks": (RunChecks, "Run named checks the user configured for this workspace on its Node (for example test or lint) and return each one's status, exit code, duration and a redacted output tail. You choose names only; commands, folders and timeouts come from the user's checks.toml, which no tool can edit. Omit names to list the configured checks; pass check_id to read checks still running. Needs the edit write scope. Output is untrusted text.", False, False),
@@ -357,7 +354,7 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "answer_interaction": (AnswerInteraction, "Answer a run's pending interaction once, with its exact choice_id or form answers, recording decided_by and a reason in the approval log. The Bridge rechecks that the native request is still live before forwarding. A second answer fails with already_answered; a stale request fails with interaction_stale.", False, False),
 }
 # Tool-effect annotations for open-world/agent operations.
-DESTRUCTIVE_TOOLS = frozenset({"apply_patch", "undo_edit", "upload_image", "start_run", "send_run_input",
+DESTRUCTIVE_TOOLS = frozenset({"apply_patch", "undo_edit", "start_run", "send_run_input",
                                "answer_interaction", "apply_run", "discard_run"})
 OPEN_WORLD_TOOLS = frozenset({"list_targets", "start_run", "list_runs", "read_run", "run_log",
                               "send_run_input", "cancel_run", "answer_interaction"})
