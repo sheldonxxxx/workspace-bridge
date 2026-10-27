@@ -10,7 +10,7 @@ import {
 } from "./api";
 import { appendOlder, mergeNewest, newestPageHasGap } from "./feed-state";
 import { createRefreshQueue } from "./refresh-queue";
-import { useRunEvents } from "./useRunEvents";
+import { useManagerEvents } from "./useManagerEvents";
 
 type Feed = "activity" | "executions";
 type Feeds = {
@@ -158,10 +158,10 @@ export function useRunInspector(
   const changed = useCallback(() => {
     if (!document.hidden) sessionRef.current?.queue.schedule();
   }, []);
-  useRunEvents({
+  useManagerEvents({
     enabled: Boolean(runId),
     runId,
-    onChange: changed,
+    onRun: changed,
     onReset: changed,
   });
 

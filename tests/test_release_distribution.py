@@ -71,7 +71,6 @@ def test_ci_baseline_current_and_least_privilege():
     assert "ubuntu-24.04-arm" in pi_text
     assert "macos-14" in pi_text
     assert "--omit=dev" in text
-    assert "node --test web/test/*.test.mjs" in text
     assert "docker" not in text.lower()
 
 

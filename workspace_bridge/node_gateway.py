@@ -299,6 +299,8 @@ class NodeGateway:
                 pass
         await websocket.send_json({"type": "ready", "node_id": node_id})
         await asyncio.to_thread(self._record, node_id, "connected")
+        # The reader below must run to deliver this call's replies.
+        observed = asyncio.create_task(asyncio.to_thread(self._observe, node_id))
         heartbeat = asyncio.create_task(self._heartbeat(connection))
         try:
             while True:
@@ -315,8 +317,10 @@ class NodeGateway:
                 if current:
                     del self._connections[node_id]
             # A replaced socket must not mark the Node's newer connection gone.
+            observed.cancel()
             if current:
                 await asyncio.to_thread(self._record, node_id, "disconnected")
+                self.service.push_state()
 
     async def _pair(self, websocket: WebSocket, message: dict, nonce: str,
                     fingerprint: str) -> None:
@@ -341,6 +345,12 @@ class NodeGateway:
             await asyncio.sleep(HEARTBEAT_SECONDS)
             if not connection.closed:
                 await asyncio.to_thread(self._record, connection.node_id, "seen")
+
+    def _observe(self, node_id: str) -> None:
+        try:
+            self.service.node_registry.observe(node_id)
+        except Exception:  # noqa: BLE001 - a Node that cannot be read stays "unavailable"
+            pass
 
     def _record(self, node_id: str, event: str) -> None:
         """Persist connection state for Doctor and the Manager; never raises."""

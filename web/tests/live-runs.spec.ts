@@ -25,11 +25,11 @@ type FeedPage = {
   executions?: Execution[];
   next_cursor: Cursor | null;
 };
-type FakeSource = EventTarget & {
+type FakeSource = {
   url: string;
-  readyState: number;
   closed: boolean;
-  listenerCount: number;
+  onmessage: ((event: MessageEvent) => void) | null;
+  onclose: (() => void) | null;
 };
 type StreamingWindow = Window & { __runSources: FakeSource[] };
 
@@ -68,38 +68,26 @@ function execution(id: string, title: string): Execution {
 
 async function mockApi(page: Page) {
   await page.addInitScript(() => {
-    class FakeEventSource extends EventTarget {
+    class FakeWebSocket {
       static CONNECTING = 0;
       static OPEN = 1;
-      static CLOSED = 2;
+      static CLOSED = 3;
       readyState = 1;
       closed = false;
-      listenerCount = 0;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: (() => void) | null = null;
       constructor(public url: string) {
-        super();
         (
-          window as unknown as { __runSources: FakeEventSource[] }
+          window as unknown as { __runSources: FakeWebSocket[] }
         ).__runSources.push(this);
-        queueMicrotask(() => this.dispatchEvent(new Event("open")));
-      }
-      addEventListener(...args: Parameters<EventTarget["addEventListener"]>) {
-        this.listenerCount++;
-        super.addEventListener(...args);
-      }
-      removeEventListener(
-        ...args: Parameters<EventTarget["removeEventListener"]>
-      ) {
-        this.listenerCount--;
-        super.removeEventListener(...args);
       }
       close() {
         this.closed = true;
-        this.readyState = 2;
+        this.readyState = 3;
       }
     }
-    (window as unknown as { __runSources: FakeEventSource[] }).__runSources =
-      [];
-    window.EventSource = FakeEventSource as unknown as typeof EventSource;
+    (window as unknown as { __runSources: FakeWebSocket[] }).__runSources = [];
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     // Feed pagination is driven explicitly in these regression tests.
     window.IntersectionObserver = class {
       observe() {}
@@ -253,7 +241,7 @@ async function mockApi(page: Page) {
 
 async function emit(
   page: Page,
-  type: "run.changed" | "reset" | "error",
+  type: "run.changed" | "state.changed" | "reset" | "error",
   runId?: string,
   repeats = 1,
 ) {
@@ -261,21 +249,21 @@ async function emit(
     ({ type, runId, repeats }) => {
       const sources = (window as unknown as StreamingWindow).__runSources;
       for (const source of sources) {
-        const selected = new URL(source.url, location.origin).searchParams.get(
-          "run_id",
-        );
-        if (source.closed || (selected && runId && selected !== runId))
-          continue;
-        for (let index = 0; index < repeats; index++)
-          source.dispatchEvent(
-            type === "error"
-              ? new Event("error")
-              : new MessageEvent(type, {
-                  data: JSON.stringify(
-                    type === "run.changed" ? { run_id: runId } : {},
-                  ),
-                }),
-          );
+        if (source.closed || !source.url.endsWith("/api/ws")) continue;
+        for (let index = 0; index < repeats; index++) {
+          if (type === "error") {
+            source.closed = true;
+            source.onclose?.();
+          } else {
+            source.onmessage?.(
+              new MessageEvent("message", {
+                data: JSON.stringify(
+                  type === "run.changed" ? { type, run_id: runId } : { type },
+                ),
+              }),
+            );
+          }
+        }
       }
     },
     { type, runId, repeats },
@@ -294,11 +282,13 @@ async function openAlpha(page: Page) {
 }
 async function sourceCounts(page: Page) {
   return page.evaluate(() =>
-    (window as unknown as StreamingWindow).__runSources.map((source) => ({
-      url: source.url,
-      closed: source.closed,
-      listeners: source.listenerCount,
-    })),
+    (window as unknown as StreamingWindow).__runSources
+      .filter((source) => source.url.endsWith("/api/ws"))
+      .map((source) => ({
+        url: source.url,
+        closed: source.closed,
+        listening: source.onmessage !== null,
+      })),
   );
 }
 
@@ -485,7 +475,7 @@ test("older activity and execution pages and cursors survive live refreshes", as
     ).toEqual([first.id, second.id]);
 });
 
-test("closing and switching runs discards a delayed snapshot and closes its subscription", async ({
+test("closing and switching runs discards a delayed snapshot and keeps one socket", async ({
   page,
 }) => {
   const mock = await mockApi(page);
@@ -519,24 +509,20 @@ test("closing and switching runs discards a delayed snapshot and closes its subs
   release();
   await emit(page, "reset", BETA);
   await expect(page.getByRole("dialog")).not.toContainText("Stale Alpha");
-  const alphaSource = (await sourceCounts(page)).find((source) =>
-    source.url.includes(ALPHA),
-  );
-  expect(alphaSource).toMatchObject({ closed: true, listeners: 0 });
+  // Every subscriber shares the Manager's one socket.
+  expect(
+    (await sourceCounts(page)).filter((source) => !source.closed),
+  ).toHaveLength(1);
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Close", exact: true })
     .click();
-  const betaSources = (await sourceCounts(page)).filter((source) =>
-    source.url.includes(BETA),
-  );
-  expect(betaSources.length).toBeGreaterThan(0);
   expect(
-    betaSources.every((source) => source.closed && source.listeners === 0),
-  ).toBe(true);
+    (await sourceCounts(page)).filter((source) => !source.closed),
+  ).toHaveLength(1);
 });
 
-test("global hints preserve run pagination and auto-refresh controls the subscription", async ({
+test("global hints preserve run pagination and the live switch controls the socket", async ({
   page,
 }) => {
   const mock = await mockApi(page);
@@ -570,20 +556,16 @@ test("global hints preserve run pagination and auto-refresh controls the subscri
         ?.searchParams.get("offset"),
     )
     .toBe("50");
-  await page
-    .getByRole("switch", { name: "Auto-refresh data every 30 seconds" })
-    .click();
+  await page.getByRole("switch", { name: "Update data live" }).click();
   expect(
     (await sourceCounts(page)).every(
-      (source) => source.closed && source.listeners === 0,
+      (source) => source.closed && !source.listening,
     ),
   ).toBe(true);
   const reads = mock.count("/api/runs");
   await emit(page, "reset");
   expect(mock.count("/api/runs")).toBe(reads);
-  await page
-    .getByRole("switch", { name: "Auto-refresh data every 30 seconds" })
-    .click();
+  await page.getByRole("switch", { name: "Update data live" }).click();
   await emit(page, "reset");
   await expect.poll(() => mock.count("/api/runs")).toBeGreaterThan(reads);
 });
@@ -720,7 +702,8 @@ test("a full page of new runs restarts list pagination and preserves pages on re
   await expect(
     page.locator(".run-row").filter({ hasText: "Beta" }),
   ).toBeVisible();
-  await page.clock.fastForward(30_000);
+  await emit(page, "state.changed");
+  await page.clock.runFor(200);
   await expect(
     page.locator(".run-row").filter({ hasText: "Beta" }),
   ).toBeVisible();
@@ -803,4 +786,19 @@ test("run changes panel lists changed paths and pages a run diff", async ({
   await expect(panel.locator(".run-diff")).toContainText("+second page");
   await expect(panel.getByRole("button", { name: "Load more" })).toHaveCount(0);
   await panel.screenshot({ path: "test-results/run-changes-panel.png" });
+});
+
+test("a state hint rereads the snapshot without polling", async ({ page }) => {
+  const mock = await mockApi(page);
+  await page.clock.install();
+  await page.goto("./#runs");
+  await expect(
+    page.locator(".run-row").filter({ hasText: "Alpha" }),
+  ).toBeVisible();
+  const reads = mock.count("/api/status");
+  await page.clock.fastForward(120_000);
+  expect(mock.count("/api/status")).toBe(reads);
+  await emit(page, "state.changed");
+  await page.clock.runFor(200);
+  await expect.poll(() => mock.count("/api/status")).toBeGreaterThan(reads);
 });

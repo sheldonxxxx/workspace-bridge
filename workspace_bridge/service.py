@@ -777,6 +777,13 @@ class Service:
                 (now(), workspace, action[:80], outcome[:80], node_id[:80], node_name[:80],
                  (adapter_id or "")[:80], adapter_name[:80], runtime_type[:40]))
             self.db.execute("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id),0)-10000 FROM events)")
+        self.push_state()
+
+    def push_state(self) -> None:
+        """Tell connected Managers that audited state moved; they reread REST."""
+        hub = getattr(getattr(self, "run_coordinator", None), "run_events", None)
+        if hub is not None:
+            hub.publish_state()
     def workspace(self, ident: str, require_enabled: bool = True) -> dict:
         with self.lock:
             row = self.db.execute("SELECT * FROM workspaces WHERE id=?", (ident,)).fetchone()

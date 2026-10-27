@@ -17,6 +17,7 @@ def _now() -> str:
 class NodeRegistry:
     def __init__(self, service):
         self.service = service
+        self._seen: dict[str, dict] = {}
 
     def rows(self) -> list[dict]:
         with self.service.lock:
@@ -57,28 +58,50 @@ class NodeRegistry:
             transport = self.service.local_node_transport(node_id)
         return NodeClient(row, timeout=timeout, transport=transport)
 
-    def list_public(self, *, probe: bool = False) -> list[dict]:
+    def list_public(self) -> list[dict]:
+        """Nodes as the Manager shows them, from state cached at connect time.
+
+        Nothing here talks to a Node: a paired Node is healthy while its
+        socket is up, and the gateway pushes a change when that flips.
+        """
         result = []
         for row in self.rows():
             view = self.public(row)
-            if probe and row["enabled"]:
-                try:
-                    state = self.client(row["id"], timeout=3).status()
-                    self.refresh_adapters(row["id"])
-                    view.update(health="healthy", protocol=state.get("protocol"),
-                                node_version=state.get("node_version"),
-                                capabilities=state.get("capabilities", []),
-                                allowed_root_count=len(state.get("allowed_roots", [])))
-                except BridgeError as exc:
-                    if exc.code == "adapter_identity_conflict":
-                        view.update(health="failed", error_code=exc.code,
-                                    error="Adapter identity conflict detected.")
-                    else:
-                        view.update(health="unavailable")
-            elif not row["enabled"]:
+            seen = self._seen.get(row["id"], {})
+            if not row["enabled"]:
                 view["health"] = "disabled"
+            elif seen.get("health") == "failed":
+                view.update(seen)
+            elif self.is_connected(row):
+                view.update(health="healthy", **seen)
+            else:
+                view["health"] = "unavailable"
             result.append(view)
         return result
+
+    def is_connected(self, row: dict) -> bool:
+        if row["id"] in getattr(self.service, "_node_transport", {}):
+            return True
+        if row["transport"] == "local":
+            return True
+        gateway = getattr(self.service, "node_gateway", None)
+        return row["transport"] == "paired" and gateway is not None and gateway.connected(row["id"])
+
+    def observe(self, node_id: str) -> None:
+        """Read a connected Node's status and adapters once and keep them for the Manager."""
+        try:
+            state = self.client(node_id, timeout=5).status()
+            self.refresh_adapters(node_id)
+        except BridgeError as exc:
+            # refresh_adapters has already recorded an identity conflict.
+            if exc.code != "adapter_identity_conflict":
+                self._seen.pop(node_id, None)
+        else:
+            self._seen[node_id] = {"protocol": state.get("protocol"),
+                                   "node_version": state.get("node_version"),
+                                   "capabilities": state.get("capabilities", []),
+                                   "allowed_root_count": len(state.get("allowed_roots", []))}
+        self.service.push_state()
 
     def update(self, node_id: str, payload: dict) -> dict:
         if not isinstance(payload, dict) or not payload or set(payload) - {"name", "enabled"}:
@@ -132,6 +155,7 @@ class NodeRegistry:
         except BridgeError as exc:
             return {"success": False, "code": exc.code,
                     "message": "Node connection could not be verified."}
+        self.observe(node_id)
         return {"success": True, "protocol": status.get("protocol"),
                 "capabilities": status.get("capabilities", []),
                 "allowed_root_count": len(status.get("allowed_roots", []))}
@@ -166,6 +190,8 @@ class NodeRegistry:
                     "SELECT node_id,revision FROM node_adapters WHERE adapter_id=?",
                     (adapter_id,)).fetchone()
                 if existing is not None and existing["node_id"] != node_id:
+                    self._seen[node_id] = {"health": "failed", "error_code": "adapter_identity_conflict",
+                                           "error": "Adapter identity conflict detected."}
                     raise BridgeError(
                         "Adapter identity is already owned by another Node",
                         "adapter_identity_conflict")
@@ -190,4 +216,4 @@ class NodeRegistry:
     def sync_all(self) -> None:
         for node in self.rows():
             if node["enabled"]:
-                self.refresh_adapters(node["id"])
+                self.observe(node["id"])

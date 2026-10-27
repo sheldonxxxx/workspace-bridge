@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Breaking:** the Manager's live updates move from server-sent events
+  (`/api/run-events`) to one WebSocket at `/api/ws` that carries only
+  `state.changed`, `run.changed` and `reset` hints. Node health is cached
+  when a Node connects and pushed to the Manager, so the 30-second probe is
+  gone. Signing out, expiry or a password change closes the socket.
+- The Manager pairs a Node with a one-time pairing string and adds adapters by
+  picking an agent plugin on a Node. The base URL, token, workspace-wide agent
+  switch, release and Versions screens of 0.3 are removed.
 - The Bridge records each MCP client name and protocol version the first
   time it sees them after a start, in its log and the Manager's event list.
 - **Breaking:** the Bridge state is schema v5, created whole on first start.

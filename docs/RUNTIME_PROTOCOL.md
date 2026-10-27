@@ -301,13 +301,14 @@ identifies the same native operation/request. Otherwise the run becomes
 `interrupted` or `orphaned` and its interactions become stale. It never replays
 a prompt or approval on recovery.
 
-The authenticated local Manager receives separate SSE invalidation hints at
-`GET /api/run-events`, optionally filtered by `run_id`. `run.changed` contains
-only a Bridge run ID; `reset` tells the UI to reload its REST projections.
-Every connection and reconnection starts with a reset, including when the
-client supplies `Last-Event-ID`; there is no durable SSE replay. Slow clients
-receive a reset when bounded queues overflow. Session expiry, logout, or
-password changes terminate existing streams. This Manager transport is
+The authenticated local Manager receives separate invalidation hints over one
+WebSocket at `/api/ws`. `run.changed` contains only a Bridge run ID,
+`state.changed` says audited state moved, and `reset` tells the UI to reload
+its REST projections. Every connection starts with a reset; there is no
+durable replay. Slow clients receive a reset when bounded queues overflow, and
+the number of sockets is bounded. Session expiry, logout, or password changes
+close existing sockets, and a message from the client closes its socket. This
+Manager transport is
 independent of [MCP run events](EVENTS.md) and their signed webhook outbox.
 
 The adapter may resume a conversation it created. It must never adopt a Pi TUI

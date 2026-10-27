@@ -126,7 +126,7 @@ def test_paired_node_serves_files_and_git_without_a_node_port(paired):
     listing = service.call(ws_id, token, "list_dir", {"path": "", "depth": 1})
     assert any(entry["path"] == "README.md" for entry in listing["entries"])
     assert service.call(ws_id, token, "git_status", {})["available"] is False
-    public = next(item for item in service.node_registry.list_public(probe=True)
+    public = next(item for item in service.node_registry.list_public()
                   if item["id"] == node_id)
     assert (public["transport"], public["health"]) == ("paired", "healthy")
 
@@ -139,10 +139,15 @@ def test_reconnect_keeps_revision_and_outage_fails_closed(paired):
     with pytest.raises(BridgeError) as outage:
         service.node_registry.client(node_id, timeout=2).status()
     assert outage.value.code == "node_unavailable"
+    # The Manager's view comes from the cached connection, without a probe.
+    health = lambda: next(item["health"] for item in service.node_registry.list_public()
+                          if item["id"] == node_id)
+    assert health() == "unavailable"
     paired["link"] = _Link(paired["node_service"], paired["node_state"])
     _wait(lambda: service.node_gateway.connected(node_id))
     assert service.node_registry.client(node_id, timeout=5).status()["status"] == "ok"
     assert service.node_registry.get(node_id)["revision"] == revision
+    _wait(lambda: health() == "healthy")
 
 
 def test_bridge_restart_is_a_clean_disconnect_and_reconnect(paired, caplog):

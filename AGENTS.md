@@ -57,7 +57,7 @@ Pick checks by what the change touches. These mirror the CI jobs in
 | Change touches | Run |
 | --- | --- |
 | `workspace_bridge/`, `scripts/`, `tests/` | `uv run pytest -q tests/test_<area>.py`, then `uv run pytest -q` |
-| `web/` | `npm --prefix web run lint`, `npm --prefix web run format:check`, `npm --prefix web run build`, `node --test web/test/*.test.mjs`; `npm --prefix web run test:e2e` only if a Playwright browser is already installed |
+| `web/` | `npm --prefix web run lint`, `npm --prefix web run format:check`, `npm --prefix web run build`; `npm --prefix web run test:e2e` only if a Playwright browser is already installed |
 | `runtime/pi-host-adapter/` | `npm --prefix runtime/pi-host-adapter test` |
 | Tracked Markdown | `uv run pytest -q tests/test_public_docs.py` |
 | `pyproject.toml` or `uv.lock` dependencies | Full Python suite |

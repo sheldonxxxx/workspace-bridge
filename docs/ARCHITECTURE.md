@@ -65,9 +65,10 @@ Component responsibilities:
 - `adapter_events.py`: bounded event readers keyed by exact Node/adapter
   authority. Native events trigger snapshot reconciliation, with periodic
   polling retained for recovery and adapters without event support.
-- `manager_events.py`: bounded, process-local Manager SSE hints containing
-  run IDs. Reconnects and queue overflow request a REST snapshot refresh;
-  this stream has no durable event replay or runtime content.
+- `manager_events.py`: bounded, process-local hints for the Manager's one
+  WebSocket (`/api/ws`): `state.changed`, `run.changed` with a run ID, and
+  `reset`. Reconnects and queue overflow send `reset` so the Manager rereads
+  REST; the socket has no durable replay and no runtime content.
 - `wbrp.py`: validated bounded runtime client for agent plugins.
 - `plugin_protocol.py` / `plugin_supervisor.py` / `plugin_host.py`: Agent
   Protocol v2 framing and manifests, the Node's plugin supervisor, and the
@@ -96,8 +97,8 @@ Component responsibilities:
   project-lead guidance served through the MCP skills extension.
 - `web/` plus `static/dist/`: Manager source and compiled assets served by
   Starlette on the same loopback listener. `web/src/features/runs/` separates
-  the Run Inspector, API loaders, feed presentation, state hooks, and SSE
-  subscriptions from the main Manager shell.
+  the Run Inspector, API loaders, feed presentation, state hooks, and the
+  WebSocket subscription from the main Manager shell.
 
 ## Node transports
 
@@ -220,10 +221,12 @@ operations become interrupted or orphaned with stale interactions.
 Adapters that advertise events have their native hints read through the Node.
 The coordinator validates instance/cursor and conversation/run bindings before
 refreshing authoritative snapshots. Committed projection changes notify the
-Manager through an authenticated, bounded SSE connection; unchanged snapshots
-emit no refresh hint. The UI reloads run details, interactions, activity, and
-execution projections through REST, coalesces bursts, and retains periodic
-refresh plus refresh on returning to the visible page. REST continues to own
+Manager through one authenticated, bounded WebSocket; unchanged snapshots
+emit no refresh hint. Node health is cached when a Node connects or
+disconnects and pushed the same way, so the Manager runs no periodic probe.
+The UI reloads run details, interactions, activity, and execution projections
+through REST, coalesces bursts, and rereads everything on a `reset` and when
+the page becomes visible again. REST continues to own
 all control operations. Loaded history stays available while the newest page
 overlaps it; a disjoint page after a large burst restarts pagination so records
 between the pages remain reachable. See [Runtime Protocol recovery](RUNTIME_PROTOCOL.md#recovery).

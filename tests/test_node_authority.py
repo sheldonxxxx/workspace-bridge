@@ -85,7 +85,7 @@ def test_refresh_adapters_rejects_cross_node_identity_and_surfaces_failure(env):
 
         cached = service.adapter_registry.get(collision_id)
         assert cached["node_id"] == node_a_id
-        public = next(item for item in service.node_registry.list_public(probe=True)
+        public = next(item for item in service.node_registry.list_public()
                       if item["id"] == record_b["id"])
         assert public["health"] == "failed"
         assert public["error_code"] == "adapter_identity_conflict"

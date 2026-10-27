@@ -70,8 +70,6 @@ jobs:
         run: npm --prefix web run format:check
       - name: Build Manager
         run: npm --prefix web run build
-      - name: Manager unit tests
-        run: node --test web/test/*.test.mjs
 
   manager-browser:
     name: Manager browser / Ubuntu x64

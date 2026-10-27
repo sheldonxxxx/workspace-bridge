@@ -13,10 +13,8 @@ type AdapterRow = {
   id: string;
   name: string;
   runtime_type: "pi" | "codex" | "claude" | "opencode";
-  base_url: string;
   enabled: boolean;
   revision: string;
-  has_token: boolean;
   node_id: string;
   node_name: string;
   healthy: boolean;
@@ -24,16 +22,35 @@ type AdapterRow = {
   native_version: string;
   model_policy: { configured: boolean; enabled: string[]; default: string };
   features?: Record<string, number>;
-  savedToken: string;
+  security: { enforces: string[]; native: boolean };
+  projects_root: string;
+  settings: Record<string, string>;
 };
+
+const FULL_ENFORCEMENT = [
+  "read_inside",
+  "read_outside",
+  "write_inside",
+  "write_outside",
+  "shell",
+  "web",
+  "extensions",
+  "protected",
+  "external_roots",
+  "commands",
+];
+const CODEX_ENFORCEMENT = [
+  "write_inside",
+  "write_outside",
+  "protected",
+  "commands",
+];
 
 function adapter(
   id: string,
   name: string,
   runtime_type: "pi" | "codex" | "claude" | "opencode",
-  base_url: string,
   model: string,
-  savedToken: string,
   node_id = LOCAL_NODE,
   node_name = "Local Mac",
 ): AdapterRow {
@@ -41,17 +58,20 @@ function adapter(
     id,
     name,
     runtime_type,
-    base_url,
     enabled: true,
     revision: `revision-${id.slice(-3)}`,
-    has_token: true,
     node_id,
     node_name,
     healthy: true,
     adapter_version: "1.4.0",
     native_version: "2026.09",
     model_policy: { configured: true, enabled: [model], default: model },
-    savedToken,
+    security:
+      runtime_type === "codex"
+        ? { enforces: CODEX_ENFORCEMENT, native: true }
+        : { enforces: FULL_ENFORCEMENT, native: false },
+    projects_root: "/Projects",
+    settings: {},
   };
 }
 
@@ -60,8 +80,7 @@ const workspace = {
   name: "Alpine archive",
   root: "/Projects/alpine-archive",
   enabled: true,
-  agent_enabled: true,
-  write_scope: "none" as const,
+  write_scope: "read-only" as const,
   excludes: "[]",
   node_id: LOCAL_NODE,
   node_name: "Local Mac",
@@ -118,7 +137,7 @@ const workspace = {
       enabled: true,
       is_default: false,
       security_binding: {
-        source: "runtime-config" as const,
+        source: "native" as const,
         revision: "codex-config-rev",
         status: "ready",
         resolved_summary: {
@@ -129,7 +148,7 @@ const workspace = {
       },
       profile: null,
       effective_security: {
-        source: "runtime-config",
+        source: "native",
         bound_revision: "codex-config-rev",
         freshness: "current",
         status: "ready",
@@ -223,7 +242,7 @@ const routeReport = {
       status: "blocked",
       summary: "Route has one blocker.",
       blockers: ["model.default_freshness"],
-      security_source: "runtime-config",
+      security_source: "native",
       profile: null,
       default_model_selector: "codex-5",
     },
@@ -231,7 +250,7 @@ const routeReport = {
 };
 
 function publicAdapter(row: AdapterRow) {
-  const { savedToken: _savedToken, ...publicRow } = row;
+  const { projects_root: _root, settings: _settings, ...publicRow } = row;
   return publicRow;
 }
 
@@ -300,30 +319,9 @@ async function mockApi(
   } = {},
 ) {
   const adapters = [
-    adapter(
-      LOCAL_PI,
-      "Local Pi",
-      "pi",
-      "http://host.docker.internal:8780",
-      "pi-local-fast",
-      "local-pi-private-token",
-    ),
-    adapter(
-      GPU_PI,
-      "GPU Pi",
-      "pi",
-      "http://gpu-host:8780",
-      "pi-gpu-large",
-      "gpu-pi-private-token",
-    ),
-    adapter(
-      LOCAL_CODEX,
-      "Local Codex",
-      "codex",
-      "http://host.docker.internal:8772",
-      "codex-5",
-      "codex-private-token",
-    ),
+    adapter(LOCAL_PI, "Local Pi", "pi", "pi-local-fast"),
+    adapter(GPU_PI, "GPU Pi", "pi", "pi-gpu-large"),
+    adapter(LOCAL_CODEX, "Local Codex", "codex", "codex-5"),
   ];
   if (options.zeroRoute || options.remoteAdapter) {
     adapters.push(
@@ -331,9 +329,7 @@ async function mockApi(
         REMOTE_PI,
         "GPU-only Pi",
         "pi",
-        "http://gpu-only:8780",
         "pi-gpu-only",
-        "gpu-only-private-token",
         GPU_NODE,
         "GPU Server",
       ),
@@ -447,12 +443,11 @@ async function mockApi(
     {
       id: LOCAL_NODE,
       name: "Local Mac",
-      base_url: "http://127.0.0.1:8770",
       enabled: true,
       revision: "node-local-rev",
-      has_token: true,
+      transport: "local",
       health: "healthy",
-      protocol: 1,
+      protocol: 2,
       node_version: "2026.09",
       capabilities: ["workspace", "runtime"],
       allowed_root_count: 1,
@@ -460,15 +455,60 @@ async function mockApi(
     {
       id: GPU_NODE,
       name: "GPU Server",
-      base_url: "http://gpu-node:8770",
       enabled: true,
       revision: "node-gpu-rev",
-      has_token: true,
+      transport: "paired",
+      connection: {
+        connected_at: "2026-09-25T08:00:00Z",
+        last_seen: "2026-09-25T08:05:00Z",
+        disconnected_at: null,
+      },
       health: "healthy",
-      protocol: 1,
+      protocol: 2,
       node_version: "2026.09",
       capabilities: ["workspace", "runtime"],
       allowed_root_count: 1,
+    },
+  ];
+  const pairings: Array<Record<string, unknown>> = [];
+  const plugins = [
+    {
+      id: "pi",
+      runtime_type: "pi" as const,
+      version: "1.0.0",
+      description: "Pi through the Pi coding agent SDK",
+      settings: ["pi_binary", "agent_dir"],
+      features: ["steer", "queue"],
+    },
+    {
+      id: "opencode",
+      runtime_type: "opencode" as const,
+      version: "1.0.0",
+      description: "OpenCode through opencode serve",
+      settings: ["binary"],
+      features: ["steer", "queue"],
+    },
+    {
+      id: "codex",
+      runtime_type: "codex" as const,
+      version: "1.0.0",
+      description: "Codex through codex app-server",
+      settings: [],
+      features: ["steer", "queue"],
+    },
+  ];
+  const bridgeProfiles = [
+    {
+      id: "read-only",
+      revision: "profile-rev-readonly",
+      builtin: true,
+      restricts: ["write_inside", "write_outside"],
+    },
+    {
+      id: "reviewed",
+      revision: "profile-rev-reviewed",
+      builtin: true,
+      restricts: ["read_outside", "shell", "web"],
     },
   ];
   const calls: Array<{
@@ -571,19 +611,53 @@ async function mockApi(
       });
       return;
     }
-    if (path === "/api/nodes/test" && method === "POST") {
-      await respond(route, { success: true });
+    if (path === "/api/nodes/pairings" && method === "POST") {
+      pairings.push(body || {});
+      await respond(
+        route,
+        {
+          pairing: "wbpair1:wss://bridge.tailnet:8767#cafe.0123456789abcdef",
+          name: String(body?.name),
+          expires: "2026-09-25T09:00:00Z",
+          note: "Single use, valid for 10 minutes.",
+        },
+        201,
+      );
       return;
     }
-    if (path === "/api/nodes" && method === "POST") {
-      const created = {
-        ...nodes[0],
-        id: "node_cccccccccccccccccccccccc",
-        name: String(body?.name || "New Node"),
-        base_url: String(body?.base_url || "http://new-node:8770"),
-      };
-      nodes.push(created);
-      await respond(route, created, 201);
+    const nodeTestMatch = path.match(
+      /^\/api\/nodes\/(node_[0-9a-f]{24})\/test$/,
+    );
+    if (nodeTestMatch && method === "POST") {
+      await respond(route, { success: true, protocol: 2 });
+      return;
+    }
+    const nodePluginsMatch = path.match(
+      /^\/api\/nodes\/(node_[0-9a-f]{24})\/plugins$/,
+    );
+    if (nodePluginsMatch && method === "GET") {
+      await respond(route, { plugins });
+      return;
+    }
+    const nodeAdaptersMatch = path.match(
+      /^\/api\/nodes\/(node_[0-9a-f]{24})\/adapters$/,
+    );
+    if (nodeAdaptersMatch && method === "GET") {
+      await respond(route, {
+        node_id: nodeAdaptersMatch[1],
+        adapters: adapters
+          .filter((item) => item.node_id === nodeAdaptersMatch[1])
+          .map((item) => ({
+            id: item.id,
+            plugin: item.runtime_type,
+            projects_root: item.projects_root,
+            settings: item.settings,
+          })),
+      });
+      return;
+    }
+    if (path === "/api/profiles" && method === "GET") {
+      await respond(route, { profiles: bridgeProfiles });
       return;
     }
     const nodeMatch = path.match(/^\/api\/nodes\/(node_[0-9a-f]{24})$/);
@@ -598,33 +672,30 @@ async function mockApi(
       return;
     }
     if (path === "/api/adapters" && method === "POST") {
+      const plugin = plugins.find((item) => item.id === body?.plugin);
       const created = adapter(
         "adapter_444444444444444444444444",
         String(body?.name),
-        body?.runtime_type === "opencode"
-          ? "opencode"
-          : body?.runtime_type === "claude"
-            ? "claude"
-            : body?.runtime_type === "codex"
-              ? "codex"
-              : "pi",
-        String(body?.base_url),
+        plugin?.runtime_type || "pi",
         "new-default",
-        String(body?.token),
+        String(body?.node_id || LOCAL_NODE),
       );
+      created.projects_root = String(body?.projects_root || "/Projects");
+      created.settings = (body?.settings as Record<string, string>) || {};
       adapters.push(created);
       await respond(route, publicAdapter(created), 201);
       return;
     }
     if (path === "/api/adapters/test" && method === "POST") {
       tests.push(body || {});
+      const row = adapters.find((item) => item.id === body?.adapter_id);
       await respond(route, {
         success: true,
         adapter_id: body?.adapter_id,
-        runtime_type: body?.runtime_type,
-        native_runtime: body?.runtime_type,
+        runtime_type: row?.runtime_type,
+        native_runtime: row?.runtime_type,
         native_version: "2026.09",
-        adapter_version: "1.4.0",
+        adapter_version: "1.0.0",
       });
       return;
     }
@@ -641,12 +712,11 @@ async function mockApi(
       if (!leaf && method === "PATCH") {
         updates.push({ id, body: body || {} });
         Object.assign(row, body);
-        if (body?.token) row.savedToken = String(body.token);
         await respond(route, publicAdapter(row));
         return;
       }
       if (!leaf && method === "GET") {
-        await respond(route, publicAdapter(row));
+        await respond(route, { ...publicAdapter(row), security: row.security });
         return;
       }
       if (leaf === "models" && method === "GET") {
@@ -818,7 +888,7 @@ async function mockApi(
     }
     await respond(route, { ok: true });
   });
-  return { calls, tests, updates, adapters };
+  return { calls, tests, updates, adapters, pairings };
 }
 
 async function navigate(page: Page, title: string) {
@@ -827,93 +897,6 @@ async function navigate(page: Page, title: string) {
     .getByRole("button", { name: title, exact: true })
     .click();
 }
-
-test("Versions shows one target, grouped status, and optional build details", async ({
-  page,
-}) => {
-  await mockApi(page);
-  const build = `sha256:${"a".repeat(64)}`;
-  const versionEntry = (
-    component: string,
-    instance: string,
-    state: string,
-    current: string | null,
-    target: string | null,
-    runtimeType?: string,
-  ) => ({
-    component,
-    instance,
-    runtime_type: runtimeType,
-    state,
-    execution_compatible: state !== "unavailable",
-    reason: state === "unavailable" ? "adapter-unavailable" : "version-skew",
-    current_product_version: current,
-    current_build_id: build,
-    target_product_version: target,
-    target_build_id: runtimeType === "pi" ? null : build,
-    target_precision: runtimeType === "pi" ? "product-version-only" : "exact",
-  });
-  await page.route("**/api/system/versions", (route) =>
-    route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        schema_version: 1,
-        status: "ok",
-        target: { product_version: "0.2.0", build_id: build },
-        bridge: versionEntry("bridge", "bridge", "current", "0.2.0", "0.2.0"),
-        manager: versionEntry(
-          "manager",
-          "manager",
-          "current",
-          "0.2.0",
-          "0.2.0",
-        ),
-        nodes: [
-          versionEntry(
-            "node",
-            LOCAL_NODE,
-            "update_available",
-            "0.1.1",
-            "0.2.0",
-          ),
-        ],
-        adapters: [
-          versionEntry(
-            "pi-host-adapter",
-            LOCAL_PI,
-            "unavailable",
-            null,
-            "0.2.0",
-            "pi",
-          ),
-        ],
-      }),
-    }),
-  );
-  await page.goto("./#versions");
-  await expect(
-    page.getByRole("heading", { name: "Installed components", level: 2 }),
-  ).toBeVisible();
-  await expect(page.getByText("Target Bridge version")).toBeVisible();
-  await expect(page.locator(".version-target strong")).toHaveText("0.2.0");
-  const node = page.locator(".version-row").filter({ hasText: "Local Mac" });
-  await expect(node.getByText("Update available · Compatible")).toBeVisible();
-  await expect(node.getByText("0.1.1")).toBeVisible();
-  const pi = page.locator(".version-row").filter({ hasText: "Local Pi" });
-  await expect(
-    pi.getByText("Unavailable · Affected routes only"),
-  ).toBeVisible();
-  await pi.getByText("Build and package details").click();
-  await expect(pi.getByText(build)).toBeVisible();
-  await expect(pi.getByText("Compared by version only")).toBeVisible();
-  await expect(pi.getByText("workspace-bridge-pi-host-adapter")).toBeVisible();
-  await expect(pi.getByText(LOCAL_PI)).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole("heading", { name: "Adapters" })).toBeVisible();
-  expect(
-    await page.evaluate(() => document.documentElement.scrollWidth),
-  ).toBeLessThanOrEqual(390);
-});
 
 test("same-runtime adapter instances stay distinct in workspaces and handoff targets", async ({
   page,
@@ -948,7 +931,7 @@ test("same-runtime adapter instances stay distinct in workspaces and handoff tar
   expect(errors).toEqual([]);
 });
 
-test("adapter add/edit forms test current values and never read a token back", async ({
+test("adapter forms pick a Node plugin and keep no URL or token", async ({
   page,
 }) => {
   const api = await mockApi(page);
@@ -957,20 +940,10 @@ test("adapter add/edit forms test current values and never read a token back", a
 
   await page.getByRole("button", { name: "Add adapter" }).click();
   await page.getByLabel("Name", { exact: true }).fill("Backup Pi");
-  await page
-    .getByLabel("Base URL", { exact: true })
-    .fill("http://gpu-backup:8780");
-  await page
-    .getByLabel("Adapter token", { exact: true })
-    .fill("new-private-token");
-  await page.getByRole("button", { name: "Test connection" }).click();
-  await expect(
-    page.getByRole("status").filter({ hasText: "Connected: pi" }),
-  ).toBeVisible();
-  expect(api.tests.at(-1)).toMatchObject({
-    name: "Backup Pi",
-    token: "new-private-token",
-  });
+  await expect(page.getByLabel("Base URL")).toHaveCount(0);
+  await expect(page.getByLabel("Adapter token")).toHaveCount(0);
+  await page.getByLabel("Agent plugin", { exact: true }).selectOption("pi");
+  await page.getByLabel("pi_binary", { exact: true }).fill("/opt/pi/bin/pi");
   await page
     .getByRole("button", { name: "Add adapter", exact: true })
     .last()
@@ -978,45 +951,41 @@ test("adapter add/edit forms test current values and never read a token back", a
   await expect(
     page.getByRole("heading", { name: "Backup Pi · Pi" }),
   ).toBeVisible();
-  await expect(page.getByText("new-private-token")).toHaveCount(0);
+  expect(
+    api.calls.find((c) => c.path === "/api/adapters" && c.method === "POST")
+      ?.body,
+  ).toEqual({
+    name: "Backup Pi",
+    node_id: LOCAL_NODE,
+    plugin: "pi",
+    settings: { pi_binary: "/opt/pi/bin/pi" },
+    enabled: true,
+  });
 
   const gpuRow = page
     .locator(".adapter-card")
     .filter({ hasText: "GPU Pi · Pi" });
   await gpuRow.getByRole("button", { name: "Edit" }).click();
-  const tokenField = page.getByLabel("Adapter token", { exact: true });
-  await expect(tokenField).toHaveValue("");
-  await page
-    .getByLabel("Base URL", { exact: true })
-    .fill("http://gpu-updated:8780");
+  await expect(page.getByLabel("Projects root")).toHaveValue("/Projects");
   await page.getByRole("button", { name: "Test connection" }).click();
-  expect(api.tests.at(-1)).toMatchObject({
-    adapter_id: GPU_PI,
-    base_url: "http://gpu-updated:8780",
-    token: "",
-  });
+  await expect(
+    page.getByRole("status").filter({ hasText: "Connected: pi" }),
+  ).toBeVisible();
+  expect(api.tests.at(-1)).toEqual({ adapter_id: GPU_PI });
+  await page.getByLabel("Name", { exact: true }).fill("GPU Pi renamed");
   await page.getByRole("button", { name: "Save adapter" }).click();
   await expect(
-    gpuRow.getByText("http://gpu-updated:8780").first(),
+    page.getByRole("heading", { name: "GPU Pi renamed · Pi" }),
   ).toBeVisible();
   expect(api.updates.at(-1)).toEqual({
     id: GPU_PI,
     body: {
-      name: "GPU Pi",
-      base_url: "http://gpu-updated:8780",
-      token: "",
+      name: "GPU Pi renamed",
+      projects_root: "/Projects",
+      settings: {},
       enabled: true,
     },
   });
-  expect(api.adapters.find((item) => item.id === GPU_PI)?.savedToken).toBe(
-    "gpu-pi-private-token",
-  );
-
-  await gpuRow.getByRole("button", { name: "Edit" }).click();
-  await expect(page.getByLabel("Adapter token", { exact: true })).toHaveValue(
-    "",
-  );
-  await expect(page.getByText("gpu-pi-private-token")).toHaveCount(0);
 });
 
 test("model and profile discovery use each adapter ID", async ({ page }) => {
@@ -1256,42 +1225,7 @@ test("Codex native profile choices list only workspaces on its Node and allow no
     .toBeGreaterThan(0);
 });
 
-test("Codex security dialog explains why Bridge profiles cannot be assigned", async ({
-  page,
-}) => {
-  const api = await mockApi(page, { codexProfilesUnavailable: true });
-  await page.goto("./");
-  await navigate(page, "Workspaces");
-  const codexTarget = page.locator(".target-row").filter({
-    hasText: "Local Codex · Codex",
-  });
-  await codexTarget.getByRole("button", { name: "Change security" }).click();
-  await page.getByText("Use Workspace Bridge profile").click();
-  const profiles = page.getByRole("group", {
-    name: "Workspace Bridge profiles",
-  });
-  await expect(
-    profiles.getByRole("button", { name: /read-only/ }),
-  ).toBeVisible();
-  await expect(
-    profiles.getByRole("button", { name: /read-only/ }),
-  ).toBeDisabled();
-  await expect(
-    profiles.getByText(/Remove legacy sandbox_workspace_write settings/),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Save security source" }),
-  ).toBeDisabled();
-  expect(
-    api.calls.some(
-      (call) =>
-        call.path === `/api/adapters/${LOCAL_CODEX}/profiles` &&
-        call.method === "GET",
-    ),
-  ).toBe(true);
-});
-
-test("Codex security dialog allows an available Bridge profile", async ({
+test("Codex security dialog says which profile keys the agent cannot enforce", async ({
   page,
 }) => {
   await mockApi(page);
@@ -1301,16 +1235,44 @@ test("Codex security dialog allows an available Bridge profile", async ({
     hasText: "Local Codex · Codex",
   });
   await codexTarget.getByRole("button", { name: "Change security" }).click();
-  await page.getByText("Use Workspace Bridge profile").click();
+  await page.getByText("Use a Workspace Bridge profile").click();
   const profiles = page.getByRole("group", {
     name: "Workspace Bridge profiles",
   });
   await expect(
+    profiles.getByRole("button", { name: /reviewed/ }),
+  ).toBeDisabled();
+  await expect(
+    profiles.getByText(/This agent cannot enforce read_outside, shell, web/),
+  ).toBeVisible();
+  await expect(
     profiles.getByRole("button", { name: /read-only/ }),
   ).toBeEnabled();
+});
+
+test("Codex security dialog lets a route follow the agent's own security", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Workspaces");
+  const codexTarget = page.locator(".target-row").filter({
+    hasText: "Local Codex · Codex",
+  });
+  await codexTarget.getByRole("button", { name: "Change security" }).click();
   await expect(
-    page.getByRole("button", { name: "Save security source" }),
-  ).toBeEnabled();
+    page.getByRole("radio", { name: /Use the agent's own security/ }),
+  ).toBeChecked();
+  await page.getByText("Use a Workspace Bridge profile").click();
+  await page.getByRole("button", { name: /read-only/ }).click();
+  await page.getByRole("button", { name: "Save security source" }).click();
+  expect(
+    api.calls.find(
+      (call) =>
+        call.path === `/api/workspaces/${WS_ID}/routes/${LOCAL_CODEX}` &&
+        call.method === "POST",
+    )?.body,
+  ).toMatchObject({ security_source: "profile", profile_id: "read-only" });
 });
 
 test("Codex adapter card shows current account quota on the Adapters page", async ({
@@ -1526,7 +1488,7 @@ test("manager pages fit desktop and mobile viewports", async ({ page }) => {
   await noOverflow();
 });
 
-test("Nodes show authority status and keep Node and adapter tokens write-only", async ({
+test("Nodes are paired with a one-time string and hold no URL or token", async ({
   page,
 }) => {
   const api = await mockApi(page);
@@ -1538,48 +1500,29 @@ test("Nodes show authority status and keep Node and adapter tokens write-only", 
   await expect(page.getByRole("heading", { name: "Local Mac" })).toBeVisible();
   await expect(page.getByText("Node Protocol", { exact: true })).toHaveCount(2);
   await expect(page.getByText("Local Pi · Pi", { exact: true })).toBeVisible();
+  await expect(page.getByText("Embedded in the Bridge")).toBeVisible();
 
-  await page
-    .getByRole("button", { name: "Add Node", exact: true })
-    .first()
-    .click();
-  await page.getByLabel("Name", { exact: true }).fill("Review Node");
-  await page
-    .getByLabel("Node URL", { exact: true })
-    .fill("http://review-node:8770");
-  await page
-    .getByLabel("Node token", { exact: true })
-    .fill("review-node-secret");
+  await page.getByRole("button", { name: "Pair a Node" }).first().click();
+  await expect(page.getByLabel("Node URL")).toHaveCount(0);
+  await expect(page.getByLabel("Node token")).toHaveCount(0);
+  await page.getByLabel("Name", { exact: true }).fill("Laptop");
+  await page.getByRole("button", { name: "Create pairing string" }).click();
+  await expect(page.getByLabel("Pairing string")).toHaveValue(
+    "wbpair1:wss://bridge.tailnet:8767#cafe.0123456789abcdef",
+  );
+  expect(api.pairings).toEqual([{ name: "Laptop", replace: false }]);
+  await page.getByRole("button", { name: "Done" }).click();
+
+  const gpuNode = page.locator(".node-card").filter({ hasText: "GPU Server" });
+  await expect(gpuNode.getByText(/Last connected/)).toBeVisible();
+  await gpuNode.getByRole("button", { name: "Edit" }).first().click();
   await page.getByRole("button", { name: "Test connection" }).click();
   await expect(page.getByRole("status")).toHaveText(
     "Connected: Node Protocol is ready.",
   );
-  expect(api.calls.at(-1)).toMatchObject({
-    path: "/api/nodes/test",
-    method: "POST",
-    body: { token: "review-node-secret", base_url: "http://review-node:8770" },
-  });
-  await page
-    .getByRole("button", { name: "Add Node", exact: true })
-    .last()
-    .click();
-  await expect(page.getByText("review-node-secret")).toHaveCount(0);
-  expect(
-    api.calls.some(
-      (call) => call.path === "/api/nodes" && call.method === "POST",
-    ),
-  ).toBe(true);
-
-  const localNode = page.locator(".node-card").filter({ hasText: "Local Mac" });
-  await localNode.getByRole("button", { name: "Edit" }).first().click();
-  await expect(page.getByLabel("Node token", { exact: true })).toHaveValue("");
-  await expect(page.getByText("node-test-token")).toHaveCount(0);
   await page.getByRole("button", { name: "Cancel" }).click();
-  await localNode.getByRole("button", { name: "Add adapter" }).click();
-  await expect(
-    page.getByText(/owning Node's private SQLite state/),
-  ).toBeVisible();
-  await expect(page.getByText(/Manager never reads it back/)).toBeVisible();
+  await gpuNode.getByRole("button", { name: "Add adapter" }).click();
+  await expect(page.getByLabel("Adapter token")).toHaveCount(0);
 });
 
 test("zero-route workspaces offer only same-Node targets and no implicit fallback", async ({
@@ -1849,25 +1792,18 @@ test("admin login requires a password change and supports later changes", async 
   ).toBeVisible();
 });
 
-test("OpenCode can be registered as an exact native adapter", async ({
-  page,
-}) => {
+test("OpenCode can be registered from its Node plugin", async ({ page }) => {
   const api = await mockApi(page);
   await page.goto("./");
   await navigate(page, "Adapters");
   await page.getByRole("button", { name: "Add adapter" }).click();
   await page.getByLabel("Name", { exact: true }).fill("Local OpenCode");
   await page
-    .getByLabel("Runtime type", { exact: true })
+    .getByLabel("Agent plugin", { exact: true })
     .selectOption("opencode");
   await page
-    .getByLabel("Base URL", { exact: true })
-    .fill("http://127.0.0.1:8776");
-  await page
-    .getByLabel("Adapter token", { exact: true })
-    .fill("private-test-token");
-  await page.getByRole("button", { name: "Test connection" }).click();
-  expect(api.tests.at(-1)?.runtime_type).toBe("opencode");
+    .getByLabel("binary", { exact: true })
+    .fill("/usr/local/bin/opencode");
   await page
     .getByRole("button", { name: "Add adapter", exact: true })
     .last()
@@ -1879,10 +1815,7 @@ test("OpenCode can be registered as an exact native adapter", async ({
     api.calls.find((c) => c.path === "/api/adapters" && c.method === "POST")
       ?.body,
   ).toMatchObject({
-    runtime_type: "opencode",
-    base_url: "http://127.0.0.1:8776",
+    plugin: "opencode",
+    settings: { binary: "/usr/local/bin/opencode" },
   });
-  await expect(
-    page.getByText("private-test-token", { exact: true }),
-  ).toHaveCount(0);
 });

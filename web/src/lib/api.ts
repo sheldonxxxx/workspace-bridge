@@ -65,28 +65,38 @@ export interface Workspace {
   available_adapters?: AvailableAdapter[];
   node_adapter_count?: number;
 }
-export interface ReleaseIdentity {
-  contract: number;
-  product: string;
-  product_version: string;
-  component: string;
-  component_version: string;
-  build_id: string;
-}
 export interface NodeInfo {
   id: string;
   name: string;
-  base_url: string;
   enabled: boolean;
   revision: string;
-  has_token: boolean;
-  transport?: "http" | "paired" | "local";
+  transport?: "paired" | "local";
+  connection?: {
+    connected_at: string | null;
+    last_seen: string | null;
+    disconnected_at: string | null;
+  } | null;
   health?: string;
+  error?: string;
   protocol?: number;
   node_version?: string;
   capabilities?: string[];
   allowed_root_count?: number;
-  release?: ReleaseIdentity | null;
+}
+export interface PluginInfo {
+  id: string;
+  runtime_type: AdapterInfo["runtime_type"];
+  version: string;
+  description: string;
+  settings: string[];
+  features: string[];
+}
+/** The Node's saved configuration of an adapter. */
+export interface NodeAdapterConfig {
+  id: string;
+  plugin: string;
+  projects_root: string;
+  settings: Record<string, string>;
 }
 export interface AdapterInfo {
   id: string;
@@ -94,10 +104,8 @@ export interface AdapterInfo {
   node_name?: string;
   name: string;
   runtime_type: "pi" | "codex" | "claude" | "opencode";
-  base_url: string;
   enabled: boolean;
   revision: string;
-  has_token: boolean;
   configured?: boolean;
   healthy?: boolean;
   locked?: boolean;
@@ -106,7 +114,6 @@ export interface AdapterInfo {
   native_version?: string;
   adapter_version?: string;
   detail?: string;
-  release?: ReleaseIdentity | null;
   model_policy?: ModelPolicy;
   features?: Record<string, number>;
 }
@@ -174,8 +181,6 @@ export function quotaResetText(resetsAt?: number | null): string {
 }
 export interface Status {
   version: string;
-  release?: ReleaseIdentity | null;
-  manager_release?: ReleaseIdentity | null;
   listen_mode: string;
   mcp_port: number;
   bridge: { configured: boolean; enabled: boolean };
@@ -353,42 +358,6 @@ export interface Model {
   defaultReasoningEffort?: string | null;
 }
 
-export interface VersionComponentState {
-  component: string;
-  instance: string;
-  runtime_type?: string | null;
-  instance_id?: string | null;
-  state:
-    | "current"
-    | "update_available"
-    | "unsupported_build"
-    | "target_mismatch"
-    | "incompatible"
-    | "unavailable";
-  execution_compatible: boolean;
-  reason: string;
-  current_product_version?: string | null;
-  current_build_id?: string | null;
-  target_product_version?: string | null;
-  target_build_id?: string | null;
-  target_precision: "exact" | "product-version-only";
-  current?: ReleaseIdentity | null;
-}
-export interface VersionStatus {
-  schema_version: number;
-  status: "ok" | "failed";
-  target: {
-    product_version?: string | null;
-    build_id?: string | null;
-    manager?: ReleaseIdentity | null;
-    note?: string;
-  };
-  bridge?: VersionComponentState | null;
-  manager?: VersionComponentState | null;
-  nodes?: VersionComponentState[];
-  adapters?: VersionComponentState[];
-  error?: { code: string; summary: string };
-}
 export async function api<T>(
   path: string,
   method = "GET",

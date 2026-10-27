@@ -3,7 +3,7 @@
 MCP runs on the official SDK: stateless Streamable HTTP with JSON responses,
 for 2025 clients and the 2026-07-28 request model. MCP 2.0 event
 subscriptions use signed outbound HTTPS webhooks. The separate authenticated
-Manager API streams run invalidation hints over SSE. No sampling or arbitrary
+Manager API pushes invalidation hints over one WebSocket. No sampling or arbitrary
 execution.
 """
 from __future__ import annotations
@@ -28,13 +28,13 @@ from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response, FileResponse, StreamingResponse
-from starlette.routing import Route
+from starlette.responses import JSONResponse, Response, FileResponse
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket
 
 from . import __version__
 from .admin_account import AdminAccount
 from .media import ImageReadResult, MAX_IMAGE_BASE64_CHARS, MAX_IMAGE_REQUEST_BYTES
-from .manager_events import RUN_ID
 from .embedded_skill import SKILLS_EXTENSION, SKILL_URI, read_skill_resource, skill_entry
 from .event_protocol import EVENT_METHODS, arguments as event_arguments, dispatch as dispatch_event
 from .webhook_transport import CallbackError
@@ -470,7 +470,7 @@ class Boundary:
         return port is None or port in (80, 443) or port in self.ports
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
+        if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         headers = {}
         duplicate_security_header = False
@@ -499,6 +499,9 @@ class Boundary:
             # tokens, allowlist contents, ports, or arbitrary values.
             _emit_ops(_ops_log, "WARNING", "bridge", "boundary_reject",
                       reason=str(reason)[:80])
+            if scope["type"] == "websocket":
+                await receive()
+                return await send({"type": "websocket.close", "code": 1008})
             return await JSONResponse({"error": "Untrusted Host or Origin"}, 403)(scope, receive, send)
         async def secured_send(message):
             if message["type"] == "http.response.start":
@@ -894,20 +897,8 @@ def _parse_cookie(request: Request, name: str) -> str:
     return ""
 
 
-class _RunEventResponse(StreamingResponse):
-    """Release a subscription even if sending response headers is cancelled."""
-
-    def __init__(self, content, hub, subscriber):
-        super().__init__(content, media_type="text/event-stream",
-                         headers={"X-Accel-Buffering": "no"})
-        self.hub = hub
-        self.subscriber = subscriber
-
-    async def __call__(self, scope, receive, send):
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            self.hub.unsubscribe(self.subscriber)
+# How often an idle Manager socket rechecks its session.
+SOCKET_RECHECK_SECONDS = 5
 
 
 def make_admin(service: Service, port: int = 8766, *,
@@ -968,6 +959,58 @@ def make_admin(service: Service, port: int = 8766, *,
         response = JSONResponse({"status": "ok"})
         response.delete_cookie(AdminSessionStore.COOKIE_NAME, path="/api")
         return response
+    async def manager_socket(websocket: WebSocket):
+        """Push invalidation hints (run IDs only) to the signed-in Manager.
+
+        One socket carries every hint; the page rereads REST for content. A
+        client sends nothing, so any message closes the socket.
+        """
+        cookie = websocket.cookies.get(AdminSessionStore.COOKIE_NAME, "")
+
+        async def signed_in() -> bool:
+            account = await run_in_threadpool(account_store.read)
+            return (not account["must_change_password"]
+                    and sessions.validate(cookie, account["revision"]))
+
+        if not await signed_in():
+            await websocket.close(code=4401)
+            return
+        hub = service.run_coordinator.run_events
+        try:
+            subscriber = hub.subscribe()
+        except RuntimeError:
+            await websocket.close(code=1013)
+            return
+        await websocket.accept()
+
+        async def push():
+            while True:
+                event, run_id = await subscriber.queue.get()
+                if event == "closed":
+                    return
+                await websocket.send_json({"type": event, **({"run_id": run_id} if run_id else {})})
+
+        async def hear():
+            await websocket.receive_text()
+
+        async def revalidate():
+            # Revocation, expiry and password changes also end idle sockets.
+            while await signed_in():
+                await asyncio.sleep(SOCKET_RECHECK_SECONDS)
+
+        tasks = [asyncio.create_task(job()) for job in (push, hear, revalidate)]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            hub.unsubscribe(subscriber)
+            try:
+                await websocket.close(code=1008)
+            except RuntimeError:
+                pass  # already closed by the peer
+
     async def api(request: Request):
         path = request.url.path
         if path in ("/api/login", "/api/logout"):
@@ -997,53 +1040,6 @@ def make_admin(service: Service, port: int = 8766, *,
             if account["must_change_password"]:
                 return JSONResponse({"error": "Change your temporary password before using the Manager",
                                      "code": "password_change_required"}, 403)
-            if path == "/api/run-events":
-                run_id = request.query_params.get("run_id")
-                if run_id is not None:
-                    if RUN_ID.fullmatch(run_id) is None:
-                        return JSONResponse({"error": "Invalid run ID"}, 400)
-                    with service.lock:
-                        exists = service.db.execute(
-                            "SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone()
-                    if exists is None:
-                        return JSONResponse({"error": "Run not found"}, 404)
-                hub = service.run_coordinator.run_events
-                try:
-                    subscriber = hub.subscribe(run_id)
-                except RuntimeError:
-                    return JSONResponse({"error": "Run event stream unavailable",
-                                         "code": "stream_unavailable"}, 503)
-                cookie = _parse_cookie(request, AdminSessionStore.COOKIE_NAME)
-
-                async def stream():
-                    heartbeat_at = time.monotonic()
-                    try:
-                        while True:
-                            try:
-                                event, changed_run = await asyncio.wait_for(
-                                    subscriber.queue.get(), timeout=1)
-                            except TimeoutError:
-                                event, changed_run = "heartbeat", None
-                            if event == "closed":
-                                return
-                            # Recheck revocation, TTL and password changes even
-                            # on idle connections; never expose runtime bodies.
-                            current_account = await run_in_threadpool(account_store.read)
-                            if (current_account["must_change_password"] or not sessions.validate(
-                                    cookie, current_account["revision"])):
-                                return
-                            if event == "heartbeat":
-                                if time.monotonic() - heartbeat_at >= 15:
-                                    yield ": keepalive\n\n"
-                                    heartbeat_at = time.monotonic()
-                                continue
-                            payload = {"run_id": changed_run} if changed_run else {}
-                            yield f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-                            heartbeat_at = time.monotonic()
-                    finally:
-                        hub.unsubscribe(subscriber)
-
-                return _RunEventResponse(stream(), hub, subscriber)
             if path == "/api/diagnostics":
                 if request.method != "GET":
                     return JSONResponse({"error": "Method not allowed"}, 405)
@@ -1066,7 +1062,7 @@ def make_admin(service: Service, port: int = 8766, *,
                     "listen_mode": listen_mode,
                     "admin_allowed_hosts": list(extra_hosts),
                     "mcp_endpoint": "/mcp", "bridge": service.bridge_status(),
-                    "nodes": await run_in_threadpool(service.node_registry.list_public, probe=True),
+                    "nodes": await run_in_threadpool(service.node_registry.list_public),
                     "adapters": await run_in_threadpool(service.list_adapters),
                     "notifications": service.notification_manager.status(),
                     "mcp_events": service.event_broker.status() if service.event_broker is not None else {},
@@ -1076,7 +1072,7 @@ def make_admin(service: Service, port: int = 8766, *,
             if path == "/api/nodes":
                 if request.method == "GET":
                     return JSONResponse({"nodes": await run_in_threadpool(
-                        service.node_registry.list_public, probe=True)})
+                        service.node_registry.list_public)})
                 return JSONResponse({"error": "Method not allowed"}, 405)
             if path == "/api/nodes/pairings" and request.method == "POST":
                 model = NodePairingCreate.model_validate(await body_json(request))
@@ -1210,7 +1206,7 @@ def make_admin(service: Service, port: int = 8766, *,
                             "native_instance": descriptor.instance_id,
                             "adapter_version": descriptor.adapter_version,
                             "native_version": descriptor.native_version,
-                            "protocol": 1, "features": descriptor.features}
+                            "protocol": 2, "features": descriptor.features}
                         return JSONResponse(payload)
                     except BridgeError as exc:
                         return JSONResponse({"success": False, "code": exc.code,
@@ -1399,7 +1395,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/status", api), Route("/api/diagnostics", api), Route("/api/events", api),
         Route("/api/runs", api),
         Route("/api/approvals", api),
-        Route("/api/run-events", api),
+        WebSocketRoute("/api/ws", manager_socket),
         Route("/api/nodes", api, methods=["GET"]),
         Route("/api/nodes/pairings", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/test", api, methods=["POST"]),
