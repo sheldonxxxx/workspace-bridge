@@ -22,6 +22,7 @@ from .adapter_events import AdapterEventReader
 from .manager_events import RunEventHub
 from .keyed_locks import KeyedLocks
 from .run_checkpoints import RunCheckpoints
+from .run_checks import RunChecks
 from .schema_upgrade import add_interaction_decisions
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
@@ -252,6 +253,7 @@ class RunCoordinator:
                     "state_schema_incompatible")
             add_interaction_decisions(service.db)
         self.checkpoints = RunCheckpoints(self, read_only=read_only)
+        self.run_checks = RunChecks(self, read_only=read_only)
 
     @staticmethod
     def _outcome_event_type(outcome: str | None) -> str | None:
@@ -265,10 +267,13 @@ class RunCoordinator:
         event_type = self._outcome_event_type(outcome)
         if event_type is None:
             return
-        self.service.notification_manager.record_run_event_locked(
-            run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
-            adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
-            event_type=event_type, occurred_at=_now())
+        event = {"run_id": run["id"], "workspace_id": run["workspace"], "job_id": run["handoff"],
+                 "adapter_id": run["adapter_id"], "runtime_type": run["runtime_type"],
+                 "event_type": event_type, "occurred_at": _now()}
+        # With after-run checks, the notice waits for their result.
+        if self.run_checks.defer_locked(run, event_type, event):
+            return
+        self.service.notification_manager.record_run_event_locked(**event)
 
     def configured(self, adapter_id: str) -> bool:
         try:
@@ -1283,6 +1288,9 @@ class RunCoordinator:
         checkpoint = self.checkpoints.view(ws, run_id)
         if checkpoint is not None:
             result["checkpoint"] = checkpoint
+        checks = self.run_checks.view(run_id)
+        if checks is not None:
+            result["checks"] = checks
         result["input_capabilities"] = {"steer": False, "queue": False}
         if sync and sync_warning is None and run["phase"] == "active":
             try:

@@ -48,6 +48,41 @@ def test_run_window_checkpoint_and_diff(modern_env):
     assert diff["run_id"] == run["run_id"] and diff["checkpoint"]["status"] == "complete"
 
 
+def test_run_diff_lists_chatgpt_edits_made_during_the_run(modern_env):
+    service, ws_id, token, job, native, _ = modern_env
+    service.manage_workspace(ws_id, "set_write_scope", write_scope="workspace")
+    root = _root(service, ws_id)
+    before = service.call(ws_id, token, "apply_patch", {
+        "changes": [{"op": "create", "path": "before.txt", "content": "early\n"}],
+        "message": "Before the run"})
+    run = _start(service, ws_id, token, job)
+    (root / "agent.py").write_text("print('agent')\n")
+    during = service.call(ws_id, token, "apply_patch", {
+        "changes": [{"op": "create", "path": "notes/plan.md", "content": "plan\n"}],
+        "message": "Note the plan"})
+    _finish_test_run(service, native, ws_id, run["run_id"])
+    service.run_coordinator.checkpoints.process_pending()
+    service.call(ws_id, token, "apply_patch", {
+        "changes": [{"op": "create", "path": "after.txt", "content": "late\n"}],
+        "message": "After the run"})
+    diff = service.call(ws_id, token, "git_diff", {"mode": "run", "run_id": run["run_id"]})
+    edits = diff["chatgpt_edits"]
+    assert edits["status"] == "ok" and edits["truncated"] is False
+    assert [item["edit_id"] for item in edits["edits"]] == [during["edit_id"]]
+    assert edits["edits"][0]["message"] == "Note the plan" and edits["paths"] == ["notes/plan.md"]
+    assert before["edit_id"] not in str(edits)
+    # The snapshot diff holds both the agent's file and ChatGPT's edit; the list tells them apart.
+    assert {item["path"] for item in diff["checkpoint"]["changes"]} == {"agent.py", "notes/plan.md"}
+
+
+def test_edit_journal_window_rejects_naive_times(modern_env):
+    service, ws_id, token, *_ = modern_env
+    with pytest.raises(BridgeError) as caught:
+        service.node_registry.client(service.workspace(ws_id)["node_id"]).workspace(
+            "list_edits", service.workspace(ws_id), {"since": "2026-01-01T00:00:00"})
+    assert caught.value.code == "invalid_arguments"
+
+
 def test_pre_capture_failure_never_blocks_the_run(modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     original = NodeClient.workspace

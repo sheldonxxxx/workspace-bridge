@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from .browse import Browser
 from .keyed_locks import KeyedLocks
 from .checkpoint_store import CheckpointStore
+from .checks import CheckRunner
 from . import edit_journal
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
@@ -40,6 +41,12 @@ CHECKPOINT_OPERATIONS = {
     "checkpoint_diff": frozenset({"from_id", "to_id", "path", "offset", "max_bytes"}),
     "checkpoint_purge": frozenset({"checkpoint_ids", "everything"}),
     "checkpoint_stats": frozenset(),
+}
+CHECK_OPERATIONS = {
+    "checks_config": frozenset(),
+    "set_checks_config": frozenset({"text"}),
+    "start_checks": frozenset({"names", "run_id"}),
+    "read_checks": frozenset({"check_id", "wait_ms"}),
 }
 
 
@@ -185,6 +192,7 @@ class NodeService:
         self.plugins = PluginRegistry(self.state / "plugins")
         self._checkpoints = None
         self._journal = None
+        self._checks = None
 
     @property
     def journal(self) -> edit_journal.EditJournal:
@@ -194,6 +202,15 @@ class NodeService:
             if self._journal is None:
                 self._journal = edit_journal.EditJournal(self.state / "edit-journal.sqlite3")
             return self._journal
+
+    @property
+    def checks(self) -> CheckRunner:
+        if self.read_only:
+            raise BridgeError("Checks are unavailable in read-only mode", "checks_unavailable")
+        with self.lock:
+            if self._checks is None:
+                self._checks = CheckRunner(self.state)
+            return self._checks
 
     @property
     def checkpoints(self) -> CheckpointStore:
@@ -208,6 +225,8 @@ class NodeService:
         self.plugins.close()
         if self._journal is not None:
             self._journal.close()
+        if self._checks is not None:
+            self._checks.close()
         self.db.close()
 
     def safe_root(self, workspace: dict) -> SafeRoot:
@@ -307,13 +326,14 @@ class NodeService:
         # no package-manager commands.
         return {"status": "ok", "protocol": 1, "node_version": __version__,
                 "release": node_release(), "capabilities": [
-            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints"],
+            "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
     WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file", "apply_patch",
-                                  "undo_edit", "publish_handoff_artifacts"})
+                                  "undo_edit", "publish_handoff_artifacts",
+                                  "set_checks_config"})
 
     def workspace_call(self, operation: str, body: dict):
         if operation in self.WRITE_OPERATIONS:
@@ -472,7 +492,30 @@ class NodeService:
                     "note": "Only these files changed. No command was executed or agent started."}
         if operation == "list_edits":
             args = body["arguments"]
-            return self.journal.list(workspace["id"], args.get("offset", 0), args.get("limit", 50))
+            return self.journal.list(workspace["id"], args.get("offset", 0), args.get("limit", 50),
+                                     args.get("since"), args.get("until"))
+        if operation in CHECK_OPERATIONS:
+            args = body.get("arguments")
+            if not isinstance(args, dict) or not set(args) <= CHECK_OPERATIONS[operation]:
+                raise BridgeError("Invalid check arguments", "invalid_arguments")
+            runner = self.checks
+            if operation == "checks_config":
+                return runner.read_config(workspace)
+            if operation == "set_checks_config":
+                return runner.write_config(workspace, args.get("text"))
+            if operation == "start_checks":
+                run_id = args.get("run_id")
+                # Checks a user asked for after every run need no write scope;
+                # an ad hoc request runs commands that can change files.
+                if run_id is None and workspace["write_scope"] != "workspace":
+                    raise BridgeError("Running checks needs the edit write scope", "policy_denied")
+                return runner.start(workspace, root, args.get("names"), run_id)
+            wait_ms = args.get("wait_ms", 0)
+            if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 20000:
+                raise BridgeError("wait_ms must be 0 to 20000", "invalid_arguments")
+            runner.read(workspace, args.get("check_id"))
+            runner.wait(args["check_id"], wait_ms / 1000)
+            return runner.read(workspace, args["check_id"])
         if operation == "git_status":
             with self.safe_root(ws) as safe:
                 return GitEvidence.status(safe, ws, **body["arguments"])

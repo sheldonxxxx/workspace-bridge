@@ -384,7 +384,7 @@ def test_skill_and_capabilities_describe_image_boundary(env):
     assert info["image_reading"]["formats"] == ["PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF"]
     assert info["limits"]["max_file_bytes"] == MAX_FILE
     assert info["image_reading"]["max_input_bytes"] == MAX_INPUT_BYTES
-    assert len(TOOLS) == 30
+    assert len(TOOLS) == 31
     schema = TOOLS["read_file"][0].model_json_schema()
     assert schema["properties"]["representation"]["default"] == "auto"
     assert "representation" not in schema["required"]

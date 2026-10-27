@@ -455,13 +455,27 @@ class EditJournal:
                            "sha256": item["after_sha256"]} for item in files if item["op"] != "mkdir"],
                 "created_folders": [item["path"] for item in files if item["op"] == "mkdir"]}
 
-    def list(self, workspace: str, offset: int = 0, limit: int = 50) -> dict:
+    def list(self, workspace: str, offset: int = 0, limit: int = 50,
+             since: str | None = None, until: str | None = None) -> dict:
+        """Newest first; ``since``/``until`` bound ``created`` to a run's window."""
         if not isinstance(offset, int) or not isinstance(limit, int) or offset < 0 or not 1 <= limit <= 100:
             raise BridgeError("Invalid edit journal page", "invalid_arguments")
+        bounds = []
+        for value in (since, until):
+            if value is not None:
+                try:
+                    stamp = datetime.fromisoformat(value)
+                except (TypeError, ValueError):
+                    raise BridgeError("Invalid edit journal time bound", "invalid_arguments") from None
+                if stamp.tzinfo is None:
+                    raise BridgeError("Edit journal time bounds need a time zone", "invalid_arguments")
+                value = stamp.astimezone(timezone.utc).isoformat()
+            bounds.append(value)
         with self.lock:
             rows = [dict(row) for row in self.db.execute(
-                "SELECT * FROM edits WHERE workspace=? ORDER BY created DESC,id DESC LIMIT ? OFFSET ?",
-                (workspace, limit + 1, offset))]
+                "SELECT * FROM edits WHERE workspace=? AND created>=COALESCE(?,'') "
+                "AND created<=COALESCE(?,'9999') ORDER BY created DESC,id DESC LIMIT ? OFFSET ?",
+                (workspace, *bounds, limit + 1, offset))]
             items = [self._public(row, [dict(item) for item in self.db.execute(
                 "SELECT path,op,before_sha256,after_sha256 FROM edit_files WHERE edit=? ORDER BY seq",
                 (row["id"],))]) for row in rows[:limit]]

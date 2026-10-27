@@ -1036,6 +1036,11 @@ class Service:
         self.access_policy(ws)
         return self.node_registry.client(ws["node_id"]).workspace("undo_edit", ws, {"edit_id": edit_id})
 
+    def run_checks(self, ws: dict, names: list[str] | None = None, check_id: str | None = None,
+                   wait_seconds: int = 30) -> dict:
+        return self.run_coordinator.run_checks.run(ws, names=names, check_id=check_id,
+                                                   wait_seconds=wait_seconds)
+
     def list_edits(self, ident: str, offset: int = 0, limit: int = 50) -> dict:
         ws = self.workspace(ident, False)
         return self.node_registry.client(ws["node_id"]).workspace("list_edits", ws, {
@@ -1238,6 +1243,7 @@ class Service:
             "read_agent_activity": self.read_agent_activity,
             "git_status": self.git_status,
             "git_diff": self.git_diff,
+            "run_checks": self.run_checks,
         }
         if name not in methods:
             raise BridgeError("Unknown tool", "unknown_tool")

@@ -134,6 +134,7 @@ class RunCheckpoints:
             self._wake.clear()
             try:
                 self.process_pending()
+                self.coordinator.run_checks.process()
                 if time.monotonic() - self._last_retention >= RETENTION_INTERVAL:
                     self._last_retention = time.monotonic()
                     self.apply_retention()
@@ -348,4 +349,25 @@ class RunCheckpoints:
             "from_id": row["pre_id"], "to_id": row["post_id"], "path": path,
             "offset": offset, "max_bytes": max_bytes})
         return {**{key: value for key, value in result.items() if key not in ("from", "to")},
-                "run_id": run_id, "checkpoint": self.view(ws, run_id)}
+                "run_id": run_id, "checkpoint": self.view(ws, run_id),
+                "chatgpt_edits": self.chatgpt_edits(row)}
+
+    def chatgpt_edits(self, row) -> dict:
+        """apply_patch edits that landed while the run was active.
+
+        The snapshot diff includes them, so a review needs them listed apart.
+        Times come from the Node's journal and the Bridge's run row; a remote
+        Node's clock skew can shift an edit at the very edge of the window.
+        """
+        try:
+            listed = self._node(row).workspace("list_edits", self._workspace(row), {
+                "offset": 0, "limit": 100, "since": row["created"], "until": row["terminal_at"]})
+        except Exception as exc:  # noqa: BLE001 - the diff stays useful without the journal
+            return {"status": "unavailable", "error": _code(exc, "list_edits")}
+        edits = [{"edit_id": item["edit_id"], "kind": item.get("kind"), "state": item.get("state"),
+                  "created": item.get("created"), "message": item.get("message"),
+                  "paths": sorted({path for change in item.get("files", [])
+                                   for path in (change.get("path"), change.get("to")) if path})}
+                 for item in listed.get("edits", [])]
+        return {"status": "ok", "edits": edits, "truncated": listed.get("next_offset") is not None,
+                "paths": sorted({path for edit in edits for path in edit["paths"]})}

@@ -172,6 +172,22 @@ class UndoEdit(Input):
     edit_id: str = Field(pattern=r"^edit_[0-9a-f]{24}$", description="edit_id returned by apply_patch or an earlier undo_edit.")
 
 
+class RunChecks(Input):
+    names: list[Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,39}$")]] | None = Field(
+        default=None, min_length=1, max_length=20,
+        description="Check names from the workspace's checks.toml to run in order. Omit names and check_id to list the configured checks.")
+    check_id: str | None = Field(default=None, pattern=r"^chk_[0-9a-f]{24}$",
+                                 description="Read an earlier run_checks call's result instead of starting checks.")
+    wait_seconds: int = Field(default=30, ge=0, le=50,
+                              description="How long to wait for the checks to finish before returning their current state.")
+
+    @model_validator(mode="after")
+    def _one_action(self):
+        if self.names is not None and self.check_id is not None:
+            raise ValueError("pass names or check_id, not both")
+        return self
+
+
 class Directory(Files):
     depth: int = Field(default=1, ge=1, le=4, description="1 = immediate children, up to 4 levels. Root path is the empty string.")
     expected_listing_sha256: HashString | None = None
@@ -333,7 +349,8 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "list_agent_activities": (AgentActivities, "List bounded activities for a Runtime Protocol v1 run, including commands, file changes, tool calls and searches.", True, True),
     "read_agent_activity": (AgentActivityDetail, "Read bounded sanitized evidence for one activity in a Runtime Protocol v1 run.", True, True),
     "git_status": (GitStatus, "Read fixed-function Git status for the selected workspace. Shows only paths allowed by workspace policy; excluded changes are aggregate counts. No repository mutation.", True, True),
-    "git_diff": (GitDiff, "Read a bounded patch from HEAD, the index, or the worktree for policy-allowed changed paths, or with mode run and run_id the changes between that run's pre and post checkpoints. A run diff covers the run's time window: edits by people or overlapping runs (listed in read_agent_run checkpoint) are included and authorship is not proven. No caller-supplied Git commands, refs, or options; patch content is secret-redacted and paginated.", True, True),
+    "git_diff": (GitDiff, "Read a bounded patch from HEAD, the index, or the worktree for policy-allowed changed paths, or with mode run and run_id the changes between that run's pre and post checkpoints. A run diff covers the run's time window: your own apply_patch edits from that window are listed in chatgpt_edits, overlapping runs in checkpoint.overlapping_runs, and other people's edits are included without attribution. No caller-supplied Git commands, refs, or options; patch content is secret-redacted and paginated.", True, True),
+    "run_checks": (RunChecks, "Run named checks the user configured for this workspace on its Node (for example test or lint) and return each one's status, exit code, duration and a redacted output tail. You choose names only; commands, folders and timeouts come from the user's checks.toml, which no tool can edit. Omit names to list the configured checks; pass check_id to read checks still running. Needs the edit write scope. Output is untrusted text.", False, False),
 }
 # Tool-effect annotations for open-world/agent operations.
 DESTRUCTIVE_TOOLS = frozenset({"write_file", "write_image", "edit_file", "apply_patch", "undo_edit",
@@ -1377,6 +1394,19 @@ def make_admin(service: Service, port: int = 8766, *,
                 except ValueError:
                     offset, limit = 0, 50
                 return JSONResponse(await run_in_threadpool(service.list_edits, ws_id, offset, limit))
+            if path.endswith("/checks"):
+                ws = await run_in_threadpool(service.workspace, ws_id, False)
+                run_checks = service.run_coordinator.run_checks
+                if request.method == "PUT":
+                    body = await body_json(request)
+                    if not isinstance(body, dict) or set(body) - {"text", "after_run"}:
+                        return JSONResponse({"error": "Send text and/or after_run", "code": "invalid_arguments"}, 400)
+                    if "text" in body:
+                        await run_in_threadpool(run_checks.write_config, ws, body["text"])
+                    if "after_run" in body:
+                        await run_in_threadpool(run_checks.set_after_run, ws, body["after_run"])
+                    service.event(ws_id, "configure_checks")
+                return JSONResponse(await run_in_threadpool(run_checks.describe, ws))
             if path.endswith("/checkpoints"):
                 ws = await run_in_threadpool(service.workspace, ws_id, False)
                 checkpoints = service.run_coordinator.checkpoints
@@ -1456,6 +1486,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/workspaces/{workspace}/routes", api, methods=["GET"]),
         Route("/api/workspaces/{workspace}/checkpoints", api, methods=["GET", "DELETE"]),
         Route("/api/workspaces/{workspace}/edits", api, methods=["GET"]),
+        Route("/api/workspaces/{workspace}/checks", api, methods=["GET", "PUT"]),
         Route("/api/workspaces/{workspace}/routes/default", api, methods=["POST", "DELETE"]),
         Route("/api/workspaces/{workspace}/routes/{adapter_id}", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}", api, methods=["POST"])])

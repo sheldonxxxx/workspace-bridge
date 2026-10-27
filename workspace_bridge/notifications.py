@@ -49,6 +49,27 @@ SAFE_KINDS = frozenset({"permission", "question", "choice", "approval",
 BRIDGE_USER_AGENT = "Workspace-Bridge/0.3.0 (+local-admin; notification channel)"
 
 
+CHECKS_LABEL = re.compile(r"complete:\d{1,3}:\d{1,3}|unavailable")
+
+
+def checks_label(value: str) -> str:
+    """Human text for an event's after-run check summary."""
+    if value.startswith("complete:"):
+        _, passed, failed = value.split(":")
+        return f"{passed} passed, {failed} failed"
+    return "unavailable"
+
+
+def checks_data(value: str) -> dict | None:
+    """Structured form of an event's after-run check summary, or None."""
+    if not value or not CHECKS_LABEL.fullmatch(value):
+        return None
+    if value == "unavailable":
+        return {"state": "unavailable"}
+    _, passed, failed = value.split(":")
+    return {"state": "complete", "passed": int(passed), "failed": int(failed)}
+
+
 def _safe_label(value: object, fallback: str, limit: int) -> str:
     text = value if isinstance(value, str) else ""
     text = "".join(char for char in text if char == " " or ord(char) >= 32)
@@ -166,6 +187,9 @@ class NotificationEvent:
     subject_id: str = ""
     request_kind: str = ""
     action: str = ""
+    # After-run check counts, '' when the workspace runs none:
+    # "complete:<passed>:<failed>" or "unavailable".
+    checks: str = ""
     # Ephemeral, delivery-time-only enrichment. Never persisted and never
     # accepted by build(); Discord renders it as one compact field and every
     # other channel ignores it.
@@ -177,7 +201,7 @@ class NotificationEvent:
               adapter_name: str, runtime_type: str,
               node_id: str = "", node_name: str = "",
               occurred_at: str | None = None, subject_id: str = "",
-              request_kind: str = "", action: str = "") -> "NotificationEvent":
+              request_kind: str = "", action: str = "", checks: str = "") -> "NotificationEvent":
         if event_type not in EVENT_TYPES:
             raise BridgeError("Unknown notification event type", "invalid_notification")
         safe_run = _safe_id(run_id)
@@ -205,6 +229,8 @@ class NotificationEvent:
                 pass
         if not stamp:
             stamp = datetime.now(timezone.utc).isoformat()
+        if checks and not CHECKS_LABEL.fullmatch(checks):
+            raise BridgeError("Invalid check summary", "invalid_notification")
         dedupe = (f"attention:{safe_run}:{safe_subject}" if event_type == "run_needs_attention"
                   else f"run:{safe_run}:{event_type}")
         return cls(
@@ -216,7 +242,7 @@ class NotificationEvent:
             adapter_name=_safe_label(adapter_name, "adapter", 80),
             runtime_type=runtime_type, occurred_at=stamp, node_id=safe_node,
             node_name=_safe_label(node_name, "Node", 80), subject_id=safe_subject,
-            request_kind=kind, action=safe_action)
+            request_kind=kind, action=safe_action, checks=checks)
 
 
 @dataclass(frozen=True)
@@ -316,6 +342,8 @@ class DiscordChannel:
             fields.append({"name": "Request", "value": event.request_kind[:60], "inline": True})
         if event.action:
             fields.append({"name": "Action", "value": event.action[:80], "inline": True})
+        if event.checks:
+            fields.append({"name": "Checks", "value": checks_label(event.checks), "inline": True})
         if event.quota:
             # Ephemeral best-effort enrichment; omitted entirely when the
             # current account quota could not be read.
@@ -416,7 +444,7 @@ class NotificationManager:
             node_name TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL,
             subject_id TEXT NOT NULL DEFAULT '', request_kind TEXT NOT NULL DEFAULT '',
             action TEXT NOT NULL DEFAULT '', occurred_at TEXT NOT NULL,
-            created_at TEXT NOT NULL);
+            checks TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS notification_deliveries (
             event_id TEXT NOT NULL, channel_id TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','disabled')),
@@ -428,6 +456,9 @@ class NotificationManager:
           CREATE INDEX IF NOT EXISTS ix_notification_events_run
             ON notification_events(run_id,occurred_at DESC);
         """)
+        if "checks" not in {row[1] for row in service.db.execute("PRAGMA table_info(notification_events)")}:
+            with service.lock, service.db:
+                service.db.execute("ALTER TABLE notification_events ADD COLUMN checks TEXT NOT NULL DEFAULT ''")
         # A process exit while a channel is in flight is ambiguous. Requeue
         # those intents on restart; persisted sent rows remain untouched.
         with service.lock, service.db:
@@ -455,16 +486,17 @@ class NotificationManager:
             adapter_name=event.adapter_name, runtime_type=event.runtime_type,
             node_id=event.node_id, node_name=event.node_name,
             occurred_at=event.occurred_at, subject_id=event.subject_id,
-            request_kind=event.request_kind, action=event.action)
+            request_kind=event.request_kind, action=event.action, checks=event.checks)
         self.service.db.execute(
             "INSERT OR IGNORE INTO notification_events(id,dedupe_key,run_id,workspace_id,"
             "workspace_name,handoff_title,adapter_id,adapter_name,runtime_type,node_id,node_name,event_type,"
-            "subject_id,request_kind,action,occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "subject_id,request_kind,action,checks,occurred_at,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (event.id, event.dedupe_key, event.run_id, event.workspace_id,
              event.workspace_name, event.handoff_title, event.adapter_id,
              event.adapter_name, event.runtime_type, event.node_id, event.node_name,
              event.event_type, event.subject_id, event.request_kind, event.action,
-             event.occurred_at, self._now()))
+             event.checks, event.occurred_at, self._now()))
         row = self.service.db.execute(
             "SELECT id FROM notification_events WHERE dedupe_key=?", (event.dedupe_key,)).fetchone()
         event_id = row["id"]
@@ -483,7 +515,8 @@ class NotificationManager:
     def record_run_event_locked(self, *, run_id: str, workspace_id: str,
                                 job_id: str, adapter_id: str, runtime_type: str,
                                 event_type: str, subject_id: str = "", request_kind: str = "",
-                                action: str = "", occurred_at: str | None = None) -> tuple[str, bool]:
+                                action: str = "", occurred_at: str | None = None,
+                                checks: str = "") -> tuple[str, bool]:
         """Insert a run event inside the caller's state transaction."""
         row = self.service.db.execute(
             "SELECT w.name,j.title FROM workspaces w LEFT JOIN jobs j ON j.id=? "
@@ -497,7 +530,7 @@ class NotificationManager:
             adapter_name=adapter["name"], runtime_type=runtime_type,
             node_id=adapter.get("node_id", ""), node_name=adapter.get("node_name", ""),
             occurred_at=occurred_at, subject_id=subject_id,
-            request_kind=request_kind, action=action)
+            request_kind=request_kind, action=action, checks=checks)
         return self._record_event_locked(event)
 
     def publish(self, event: NotificationEvent) -> str:
@@ -562,7 +595,7 @@ class NotificationManager:
                 runtime_type=row["runtime_type"], occurred_at=row["occurred_at"],
                 node_id=row["node_id"], node_name=row["node_name"],
                 subject_id=row["subject_id"], request_kind=row["request_kind"],
-                action=row["action"])
+                action=row["action"], checks=row["checks"])
             event = self._quota_enriched(event)
             try:
                 result = channel.deliver(event)
