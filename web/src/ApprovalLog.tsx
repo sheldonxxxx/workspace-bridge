@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { api, dateTime } from "@/lib/api";
+import { api, dateTime, decidedByLabel } from "@/lib/api";
 
 type Decision = {
   interaction_id: string;
@@ -9,12 +9,12 @@ type Decision = {
   kind: string;
   choice_label?: string | null;
   choice_id?: string;
-  decided_by: "chatgpt" | "owner";
+  decided_by: "chatgpt" | "owner" | "manager";
   reason?: string;
   decided?: string;
 };
 
-type Decider = "" | "chatgpt" | "owner";
+type Decider = "" | "chatgpt" | "owner" | "manager";
 
 /** The approval log: what each run asked and who answered, newest first. */
 export function ApprovalLog({ refreshKey }: { refreshKey: number | null }) {
@@ -80,7 +80,8 @@ export function ApprovalLog({ refreshKey }: { refreshKey: number | null }) {
           >
             <option value="">Everyone</option>
             <option value="chatgpt">ChatGPT</option>
-            <option value="owner">You</option>
+            <option value="owner">You, as ChatGPT reported</option>
+            <option value="manager">You, in the Manager</option>
           </select>
         </div>
       </div>
@@ -97,7 +98,7 @@ export function ApprovalLog({ refreshKey }: { refreshKey: number | null }) {
                 <strong>{item.title || item.kind}</strong>
                 <p>
                   {item.choice_label || item.choice_id || "Answered"}, decided
-                  by {item.decided_by === "owner" ? "you" : "ChatGPT"}
+                  by {decidedByLabel(item.decided_by)}
                   {item.reason ? `: ${item.reason}` : ""}
                 </p>
               </div>

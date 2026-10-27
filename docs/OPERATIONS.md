@@ -154,8 +154,8 @@ Listener health, gateway state, runtime health, and runnable routes are
 distinct observations. The Manager treats only `runnable_routes[].ready`
 for the exact `(workspace_id, adapter_id)` pair as route readiness. If
 diagnostics are unavailable, the Manager marks readiness unavailable while
-retaining other page data. The Manager cannot start runs; ChatGPT starts them
-with `start_run`. Offline Doctor opens SQLite read-only, starts no workers, recovers
+retaining other page data. ChatGPT normally starts runs with `start_run`; the Manager can start one by
+hand as a last resort through the same route checks. Offline Doctor opens SQLite read-only, starts no workers, recovers
 no notification deliveries, and does not contend for the serve process lock.
 
 Diagnostics do not prove account authorization, model behavior, test
@@ -344,12 +344,16 @@ or model policy. The Manager shows the owning Node and adapter name and ID,
 runtime type, Bridge run and conversation IDs, handoff, model, immutable
 security-used snapshot, state, timestamps, and notification delivery. Run
 details show current interactions plus bounded activity and execution
-records. The Manager does not answer interactions: a waiting request shows its
-action and choices with a note to answer it in ChatGPT, and the Manager can
-only stop the run. Answered interactions show who decided (ChatGPT or you, as
-ChatGPT reports it) and the stated reason. `GET /api/approvals`, optionally
-with `decided_by=chatgpt` or `decided_by=owner`, returns that approval log
-newest first.
+records. ChatGPT normally answers interactions. Under Manual control a waiting request
+shows its action and choices and can be answered, a run can be steered, queued
+or stopped, and a new run can be started from a prepared handoff or a direct
+instruction. Every such action is recorded with the actor `manager` in the
+approval log, the run's input receipts and the audit list, and sends a Discord
+notice when one is configured. Answered interactions show who decided
+(ChatGPT, you as ChatGPT reports it, or you in the Manager) and the stated
+reason. `GET /api/approvals`, optionally with `decided_by=chatgpt`,
+`decided_by=owner` or `decided_by=manager`, returns that approval log newest
+first.
 
 On startup and during active runs, the Bridge reconciles durable records
 with adapter snapshots. It rebinds only operations the adapter positively

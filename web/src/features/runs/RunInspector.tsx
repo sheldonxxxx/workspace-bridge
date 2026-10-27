@@ -12,6 +12,7 @@ import {
 import {
   api,
   dateTime,
+  decidedByLabel,
   displayState,
   jsonText,
   runtimeName,
@@ -27,6 +28,7 @@ import {
 import { ExecutionStatus } from "./ExecutionStatus";
 import { RunChanges } from "./RunChanges";
 import { useRunInspector } from "./useRunInspector";
+import { ManualAnswer, ManualInput } from "./ManualControl";
 
 function StateBadge({ value }: { value: string }) {
   const lower = value.toLowerCase();
@@ -87,8 +89,10 @@ export function RunInspector({
   onRefresh,
   onDetail,
   onConfirm,
+  lastMcpCall,
 }: {
   run: Run | null;
+  lastMcpCall?: string | null;
   onClose: () => void;
   onNotice: (message: string) => void;
   onRefresh: () => Promise<void>;
@@ -450,9 +454,15 @@ export function RunInspector({
                     </small>
                   ) : null}
                   <p className="muted-note">
-                    Answer this in the ChatGPT chat that started the run. The
-                    Manager can only stop the run.
+                    ChatGPT normally answers this in its chat.
                   </p>
+                  <ManualAnswer
+                    runId={current.run_id}
+                    item={item}
+                    onConfirm={onConfirm}
+                    onNotice={onNotice}
+                    onChanged={() => load(current.run_id)}
+                  />
                 </section>
               ))}
               {!pending.length && (
@@ -464,8 +474,7 @@ export function RunInspector({
                   {item.details?.choices?.find(
                     (c) => c.id === item.decision?.choice_id,
                   )?.label || "answered"}
-                  , decided by{" "}
-                  {item.decision?.decided_by === "owner" ? "you" : "ChatGPT"}{" "}
+                  , decided by {decidedByLabel(item.decision?.decided_by)}{" "}
                   {dateTime(item.decision?.decided)}. {item.decision?.reason}
                 </p>
               ))}
@@ -479,6 +488,7 @@ export function RunInspector({
                           {message.mode === "steer"
                             ? "Correction"
                             : "Follow-up"}
+                          {message.origin === "manager" ? " (from you)" : ""}
                         </span>
                         <StateBadge
                           value={
@@ -494,6 +504,14 @@ export function RunInspector({
                     Pending messages are discarded if the run stops or restarts.
                   </p>
                 </section>
+              )}
+              {current.phase === "active" && (
+                <ManualInput
+                  run={current}
+                  lastCall={lastMcpCall}
+                  onNotice={onNotice}
+                  onChanged={() => load(current.run_id)}
+                />
               )}
               <div className="inspector-actions">
                 <Button

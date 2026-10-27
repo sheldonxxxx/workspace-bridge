@@ -84,6 +84,9 @@ class Service:
         # adapter I/O. Longer steps serialize on keyed locks (per workspace,
         # per Node mapping), always acquired before the database lock.
         self.lock = threading.RLock()
+        # When ChatGPT last called the MCP endpoint; the Manager shows it so a
+        # silent chat is visible before you take manual control. Not persisted.
+        self.last_mcp_call: str | None = None
         self.keyed_locks = KeyedLocks(inner=self.lock)
         database = self.state / "bridge.sqlite3"
         if read_only:
@@ -671,6 +674,9 @@ class Service:
 
     def answer_interaction(self, ws: dict, run_id: str, interaction_id: str, decided_by: str, reason: str,
                            choice_id: str | None = None, answers: dict | None = None) -> dict:
+        if decided_by not in ("chatgpt", "owner"):
+            # "manager" is recorded only for an answer made in the signed-in Manager.
+            raise BridgeError("decided_by must be chatgpt or owner", "invalid_arguments")
         response = {"choiceId": choice_id} if choice_id is not None else {"answers": answers}
         return self.respond_agent_interaction(ws, run_id, interaction_id, response, decided_by, reason)
 
@@ -695,13 +701,58 @@ class Service:
     def admin_stop_agent_run(self, run_id: str) -> dict:
         """Cancel one Runtime Protocol run through the local admin plane."""
         ws = self._admin_run_workspace(run_id)
-        return self.run_coordinator.cancel(ws, run_id)
+        result = self.run_coordinator.cancel(ws, run_id)
+        self._manager_acted(ws, run_id, "stopped", "stop", "stop_agent_run")
+        return result
+
+    def _manager_acted(self, ws: dict, run_id: str, action: str, subject: str, audit: str) -> None:
+        """Record a hand action in the audit list and tell the notice channels."""
+        with self.lock:
+            run = self.db.execute("SELECT adapter_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+        self.event(ws["id"], audit, "ok", adapter_id=run["adapter_id"] if run else None)
+        self.run_coordinator.note_manager_action(run_id, action, subject)
+
+    def admin_start_agent_run(self, workspace_id: str, adapter_id: str, request_id: str,
+                              job_id: str | None = None, instruction: str | None = None,
+                              model: str | None = None, isolation: str | None = None,
+                              continue_from_run_id: str | None = None) -> dict:
+        """Start a run by hand through the same route, security and admission gates as ChatGPT."""
+        ws = self.workspace(workspace_id)
+        result = self.start_agent_run(
+            ws, adapter_id, job_id, "manager-" + request_id, model, None,
+            continue_from_run_id, instruction, None, isolation)
+        if not result.get("idempotent"):
+            self._manager_acted(ws, result["run_id"], "started", "start", "start_agent_run")
+        return result
+
+    def admin_answer_interaction(self, run_id: str, interaction_id: str,
+                                 choice_id: str | None = None, answers: dict | None = None,
+                                 reason: str = "") -> dict:
+        """Answer a pending request by hand; the Bridge records decided_by manager."""
+        ws = self._admin_run_workspace(run_id)
+        response = {"choiceId": choice_id} if choice_id is not None else {"answers": answers}
+        result = self.respond_agent_interaction(
+            ws, run_id, interaction_id, response, "manager",
+            reason.strip() or "Answered in the Manager")
+        self._manager_acted(ws, run_id, "answered", interaction_id, "answer_agent_interaction")
+        return result
+
+    def admin_send_run_input(self, run_id: str, instruction: str, request_id: str,
+                             mode: str) -> dict:
+        """Steer or queue an instruction by hand; the receipt is marked as from the Manager."""
+        ws = self._admin_run_workspace(run_id)
+        result = self.run_coordinator.input(
+            ws, run_id, instruction, "manager-" + request_id, mode, "manager")
+        self._manager_acted(ws, run_id, f"{mode}d" if mode == "queue" else "steered",
+                            request_id, "send_agent_run_input")
+        return result
 
     def admin_abandon_agent_run(self, run_id: str) -> dict:
         """Stop tracking one run through the local admin plane; the runtime is not contacted."""
         ws = self._admin_run_workspace(run_id)
         result = self.run_coordinator.abandon(ws, run_id)
         self.event(ws["id"], "abandon_agent_run", result["outcome"] or "ok")
+        self.run_coordinator.note_manager_action(run_id, "abandoned", "abandon")
         return result
 
     def admin_list_agent_activities(self, run_id: str, limit: int = 50,
@@ -806,6 +857,7 @@ class Service:
             row = self.db.execute("SELECT * FROM gateway WHERE id=1").fetchone()
             return {"configured": bool(row["token_hash"]), "enabled": bool(row["enabled"]),
                     "endpoint": "/mcp", "updated": row["updated"],
+                    "last_mcp_call": self.last_mcp_call,
                     "access": "All explicitly enabled workspace mappings; one credential, no per-chat isolation"}
     def manage_bridge(self, operation: str) -> dict:
         with self.lock, self.db:

@@ -103,6 +103,7 @@ import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
 import { ApprovalLog } from "./ApprovalLog";
+import { StartRunDialog } from "./StartRunDialog";
 import {
   AdapterDialog,
   NodeDialog,
@@ -1143,6 +1144,7 @@ export default function App() {
     null,
   );
   const [nodeDialog, setNodeDialog] = useState<NodeDialogState | null>(null);
+  const [startRun, setStartRun] = useState(false);
   const [profileFor, setProfileFor] = useState<{
     ws: Workspace;
     adapterId: string;
@@ -2763,7 +2765,16 @@ export default function App() {
                 title="Agent runs"
                 description="Open a run to inspect activity or answer a request"
                 action={
-                  <span className="subtle-count">{runs.length} shown</span>
+                  <>
+                    <span className="subtle-count">{runs.length} shown</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setStartRun(true)}
+                    >
+                      Start run by hand
+                    </Button>
+                  </>
                 }
               />
               {runs.length ? (
@@ -3344,6 +3355,18 @@ export default function App() {
           </form>
         </DialogContent>
       </Dialog>
+      {startRun && (
+        <StartRunDialog
+          workspaces={workspaces}
+          onClose={() => setStartRun(false)}
+          onStarted={(run) => {
+            setStartRun(false);
+            notify("Run started.");
+            void refresh({ silent: true });
+            setRunInspect(run);
+          }}
+        />
+      )}
       {nodeDialog && (
         <NodeDialog
           dialog={nodeDialog}
@@ -3402,6 +3425,7 @@ export default function App() {
           onRefresh={refresh}
           onDetail={setTextDetail}
           onConfirm={ask}
+          lastMcpCall={status?.bridge.last_mcp_call}
         />
       )}
       <Sheet

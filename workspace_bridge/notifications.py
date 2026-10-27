@@ -32,12 +32,13 @@ MAX_SUMMARY_EVENTS = 20
 MAX_QUOTA_FIELD = 160
 EVENT_TYPES = frozenset({"run_completed", "run_failed", "run_cancelled",
                          "run_interrupted", "run_orphaned", "run_blocked",
-                         "run_needs_attention"})
+                         "run_needs_attention", "run_manager_action"})
 EVENT_TO_STATE = {
     "run_completed": "completed", "run_failed": "failed",
     "run_cancelled": "cancelled", "run_interrupted": "interrupted",
     "run_orphaned": "orphaned", "run_blocked": "blocked",
     "run_needs_attention": "needs_attention",
+    "run_manager_action": "manager_action",
 }
 STATE_EVENTS = {
     "completed": "run_completed", "failed": "run_failed",
@@ -232,7 +233,11 @@ class NotificationEvent:
             stamp = datetime.now(timezone.utc).isoformat()
         if checks and not CHECKS_LABEL.fullmatch(checks):
             raise BridgeError("Invalid check summary", "invalid_notification")
+        if event_type == "run_manager_action" and not (safe_subject and safe_action):
+            raise BridgeError("Manager action notices require a subject id and action",
+                              "invalid_notification")
         dedupe = (f"attention:{safe_run}:{safe_subject}" if event_type == "run_needs_attention"
+                  else f"manager:{safe_run}:{safe_action}:{safe_subject}" if event_type == "run_manager_action"
                   else f"run:{safe_run}:{event_type}")
         return cls(
             id="nev_" + secrets.token_hex(12), dedupe_key=dedupe,
@@ -330,15 +335,18 @@ class DiscordChannel:
     def _payload(event: NotificationEvent) -> dict:
         state = EVENT_TO_STATE[event.event_type]
         attention = event.event_type == "run_needs_attention"
-        headline = "Agent run needs attention" if attention else f"Agent run {state}"
+        manual = event.event_type == "run_manager_action"
+        headline = ("Agent run needs attention" if attention
+                    else "Agent run changed in the Manager" if manual else f"Agent run {state}")
         fields = [
             {"name": "Workspace", "value": event.workspace_name, "inline": True},
             {"name": "Node", "value": event.node_name or event.node_id or "Unknown", "inline": True},
             {"name": "Adapter", "value": event.adapter_name, "inline": True},
             {"name": "Handoff", "value": event.handoff_title, "inline": True},
             {"name": "Run", "value": event.run_id[:80], "inline": True},
-            {"name": "Outcome", "value": state[:40], "inline": True},
         ]
+        if not manual:
+            fields.append({"name": "Outcome", "value": state[:40], "inline": True})
         if event.request_kind:
             fields.append({"name": "Request", "value": event.request_kind[:60], "inline": True})
         if event.action:
@@ -352,9 +360,11 @@ class DiscordChannel:
         colors = {"run_needs_attention": 0xE0A800, "run_completed": 0x2E9E5B,
                   "run_blocked": 0x9E6B2E, "run_failed": 0xC0392B,
                   "run_cancelled": 0x6B7280, "run_interrupted": 0x6B7280,
-                  "run_orphaned": 0x6B7280}
+                  "run_orphaned": 0x6B7280, "run_manager_action": 0x3B6FB6}
         description = ("Answer it in ChatGPT; this notice cannot answer, and details are not sent to Discord."
-                       if attention else "Read the final run result in ChatGPT/local manager.")
+                       if attention else
+                       "Someone signed in to the Manager acted on this run by hand. If that was not you, change the Manager password."
+                       if manual else "Read the final run result in ChatGPT/local manager.")
         embed = {"title": headline, "color": colors[event.event_type],
                  "description": description, "fields": fields,
                  "timestamp": event.occurred_at}

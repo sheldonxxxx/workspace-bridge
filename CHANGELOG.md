@@ -10,6 +10,16 @@
 - The Manager pairs a Node with a one-time pairing string and adds adapters by
   picking an agent plugin on a Node. The base URL, token, workspace-wide agent
   switch, release and Versions screens of 0.3 are removed.
+- The Manager can take manual control of runs as a last resort: start a run
+  from a prepared handoff or a direct instruction, answer a waiting request,
+  steer or queue an instruction, and stop or abandon a run. Each action uses
+  the same route, security and idempotency checks as ChatGPT, and is recorded
+  as the Manager's: approvals carry `decided_by: "manager"` (a value only the
+  Manager session can set; `answer_interaction` refuses it), input receipts
+  carry `origin: "manager"`, and the audit list and the Discord channel get a
+  notice. The Manager shows when ChatGPT last called the Bridge. The
+  project-lead skill is 4.1.0 and tells ChatGPT to re-read a run after a
+  Manager action.
 - The Manager's Audit page lists the approval log, filtered by who decided
   (ChatGPT or you), and a run inspector can abandon a run whose Node is gone.
 - The Bridge records each MCP client name and protocol version the first

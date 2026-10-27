@@ -452,7 +452,9 @@ at most 20 pending inputs. `input_message` is the accepted request's receipt;
 `unknown`). Delivered means native submission, not successful completion.
 Unknown delivery is never retried automatically. Failure, cancellation, and
 adapter restart discard pending inputs; prompt text is never persisted as a
-replay queue. The Manager shows the receipts but cannot send input.
+replay queue. The Manager shows the receipts and can steer or queue by hand as a last
+resort; those receipts carry `origin: "manager"` (`"chatgpt"` otherwise), so
+re-read the run before sending more input.
 
 Call `list_targets` first. Without `adapter_id` it returns only configured
 AdapterInstances owned by the selected workspace's authoritative Node,
@@ -523,14 +525,17 @@ A run in a workspace with after-run checks includes `checks`: `state`
 complete the `passed` and `failed` counts with each check's status, exit code
 and duration. See [run_checks](#run_checks).
 `read_run` lists every interaction with its exact live request and supported
-choices. ChatGPT is the only place an interaction is answered: the Manager and
-Discord only show that a run is waiting, and nothing answers on a timeout.
+choices. ChatGPT normally answers an interaction. The signed-in Manager can answer it
+by hand as a last resort; Discord only shows that a run is waiting. Nothing
+answers on a timeout.
 `list_runs` lists runs waiting on an answer first. Submit the adapter's
 opaque choice ID unchanged as `choice_id`, or a form's validated `answers`
 keyed by question ID, with `answer_interaction`, with `decided_by`
 (`chatgpt` when ChatGPT decided under the project-lead skill's approval rules,
 `owner` when it relays the user's own answer) and a `reason` of up to 500
 characters. The Bridge cannot verify `owner`; it records what ChatGPT reports.
+An answer made in the Manager is recorded as `manager`, which only the Manager
+session can set; the tool refuses it.
 An interaction is answered once: the Bridge claims it with compare-and-set,
 then rechecks that the native request is still live and forwards it, so a
 retry or a second answer fails with `already_answered`. If the plugin refuses
@@ -538,7 +543,7 @@ the answer, the claim is released, or the interaction becomes stale when the
 native request is gone. Form interactions accept only validated answers. A
 stale interaction fails closed. Answered interactions carry a `decision`
 (`decided_by`, `reason`, `decided`, `choice_id`); the Manager's approval log
-at `GET /api/approvals?decided_by=chatgpt|owner` lists them newest first.
+at `GET /api/approvals?decided_by=chatgpt|owner|manager` lists them newest first.
 Activities are bounded adapter evidence and do not independently verify the
 agent's final claim.
 

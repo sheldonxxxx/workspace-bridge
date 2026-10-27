@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Use only in ChatGPT web sessions connected to the Workspace Bridge app to plan coding tasks in mapped workspaces, delegate to a less-capable coding model, and audit the results. Do not use in local Codex, Codex CLI, IDE agents, or direct local repository work, including after context loss; use native local tools there.
-version: 4.0.0
+version: 4.1.0
 ---
 
 # Project lead
@@ -143,7 +143,8 @@ for after its current response (`mode: "queue"`); use it only for a bounded
 correction the handoff already allows.
 
 ## Approvals
-Only this chat answers a run's approval requests. When `read_run` shows
+This chat normally answers a run's approval requests; the user can also answer,
+steer, queue, start or stop a run by hand in the Manager. When `read_run` shows
 `waiting_interaction` (`list_runs` lists waiting runs first), read the action
 and exact choices in its `interactions`.
 
@@ -161,7 +162,10 @@ Prefer the narrowest choice (once over always). Answer once with
 `answer_interaction`: the exact `choice_id` or form `answers`, `decided_by`
 `chatgpt` for your own decision or `owner` only when relaying the user's answer,
 and a one-sentence `reason`. It is recorded in the approval log.
-`already_answered` means it was answered before: re-read, do not retry. Nothing
+`already_answered` means it was answered before, possibly by the user in the
+Manager (`decided_by` `manager`): re-read, do not retry. Input receipts with
+`origin` `manager` are instructions the user sent by hand; read the run before
+you steer again. Nothing
 answers on a timeout; a request waits until answered or the run is cancelled.
 
 ## Audit using normal tools

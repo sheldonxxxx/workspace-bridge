@@ -65,9 +65,12 @@ as `.env.example` excepted), and the root `checks.toml` are always protected.
 
 `ask` pauses the run until ChatGPT answers the interaction, on its own under
 the project-lead skill's approval rules or by asking you in the chat. Nothing
-answers on a timeout, and the Manager can only cancel the run. Each answer is
-recorded with `decided_by` (`chatgpt` or `owner`, as ChatGPT reports it) and a
-reason. The skill is guidance, not enforcement, so put anything that must
+answers on a timeout. As a last resort the signed-in Manager can also answer,
+steer, queue, start or cancel a run, so the Manager login carries the same
+run authority as the gateway token; each such action is audited and sent to
+the notice channel. Each answer is recorded with `decided_by` (`chatgpt` or
+`owner`, as ChatGPT reports it, or `manager` for an answer made in the
+Manager, which only the Manager session can set) and a reason. The skill is guidance, not enforcement, so put anything that must
 never be approved without you under `deny`, not `ask`, and review the
 approval log filtered to `chatgpt` now and then. A route names one
 profile, or `native` for a plugin that can follow the agent's own security

@@ -37,7 +37,9 @@ def _sanitized_descriptor_code(code: Any, fallback: str = "descriptor_error") ->
 
 # Who answered an interaction. ``owner`` is reported by ChatGPT when it relays
 # the user's own answer; the Bridge cannot verify it.
-DECIDERS = ("chatgpt", "owner")
+# "manager" is set only by the signed-in Manager session, never taken from a
+# tool argument, so it is the one decider the Bridge can verify.
+DECIDERS = ("chatgpt", "owner", "manager")
 MAX_DECISION_REASON = 500
 
 
@@ -1030,7 +1032,10 @@ class RunCoordinator:
                 "SELECT payload FROM agent_activities WHERE run=? AND kind='run_input' "
                 "AND native_id LIKE 'bridge-input:%' ORDER BY created,id LIMIT 50",
                 (run["id"],)).fetchall()
-        input_messages = [json.loads(row["payload"])["receipt"] for row in receipts]
+        input_messages = []
+        for row in receipts:
+            stored = json.loads(row["payload"])
+            input_messages.append({**stored["receipt"], "origin": stored.get("origin", "chatgpt")})
         with self.service.lock:
             image_row = self.service.db.execute("SELECT refs,metadata FROM agent_run_images WHERE run=?", (run["id"],)).fetchone()
             native_conversation = self.service.db.execute("SELECT native_id FROM agent_conversations WHERE id=?", (run["conversation"],)).fetchone()
@@ -1179,8 +1184,12 @@ class RunCoordinator:
                 existing = self.service.db.execute(
                     "SELECT payload FROM agent_activities WHERE run=? AND native_id=?",
                     (run["id"], native_id)).fetchone()
+                origin = {}
                 if existing:
-                    prior = json.loads(existing["payload"])["receipt"]
+                    stored = json.loads(existing["payload"])
+                    if "origin" in stored:
+                        origin = {"origin": stored["origin"]}
+                    prior = stored["receipt"]
                     if prior["mode"] != receipt["mode"]:
                         raise RuntimeUnavailable("Runtime input receipt changed mode")
                     # Concurrent reads can return an older snapshot. Positive
@@ -1189,7 +1198,7 @@ class RunCoordinator:
                     if (prior["status"] in {"delivered", "discarded"}
                             or prior["status"] == "unknown" and receipt["status"] == "queued"):
                         continue
-                payload = _safe_payload({"receipt": receipt,
+                payload = _safe_payload({"receipt": receipt, **origin,
                     "title": f"{receipt['mode'].capitalize()} input: {receipt['status']}"})
                 self.service.db.execute(
                     "INSERT INTO agent_activities VALUES(?,?,?,?,?,?,?,?) "
@@ -1368,7 +1377,7 @@ class RunCoordinator:
     def resolve(self, ws: dict, run_id: str, interaction_id: str,
                 response: dict, decided_by: str, reason: str) -> dict:
         if decided_by not in DECIDERS:
-            raise BridgeError("decided_by must be chatgpt or owner", "invalid_arguments")
+            raise BridgeError("decided_by must be chatgpt, owner or manager", "invalid_arguments")
         if (not isinstance(reason, str) or not reason.strip()
                 or len(reason) > MAX_DECISION_REASON):
             raise BridgeError("A reason of at most 500 characters is required",
@@ -1433,7 +1442,7 @@ class RunCoordinator:
                   limit: int = 50) -> dict:
         """The approval log: answered interactions, newest first."""
         if decided_by is not None and decided_by not in DECIDERS:
-            raise BridgeError("decided_by must be chatgpt or owner", "invalid_arguments")
+            raise BridgeError("decided_by must be chatgpt, owner or manager", "invalid_arguments")
         sql = ("SELECT i.*,r.workspace,r.adapter_id,r.runtime_type FROM agent_interactions i "
                "JOIN agent_runs r ON r.id=i.run WHERE i.decided_by IS NOT NULL")
         args: list = []
@@ -1466,13 +1475,13 @@ class RunCoordinator:
         return self.read(ws, run_id)
 
     def input(self, ws: dict, run_id: str, instruction: str,
-              request_id: str, mode: str) -> dict:
+              request_id: str, mode: str, origin: str = "chatgpt") -> dict:
         """Send one bounded instruction to the positively identified owned run."""
         with self.input_lock(run_id):
-            return self._input_locked(ws, run_id, instruction, request_id, mode)
+            return self._input_locked(ws, run_id, instruction, request_id, mode, origin)
 
     def _input_locked(self, ws: dict, run_id: str, instruction: str,
-                      request_id: str, mode: str) -> dict:
+                      request_id: str, mode: str, origin: str = "chatgpt") -> dict:
         if (mode not in {"steer", "queue"} or not isinstance(instruction, str)
                 or not instruction.strip() or len(instruction) > 8000
                 or not isinstance(request_id, str)
@@ -1515,13 +1524,40 @@ class RunCoordinator:
             raise RuntimeUnavailable("Runtime did not confirm the input receipt")
         self._persist_snapshot(run, native, adapter.interactions(run["native_id"]),
                                adapter.activities(run["native_id"]))
+        if origin == "manager":
+            self._mark_input_origin(run["id"], request_id, origin)
         result = self.read(ws, run_id, sync=False)
-        result["input_message"] = receipt
+        result["input_message"] = {**receipt, "origin": origin}
         if native["phase"] == "active":
             result["input_capabilities"] = {
                 "steer": descriptor.supports("steering"),
                 "queue": descriptor.supports("queueing")}
         return result
+
+    def _mark_input_origin(self, run_id: str, request_id: str, origin: str) -> None:
+        """Remember that a person, not ChatGPT, sent this input; later snapshots keep it."""
+        with self.service.lock, self.service.db:
+            row = self.service.db.execute(
+                "SELECT id,payload FROM agent_activities WHERE run=? AND native_id=?",
+                (run_id, "bridge-input:" + request_id)).fetchone()
+            if row is not None:
+                payload = json.loads(row["payload"])
+                payload["origin"] = origin
+                self.service.db.execute("UPDATE agent_activities SET payload=? WHERE id=?",
+                                        (_safe_payload(payload), row["id"]))
+
+    def note_manager_action(self, run_id: str, action: str, subject: str) -> None:
+        """Tell the notice channels that the Manager acted on a run by hand."""
+        with self.service.lock, self.service.db:
+            run = self.service.db.execute(
+                "SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if run is None:
+                return
+            self.service.notification_manager.record_run_event_locked(
+                run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
+                adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
+                event_type="run_manager_action", subject_id=subject, action=action,
+                occurred_at=_now())
 
     def activities(self, ws: dict, run_id: str, offset: int = 0,
                    limit: int = 50, *, newest_first: bool = False,

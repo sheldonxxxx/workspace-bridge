@@ -8,6 +8,7 @@ execution.
 """
 from __future__ import annotations
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -364,7 +365,7 @@ INSTRUCTIONS = (
     "Use list_dir, glob and grep before read_file; follow pagination, retain hashes, and read only relevant files. read_file returns native image previews for supported raster files: first-frame previews, not exact originals, with visible secrets not redacted. Do not claim visual inspection unless image content actually reaches you. "
     "Change source with apply_patch (atomic, journaled; undo_edit restores). Check workspace_info.write_scope first: none (read-only, the default) or workspace (edit). Read before replacing, supply the current hash and reconcile conflicts; never force stale writes. Only the local administrator can change write or agent policy; never try to broaden it through tool arguments or repository edits. "
     "Normal loop: plan in the chat, save it with save_handoff, call list_targets for the workspace, choose an exact available adapter_id (optionally list its models with list_targets and that adapter_id), then start_run with the saved handoff or a bounded direct instruction. Runtime type is descriptive; never map pi or codex to an arbitrary adapter. "
-    "Only this chat answers a run's approval requests. When read_run shows waiting_interaction, read the interaction there, decide under the project-lead skill's approval rules or ask the user, then answer once with answer_interaction, setting decided_by (chatgpt, or owner when relaying the user's answer) and a short reason. "
+    "This chat normally answers a run's approval requests; the user can also answer, steer or stop a run by hand in the Manager. When read_run shows waiting_interaction, read the interaction there, decide under the project-lead skill's approval rules or ask the user, then answer once with answer_interaction, setting decided_by (chatgpt, or owner when relaying the user's answer) and a short reason. An answer or input the user made in the Manager is marked manager in read_run: re-read the run before acting, and treat already_answered as the user having decided. "
     "After a run finishes, read it with read_run and its activities with run_log. When read_run reports checkpoint status complete or partial, read git_diff with mode run first: it shows the changes made during the run window, though people and checkpoint.overlapping_runs can still contribute. Then inspect current code, callers and tests yourself. An agent's statement that tests passed is not verification; read the checks in read_run or call run_checks. "
     "For visual handoffs, upload original raster bytes with upload_image, then pass their paths, descriptions and returned sha256 values as save_handoff attachments. No URL fetch occurs. "
     "Handoffs are kept in Bridge state; read them with list_handoffs. Do not change dispatched plans while the local agent is working. Workspace-wide permission is capability, not user authorization to take over an implementation. "
@@ -715,6 +716,7 @@ def make_mcp(service: Service, port: int = 8765):
         # The SDK sieves legacy initialize results down to the 2025 capability
         # shape, and events are this server's own capability; add both back.
         result = await call_next(ctx)
+        service.last_mcp_call = datetime.now(timezone.utc).isoformat()
         await note_client(ctx, result)
         if ctx.method in ("initialize", "server/discover") and isinstance(result, dict):
             capabilities = result.setdefault("capabilities", {})
@@ -774,6 +776,41 @@ class ManageBridge(Input):
 class NodePairingCreate(Input):
     name: str = Field(min_length=1, max_length=80)
     replace: bool = Field(default=False, description="Re-pair the existing paired Node with this name.")
+
+
+class ManagerStartRun(Input):
+    adapter_id: AdapterID
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,50}$")
+    job_id: JobID | None = None
+    instruction: str | None = Field(default=None, min_length=1, max_length=8000)
+    model: str | None = Field(default=None, max_length=260)
+    isolation: Literal["none", "worktree"] | None = None
+    continue_from_run_id: RunID | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_start_target(self) -> "ManagerStartRun":
+        if bool(self.job_id) == bool(self.instruction):
+            raise ValueError("Supply exactly one of job_id or instruction")
+        return self
+
+
+class ManagerAnswer(Input):
+    interaction_id: str = Field(min_length=1, max_length=200)
+    choice_id: str | None = Field(default=None, min_length=1, max_length=200)
+    answers: dict | None = None
+    reason: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def _one_answer(self) -> "ManagerAnswer":
+        if (self.choice_id is None) == (self.answers is None):
+            raise ValueError("Supply exactly one of choice_id or answers")
+        return self
+
+
+class ManagerRunInput(Input):
+    instruction: str = Field(min_length=1, max_length=8000)
+    request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    mode: Literal["steer", "queue"]
 
 
 class NodeUpdate(Input):
@@ -1252,6 +1289,14 @@ def make_admin(service: Service, port: int = 8766, *,
                 run_id = parts[2]
                 if len(parts) == 4 and parts[3] == "stop":
                     return JSONResponse(await run_in_threadpool(service.admin_stop_agent_run, run_id))
+                if len(parts) == 4 and parts[3] == "answer" and request.method == "POST":
+                    model = ManagerAnswer.model_validate(await body_json(request))
+                    return JSONResponse(await run_in_threadpool(
+                        lambda: service.admin_answer_interaction(run_id, **model.model_dump())))
+                if len(parts) == 4 and parts[3] == "input" and request.method == "POST":
+                    model = ManagerRunInput.model_validate(await body_json(request))
+                    return JSONResponse(await run_in_threadpool(
+                        lambda: service.admin_send_run_input(run_id, **model.model_dump())))
                 if len(parts) == 4 and parts[3] == "abandon":
                     return JSONResponse(await run_in_threadpool(service.admin_abandon_agent_run, run_id))
                 if len(parts) == 4 and parts[3] == "activities":
@@ -1367,6 +1412,10 @@ def make_admin(service: Service, port: int = 8766, *,
                     ws = service.workspace(ws_id, False)
                     return service.read_handoff(ws, **document.model_dump())
                 return JSONResponse(await run_in_threadpool(read_document))
+            if path.endswith("/runs") and request.method == "POST":
+                model = ManagerStartRun.model_validate(await body_json(request))
+                return JSONResponse(await run_in_threadpool(
+                    lambda: service.admin_start_agent_run(ws_id, **model.model_dump())), 201)
             if path.endswith("/runs"):
                 try:
                     offset = max(0, int(request.query_params.get("offset", "0")))
@@ -1414,6 +1463,8 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/runs/{run_id}", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
         Route("/api/runs/{run_id}/abandon", api, methods=["POST"]),
+        Route("/api/runs/{run_id}/answer", api, methods=["POST"]),
+        Route("/api/runs/{run_id}/input", api, methods=["POST"]),
         Route("/api/runs/{run_id}/activities", api),
         Route("/api/runs/{run_id}/executions", api),
         Route("/api/runs/{run_id}/executions/{execution_id}", api),
@@ -1421,7 +1472,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/bridge", api, methods=["GET", "POST"]),
         Route("/api/workspaces", api, methods=["GET", "POST"]),
         Route("/api/workspaces/{workspace}/jobs", api),
-        Route("/api/workspaces/{workspace}/runs", api),
+        Route("/api/workspaces/{workspace}/runs", api, methods=["GET", "POST"]),
         Route("/api/workspaces/{workspace}/document", api),
         Route("/api/workspaces/{workspace}/routes", api, methods=["GET"]),
         Route("/api/workspaces/{workspace}/checkpoints", api, methods=["GET", "DELETE"]),

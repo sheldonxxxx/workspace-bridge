@@ -73,19 +73,87 @@ def test_input_rejects_changed_security_before_delivery(modern_env, monkeypatch)
     assert not any(method == "turn/steer" for method, _ in rpc.calls)
 
 
-async def test_only_mcp_sends_run_input(modern_env):
+async def test_manager_input_is_marked_and_chatgpt_input_is_not(modern_env):
     service, ws_id, token, _, _, rpc = modern_env
     run = start(modern_env)
     app = make_admin(service)
     cookie = admin_cookie(app)
+    path = f"/api/runs/{run['run_id']}/input"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                base_url="http://127.0.0.1:8766") as client:
+        assert (await client.post(path, json={})).status_code == 401
+        bad = await client.post(path, headers={"Cookie": cookie}, json={
+            "instruction": "Then review tests.", "request_id": "one", "mode": "shout"})
+        assert bad.status_code == 400
+        for mode in ("queue", "steer"):
+            sent = await client.post(path, headers={"Cookie": cookie}, json={
+                "instruction": "Then review tests.", "request_id": f"hand-{mode}", "mode": mode})
+            assert sent.status_code == 200, sent.text
+            assert sent.json()["input_message"]["origin"] == "manager"
+            assert sent.json()["input_message"]["requestId"] == f"manager-hand-{mode}"
+    assert sum(method == "turn/steer" for method, _ in rpc.calls) == 1
+    service.call(ws_id, token, "send_run_input", {
+        "run_id": run["run_id"], "instruction": "From the chat.", "request_id": "chat-1",
+        "mode": "queue"})
+    # Later snapshots keep the origin: it is stored with the receipt, not with the request.
+    service.run_coordinator.reconcile(service.workspace(ws_id), run["run_id"])
+    read = service.call(ws_id, token, "read_run", {"run_id": run["run_id"]})
+    origins = {item["requestId"]: item["origin"] for item in read["input_messages"]}
+    assert origins == {"manager-hand-queue": "manager", "manager-hand-steer": "manager",
+                       "chat-1": "chatgpt"}
+    with service.lock:
+        kinds = {row["action"] for row in service.db.execute(
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_manager_action'",
+            (run["run_id"],))}
+    assert kinds == {"queued", "steered"}
+
+
+async def test_manager_starts_stops_and_abandons_a_run_by_hand(modern_env):
+    service, ws_id, token, job, native, _ = modern_env
+    app = make_admin(service)
+    headers = {"Cookie": admin_cookie(app)}
+    path = f"/api/workspaces/{ws_id}/runs"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                base_url="http://127.0.0.1:8766") as client:
+        assert (await client.post(path, json={})).status_code == 401
+        neither = await client.post(path, headers=headers, json={
+            "adapter_id": ADAPTER_ID, "request_id": "hand-1"})
+        assert neither.status_code == 400
+        body = {"adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "hand-1"}
+        started = await client.post(path, headers=headers, json=body)
+        assert started.status_code == 201, started.text
+        again = await client.post(path, headers=headers, json=body)
+        assert again.status_code == 201 and again.json()["run_id"] == started.json()["run_id"]
+        assert again.json()["idempotent"] is True
+        run_id = started.json()["run_id"]
+        assert started.json()["request_id"] == "manager-hand-1"
+        stopped = await client.post(f"/api/runs/{run_id}/stop", headers=headers)
+        assert stopped.status_code == 200, stopped.text
+    with service.lock:
+        notices = sorted(row["action"] for row in service.db.execute(
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_manager_action'",
+            (run_id,)))
+        audit = {row["action"] for row in service.db.execute("SELECT action FROM events")}
+    assert notices == ["started", "stopped"]
+    assert {"start_agent_run", "stop_agent_run"} <= audit
+
+
+async def test_manager_start_respects_route_enablement(modern_env):
+    service, ws_id, _, job, _, rpc = modern_env
+    service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, False, "trusted")
+    app = make_admin(service)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                 base_url="http://127.0.0.1:8766",
-                                headers={"Cookie": cookie}) as client:
-        for mode in ("queue", "steer"):
-            sent = await client.post(f"/api/runs/{run['run_id']}/{mode}", json={
-                "instruction": "Then review tests.", "request_id": f"manager-{mode}"})
-            assert sent.status_code in {404, 405}
-    assert not any(method == "turn/steer" for method, _ in rpc.calls)
+                                headers={"Cookie": admin_cookie(app)}) as client:
+        refused = await client.post(f"/api/workspaces/{ws_id}/runs", json={
+            "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "hand-off"})
+    assert refused.status_code == 400
+    assert not any(method == "turn/start" for method, _ in rpc.calls)
+
+
+async def test_mcp_sends_run_input(modern_env):
+    service, ws_id, token, _, _, rpc = modern_env
+    run = start(modern_env)
     async with httpx.AsyncClient(transport=McpTransport(make_mcp(service)),
                                 base_url="http://127.0.0.1:8765",
                                 headers={"X-Bridge-Token": token,
@@ -130,7 +198,8 @@ def test_stale_receipt_snapshot_does_not_undo_delivery(modern_env):
         "id": "bridge-input:forged", "runId": stored["native_id"],
         "kind": "run_input", "status": "queued"}])
     receipts = service.run_coordinator.read(ws, run["run_id"], sync=False)["input_messages"]
-    assert receipts == [{"requestId": "one", "mode": "steer", "status": "delivered"}]
+    assert receipts == [{"requestId": "one", "mode": "steer", "status": "delivered",
+                         "origin": "chatgpt"}]
 
 
 def test_input_tools_are_scoped_mutating_open_world():

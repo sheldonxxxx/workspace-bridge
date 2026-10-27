@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import httpx
 import pytest
@@ -126,26 +127,107 @@ def test_runs_waiting_on_an_answer_are_listed_first(modern_env):
     assert [item["run_id"] for item in listed] == ["run_newer", waiting]
 
 
+def _manager(service):
+    app = make_admin(service)
+    return app, {"Cookie": admin_cookie(app)}
+
+
+def _notices(service, run_id, event_type="run_manager_action"):
+    with service.lock:
+        return [dict(row) for row in service.db.execute(
+            "SELECT action,subject_id FROM notification_events WHERE run_id=? AND event_type=?",
+            (run_id, event_type))]
+
+
 @pytest.mark.asyncio
-async def test_the_manager_reads_the_approval_log_but_cannot_answer(modern_env):
-    service, ws_id, token, job, native, _ = modern_env
+async def test_the_manager_reads_the_approval_log_and_answers_as_manager(modern_env):
+    service, ws_id, token, job, native, rpc = modern_env
     run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-4")
     service.call(ws_id, token, "answer_interaction", {
         "run_id": run_id, "interaction_id": interaction_id,
         "choice_id": choices["deny"], "decided_by": "owner",
         "reason": "The user declined in the chat"})
-    app = make_admin(service)
-    headers = {"Cookie": admin_cookie(app)}
+    app, headers = _manager(service)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
         assert (await client.get("/api/approvals")).status_code == 401
-        answered = await client.post(f"/api/runs/{run_id}/interactions/{interaction_id}",
-                                     headers=headers, json={"choiceId": choices["approve"]})
-        assert answered.status_code in {404, 405}
         owner = (await client.get("/api/approvals?decided_by=owner", headers=headers)).json()
         assert [item["reason"] for item in owner["decisions"]] == ["The user declined in the chat"]
         chatgpt = (await client.get("/api/approvals?decided_by=chatgpt", headers=headers)).json()
         assert chatgpt["decisions"] == []
+        assert (await client.get("/api/approvals?decided_by=manager",
+                                 headers=headers)).json()["decisions"] == []
         assert (await client.get("/api/approvals?decided_by=bot",
                                  headers=headers)).status_code == 400
+    _finish_test_run(service, native, ws_id, run_id)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_in_the_manager_is_recorded_as_manager_and_announced(modern_env):
+    service, ws_id, token, job, native, rpc = modern_env
+    run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-m1")
+    app, headers = _manager(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as client:
+        path = f"/api/runs/{run_id}/answer"
+        assert (await client.post(path, json={})).status_code == 401
+        both = await client.post(path, headers=headers, json={
+            "interaction_id": interaction_id, "choice_id": choices["approve"], "answers": {}})
+        assert both.status_code == 400
+        answered = await client.post(path, headers=headers, json={
+            "interaction_id": interaction_id, "choice_id": choices["approve"]})
+        assert answered.status_code == 200
+        again = await client.post(path, headers=headers, json={
+            "interaction_id": interaction_id, "choice_id": choices["deny"]})
+        assert again.status_code == 400 and "already" in again.json()["error"].lower()
+        log = (await client.get("/api/approvals?decided_by=manager", headers=headers)).json()
+    assert [(item["run_id"], item["decided_by"], item["reason"]) for item in log["decisions"]] == [
+        (run_id, "manager", "Answered in the Manager")]
+    assert rpc.responses == [(99, {"decision": "accept"}, None)]
+    seen = _interaction(service, ws_id, token, {"run_id": run_id, "interaction_id": interaction_id})
+    assert seen["decision"]["decided_by"] == "manager"
+    assert _notices(service, run_id) == [{"action": "answered", "subject_id": interaction_id}]
+    with pytest.raises(BridgeError) as claimed:
+        service.call(ws_id, token, "answer_interaction", {
+            "run_id": run_id, "interaction_id": interaction_id,
+            "choice_id": choices["approve"], "decided_by": "manager", "reason": "Claimed"})
+    assert claimed.value.code == "invalid_arguments"
+    _finish_test_run(service, native, ws_id, run_id)
+
+
+def test_chatgpt_and_the_manager_answering_together_forward_one_answer(modern_env):
+    service, ws_id, token, job, native, rpc = modern_env
+    run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-race")
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def chatgpt():
+        barrier.wait()
+        try:
+            service.call(ws_id, token, "answer_interaction", {
+                "run_id": run_id, "interaction_id": interaction_id,
+                "choice_id": choices["approve"], "decided_by": "chatgpt", "reason": "Fine"})
+            outcomes.append("chatgpt")
+        except BridgeError as exc:
+            outcomes.append(exc.code)
+
+    def manager():
+        barrier.wait()
+        try:
+            service.admin_answer_interaction(run_id, interaction_id, choice_id=choices["deny"])
+            outcomes.append("manager")
+        except BridgeError as exc:
+            outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=chatgpt), threading.Thread(target=manager)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    winners = [item for item in outcomes if item in {"chatgpt", "manager"}]
+    assert len(winners) == 1 and len(rpc.responses) == 1
+    assert [item for item in outcomes if item not in winners] == ["already_answered"]
+    decided = _interaction(service, ws_id, token, {
+        "run_id": run_id, "interaction_id": interaction_id})["decision"]["decided_by"]
+    assert decided == winners[0]
     _finish_test_run(service, native, ws_id, run_id)

@@ -183,7 +183,11 @@ export interface Status {
   version: string;
   listen_mode: string;
   mcp_port: number;
-  bridge: { configured: boolean; enabled: boolean };
+  bridge: {
+    configured: boolean;
+    enabled: boolean;
+    last_mcp_call?: string | null;
+  };
   adapters?: { adapters: AdapterInfo[] };
   nodes?: NodeInfo[];
 }
@@ -306,13 +310,14 @@ export interface RunInputReceipt {
   requestId: string;
   mode: "steer" | "queue";
   status: "queued" | "delivered" | "discarded" | "unknown";
+  origin?: "chatgpt" | "manager";
 }
 export interface Interaction {
   id: string;
   kind: string;
   state: string;
   decision?: {
-    decided_by: "chatgpt" | "owner";
+    decided_by: "chatgpt" | "owner" | "manager";
     reason: string;
     decided: string;
     choice_id?: string | null;
@@ -383,6 +388,11 @@ export function displayState(run: Run): string {
       ? run.outcome
       : run.active_state || run.phase || run.state;
   return (value || "Unknown").replaceAll("_", " ");
+}
+export function decidedByLabel(value?: string): string {
+  if (value === "manager") return "you in the Manager";
+  if (value === "owner") return "you (as ChatGPT reported)";
+  return "ChatGPT";
 }
 export function dateTime(value?: string): string {
   return value ? new Date(value).toLocaleString() : "—";

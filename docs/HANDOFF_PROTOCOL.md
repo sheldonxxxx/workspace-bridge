@@ -92,7 +92,8 @@ an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
 
 `answer_interaction` resolves only a live request with its exact
 adapter-provided choice or validated form answers, once, recording who decided
-and why. The Manager cannot answer; it can request cancellation of a run bound to that conversation. A corrective iteration creates
+and why. ChatGPT is the normal path. As a last resort the signed-in Manager can answer
+(recorded as `manager`), steer or queue, start a run and cancel one. A corrective iteration creates
 a new Bridge run and can reuse a terminal conversation only after live ownership
 of the stored native conversation (same adapter, same workspace, idle) and
 compatible security are proven. See `MCP_TOOLS.md` and

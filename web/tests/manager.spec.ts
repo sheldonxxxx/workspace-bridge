@@ -312,6 +312,7 @@ async function mockApi(
     blockedDefault?: boolean;
     runSnapshot?: boolean;
     activeRun?: boolean;
+    pendingRequest?: boolean;
     codexProfilesUnavailable?: boolean;
     codexQuota?:
       "ok" | "empty" | "error" | "ordinary-unavailable" | "same-duration";
@@ -414,6 +415,23 @@ async function mockApi(
       ? [
           { requestId: "chatgpt-queue", mode: "queue", status: "queued" },
           { requestId: "chatgpt-steer", mode: "steer", status: "delivered" },
+        ]
+      : [],
+    interactions: options.pendingRequest
+      ? [
+          {
+            id: "int_pending",
+            kind: "choice",
+            state: "pending",
+            details: {
+              title: "Run npm test",
+              resource: "npm test",
+              choices: [
+                { id: "allow", label: "Allow once", semantic: "approve" },
+                { id: "deny", label: "Deny", semantic: "deny" },
+              ],
+            },
+          },
         ]
       : [],
     workspace_id: WS_ID,
@@ -604,6 +622,18 @@ async function mockApi(
           : all,
         next_offset: null,
       });
+      return;
+    }
+    if (path === `/api/workspaces/${WS_ID}/runs` && method === "POST") {
+      await respond(route, { ...snapshotRun, request_id: "manager-x" }, 201);
+      return;
+    }
+    if (
+      (path === `/api/runs/${snapshotRun.run_id}/answer` ||
+        path === `/api/runs/${snapshotRun.run_id}/input`) &&
+      method === "POST"
+    ) {
+      await respond(route, snapshotRun);
       return;
     }
     if (path === "/api/runs" && method === "GET") {
@@ -1679,7 +1709,7 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
 });
 
-test("run messages show ChatGPT's receipts without send controls", async ({
+test("run messages show receipts and Manual control steers by hand", async ({
   page,
 }) => {
   const mock = await mockApi(page, { runSnapshot: true, activeRun: true });
@@ -1689,16 +1719,86 @@ test("run messages show ChatGPT's receipts without send controls", async ({
   const receipts = page.locator(".run-input-receipts");
   await expect(receipts).toContainText("queued");
   await expect(receipts).toContainText("delivered");
-  await expect(page.getByLabel("Correction or follow-up")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Steer", exact: true }),
-  ).toHaveCount(0);
+    page.getByText("ChatGPT has not called the Bridge since it started."),
+  ).toBeHidden();
+  await page.getByText("Manual control").click();
   await expect(
-    page.getByRole("button", { name: "Queue", exact: true }),
-  ).toHaveCount(0);
-  expect(mock.calls.some((call) => /\/(steer|queue)$/.test(call.path))).toBe(
-    false,
-  );
+    page.getByText("ChatGPT has not called the Bridge since it started."),
+  ).toBeVisible();
+  await page.getByLabel("Instruction").fill("Skip the slow tests.");
+  await page.getByRole("button", { name: "Send instruction" }).click();
+  await expect
+    .poll(
+      () =>
+        mock.calls.find((call) => call.path === "/api/runs/run-snapshot/input")
+          ?.body,
+    )
+    .toMatchObject({ mode: "steer", instruction: "Skip the slow tests." });
+  const sent = mock.calls.find(
+    (call) => call.path === "/api/runs/run-snapshot/input",
+  )?.body;
+  expect(String(sent?.request_id)).toMatch(/^[a-z0-9]{24}$/);
+});
+
+test("a waiting request can be answered by hand after a confirmation", async ({
+  page,
+}) => {
+  const mock = await mockApi(page, {
+    runSnapshot: true,
+    activeRun: true,
+    pendingRequest: true,
+  });
+  await page.goto("./");
+  await navigate(page, "Runs");
+  await page.getByRole("button", { name: "Open run" }).click();
+  await page.getByText("Answer by hand").click();
+  await page.getByLabel("Reason (optional)").fill("Safe test run");
+  await page.getByRole("button", { name: "Allow once" }).click();
+  await expect(
+    page.getByRole("alertdialog").getByText(/recorded as decided/),
+  ).toBeVisible();
+  expect(
+    mock.calls.some((call) => call.path === "/api/runs/run-snapshot/answer"),
+  ).toBe(false);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect
+    .poll(
+      () =>
+        mock.calls.find((call) => call.path === "/api/runs/run-snapshot/answer")
+          ?.body,
+    )
+    .toEqual({
+      interaction_id: "int_pending",
+      reason: "Safe test run",
+      choice_id: "allow",
+    });
+});
+
+test("Start run by hand posts the chosen workspace, agent and handoff", async ({
+  page,
+}) => {
+  const mock = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Runs");
+  await page.getByRole("button", { name: "Start run by hand" }).click();
+  await page.getByLabel("Agent", { exact: true }).selectOption(LOCAL_PI);
+  await expect(page.getByLabel("Handoff", { exact: true })).toHaveValue(JOB_ID);
+  await page.getByRole("button", { name: "Start run", exact: true }).click();
+  await expect
+    .poll(
+      () =>
+        mock.calls.find(
+          (call) =>
+            call.path === `/api/workspaces/${WS_ID}/runs` &&
+            call.method === "POST",
+        )?.body,
+    )
+    .toMatchObject({
+      adapter_id: LOCAL_PI,
+      job_id: JOB_ID,
+      isolation: "none",
+    });
 });
 
 test("admin login requires a password change and supports later changes", async ({
