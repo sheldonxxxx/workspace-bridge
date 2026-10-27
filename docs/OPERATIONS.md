@@ -13,7 +13,7 @@ Configuration, SQLite database, and the salted admin password file (`admin-accou
 private Bridge SQLite; agent plugins have no tokens.
 Normal Manager APIs return only whether a token exists, and tokens are
 excluded from diagnostics, logs, errors, and events. Treat both state
-databases and project handoff folders as sensitive: the Bridge holds
+databases as sensitive; the Bridge database also holds handoff text: the Bridge holds
 sanitized adapter references while the Node holds adapter secrets and
 data-plane state.
 
@@ -139,9 +139,9 @@ workspace/adapter mapping, accessible root, shared MCP gateway, enabled
 workspace route and adapter, and the adapter's current security profile all
 pass. A configured model policy is validated; an unconfigured policy is
 optional governance and the runtime chooses its own default. Write scope is
-not a run prerequisite — it governs only new handoff publication and is
-reported as its own diagnostic — so a read-only workspace may still run an
-existing prepared handoff. Git evidence is review-only and never blocks a
+not a run prerequisite — it governs only ChatGPT's own edits and checks and is
+reported as its own diagnostic — so a read-only workspace still prepares and
+runs handoffs. Git evidence is review-only and never blocks a
 route.
 
 Listener health, gateway state, runtime health, and runnable routes are
@@ -488,34 +488,38 @@ settings' `defaultMode`. Each native permission prompt becomes a Bridge
 interaction. Switching a route between a profile and native security needs a
 fresh conversation. Native security is unsupported for Pi and OpenCode.
 
-## Writable handoff notes
-
-Use the general write and edit tools with the default handoff-only policy
-for small UTF-8 documents. Current hashes are required for replacements and
-edits; no forced overwrite, delete, or rename is available. Read back after
-connection loss or ambiguous disk errors. Writes may create parent
-directories, and partial failures can leave empty directories or an internal
-staging file after process termination; internal staging files are hidden
-from tools. Do not remove such files while a write is active. No automated
-cleanup or total handoff-storage quota is provided.
-
-For least privilege, precreate each project's `.workspace-handoff/` with
-ownership and write permission for the dedicated service identity; give that
-identity only read access to the rest of the project. This release does not
-configure those OS permissions. Stop the local coding agent before revising
-its active plan.
-
 ## Per-workspace write permissions
 
-The general tools are `read_file`, `write_file`, and `edit_file`. Write
-scope is set only in the local Manager: Exclusions & policy, Write
-permission, Save and confirm. The default handoff mode allows notes but not
-source. `none` denies every file mutation including `prepare_handoff`;
-`workspace` allows bounded permitted source text. New mappings default to
-handoff. Scope changes take effect on subsequent calls with no tunnel,
+The general tools are `read_file`, `write_file`, `edit_file` and
+`apply_patch`. Write scope is set only in the local Manager: Settings,
+ChatGPT file access, save and confirm. `none` (read-only) is the default and
+denies every file mutation, image upload and ad hoc check; preparing handoffs
+and starting runs still work. `workspace` (edit) allows bounded permitted text
+files, image uploads under `.workspace-handoff/attachments/`, and
+`run_checks`. Workspaces set to the earlier handoff-only scope became
+read-only. Scope changes take effect on subsequent calls with no tunnel,
 schema change, or restart. OS permissions remain an additional requirement;
 enabling scope does not grant filesystem privileges. See
 [File access](FILE_ACCESS.md) for mode and ownership limits.
+
+Current hashes are required for replacements and edits. Read back after
+connection loss or ambiguous disk errors. Writes may create parent
+directories, and partial failures can leave empty directories or an internal
+staging file after process termination; internal staging files are hidden
+from tools. Do not remove such files while a write is active.
+
+## Checks
+
+Each workspace's checks live in the Node's state at
+`checks/<workspace-id>.toml`, outside the project, so neither ChatGPT nor a
+cloned repository can add a command. Edit it through the Manager API
+(`PUT /api/workspaces/{workspace}/checks` with `text`) or directly on the
+Node host; the same call's `after_run` names checks to run after every run.
+See [run_checks](MCP_TOOLS.md#run_checks) for the format. A check runs the
+named command with your login `PATH` under the Node's identity, so only list
+commands you would run yourself. Results are kept in the Node's
+`checks.sqlite3`, the newest 200 batches per workspace; checks still running when
+the Node stops are marked interrupted on its next start.
 
 ## Manual upgrades
 

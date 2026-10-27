@@ -31,7 +31,7 @@ update does not replace the MCP server or rescan its event catalog.
 
 | Event | Data beyond common identifiers |
 |---|---|
-| `workspace_bridge.run.finished` | `outcome`: `succeeded`, `failed`, `cancelled`, `interrupted`, `orphaned` or `blocked` |
+| `workspace_bridge.run.finished` | `outcome`: `succeeded`, `failed`, `cancelled`, `interrupted`, `orphaned` or `blocked`; optional `checks`: `state` (`complete` or `unavailable`) with `passed` and `failed` counts |
 | `workspace_bridge.run.needs_attention` | Optional Bridge-issued `interaction_id` and allowlisted `request_kind` |
 
 Every subscription requires `arguments.workspace_id`, an exact enabled mapping
@@ -49,8 +49,10 @@ Events use the canonical `notification_events` IDs and journal, independently
 of Discord. `run.finished` projects recorded notification outcomes; it does not
 invent a new runtime outcome or a blocked event that the coordinator never
 recorded. An event is a signal to read `read_agent_run` and, when relevant,
-`read_agent_interaction` for authoritative current state. Acceptance checks and
-agent claims still need review. A pending interaction may already be stale.
+`read_agent_interaction` for authoritative current state. When the workspace
+runs checks after each run, a succeeded or failed run's `run.finished` waits
+for them and carries their counts; the Discord notice shows the same counts.
+Check results and agent claims still need review. A pending interaction may already be stale.
 The Bridge never starts a run or approves an interaction from an event.
 
 ## Subscription lifecycle

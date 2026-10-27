@@ -21,6 +21,8 @@
   failed.
 - `git_diff` with `mode=run` lists the `apply_patch` edits ChatGPT made
   during the run as `chatgpt_edits`.
+- The project-lead skill (3.7.0) covers read-only and edit workspaces,
+  Bridge-stored handoffs, `run_checks` and after-run checks in the audit.
 - New MCP tools `apply_patch` and `undo_edit`. `apply_patch` edits, creates,
   moves and deletes up to 50 files (1 MiB of text) in one step: every
   existing file needs its current hash, and all changes apply or none do. It

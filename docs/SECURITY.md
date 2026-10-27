@@ -2,7 +2,7 @@
 
 ## Intended threat model
 
-Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no arbitrary command execution and handoff-only writes by default. Only local administrators may explicitly enable bounded source-text writes and, separately, opt-in Runtime Protocol agent execution. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job/conversation confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
+Restrict a remote ChatGPT tool connection to explicitly enabled project mappings, with no arbitrary command execution and read-only access by default. Only local administrators may explicitly enable bounded source-text writes, name the checks ChatGPT may run, and, separately, opt in to Runtime Protocol agent execution. Defend against path traversal, accidental scope expansion, unsafe filesystem entries, cross-workspace path/job/conversation confusion, browser cross-origin access and accidental treatment of agent claims as verified results.
 
 Not covered: a hostile local user/process with the service user's permissions; root/admin compromise; malicious browser extensions; compromised Python dependencies or tunnel-client; vulnerabilities in the host OS; comprehensive secret detection; prevention of every prompt-injection attempt; or ensuring that the local coding agent obeys a handoff. A prompt cannot substitute for the local agent's sandbox.
 
@@ -29,8 +29,8 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Two loopback listeners, no proxy-header trust, strict Host/Origin checks, separate admin/shared-bridge credentials. Manager operations never appear as MCP tools.
 - Each Workspace is bound to one authoritative Node. The Node owns the host `allowed_roots` ceiling and validates the canonical node-local root on registration and every data-plane request; Bridge cannot edit that ceiling or inspect a local fallback checkout. Overlapping mappings on one Node are rejected even when disabled, and registrations start disabled.
 - Relative POSIX paths only. No absolute reads, `..`, ambiguous separators or paths outside the selected workspace. Current write scope further restricts writes. Each opened ancestor uses `O_NOFOLLOW`; special files, hardlinks and cross-device traversal are rejected.
-- Local write scope is `none`, `handoff` (default), or `workspace`; it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. `none` denies `prepare_handoff` too. Create-only by default; existing files require their current hash. `apply_patch` can also move and delete files under the same scope, exclusions and hash checks, journaling earlier content on the Node for `undo_edit`. No shell or arbitrary command surface is exposed as an MCP tool. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
-- `RuntimeType` (`pi`, `codex`, or `claude`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_agent_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff through the normal Node write policy, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
+- Local write scope is `none` (read-only, the default) or `workspace` (edit); it is reloaded for each call (a queued write reloads it when its turn comes), and no MCP argument can override it. Workspaces set to the earlier handoff-only scope became read-only. Handoffs are stored in Bridge state, so `prepare_handoff` writes nothing to the workspace and needs no write scope. Create-only by default; existing files require their current hash. `apply_patch` can also move and delete files under the same scope, exclusions and hash checks, journaling earlier content on the Node for `undo_edit`. No shell or arbitrary command surface is exposed as an MCP tool. `run_checks` runs only commands the local administrator listed in the workspace's `checks.toml`, which the Node keeps in its state outside the project; ChatGPT passes check names, never commands, folders or arguments. Commands start without a shell, with a timeout, Bridge variables removed from the environment, and a bounded, redacted output tail. Ad hoc checks need the edit scope; checks after a run follow route enablement. A configured command runs with the Node's identity, so it is as trusted as the administrator who listed it. Two read-only Git evidence tools invoke only fixed status/diff operations with bounded time/output, no pager, external diff/textconv, filter drivers (repository-defined clean/smudge/process filters are overridden to empty), hooks, network transports, terminal prompting, or repository mutation.
+- `RuntimeType` (`pi`, `codex`, or `claude`) describes protocol behavior. An `AdapterInstance` is one exact execution destination owned by a Node, identified by `adapter_id`; multiple instances can share a runtime type. A `WorkspaceRoute` binds one workspace to one same-Node adapter ID and at most one enabled default. Execution requires exactly that route and its adapter to be enabled on the same authoritative Node; a legacy workspace-wide execution switch may remain in storage and API responses for compatibility but is inert and is never a run gate. It is not implied by `write_scope`; MCP has no tool to change route or policy settings. `start_agent_run(adapter_id, ...)` is handoff-bound or takes a bounded direct instruction (published as a minimal auditable handoff in Bridge state, deterministically derived from the adapter_id + run request_id idempotency domain; never both), accepts no free-form prompt path, and resolves a model against the adapter's configured allowlist when one exists; with no Bridge model policy the models are unrestricted by Bridge governance and the runtime chooses its own default. There is no arbitrary command endpoint.
 - Runtime Protocol v1 conversations persist workspace, adapter ID, descriptive runtime type, connection revision, and security source. Every run carries the rules of its route's [security profile](#security-profiles), and the plugin echoes the profile ID and revision it enforces; a mismatch fails the run before any prompt. Each run records its rules in an immutable `effective_security` snapshot. Interactions require a live exact request, not merely a persisted ID.
 - Claude Code loads the host's Claude settings, `CLAUDE.md`, skills, plugins, sub-agents, and MCP servers as the CLI does, so hooks and MCP servers configured in a loaded layer run with the host user's authority. The Node protects `.claude` and `.mcp.json` from Bridge reads and writes, the plugin never edits them, and the plugin's `setting_sources` setting can drop the project and local layers.
 - Per-adapter model policy (enabled selectors, one mandatory default, and optional per-model reasoning defaults) and the Bridge-owned run list (`/api/runs`, newest first, bounded) are local-admin-only; no MCP tool can enable models, change these defaults, bypass a configured policy, or act on arbitrary adapter conversations. An unconfigured policy is a governance choice, not a failure: models are then unrestricted by Bridge policy and the runtime selects its own default.
@@ -40,7 +40,7 @@ One gateway credential authorizes every enabled mapping. Each project call requi
 - Built-in sensitive-name and build-directory exclusions. Credential and version-control names are always denied; an administrator `!name` entry can show only a hidden-by-default generated or dependency name such as `build` or `vendor`. Additional administrator globs are conservative and case-insensitive. Repository ignore files cannot grant access or relax policy.
 - Git evidence requires a direct real `.git` directory and rejects linked worktrees, bare repositories, symlinked/hardlinked metadata, shared object stores and external config includes. Changed paths are filtered through workspace exclusions before any patch command; denied paths are represented by aggregate counts only. Patch text uses the normal secret redactor. Status hashes bind pagination/diffs to the filtered current state, but do not attribute edits to an agent or user.
 - Request type/size bounds, bounded reads/search, output budget, concurrency gate and quotas. File changes during reads and stale context hashes fail rather than silently succeeding.
-- Generated planning document hashes expose local modification when a handoff is read. No runtime test execution, automatic approval gate, stored verdict, or claim of independent verification is provided.
+- Handoff text is stored in Bridge state and cannot change after publication; handoffs from earlier versions still report local modification of their workspace documents. Only administrator-configured checks run; there is no automatic approval gate, stored verdict, or claim of independent verification.
 - No third-party scripts, escaped text rendering, a restrictive CSP, no browser persistent token storage, and no contents/keys in operational events. The UI intentionally does not render project Markdown as HTML.
 
 ## Security profiles
@@ -160,7 +160,7 @@ The SQLite quota is a preventive allocation gate, not an OS disk quota; WAL/jour
 
 ## Deployment rule
 
-Never tunnel the admin listener. Admin passwords and browser sessions never authorize MCP requests. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus their handoff directories. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
+Never tunnel the admin listener. Admin passwords and browser sessions never authorize MCP requests. For stronger isolation use a dedicated service identity that can read only selected projects and write only private state plus the projects you allow it to edit. Configure and test those permissions yourself before treating them as enforced. Run only one bridge process per state directory.
 
 The admin listener is loopback-only by default. Setting `WB_ADMIN_ALLOWED_HOSTS`
 (admin only; MCP is unaffected) is the sole opt-in remote-admin path: a
@@ -186,18 +186,18 @@ Backups remain sensitive.
 ## Policy-scoped writes and readable notes
 
 Access requires the existing shared credential and an enabled, explicitly selected
-workspace. `read_file` and explicit handoff scans obey the same filename/administrator
-exclusions. Default source-root scans still skip handoffs. Internal staging names
+workspace. `read_file` and explicit `.workspace-handoff` scans obey the same filename/administrator
+exclusions. Default source-root scans still skip that folder. Internal staging names
 beginning `.wb-write-` are never caller-addressable and are hidden from tools.
 
 The writer never follows existing symlinks, truncates a hard-linked inode, or
-adds executable permissions to newly created files. New files and replaced handoff
-notes use 0600; source replacements preserve ordinary permissions including execute
+adds executable permissions to newly created files. New files and replaced
+`.workspace-handoff` files use 0600; source replacements preserve ordinary permissions including execute
 bits, stripping special bits. Parent directories
 created by the bridge use 0700. Existing ACLs/extended attributes are not preserved
 by replacing an inode. Host case-sensitivity and filesystem permissions still apply.
 
-No aggregate handoff disk quota, version history, automatic pruning or general
+No aggregate upload disk quota, version history, automatic pruning or general
 file deletion is added. The 256 KiB bound is per file, not a total disk limit.
 Do not use this as arbitrary storage; configure OS quotas for stricter limits.
 Normal notes and user-pasted returns remain untrusted data, not proof that tests
@@ -255,7 +255,7 @@ checks become unknown, which prevents a route from being reported ready.
 
 ## Local policy control
 
-New mappings default to write_scope=handoff. The manager requires
+New mappings default to write_scope=none (read-only). The manager requires
 a separate admin credential and explicit workspace-write confirmation. Its routes
 are absent from the MCP listener; no remote permission-changing tool is offered.
 Workspace mode is available to every chat using the shared connection, not per-chat
@@ -302,9 +302,9 @@ Engine needs a reachable Node URL. Native daemon process tokens and provider
 credentials remain host-side and are never returned by Bridge APIs.
 
 The Bridge container has no workspace data bind. The selected Node controls
-handoffs and later authorized source writes, and its host identity can access every
+authorized source writes and checks, and its host identity can access every
 configured `allowed_roots` entry. A Node compromise is not constrained to one
-handoff directory; mount only intended projects under a dedicated host root and do
+project; mount only intended projects under a dedicated host root and do
 not use a home/root bind.
 Outbound network access is not disabled by this Compose file. Image pixel secrets
 are still not redacted. The same configured path remains usable after a

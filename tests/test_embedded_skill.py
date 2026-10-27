@@ -30,7 +30,7 @@ async def rpc(env, method="skills/get", params=None, *, version=LEGACY[-1], toke
 
 def test_skill_is_complete_and_versioned():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "3.6.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "3.7.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
@@ -110,7 +110,7 @@ def digest(text):
 async def test_skills_list_and_get_return_catalog_entry(env, version):
     skill = read_project_lead_skill()
     entry = {"uri": SKILL_URI,
-             "frontmatter": {"name": "project-lead", "version": "3.6.0",
+             "frontmatter": {"name": "project-lead", "version": "3.7.0",
                              "description": skill["content"].split("\n")[2].removeprefix("description: ")},
              "resources": [{"uri": SKILL_URI, "digest": digest(skill["content"])}]}
     listed = await rpc(env, "skills/list", {}, version=version)

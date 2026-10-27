@@ -76,8 +76,11 @@ project, and source that ChatGPT reads leaves your machine. Read
 
 - **Project browsing:** directory trees, globs, regex search, paginated reads
   with hashes, and read-only Git status and diffs.
-- **Planning handoffs:** `TASK.md`, `CONTEXT.md`, and `ACCEPTANCE.md`
-  published under `.workspace-handoff/`, ready to paste into any agent.
+- **Planning handoffs:** `TASK.md`, `CONTEXT.md`, and `ACCEPTANCE.md` kept
+  in Bridge state, never in your repository, with a prompt ready to paste
+  into any agent.
+- **Checks:** ChatGPT runs the test and lint commands you list for a
+  workspace, and they can run after every agent run.
 - **Local agent runs:** Claude Code, Codex, OpenCode v2, and Pi through one runtime
   protocol, with per-agent model policy, security profiles, resumable
   approvals, and run-scoped usage.

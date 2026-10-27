@@ -133,7 +133,7 @@ Reads flow: shared credential, explicit enabled workspace, authoritative
 Node, host ceiling check, bounded untrusted source with pagination. The
 Bridge never opens a workspace root itself and never falls back to a local
 checkout. Writes flow through the same route plus the mapping's current
-write scope (`none`, `handoff`, `workspace`), loaded per call. Git evidence
+write scope (`none` read-only or `workspace` edit), loaded per call. Git evidence
 is fixed-function status and diff output and proves no authorship. Run
 checkpoints are the one stored copy of source: the owning Node keeps them in
 its private state, and the Bridge receives only IDs, statuses and paged diffs.
@@ -166,8 +166,8 @@ Boundaries:
   state; each plugin holds native sessions in its private folder under the
   Node state. All
   state files are private (`0700` directories, `0600` files).
-- Write scope governs new handoff publication and source mutation; exact
-  route enablement governs run admission. One does not imply the other.
+- Write scope governs ChatGPT's file mutation and checks; exact route
+  enablement governs run admission. Handoffs live in Bridge state. One does not imply the other.
 - Security profiles are pre-tool policy enforced by each plugin, not OS
   sandboxes. Pi uses its trusted permission extension, Claude Code its tool
   list and permission hook, OpenCode its permission plugin, and Codex its

@@ -85,7 +85,7 @@ pre-v4 state reports `state_schema_incompatible` and is left untouched; use a
 fresh state path for it. Runtime adapter secrets and workspace data remain in
 the private Node service. Container recreation retains Node records, mappings,
 handoffs and selected write scopes. A new mapping is still disabled and
-handoff-only.
+read-only.
 
 ### Without host Python
 
@@ -382,7 +382,7 @@ not disabled. Do not attach untrusted containers to this service's Compose netwo
 
 Text/image reading, metadata stripping, preview limits and image-secret caveats
 are unchanged. `write_file`/`edit_file` remain text-only; `write_image` uploads
-validated raster bytes to Node-owned handoff paths under the current write scope.
+validated raster bytes to `.workspace-handoff/attachments/` when the workspace allows edits.
 Uploads retain metadata and do not redact pixels. No snapshot-review engine is restored.
 
 ### Node-side filesystem hardening
@@ -408,8 +408,8 @@ Docker marks unhealthy containers; health checks alone do not restart them.
 `restart: unless-stopped` restarts processes that exit and resumes them with Docker,
 but a manual stop remains a stop.
 
-Back up stopped private state and workspace handoff folders together, preserving
-permissions and all SQLite files. The Docker source archive includes no image
+Back up stopped private state, preserving permissions and all SQLite files;
+Bridge state holds the handoffs. The Docker source archive includes no image
 layers, tokens or user project data.
 
 ## Fresh state

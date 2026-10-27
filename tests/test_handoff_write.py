@@ -299,10 +299,10 @@ def test_logs_do_not_contain_document_content_or_paths(env):
     assert 'my-planning-sentinel' not in text and NOTE not in text
 
 
-def test_skill_and_tools_describe_handoff_only_and_manual_review():
+def test_skill_and_tools_describe_bridge_handoffs_and_manual_review():
     skill=read_project_lead_skill()
-    assert skill['version']=='3.6.0'
-    for value in ['write_file','edit_file','expected_sha256','.workspace-handoff/','re-read and reconcile','No special report files','Audit using normal tools']:
+    assert skill['version']=='3.7.0'
+    for value in ['write_file','edit_file','expected_sha256','Bridge state','re-read and reconcile','No special report files','run_checks','Audit using normal tools']:
         assert value in skill['content']
     for name in ['write_file','edit_file']:
         schema,_,readonly,idempotent=TOOLS[name]

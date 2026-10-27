@@ -230,7 +230,8 @@ Hand the user these steps for the loopback Manager (for the example port,
    `workspace-bridge node --state <node-state> show-token`, then add its URL
    and token in the Node form.
 3. Add one mapping per canonical Node-local workspace root, enable it, and
-   choose its write scope (`handoff` by default).
+   choose its write scope (read-only `none` by default, or `workspace` to let
+   ChatGPT edit files and run checks).
 4. Confirm each adapter added in section 4 appears under its Node (the Bridge
    discovers them on refresh); nothing needs to be entered.
 5. Read each adapter's live model catalog, then save enabled selectors and
@@ -239,8 +240,8 @@ Hand the user these steps for the loopback Manager (for the example port,
    security binding. Pi, Claude Code, and OpenCode use a Bridge profile; Codex can use
    a Bridge profile or its native configuration source.
 
-Write scope controls publication and mutation; route enablement controls
-runs. Neither grants the other. Runtime type never selects a destination.
+Write scope controls ChatGPT's file edits and checks; route enablement
+controls runs. Neither grants the other. Runtime type never selects a destination.
 
 **Checkpoint:** obtain non-secret registration results: Node reachable,
 mapping enabled, adapters healthy, model policies saved, and routes enabled
@@ -301,7 +302,7 @@ steps or blockers. Distinguish local checks from observed client behavior.
   managed service. State, tokens, bindings, and logs remain.
 - With approval, `docker compose down` removes containers and the network,
   not host bind directories.
-- Deleting state is destructive. Back up stopped private state and workspace
-  handoff folders together first, preserving permissions and SQLite files.
+- Deleting state is destructive. Back up stopped private state first,
+  preserving permissions and SQLite files; Bridge state holds the handoffs.
 - Preserve ignored local scripts, tunnel files, `compose-prod.yaml`, and
   private configuration. Never delete them merely for cleanup.

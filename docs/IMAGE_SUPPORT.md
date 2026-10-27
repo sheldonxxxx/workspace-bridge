@@ -51,8 +51,8 @@ these capabilities under `image_reading`. No persistent image cache is written.
 
 `write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)`
 uploads original raster bytes through the Node to an allowed path inside
-`.workspace-handoff/`. It requires handoff or workspace write scope; workspace mode
-does not permit source-image uploads. Strict base64, MIME, filename extension and
+`.workspace-handoff/attachments/`. It requires the edit write scope (`workspace`)
+and never writes source images. Strict base64, MIME, filename extension and
 decoded format must agree. The existing bounded decoder validates the first frame
 before any new directory is created. Supported formats and 20 MiB/40MP limits match
 image reading. Uploads preserve original bytes and embedded metadata and do not
@@ -97,8 +97,8 @@ identity. Keep Pillow patched and use OS/container isolation for hostile inputs.
 Decoding runs on the Node outside any Bridge-wide lock, so a slow image delays
 only its own call. Avoid agents editing the image during review.
 
-Image reading works with write_scope `none`, `handoff` and `workspace`; it does not
-change any of them. `write_file` and `edit_file` still operate on UTF-8 text only.
+Image reading works with write_scope `none` and `workspace`; it does not
+change either. `write_file` and `edit_file` still operate on UTF-8 text only.
 `write_image` is limited to validated handoff rasters; no generic binary writer,
 PDF/Office parser or retired snapshot-review system is included.
 

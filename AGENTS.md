@@ -26,8 +26,8 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
   adapter secrets under its host `allowed_roots` ceiling.
 - A runtime type never selects a destination; only an exact same-Node
   `(workspace_id, adapter_id)` route with its security binding admits a run.
-- Write scope governs publication and mutation; route enablement governs
-  runs. One never implies the other.
+- Write scope governs ChatGPT's file mutation and checks; route enablement
+  governs runs. One never implies the other.
 - Bridge never replays prompts or approvals. Recovery rebinds only what the
   adapter positively identifies; everything else becomes interrupted or
   orphaned with stale interactions.

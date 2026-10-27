@@ -1,6 +1,6 @@
 # MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 30 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 31 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
@@ -60,7 +60,7 @@ Maximum `limit`: 40. Returns `workspaces` with `workspace_id`, `name`, `read_sco
 workspace_info(workspace_id)
 ```
 
-Returns the selected Node ID/name, node-local root, text limits, `image_reading` and `image_writing` capabilities/limits, exclusions, current `write_scope` (`none`, `handoff`, `workspace`), an informational `agent_execution` marker (`per-route`: execution is admitted per exact enabled workspace route, and any legacy workspace-wide switch is inert), writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
+Returns the selected Node ID/name, node-local root, text limits, `image_reading` and `image_writing` capabilities/limits, exclusions, current `write_scope` (`none` for read-only or `workspace` for edit), an informational `agent_execution` marker (`per-route`: execution is admitted per exact enabled workspace route, and any legacy workspace-wide switch is inert), writable path prefix and workflow contract. Policy changes are local-admin-only; reads remain general-purpose. Host paths are intentionally available here and in manual copy prompts, after explicit selection.
 
 ## list_dir
 
@@ -152,10 +152,10 @@ write_file(workspace_id, path, content, expected_sha256=null)
 edit_file(workspace_id, path, old_text, new_text, expected_sha256)
 ```
 
-Paths are workspace-relative, not hard-coded to a handoff prefix. The server applies
-that mapping's current `write_scope`: `none` denies all writes; `handoff` permits only
-`.workspace-handoff/`; `workspace` permits allowed source and handoff files. Default:
-`handoff`, including upgrades. No tool argument or MCP tool can expand permission.
+Paths are workspace-relative. The server applies that mapping's current
+`write_scope`: `none` (read-only, the default) denies all writes; `workspace`
+(edit) permits allowed files. Workspaces set to the earlier handoff-only scope
+became read-only. No tool argument or MCP tool can expand permission.
 
 Without a hash, `write_file` is create-only and creates missing parents. Existing
 files require their current SHA-256. `edit_file` requires a hash plus one exact,
@@ -171,10 +171,8 @@ and `write_scope`; edits also return `replacements: 1`. Re-read lost or ambiguou
 responses rather than blindly retrying. Mutation annotations remain read-only=false,
 destructive=true, idempotent=false and open-world=false. They are hints, not enforcement.
 
-General reading and explicit handoff scanning stay unchanged. `read_handoff` is an
-optional helper; it is not needed to read ordinary notes. Free-form files create no
-jobs. Original generated-document publication hashes are retained after edits.
-See [file-access semantics and limits](FILE_ACCESS.md).
+Free-form files create no jobs. See
+[file-access semantics and limits](FILE_ACCESS.md).
 
 ## apply_patch and undo_edit
 
@@ -223,11 +221,10 @@ write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)
 ```
 
 Uploads original PNG/JPEG/WebP/GIF/BMP/TIFF bytes through the authoritative Node.
-The path must be inside `.workspace-handoff/`, even with workspace-wide write
-scope. `none` denies uploads; exclusions, safe-path and single-link rules apply.
-Use `.workspace-handoff/attachments/reference.png` before preparing a handoff, or
-an allowed image filename under an existing job folder. Uploading does not create
-a job or start an agent.
+The path must be inside `.workspace-handoff/attachments/`, and the workspace
+must allow edits; exclusions, safe-path and single-link rules apply. Upload, for
+example, `.workspace-handoff/attachments/reference.png` before preparing a
+handoff. Uploading does not create a job or start an agent.
 
 `data_base64` is strict base64 without whitespace or a data-URL prefix. MIME type
 must be `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `image/bmp` or
@@ -255,10 +252,17 @@ list_handoffs(workspace_id, offset=0, limit=20)
 read_handoff(workspace_id, job_id, document, start_line=1, max_lines=100)
 ```
 
-`prepare_handoff` creates TASK.md, CONTEXT.md and ACCEPTANCE.md only, and is denied when `write_scope=none`. Optional
-context hashes check specifically named files at publication; no source snapshot
-is captured at publication ([run checkpoints](#run-checkpoints) belong to runs). The local agent replies in its conversation and the user pastes that reply
-into ChatGPT. Review uses the same normal browsing tools. Findings stay in chat, with optional ordinary handoff notes.
+`prepare_handoff` stores TASK.md, CONTEXT.md and ACCEPTANCE.md in Bridge state.
+Nothing is written into the workspace, so a handoff never appears in
+`git status`, and it needs no write scope. A run's prompt carries the full text
+of all three documents. The result has `stored: "bridge"` with each document's
+hash and size and, when it fits in 12,000 characters, a `copy_prompt` for
+pasting into a local agent; otherwise `copy_prompt_chars` and a note to read
+`PROMPT.md`. Optional context hashes check specifically named files at
+publication; no source snapshot is captured at publication
+([run checkpoints](#run-checkpoints) belong to runs). The local agent replies in
+its conversation and the user pastes that reply into ChatGPT. Review uses the
+same normal browsing tools. Findings stay in chat.
 
 Optional `attachments` contains up to 20 unique existing image references:
 `{"path":".workspace-handoff/attachments/reference.png", "description":"Layout to match", "sha256":"<original-file hash>"}`.
@@ -267,15 +271,18 @@ images using their source hashes from `read_file`. Each reference is validated
 and its hash checked at publication; paths, descriptions, hashes, formats, sizes
 and dimensions are recorded in `CONTEXT.md`. Attachment hashes and any matching
 `context_hashes` must agree. Referenced context and attachments share a 64 MiB
-total read budget. No image is copied into the generated job folder or snapshotted;
+total read budget. No image is copied into the handoff or snapshotted;
 verify current hashes before relying on references. Duplicate paths, changed or
 unavailable files, non-images and invalid references fail before document publication.
 
 `read_handoff` retains 1-based `start_line`/`max_lines` (up to 200 lines); follow
-`next_line`. Only the three planning document names are accepted. A changed
-planning file is reported by `matches_published`; it is not a review verdict.
-`list_handoffs.state` records publication state, not agent completion. Old jobs may
-have legacy states. Neither tool requires or ingests agent report files.
+`next_line`. It accepts the three planning documents and `PROMPT.md`, the
+copy-paste prompt. Handoffs published by earlier versions stay in their
+workspace `.workspace-handoff/jobs/` folder and are read from there; for those,
+`matches_published` reports whether the file changed since publication. It is
+not a review verdict. `list_handoffs.state` records publication state, not agent
+completion. Old jobs may have legacy states. Neither tool requires or ingests
+agent report files.
 
 The former `review_changes`, `read_change` and `record_audit` are removed. Cached
 calls fail as unknown tools. Tool discovery is authoritative for exact schemas.
@@ -322,6 +329,12 @@ still active, whose capture failed, or whose checkpoints were removed by
 retention fails with `checkpoint_pending`, `checkpoint_unavailable` or
 `checkpoint_expired`. A path excluded after capture is no longer shown.
 
+The result also has `chatgpt_edits`: the `apply_patch` and `undo_edit` journal
+entries made between the run's pre checkpoint and its end, each with `edit_id`,
+`kind`, `state`, `created`, `message` and `paths`, plus the combined `paths`.
+Where those paths also appear in the run diff, ChatGPT and the agent both
+changed them. `status` is `unavailable` when the Node's journal cannot be read.
+
 The owning Node captures checkpoints into its own private Git store, reading
 files with the same exclusions, built-in deny list and 512 KiB per-file limit as
 `read_file`. A Git workspace's `.gitignore` rules also apply, tracked files are
@@ -336,6 +349,48 @@ restarts; one taken more than a minute after the run ended is marked `late`.
 Checkpoints are kept for 14 days and up to 1 GiB per workspace, oldest first;
 active runs and the newest finished run are never removed. They never restore
 files.
+
+## run_checks
+
+```text
+run_checks(workspace_id, names=null, check_id=null, wait_seconds=30)
+```
+
+Runs checks the local administrator named for this workspace, such as `test`
+or `lint`, on the owning Node. ChatGPT chooses names only. Commands, folders
+and timeouts come from the workspace's `checks.toml`, which the Node keeps in
+its own state outside the repository; no MCP tool can read its path or change
+it. Omit `names` to list the configured checks and the after-run list. Pass up
+to 20 `names` to start them; the call waits up to `wait_seconds` (0 to 50) and
+returns `state: running` with a `check_id` if they are still going; call again
+with that `check_id` to read the result. Starting checks needs the edit write
+scope; one batch runs per workspace at a time (`checks_busy`).
+
+Each result has `name`, `command`, `cwd`, `status` (`passed`, `failed`,
+`timed_out`, `error` or `interrupted`), `exit_code`, `duration_ms`, a
+redacted `log_tail` of the last 6,000 characters and `output_bytes`. The batch
+reports `passed` and `failed` counts. Output is the checks' own text and is
+untrusted. Commands run without a shell, with the user's login `PATH`, and
+with Bridge variables removed from the environment. A check that passes its
+timeout is stopped and reported as `timed_out`.
+
+`checks.toml` holds one `[checks]` table. Each entry is a command string, or a
+table with `command` (string or list), an optional workspace-relative `cwd`
+and `timeout_seconds` (default 600, at most 3600):
+
+```toml
+[checks]
+test = "uv run pytest -q"
+lint = { command = ["npm", "run", "lint"], cwd = "web", timeout_seconds = 300 }
+```
+
+A workspace may also name checks to run after every run that completes or
+fails. They start after the run's post checkpoint, so their output files are
+not counted as the agent's changes; `read_agent_run` shows them under
+`checks`, and the run's `run.finished` event and Discord notice wait for them
+and report the counts. After-run checks follow route enablement, not the write
+scope. The Manager edits both at `GET`/`PUT /api/workspaces/{workspace}/checks`
+(`text` for `checks.toml`, `after_run` for the list).
 
 ## Agent run tools (Runtime Protocol v1)
 
@@ -399,7 +454,7 @@ from an unavailable default.
 `start_agent_run` accepts exactly one of a prepared handoff (`job_id`) or a
 bounded direct `instruction` (at most 8000 characters) in the selected workspace. It does not accept a
 free-form prompt path. A direct instruction is published as a minimal
-auditable prepared handoff through the normal Node write policy with a
+auditable prepared handoff in Bridge state with a
 deterministic handoff request ID derived from the run idempotency domain
 (`adapter_id` + `request_id`); exact retries reuse the same audit handoff,
 and a changed instruction under the same adapter + request_id is rejected by
@@ -412,7 +467,7 @@ An exact retry with the same request ID returns the existing run; reusing that
 ID for a different request or adapter is rejected. A continuation creates a new
 Bridge run in a terminal run's conversation for a NEW prepared handoff in the
 same workspace (or a bounded direct instruction, which is first published as
-one); the new handoff's prompt and acceptance path are sent.
+one); the new handoff's full text is sent.
 Ownership is proven live against the stored native conversation on the current
 same-Node adapter: it must exist, belong to the workspace, and be idle.
 Historical outcome (failed/cancelled/interrupted), model changes, and
@@ -441,6 +496,10 @@ Runs started with checkpoint support include `checkpoint`: overall `status`
 capture time and error code, `late`, `overlapping_runs`, and after the post
 capture `changed_paths` with up to 100 `changes` (`path`, `status`, optional
 `not_captured`). See [Run checkpoints](#run-checkpoints).
+A run in a workspace with after-run checks includes `checks`: `state`
+(`waiting`, `running`, `complete` or `unavailable`), the check `names`, and once
+complete the `passed` and `failed` counts with each check's status, exit code
+and duration. See [run_checks](#run_checks).
 Use `read_agent_interaction` to inspect the exact live request and supported
 choices. ChatGPT is the only place an interaction is answered: the Manager and
 Discord only show that a run is waiting, and nothing answers on a timeout.
@@ -477,7 +536,7 @@ filters or ranks candidates; it never selects one.
 `start_agent_run` is handoff-bound on the explicitly selected adapter: it
 requires a prepared handoff in the same workspace, or a bounded direct
 instruction, exactly one of the two; a direct instruction is published as a
-minimal auditable prepared handoff through the normal Node write policy with a
+minimal auditable prepared handoff in Bridge state with a
 deterministic handoff request ID derived from the `adapter_id` + `request_id`
 idempotency domain, so exact retries
 reuse the same audit handoff and never replay an accepted prompt, a changed

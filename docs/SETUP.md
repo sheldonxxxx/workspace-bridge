@@ -255,8 +255,9 @@ are not accepted by the Manager. Order matters:
    section 5. Embedded and paired Nodes (section 4) register themselves and
    skip this step.
 2. **Workspaces:** add one mapping per canonical Node-local root, then enable
-   it and set write scope (`handoff` default; `none` denies all writes
-   including handoff publication; `workspace` allows permitted source text).
+   it and set write scope (`none`, the default, is read-only; `workspace`
+   lets ChatGPT edit permitted files and run checks; handoffs and runs work
+   in both).
 3. **Adapter instances:** on the owning Node host, add each agent as a plugin
    with `workspace-bridge node adapter add <plugin> --name <name>` (section
    6), or through `POST /api/adapters` with `node_id`, `name` and `plugin`.
@@ -388,8 +389,8 @@ docker compose down
 ```
 
 Then, only if you intend to lose local data, remove the state directories
-and the tunnel environment. Back up stopped private state and workspace
-handoff folders together first, preserving permissions and SQLite files.
+and the tunnel environment. Back up stopped private state first, preserving
+permissions and SQLite files; Bridge state holds the handoffs.
 Removing containers or units never deletes host bind directories by itself.
 
 ## 12. Troubleshooting first aid
