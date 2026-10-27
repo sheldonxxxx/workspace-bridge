@@ -33,8 +33,7 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
   orphaned with stale interactions.
 - Tokens stay out of APIs, diagnostics, logs, errors, events, docs, and
   chat. One-time token output stays local.
-- No shell, Git mutation, per-chat ACL, automatic updater, or automatic
-  support upload.
+- No per-chat ACL, automatic updater, or automatic support upload.
 
 ## Inspect before edits
 
