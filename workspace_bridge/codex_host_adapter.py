@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 
+from . import __version__
 from .codex_rpc import CodexRpc, CodexRpcError, sanitize_diagnostic
 from .login_path import runtime_env_with_login_path, safe_summary
 from . import security_profiles as profiles
@@ -589,16 +590,14 @@ class CodexHostAdapter:
                     self._native_cli_version_checked = True
                 native_version = self._native_cli_version or "unknown"
         native_version = native_version[:80]
-        from .release import CODEX_ADAPTER_VERSION, codex_release
         return {"protocol": {"major": 1, "minor": 0},
                 "runtime": {"id": "codex", "displayName": "Codex",
-                            "adapterVersion": CODEX_ADAPTER_VERSION, "nativeVersion": native_version,
+                            "adapterVersion": __version__, "nativeVersion": native_version,
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
                              "steering": 1, "queueing": 1, "inputControls": 1,
-                             "usageLimits": 1},
-                "release": codex_release()}
+                             "usageLimits": 1}}
 
     def usage_limits(self) -> dict:
         """Read current Codex account rate limits, normalized at this boundary.

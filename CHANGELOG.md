@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Breaking:** one service module runs the Bridge and the Node. `service
+  install|status|start|stop|restart|uninstall` installs a user service by
+  default (a LaunchAgent on macOS, a systemd user unit on Linux); `--root`
+  installs a system-wide service that starts at boot, must be run as root
+  (for example with sudo) and runs as the state folder's owner. The service
+  writes its own log, capped at 10 MiB plus two older files, to
+  `<state>/logs/bridge.log` or `node.log`; the macOS log helper is gone.
+  Definitions installed by 0.3 are left alone: remove them with the 0.3
+  `service uninstall` (or delete the plist or unit) before installing.
+- **Breaking:** the Node HTTP API, its listener and its token are removed.
+  Nodes join only by pairing and dial out to the Bridge; `node init` takes no
+  `--host`/`--port`, `node show-token` is gone, and the Manager can no longer
+  add a Node by URL. Pairing refuses a Node whose version is not compatible
+  with the Bridge (same major version; same minor before 1.0).
+- **Breaking:** release bundles, manifests, staged rollout, Pi runtime
+  artifacts, the Docker image and Compose files are removed, with
+  `workspace-bridge release` and `/api/system/versions`. Releases ship a
+  wheel and the Pi npm package; `--version`, `/api/status` and
+  `doctor --json` (`versions`) report versions, and doctor warns when a
+  Node's version differs from the Bridge's.
 - **Breaking:** handoffs live in Bridge state, not in the workspace.
   `prepare_handoff` writes nothing to the project, so handoffs never show in
   `git status`; the run prompt and the copy-paste prompt carry the full TASK,

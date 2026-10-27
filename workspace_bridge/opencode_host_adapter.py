@@ -21,6 +21,7 @@ import sqlite3
 import threading
 import time
 
+from . import __version__
 from . import security_profiles as profiles
 from .run_roots import run_directory
 from .claude_host_adapter import AdapterFailure, _clean, _id, _now
@@ -306,16 +307,15 @@ class OpenCodeHostAdapter:
                              'security_enforcement_unavailable')
 
     def descriptor(self):
-        from .release import OPENCODE_ADAPTER_VERSION, opencode_release
         alive = getattr(self.native, 'is_alive', None)
         if alive is not None and not alive():
             raise AdapterFailure('OpenCode v2 server is unavailable', 503, 'runtime_unavailable')
         return {'protocol': {'major': 1, 'minor': 0}, 'runtime': {'id': RUNTIME_ID,
-            'displayName': 'OpenCode', 'adapterVersion': OPENCODE_ADAPTER_VERSION,
+            'displayName': 'OpenCode', 'adapterVersion': __version__,
             'nativeVersion': self.native.version or 'unknown', 'instanceId': self.instance_id},
             'features': {k: 1 for k in ('models', 'conversations', 'runs', 'activities',
                 'interactions', 'events', 'steering', 'queueing',
-                'inputControls', 'imageInput')}, 'release': opencode_release()}
+                'inputControls', 'imageInput')}}
 
     def models(self, workspace_id=None):
         result = self.native.request('GET', '/api/model', query={

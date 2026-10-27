@@ -236,14 +236,13 @@ def test_node_rejects_forged_scope_before_image_upload(env):
     env["service"].manage_workspace(env["id"], "set_write_scope", write_scope="none")
     # Use the Bridge's stored mapping envelope, but falsely claim a wider scope.
     workspace = env["service"].workspace(env["id"])
-    response = env["node"]["transport"].post("/v1/workspaces/write_image",
-        headers={"X-Node-Token": env["node"]["token"]}, json={
+    response = env["node"]["transport"].request("POST", "/v1/workspaces/write_image", json.dumps({
             "workspace": {"id": workspace["id"], "root": workspace["root"],
                           "excludes": json.loads(workspace["excludes"]), "write_scope": "workspace"},
             "arguments": {"path": PATH, "mime_type": "image/png",
-                          "data_base64": base64.b64encode(raster()).decode()}})
+                          "data_base64": base64.b64encode(raster()).decode()}}).encode())
     assert response.status_code == 400
-    assert response.json()["code"] == "policy_denied"
+    assert json.loads(response.content)["code"] == "policy_denied"
     assert not (env["root"] / HANDOFF).exists()
 
 

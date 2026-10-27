@@ -1,22 +1,16 @@
 """Private Node request handling, shared by every Bridge-to-Node transport.
 
-The same ``handle`` serves the token-authenticated HTTP API, requests that
-arrive over a paired Node's outbound connection, and the Node embedded in
-the Bridge process. Authentication belongs to each transport; the handler
-only routes and bounds requests. The token itself is never a response field.
+The same ``handle`` serves requests that arrive over a paired Node's
+outbound connection and the Node embedded in the Bridge process.
+Authentication belongs to each transport; the handler only routes and
+bounds requests.
 """
 from __future__ import annotations
 
-import hmac
 import json
+from types import SimpleNamespace
 
-from starlette.applications import Starlette
-from starlette.concurrency import run_in_threadpool
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
-
-from .security import BridgeError, digest
+from .security import BridgeError
 from .media import MAX_IMAGE_REQUEST_BYTES
 
 MAX_REQUEST = 1024 * 1024
@@ -143,37 +137,12 @@ def _route(service, method: str, path: str, raw: bytes) -> tuple[int, object]:
     return 404, {"error": "Not found"}
 
 
-def make_node_api(service, token_hash: str):
-    """Build the token-authenticated HTTP transport for one Node."""
-    async def dispatch(request: Request):
-        supplied = request.headers.get("x-node-token", "")
-        if (not supplied or len(supplied) > 512 or
-                not hmac.compare_digest(digest(supplied.encode()), token_hash)):
-            return JSONResponse({"error": "Invalid Node credential"}, 401)
-        path = request.url.path
-        limit = request_limit(request.method, path)
-        raw = bytearray()
-        async for chunk in request.stream():
-            if len(raw) + len(chunk) > limit:
-                status, body = encode({"error": "Node request is too large",
-                                       "code": "too_large"}, 400)
-                return Response(body, status_code=status, media_type="application/json")
-            raw.extend(chunk)
-        # Every request runs in a worker thread: one slow adapter or
-        # filesystem call must not stall the Node's other requests.
-        status, body = await run_in_threadpool(handle, service, request.method, path, bytes(raw))
-        return Response(body, status_code=status, media_type="application/json")
+class InProcessTransport:
+    """Calls one Node's handler directly: the embedded Node, and tests."""
 
-    return Starlette(routes=[
-        Route("/v1/status", dispatch, methods=["GET"]),
-        Route("/v1/workspaces/validate", dispatch, methods=["POST"]),
-        Route("/v1/workspaces/bind", dispatch, methods=["POST"]),
-        Route("/v1/workspaces/{workspace_id}/configure", dispatch, methods=["POST"]),
-        Route("/v1/workspaces/{operation}", dispatch, methods=["POST"]),
-        Route("/v1/adapters", dispatch, methods=["GET", "POST"]),
-        Route("/v1/plugins", dispatch, methods=["GET"]),
-        Route("/v1/adapters/test", dispatch, methods=["POST"]),
-        Route("/v1/adapters/{adapter_id}", dispatch, methods=["GET", "PATCH", "DELETE"]),
-        Route("/v1/adapters/{adapter_id}/test", dispatch, methods=["POST"]),
-        Route("/v1/runtime/{adapter_id}/{operation}", dispatch, methods=["POST"]),
-    ])
+    def __init__(self, service):
+        self.service = service
+
+    def request(self, method, path, content=None, headers=None):
+        status, raw = handle(self.service, method, path, content or b"")
+        return SimpleNamespace(status_code=status, content=raw)

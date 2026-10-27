@@ -477,8 +477,6 @@ class RunCoordinator:
                                     "instance": descriptor.instance_id,
                                     "adapter_version": descriptor.adapter_version,
                                     "native_version": descriptor.native_version}
-                if descriptor.release is not None:
-                    entry["release"] = descriptor.release
                 rows[adapter_id] = entry
             except BridgeError as exc:
                 rows[adapter_id] = {"configured": True, "enabled": True, "healthy": False,

@@ -21,7 +21,7 @@ from workspace_bridge.wbrp import Descriptor
 
 from test_codex_host_adapter import FakeCodexRpc
 from notification_fakes import RecordingChannel
-from conftest import attach_test_node, create_test_adapter, start_test_node, patch_node_runtime
+from conftest import attach_test_node, create_test_adapter, register_test_node, start_test_node, patch_node_runtime
 
 ADAPTER_ID = "adapter_000000000000000000000001"
 
@@ -405,8 +405,10 @@ def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
                                                    started["run_id"])
     calls = _record_native_calls(native, monkeypatch)
     original_node = service.node_registry.get(ws["node_id"])
-    service.node_registry.update(ws["node_id"], {
-        "base_url": "http://127.0.0.1:9876", "token": "rotated-node-secret"})
+    # Re-pairing gives the Node a new connection revision.
+    with service.lock, service.db:
+        service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
+                           ("rev_" + "9" * 32, ws["node_id"]))
 
     with pytest.raises(BridgeError) as reconcile_error:
         service.run_coordinator.reconcile(ws, started["run_id"])
@@ -744,10 +746,7 @@ def test_wrong_node_route_and_start_fail_before_native_call(modern_env, tmp_path
     ws = service.workspace(ws_id)
     node_b = start_test_node(tmp_path / "other-node-state", Path(ws["root"]).parent)
     try:
-        node_b_record = service.node_registry.create({
-            "name": "Other Node", "base_url": node_b["url"],
-            "token": node_b["token"], "enabled": False,
-        })
+        node_b_record = register_test_node(service, "Other Node", enabled=False)
         service._node_transport[node_b_record["id"]] = node_b["transport"]
         service._node_transport_services[node_b_record["id"]] = node_b["service"]
         service.node_registry.update(node_b_record["id"], {"enabled": True})

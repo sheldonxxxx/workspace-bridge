@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 
+from . import __version__
 from .codex_rpc import sanitize_diagnostic
 from .login_path import runtime_env_with_login_path, safe_summary
 from . import security_profiles as profiles
@@ -609,17 +610,15 @@ class ClaudeHostAdapter:
 
     def descriptor(self) -> dict:
         self._sdk_module()
-        from .release import CLAUDE_ADAPTER_VERSION, claude_release
         return {"protocol": {"major": 1, "minor": 0},
                 "runtime": {"id": RUNTIME_ID, "displayName": "Claude Code",
-                            "adapterVersion": CLAUDE_ADAPTER_VERSION,
+                            "adapterVersion": __version__,
                             "nativeVersion": self._native_cli_version(),
                             "instanceId": self.instance_id},
                 "features": {"models": 1, "conversations": 1, "runs": 1,
                              "activities": 1, "interactions": 1, "events": 1,
                              "usageLimits": 1,
-                             "steering": 1, "queueing": 1, "inputControls": 1},
-                "release": claude_release()}
+                             "steering": 1, "queueing": 1, "inputControls": 1}}
 
     def usage_limits(self) -> dict:
         """Last observed Claude subscription windows, normalized at this boundary.

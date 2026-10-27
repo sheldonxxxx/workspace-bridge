@@ -59,7 +59,7 @@ def test_node_state_created_before_claude_is_upgraded_on_open(tmp_path):
     state = tmp_path / "node"
     root = tmp_path / "allowed"
     root.mkdir()
-    config = {"allowed_roots": [str(root)], "node_token_hash": "x" * 64}
+    config = {"allowed_roots": [str(root)], "cursor_secret": "c" * 64}
     service = NodeService(state, config)
     service.close()
     db = sqlite3.connect(state / "node.sqlite3")

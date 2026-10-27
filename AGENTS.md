@@ -60,7 +60,7 @@ Pick checks by what the change touches. These mirror the CI jobs in
 | `web/` | `npm --prefix web run lint`, `npm --prefix web run format:check`, `npm --prefix web run build`, `node --test web/test/*.test.mjs`; `npm --prefix web run test:e2e` only if a Playwright browser is already installed |
 | `runtime/pi-host-adapter/` | `npm --prefix runtime/pi-host-adapter test` |
 | Tracked Markdown | `uv run pytest -q tests/test_public_docs.py` |
-| `pyproject.toml` or `uv.lock` dependencies | Full Python suite; `docker/runtime-requirements.txt` must still match `uv export --locked --no-dev --no-emit-project --no-header --no-annotate --format requirements-txt` |
+| `pyproject.toml` or `uv.lock` dependencies | Full Python suite |
 
 Run each check as its own command. Full-suite commands:
 

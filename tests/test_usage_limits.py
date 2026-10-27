@@ -342,7 +342,7 @@ def test_node_runtime_call_usage_limits_without_workspace(tmp_path):
     native = codex_with_quota(tmp_path)
     try:
         config = {"allowed_roots": [str(tmp_path)],
-                  "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+                  "cursor_secret": "c" * 64}
         node = NodeService(tmp_path / "node-state", config)
         serve_in_process(node, native)
         try:

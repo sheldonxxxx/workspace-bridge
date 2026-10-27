@@ -13,6 +13,7 @@ import threading
 from collections import deque
 from typing import Any, Callable
 
+from . import __version__
 from .security import redact
 
 
@@ -108,9 +109,8 @@ class CodexRpc:
         self._reader = threading.Thread(target=self._read_loop, name="codex-app-server-rpc",
                                         daemon=True)
         self._reader.start()
-        from .release import CODEX_ADAPTER_VERSION
         self.initialize_result = self.call("initialize", {
-            "clientInfo": {"name": "workspace-bridge-codex-adapter", "version": CODEX_ADAPTER_VERSION},
+            "clientInfo": {"name": "workspace-bridge-codex-adapter", "version": __version__},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self.notify("initialized")

@@ -57,9 +57,7 @@ class Browser:
     def __init__(self, service: Service):
         self.service = service
         # Private, high-entropy key material already outside all mapped roots.
-        secret = (service.config.get("cursor_secret") or
-                  service.config.get("node_token_hash") or
-                  service.config.get("admin_token_hash"))
+        secret = service.config.get("cursor_secret")
         if not isinstance(secret, str) or len(secret) < 32:
             raise ValueError("A private cursor secret is required")
         self.cursor_key = hashlib.sha256((secret + ":browse-v1").encode()).digest()

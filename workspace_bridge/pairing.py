@@ -157,6 +157,20 @@ def node_revision(public_key: str) -> str:
     return "rev_" + hashlib.sha256(("wb-node-key:" + public_key).encode()).hexdigest()[:32]
 
 
+def _release_line(version: object) -> tuple[int, ...] | None:
+    match = re.match(r"(\d+)\.(\d+)", version) if isinstance(version, str) else None
+    if match is None:
+        return None
+    major, minor = int(match[1]), int(match[2])
+    return (major,) if major else (0, minor)
+
+
+def compatible(node_version: object, bridge_version: str) -> bool:
+    """Same major release (same minor before 1.0): the Node and Bridge speak the same requests."""
+    line = _release_line(node_version)
+    return line is not None and line == _release_line(bridge_version)
+
+
 def _message(purpose: str, nonce: str, fingerprint: str, subject: str) -> bytes:
     return f"wb-node-v1|{purpose}|{nonce}|{fingerprint}|{subject}".encode()
 

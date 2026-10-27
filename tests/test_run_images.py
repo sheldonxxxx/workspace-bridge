@@ -18,7 +18,7 @@ def test_node_decodes_and_audits_run_images(tmp_path,monkeypatch):
     with BytesIO() as buf:
         Image.new('RGB',(32,24),'blue').save(buf,'PNG');data=buf.getvalue()
     (root/'reference.png').write_bytes(data)
-    node=NodeService(tmp_path/'node',{'allowed_roots':[str(tmp_path)],'host':'127.0.0.1','node_token_hash':digest(b'test')})
+    node=NodeService(tmp_path/'node',{'allowed_roots':[str(tmp_path)],"cursor_secret": "c" * 64})
     ws={'id':'ws_'+'1'*24,'root':str(root),'excludes':[],'write_scope':'none'}
     node.register_workspace(ws)
     adapter=node.save_adapter({'name':'OpenCode','plugin': 'opencode'})

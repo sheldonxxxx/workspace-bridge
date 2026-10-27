@@ -30,7 +30,7 @@ from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import pairing
+from . import __version__, pairing
 from .security import BridgeError
 
 MAX_FRAME = 40 * 1024 * 1024
@@ -264,6 +264,11 @@ class NodeGateway:
             return
         if not isinstance(message, dict):
             await self._refuse(websocket, "protocol_error")
+            return
+        if message.get("type") in ("pair", "hello") and not pairing.compatible(
+                message.get("version"), __version__):
+            # Checked before anything else, so an old Node learns why it was refused.
+            await self._refuse(websocket, "version_incompatible")
             return
         if message.get("type") == "pair":
             await self._pair(websocket, message, nonce, fingerprint)

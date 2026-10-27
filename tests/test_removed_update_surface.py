@@ -1,8 +1,8 @@
 """Negative surface: removed updater/backup/admission code is gone.
 
 Proves the manual-update simplification: no remote/automatic update
-planning, deployment installer probing, remote backup, or admission
-locking remains in product runtime, while release/CLI surfaces work.
+planning, deployment installer probing, remote backup, admission locking,
+release bundles or Node HTTP API remain in product runtime.
 """
 from __future__ import annotations
 from admin_helpers import admin_cookie
@@ -35,26 +35,23 @@ def test_removed_bridge_update_endpoints_absent(env):
                     ("POST", "/api/deployment/status")):
                 response = await client.request(method, path, json={})
                 assert response.status_code == 404, (method, path)
-            # Read-only version/compatibility status lives under the
-            # non-deployment name.
-            response = await client.get("/api/system/versions")
-            assert response.status_code == 200
-            payload = response.json()
-            assert payload["status"] in ("ok", "failed")
+            # Versions come from /api/status; Nodes join only by pairing.
+            assert (await client.get("/api/system/versions")).status_code == 404
+            assert (await client.post("/api/nodes", json={})).status_code == 405
+            status = (await client.get("/api/status")).json()
+            assert "release" not in status and "manager_release" not in status
     asyncio.run(_call())
 
 
 def test_removed_node_deployment_endpoints_absent(env):
     node = env["node"]
     transport = node["transport"]
-    headers = {"X-Node-Token": node["token"]}
-    assert transport.get("/v1/status", headers=headers).status_code == 200
-    assert transport.get("/v1/deployment/status",
-                         headers=headers).status_code == 404
-    assert transport.post("/v1/deployment/backup", json={},
-                          headers=headers).status_code == 404
-    assert transport.post("/v1/deployment/exec", json={},
-                          headers=headers).status_code == 404
+    assert transport.request("GET", "/v1/status").status_code == 200
+    assert transport.request("GET", "/v1/deployment/status").status_code == 404
+    assert transport.request("POST", "/v1/deployment/backup", b"{}").status_code == 404
+    assert transport.request("POST", "/v1/deployment/exec", b"{}").status_code == 404
+    from workspace_bridge import node_api
+    assert not hasattr(node_api, "make_node_api")
 
 
 def test_removed_cli_deploy_namespace_absent(capsys):
@@ -63,20 +60,17 @@ def test_removed_cli_deploy_namespace_absent(capsys):
                  ["deploy", "backup", "--target", "x"],
                  ["deploy", "select-plan", "--json"],
                  ["deploy", "build", "--output", "x"],
-                 ["deploy", "validate-bundle", "--bundle", "x"]):
+                 ["deploy", "validate-bundle", "--bundle", "x"],
+                 ["release", "build", "--output", "x"],
+                 ["release", "validate"]):
         with pytest.raises(SystemExit) as exc:
             cli_main(["--state", "/tmp/wb-no-such-state", *argv])
         assert exc.value.code == 2, argv
         capsys.readouterr()
-    # Release-oriented names exist.
-    with pytest.raises(SystemExit) as exc:
-        cli_main(["release", "--help"])
-    assert exc.value.code == 0
-    capsys.readouterr()
-    with pytest.raises(SystemExit) as exc:
-        cli_main(["release"])
-    assert exc.value.code == 2
-    capsys.readouterr()
+    for name in ("workspace_bridge.release", "workspace_bridge.release_bundle",
+                 "workspace_bridge.release_manifest", "workspace_bridge.staged_rollout",
+                 "workspace_bridge.pi_runtime_artifact", "workspace_bridge.docker_entrypoint"):
+        assert importlib.util.find_spec(name) is None, name
 
 
 def test_no_deployment_admission_dependency(tmp_path):
@@ -127,7 +121,7 @@ def test_cli_version_and_nested_node_help(capsys):
     assert "Node state directory" in out
 
 
-def test_nested_node_init_and_show_token(tmp_path, capsys):
+def test_nested_node_init_writes_no_token(tmp_path, capsys):
     from workspace_bridge.cli import main as cli_main
     root = tmp_path / "projects" / "alpha"
     root.mkdir(parents=True)
@@ -135,8 +129,8 @@ def test_nested_node_init_and_show_token(tmp_path, capsys):
     assert cli_main(["node", "--state", str(state), "init",
                      "--allow-root", str(tmp_path / "projects")]) is None
     assert (state / "node-config.json").exists()
+    assert not (state / "node-token").exists()
     capsys.readouterr()
-    assert cli_main(["node", "--state", str(state),
-                     "show-token"]) is None
-    token = capsys.readouterr().out.strip()
-    assert len(token) >= 32
+    with pytest.raises(SystemExit) as exc:
+        cli_main(["node", "--state", str(state), "show-token"])
+    assert exc.value.code == 2

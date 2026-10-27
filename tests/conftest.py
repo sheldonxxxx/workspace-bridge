@@ -1,11 +1,9 @@
 from pathlib import Path
 import os
 import pytest
-from starlette.testclient import TestClient
 from workspace_bridge.cli import initialize
-from workspace_bridge.node_api import make_node_api
+from workspace_bridge.node_api import InProcessTransport
 from workspace_bridge.node_service import NodeService
-from workspace_bridge.security import digest
 from workspace_bridge.service import Service
 
 
@@ -24,27 +22,31 @@ def _isolated_bridge_environment(monkeypatch):
 
 
 def start_test_node(state: Path, parent: Path):
-    """Build the real private Node API with an in-process HTTP transport."""
-    token = "node-test-token"
-    config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(token.encode()), "host": "127.0.0.1"}
+    """Build a real Node service that the Bridge calls in process."""
+    config = {"allowed_roots": [str(parent)], "cursor_secret": "c" * 64}
     node_service = NodeService(state, config)
-    transport = TestClient(make_node_api(node_service, config["node_token_hash"]))
+    return {"service": node_service, "transport": InProcessTransport(node_service),
+            "stop": node_service.close}
 
-    def stop():
-        transport.close()
-        node_service.close()
 
-    return {"url": "http://node-test.invalid", "token": token,
-            "service": node_service, "transport": transport, "stop": stop}
+def register_test_node(service: Service, name: str, *, enabled: bool = True) -> dict:
+    """A paired Node row; tests supply its transport through ``_node_transport``."""
+    import secrets
+    from datetime import datetime, timezone
+    node_id, now = "node_" + secrets.token_hex(12), datetime.now(timezone.utc).isoformat()
+    with service.lock, service.db:
+        service.db.execute(
+            "INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated,transport,public_key) "
+            "VALUES(?,?,'','',?,?,?,?,'paired','')",
+            (node_id, name, int(enabled), "rev_" + secrets.token_hex(16), now, now))
+    return service.node_registry.public(service.node_registry.get(node_id))
 
 
 def attach_test_node(service: Service, state: Path, parent: Path,
                      name: str = "Local Node"):
     node = start_test_node(state, parent)
     service._node_transport = {}
-    record = service.node_registry.create({"name": name, "base_url": node["url"],
-                                           "token": node["token"]})
+    record = register_test_node(service, name)
     service._node_transport[record["id"]] = node["transport"]
     service._node_transport_services = {record["id"]: node["service"]}
     service.node_registry.refresh_adapters(record["id"])

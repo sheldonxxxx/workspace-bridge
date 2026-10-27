@@ -444,18 +444,12 @@ def _split_origin(value: str) -> tuple[str | None, str | None, int | None]:
 
 
 class Boundary:
-    def __init__(self, app, port: int, *, public_port: int | None = None,
-                 internal_hosts: tuple[str, ...] = (),
-                 extra_hosts: tuple[str, ...] = ()):
+    def __init__(self, app, port: int, *, extra_hosts: tuple[str, ...] = ()):
         self.app = app
-        ports = {port, public_port} if public_port is not None else {port}
-        if any(type(p) is not int or not 1024 <= p <= 65535 for p in ports):
+        ports = {port}
+        if type(port) is not int or not 1024 <= port <= 65535:
             raise ValueError("Boundary ports must be unprivileged TCP port numbers")
-        # Docker can publish a different host port. No wildcard hosts/origins,
-        # or proxy-header trust are introduced. In container mode the MCP
-        # listener additionally trusts the Compose-internal DNS names, but only
-        # on the internal (unpublished) port, so the tunnel sidecar can reach
-        # the bridge over the shared Compose network.
+        # No wildcard hosts/origins or proxy-header trust.
         # extra_hosts is an explicit opt-in allowlist for additional Host
         # header values (admin listener only, via WB_ADMIN_ALLOWED_HOSTS).
         # Empty by default: loopback-only. Entries must already be validated
@@ -466,7 +460,6 @@ class Boundary:
         self.ports = frozenset(ports)
         self.extra_hosts = frozenset(extra_hosts)
         self.hosts = {f"{host}:{p}" for p in ports for host in ("127.0.0.1", "localhost")}
-        self.hosts |= {f"{name}:{port}" for name in internal_hosts}
         self.hosts |= {f"{name}:{p}" for p in ports for name in extra_hosts}
         self.origins = {f"http://{h}" for h in self.hosts}
         # Remote browsers may reach the admin page through a TLS-terminating
@@ -531,7 +524,6 @@ class Boundary:
             # Structured boundary rejection: safe bounded classification
             # fields only. Never log Host, Origin, HTTP path, auth headers,
             # tokens, allowlist contents, ports, or arbitrary values.
-            # Visible via `docker compose logs bridge`.
             _emit_ops(_ops_log, "WARNING", "bridge", "boundary_reject",
                       reason=str(reason)[:80])
             return await JSONResponse({"error": "Untrusted Host or Origin"}, 403)(scope, receive, send)
@@ -577,8 +569,7 @@ def rpc_error(ident, code: int, message: str, status: int = 200):
     return JSONResponse({"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}, status)
 
 
-def make_mcp(service: Service, port: int = 8765, *, public_port: int | None = None,
-             container_mode: bool = False):
+def make_mcp(service: Service, port: int = 8765):
     semaphore = asyncio.Semaphore(4)
     event_semaphore = asyncio.Semaphore(4)
     events_enabled = service.event_broker is not None
@@ -734,8 +725,7 @@ def make_mcp(service: Service, port: int = 8765, *, public_port: int | None = No
     app = Starlette(routes=[Route("/mcp", endpoint, methods=["POST", "GET", "DELETE"])])
     # Management listener stays loopback-only; only the MCP listener trusts the
     # Compose sidecar names, and only on the internal port.
-    internal = ("bridge", "workspace-bridge") if container_mode else ()
-    return Boundary(app, port, public_port=public_port, internal_hosts=internal)
+    return Boundary(app, port)
 
 class AddWorkspace(Input):
     name: str = Field(min_length=1, max_length=80)
@@ -765,13 +755,6 @@ class ManageBridge(Input):
     operation: Literal["enable", "disable", "rotate_token"]
 
 
-class NodeCreate(Input):
-    name: str = Field(min_length=1, max_length=80)
-    base_url: str = Field(min_length=1, max_length=2048)
-    token: str = Field(min_length=1, max_length=4096)
-    enabled: bool = True
-
-
 class NodePairingCreate(Input):
     name: str = Field(min_length=1, max_length=80)
     replace: bool = Field(default=False, description="Re-pair the existing paired Node with this name.")
@@ -779,18 +762,7 @@ class NodePairingCreate(Input):
 
 class NodeUpdate(Input):
     name: str | None = Field(default=None, min_length=1, max_length=80)
-    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
-    token: str | None = Field(default=None, max_length=4096,
-                              description="Blank or omitted preserves the saved Node token.")
     enabled: bool | None = None
-
-
-class NodeTest(Input):
-    node_id: NodeID | None = None
-    name: str = Field(default="New Node", min_length=1, max_length=80)
-    base_url: str = Field(min_length=1, max_length=2048)
-    token: str = Field(default="", max_length=4096)
-    enabled: bool = True
 
 
 class AdapterModelPolicy(Input):
@@ -926,8 +898,6 @@ class _RunEventResponse(StreamingResponse):
 
 
 def make_admin(service: Service, port: int = 8766, *,
-               public_port: int | None = None, public_mcp_port: int | None = None,
-               container_mode: bool = False,
                extra_hosts: tuple[str, ...] = ()):
     static = Path(__file__).parent / "static"
     sessions = AdminSessionStore()
@@ -935,7 +905,7 @@ def make_admin(service: Service, port: int = 8766, *,
     account_store.ensure()
     login_failures: list[float] = []
     auth_lock = asyncio.Lock()
-    listen_mode = "docker-published-loopback" if container_mode else "loopback"
+    listen_mode = "loopback"
     if extra_hosts:
         listen_mode += "+remote-admin"
     async def home(request):
@@ -1068,21 +1038,18 @@ def make_admin(service: Service, port: int = 8766, *,
                 if offline_value not in {"0", "1"}:
                     return JSONResponse({"error": "offline must be 0 or 1"}, 400)
                 listener = {
-                    "mcp_port": public_mcp_port or service.config.get("mcp_port", 8765),
-                    "admin_port": public_port or port,
-                    "container_mode": container_mode,
+                    "mcp_port": service.config.get("mcp_port", 8765),
+                    "admin_port": port,
                     "extra_admin_host_count": len(extra_hosts),
                 }
                 return JSONResponse(await run_in_threadpool(
                     service.diagnostic_report, offline=offline_value == "1",
                     listener=listener))
             if path == "/api/status":
-                from .release import bridge_release, read_manager_release
-                return JSONResponse({"version": __version__, "release": bridge_release(),
-                    "manager_release": read_manager_release(),
+                return JSONResponse({"version": __version__,
                     "mode": "control-plane",
-                    "mcp_port": public_mcp_port or service.config.get("mcp_port", 8765),
-                    "admin_port": public_port or port,
+                    "mcp_port": service.config.get("mcp_port", 8765),
+                    "admin_port": port,
                     "listen_mode": listen_mode,
                     "admin_allowed_hosts": list(extra_hosts),
                     "mcp_endpoint": "/mcp", "bridge": service.bridge_status(),
@@ -1093,34 +1060,15 @@ def make_admin(service: Service, port: int = 8766, *,
                     "agent_execution": {"control": "local manager only", "default": "disabled",
                                         "note": "Independent from write_scope; MCP cannot enable it."},
                     "tunnel_status": "Not observed by this service; check tunnel-client doctor /ui", "state_path": str(service.state)})
-            if path == "/api/system/versions":
-                if request.method != "GET":
-                    return JSONResponse({"error": "Method not allowed"}, 405)
-                # Read-only version/compatibility status: bounded live
-                # Node/adapter release observations only. No catalog
-                # refresh, no DB/state mutation, no backups, no artifact
-                # downloads, no locks, and no update/install/restart
-                # affordance. Failures are per-component; topology failure
-                # fails safely.
-                from .staged_rollout import rollout_live
-                return JSONResponse(await run_in_threadpool(rollout_live, service))
             if path == "/api/nodes":
                 if request.method == "GET":
                     return JSONResponse({"nodes": await run_in_threadpool(
                         service.node_registry.list_public, probe=True)})
-                if request.method == "POST":
-                    model = NodeCreate.model_validate(await body_json(request))
-                    return JSONResponse(await run_in_threadpool(
-                        service.node_registry.create, model.model_dump()), 201)
                 return JSONResponse({"error": "Method not allowed"}, 405)
             if path == "/api/nodes/pairings" and request.method == "POST":
                 model = NodePairingCreate.model_validate(await body_json(request))
                 return JSONResponse(await run_in_threadpool(
                     service.create_node_pairing, model.name, model.replace), 201)
-            if path == "/api/nodes/test" and request.method == "POST":
-                model = NodeTest.model_validate(await body_json(request))
-                return JSONResponse(await run_in_threadpool(
-                    service.node_registry.test_connection, model.model_dump()))
             if path.startswith("/api/nodes/"):
                 parts = [p for p in path.split("/") if p]
                 if len(parts) < 3 or parts[1] != "nodes":
@@ -1143,11 +1091,8 @@ def make_admin(service: Service, port: int = 8766, *,
                     return JSONResponse(await run_in_threadpool(
                         lambda: service.node_registry.client(node_id, timeout=5).plugins()))
                 if len(parts) == 4 and parts[3] == "test" and request.method == "POST":
-                    raw = await body_json(request)
-                    raw["node_id"] = node_id
-                    model = NodeTest.model_validate(raw)
                     return JSONResponse(await run_in_threadpool(
-                        service.node_registry.test_connection, model.model_dump()))
+                        service.node_registry.test_connection, node_id))
                 if len(parts) == 4 and parts[3] == "adapters":
                     if request.method == "GET":
                         catalog = await run_in_threadpool(
@@ -1253,8 +1198,6 @@ def make_admin(service: Service, port: int = 8766, *,
                             "adapter_version": descriptor.adapter_version,
                             "native_version": descriptor.native_version,
                             "protocol": 1, "features": descriptor.features}
-                        if descriptor.release is not None:
-                            payload["release"] = descriptor.release
                         return JSONResponse(payload)
                     except BridgeError as exc:
                         return JSONResponse({"success": False, "code": exc.code,
@@ -1457,12 +1400,10 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/account", api),
         Route("/api/account/password", api, methods=["POST"]),
         Route("/api/status", api), Route("/api/diagnostics", api), Route("/api/events", api),
-        Route("/api/system/versions", api),
         Route("/api/runs", api),
         Route("/api/approvals", api),
         Route("/api/run-events", api),
-        Route("/api/nodes", api, methods=["GET", "POST"]),
-        Route("/api/nodes/test", api, methods=["POST"]),
+        Route("/api/nodes", api, methods=["GET"]),
         Route("/api/nodes/pairings", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/test", api, methods=["POST"]),
         Route("/api/nodes/{node_id}/adapters", api, methods=["GET", "POST"]),
@@ -1499,4 +1440,4 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/workspaces/{workspace}/routes/default", api, methods=["POST", "DELETE"]),
         Route("/api/workspaces/{workspace}/routes/{adapter_id}", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}", api, methods=["POST"])])
-    return Boundary(app, port, public_port=public_port, extra_hosts=extra_hosts)
+    return Boundary(app, port, extra_hosts=extra_hosts)

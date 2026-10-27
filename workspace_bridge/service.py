@@ -227,8 +227,7 @@ class Service:
 
     def local_node_transport(self, node_id: str):
         """In-process transport for the Node embedded in this Bridge."""
-        from types import SimpleNamespace
-        from .node_api import handle
+        from .node_api import InProcessTransport
         from .node_cli import load_node_config
         from .node_service import NodeService
         with self.lock:
@@ -236,14 +235,7 @@ class Service:
                 state = self.state / self.LOCAL_NODE_DIR
                 self._local_node = NodeService(state, load_node_config(state),
                                                read_only=self.read_only)
-            node_service = self._local_node
-
-        class LocalTransport:
-            def request(self, method, path, content=None, headers=None):
-                status, raw = handle(node_service, method, path, content or b"")
-                return SimpleNamespace(status_code=status, content=raw)
-
-        return LocalTransport()
+            return InProcessTransport(self._local_node)
 
     def gateway_settings(self) -> dict:
         """Where paired Nodes reach this Bridge; see cli.gateway_settings."""

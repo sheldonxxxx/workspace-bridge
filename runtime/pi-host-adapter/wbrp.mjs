@@ -10,7 +10,6 @@ import { AdapterError, sanitizeModels } from "./adapter.mjs";
 import { ADAPTER_VERSION } from "./config.mjs";
 import { publicRecord } from "./executions.mjs";
 import { fromWire, validatePolicy } from "./policy.mjs";
-import { piRelease } from "./release.mjs";
 
 const now = () => new Date().toISOString();
 const id = (prefix) => prefix + randomUUID();
@@ -221,12 +220,6 @@ export class PiRuntimeProtocol {
     }, features: { models: 1, conversations: 1, runs: 1,
       activities: 1, interactions: 1,
       events: 1, steering: 1, queueing: 1, inputControls: 1 } };
-    try {
-      value.release = piRelease();
-    } catch {
-      // Release identity is additive; a local hashing failure must not
-      // break the Runtime Protocol descriptor.
-    }
     return value;
   }
 

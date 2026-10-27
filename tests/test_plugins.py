@@ -38,7 +38,7 @@ def node(tmp_path):
     projects = tmp_path / "projects"
     (projects / "alpha").mkdir(parents=True)
     service = NodeService(tmp_path / "node", {
-        "allowed_roots": [str(projects)], "node_token_hash": digest(b"t"), "host": "127.0.0.1"})
+        "allowed_roots": [str(projects)], "cursor_secret": "c" * 64})
     service.install_manifest(manifest_file(tmp_path, "fake", "fake_agent.py"))
     yield service, projects
     service.close()
@@ -169,7 +169,7 @@ def test_a_bare_plugin_command_resolves_through_the_login_path(tmp_path, monkeyp
     manifest.write_text('id = "bare"\nversion = "0.1"\nprotocol = 2\nruntime_type = "pi"\n'
                         'command = ["fake-plugin"]\nsettings = []\n')
     service = NodeService(tmp_path / "node", {
-        "allowed_roots": [str(projects)], "node_token_hash": digest(b"t"), "host": "127.0.0.1"})
+        "allowed_roots": [str(projects)], "cursor_secret": "c" * 64})
     try:
         service.install_manifest(manifest)
         adapter = service.save_adapter({"name": "Bare", "plugin": "bare",

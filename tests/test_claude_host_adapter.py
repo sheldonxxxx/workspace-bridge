@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from workspace_bridge import security_profiles as sp
-from workspace_bridge import wbrp
+from workspace_bridge import __version__, wbrp
 from workspace_bridge.claude_host_adapter import (
     AdapterFailure, ClaudeHostAdapter, _normalize_claude_usage,
     allowed_tools, decide_tool_use, parse_permission_mode, parse_setting_sources)
@@ -368,8 +368,8 @@ def test_descriptor_is_accepted_by_the_bridge_client(claude):
     adapter, _, _ = claude
     descriptor = adapter.descriptor()
     parsed = wbrp.Descriptor.parse(descriptor, expected_runtime="claude")
-    assert parsed.release_status == "valid"
-    assert parsed.release["component"] == "claude-host-adapter"
+    assert descriptor["runtime"]["adapterVersion"] == __version__
+    assert "release" not in descriptor
     assert descriptor["features"]["steering"] == 1
     assert descriptor["features"]["queueing"] == 1
     assert descriptor["features"]["usageLimits"] == 1

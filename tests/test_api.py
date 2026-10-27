@@ -95,7 +95,7 @@ async def test_admin_auth_policy_and_mapping(env):
         assert diagnostics.status_code == 200
         assert set(diagnostics.json()) == {
             "generated_at", "mode", "overall", "checks", "runnable_routes",
-            "release"
+            "versions"
         }
         assert (await c.post("/api/diagnostics")).status_code == 405
         assert (await c.get("/api/status", headers={"Origin":"http://evil.local"})).status_code == 403

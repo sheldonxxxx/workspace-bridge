@@ -290,24 +290,6 @@ class Descriptor:
     native_version: str
     instance_id: str
     features: dict[str, int]
-    release: dict | None = None
-    release_status: str = "missing"
-
-    def __post_init__(self) -> None:
-        # Bounded release-observation state. `release` is a validated
-        # identity or None; raw validation exceptions never escape.
-        # Direct constructions without an explicit status infer it so
-        # existing call sites stay correct: present release => valid,
-        # absent release => missing.
-        allowed = {"valid", "missing", "invalid", "unsupported"}
-        status = self.release_status
-        if status not in allowed:
-            object.__setattr__(self, "release_status", "missing")
-            status = "missing"
-        if self.release is not None and status == "missing":
-            object.__setattr__(self, "release_status", "valid")
-        elif self.release is None and status == "valid":
-            object.__setattr__(self, "release_status", "missing")
 
     @classmethod
     def parse(cls, value: Any, *, expected_runtime: str) -> "Descriptor":
@@ -331,38 +313,13 @@ class Descriptor:
         instance_id = runtime.get("instanceId")
         if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 200:
             raise RuntimeUnavailable("Runtime instance identity is invalid")
-        # Runtime release metadata is optional at the generic Runtime
-        # Protocol layer and is decoupled from protocol compatibility.
-        # Protocol-major, core-feature, and runtime-identity validation stay
-        # strict, but a present malformed or unsupported `release` object
-        # never makes an otherwise valid descriptor unavailable. It is
-        # observed as degraded metadata (invalid/unsupported) while the
-        # descriptor stays usable. A missing release likewise stays
-        # protocol-usable; managed-deployment support for first-party builds
-        # is classified separately, beginning at 0.1.0. Normal runtime
-        # operations are never blocked solely by release metadata.
-        release: dict | None = None
-        release_status = "missing"
-        if "release" in value:
-            from .release import ReleaseError, validate_release
-            try:
-                release = validate_release(value.get("release"))
-                release_status = "valid"
-            except ReleaseError as exc:
-                release = None
-                if getattr(exc, "kind", "invalid") == "unsupported":
-                    release_status = "unsupported"
-                else:
-                    release_status = "invalid"
         return cls(runtime_id=expected_runtime,
                    display_name=str(runtime.get("displayName") or expected_runtime)[:120],
                    adapter_version=str(runtime.get("adapterVersion") or "")[:80],
                    native_version=str(runtime.get("nativeVersion") or "")[:80],
                    instance_id=instance_id,
                    features={name: int(version) for name, version in features.items()
-                             if name in ALL_FEATURES},
-                   release=release,
-                   release_status=release_status)
+                             if name in ALL_FEATURES})
 
     def supports(self, feature: str) -> bool:
         return self.features.get(feature) == 1

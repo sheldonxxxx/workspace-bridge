@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
-from . import node_api, pairing
+from . import __version__, node_api, pairing
 from .oplog import emit, error_code
 from .security import BridgeError
 
@@ -132,7 +132,7 @@ async def pair(state: Path, config: dict, pairing_string: str) -> dict:
             der = websocket.transport.get_extra_info("ssl_object").getpeercert(binary_form=True)
             nonce = await _challenge(websocket)
             await websocket.send(json.dumps({
-                "type": "pair", "code": code, "public_key": public_key,
+                "type": "pair", "code": code, "public_key": public_key, "version": __version__,
                 "signature": pairing.sign(key, "pair", nonce, fingerprint,
                                           pairing.code_hash(code))}))
             answer = await _answer(websocket, "paired")
@@ -214,7 +214,7 @@ async def run_link(service, config: dict, state: Path, *,
                     raise BridgeError("Gateway certificate changed", "gateway_untrusted")
                 nonce = await _challenge(websocket)
                 await websocket.send(json.dumps({
-                    "type": "hello", "node_id": bridge["node_id"],
+                    "type": "hello", "node_id": bridge["node_id"], "version": __version__,
                     "signature": pairing.sign(key, "hello", nonce, bridge["fingerprint"],
                                               bridge["node_id"])}))
                 await _answer(websocket, "ready")

@@ -11,7 +11,7 @@ from workspace_bridge.api import make_admin
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.security import BridgeError, digest
 
-from conftest import create_test_adapter, start_test_node, patch_node_runtime
+from conftest import create_test_adapter, register_test_node, start_test_node, patch_node_runtime
 
 
 
@@ -20,7 +20,7 @@ def test_read_only_node_service_does_not_create_or_mutate_state(tmp_path):
     parent.mkdir()
     state = tmp_path / "node-state"
     config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+              "cursor_secret": "c" * 64}
 
     writable = NodeService(state, config)
     writable.save_adapter({
@@ -68,10 +68,7 @@ def test_refresh_adapters_rejects_cross_node_identity_and_surfaces_failure(env):
 
     node_b = start_test_node(env["tmp"] / "node-b-state", env["parent"])
     try:
-        record_b = service.node_registry.create({
-            "name": "Node B", "base_url": node_b["url"],
-            "token": node_b["token"], "enabled": False,
-        })
+        record_b = register_test_node(service, "Node B", enabled=False)
         service._node_transport[record_b["id"]] = node_b["transport"]
         service._node_transport_services[record_b["id"]] = node_b["service"]
         created = node_b["service"].save_adapter({
@@ -102,7 +99,7 @@ def test_runtime_call_rejects_stale_adapter_revision_before_native_construction(
     parent.mkdir()
     state = tmp_path / "node-state"
     config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+              "cursor_secret": "c" * 64}
     node = NodeService(state, config)
     try:
         created = node.save_adapter({
@@ -145,8 +142,7 @@ def test_status_carries_no_update_or_installer_surface(tmp_path):
         assert "deployment-v1" not in status["capabilities"]
         assert set(status["host"]) == {"platform", "arch"}
         assert "node_major" not in status["host"]
-        live = node["transport"].get("/v1/status",
-            headers={"X-Node-Token": node["token"]}).json()
+        live = json.loads(node["transport"].request("GET", "/v1/status").content)
         assert live["status"] == "ok"
         assert "installers" not in live
         assert "deployment-v1" not in live["capabilities"]
@@ -162,7 +158,7 @@ def test_runtime_call_refuses_unknown_operations(tmp_path):
     parent = tmp_path / "projects"
     parent.mkdir()
     config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+              "cursor_secret": "c" * 64}
     node = NodeService(tmp_path / "node-state", config)
     try:
         created = node.save_adapter({"name": "Codex", "plugin": "codex"})

@@ -5,7 +5,6 @@ import json
 import logging
 
 import pytest
-import yaml
 from pathlib import Path
 
 from workspace_bridge import oplog
@@ -134,22 +133,6 @@ def test_one_line_json_records(captured):
 
 
 # ------------------------------------------------------------------ config
-def test_compose_passes_log_level_to_bridge():
-    root = Path(__file__).resolve().parents[1]
-    cfg = yaml.safe_load((root / "compose.yaml").read_text())
-    assert set(cfg["services"]) == {"bridge", "mcp-tunnel"}
-    env = cfg["services"]["bridge"]["environment"]
-    assert "WB_LOG_LEVEL" in env
-    assert "WB_RUNTIME_ADAPTERS" not in env
-    assert "WB_RUNTIME_TOKEN" not in env
-
-
-def test_env_example_documents_log_level():
-    root = Path(__file__).resolve().parents[1]
-    text = (root / ".env.example").read_text()
-    assert "WB_LOG_LEVEL" in text and "INFO" in text
-
-
 def test_uvicorn_access_log_stays_disabled():
     root = Path(__file__).resolve().parents[1]
     text = (root / "workspace_bridge/cli.py").read_text()

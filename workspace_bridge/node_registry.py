@@ -1,15 +1,13 @@
-"""Bridge-side Node authority inventory with write-only credentials."""
+"""Bridge-side inventory of paired and embedded Nodes."""
 from __future__ import annotations
 
 import json
-import secrets
 import re
 import sqlite3
 from datetime import datetime, timezone
 
 from .node_client import NodeClient
 from .security import BridgeError
-from .adapter_registry import validate_base_url
 
 
 def _now() -> str:
@@ -36,34 +34,27 @@ class NodeRegistry:
 
     @staticmethod
     def public(row: dict) -> dict:
-        view: dict = {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
+        view: dict = {"id": row["id"], "name": row["name"],
                 "enabled": bool(row["enabled"]), "revision": row["revision"],
                 "created": row["created"], "updated": row["updated"],
-                "has_token": bool(row["token"]), "health": row.get("health", "unknown"),
-                "transport": row.get("transport", "http"),
+                "health": row.get("health", "unknown"), "transport": row["transport"],
                 "connection": ({"connected_at": row.get("connected_at") or None,
                                 "last_seen": row.get("last_seen") or None,
                                 "disconnected_at": row.get("disconnected_at") or None}
                                if row.get("transport") == "paired" else None),
                 "protocol": row.get("protocol"), "capabilities": row.get("capabilities", [])}
-        release = row.get("release")
-        if isinstance(release, dict):
-            try:
-                from .release import validate_release
-                view["release"] = validate_release(release)
-            except Exception:
-                pass
         return view
 
     def client(self, node_id: str, *, timeout: float = 30) -> NodeClient:
         row = self.get(node_id)
-        kind = row.get("transport", "http")
-        if kind == "paired":
+        # Tests attach in-process Nodes by ID.
+        transport = getattr(self.service, "_node_transport", {}).get(node_id)
+        if transport is not None:
+            pass
+        elif row["transport"] == "paired":
             transport = self.service.node_gateway.transport(node_id, timeout=timeout)
-        elif kind == "local":
+        elif row["transport"] == "local":
             transport = self.service.local_node_transport(node_id)
-        else:
-            transport = getattr(self.service, "_node_transport", {}).get(node_id)
         return NodeClient(row, timeout=timeout, transport=transport)
 
     def list_public(self, *, probe: bool = False) -> list[dict]:
@@ -78,13 +69,6 @@ class NodeRegistry:
                                 node_version=state.get("node_version"),
                                 capabilities=state.get("capabilities", []),
                                 allowed_root_count=len(state.get("allowed_roots", [])))
-                    release = state.get("release") if isinstance(state, dict) else None
-                    if isinstance(release, dict):
-                        try:
-                            from .release import validate_release
-                            view["release"] = validate_release(release)
-                        except Exception:
-                            pass
                 except BridgeError as exc:
                     if exc.code == "adapter_identity_conflict":
                         view.update(health="failed", error_code=exc.code,
@@ -96,71 +80,26 @@ class NodeRegistry:
             result.append(view)
         return result
 
-    def create(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"name", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected Node fields", "invalid_arguments")
-        name = payload.get("name")
-        token = payload.get("token")
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
-            raise BridgeError("Node name must contain 1 to 80 characters", "invalid_arguments")
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Node token is required", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url"))
-        enabled = payload.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        node_id = "node_" + secrets.token_hex(12)
-        now = _now()
-        revision = "rev_" + secrets.token_hex(16)
-        try:
-            with self.service.lock, self.service.db:
-                self.service.db.execute(
-                    "INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (node_id, name.strip(), base_url, token, int(enabled), revision, now, now))
-        except sqlite3.IntegrityError:
-            raise BridgeError("Node name is already in use", "conflict") from None
-        row = self.get(node_id)
-        if enabled:
-            self.refresh_adapters(node_id)
-        return self.public(row)
-
     def update(self, node_id: str, payload: dict) -> dict:
-        if not isinstance(payload, dict) or not payload or set(payload) - {
-                "name", "base_url", "token", "enabled"}:
+        if not isinstance(payload, dict) or not payload or set(payload) - {"name", "enabled"}:
             raise BridgeError("Unexpected Node fields", "invalid_arguments")
         row = self.get(node_id)
-        if row.get("transport", "http") != "http" and (payload.get("base_url") or payload.get("token")):
-            raise BridgeError("A paired or local Node has no URL or token; re-pair it instead",
-                              "invalid_arguments")
         name = payload.get("name", row["name"])
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid Node name", "invalid_arguments")
-        base_url = (row["base_url"] if row.get("transport", "http") != "http"
-                    else validate_base_url(payload.get("base_url", row["base_url"])))
-        token = payload.get("token", "")
-        if not isinstance(token, str) or len(token) > 4096:
-            raise BridgeError("Invalid Node token", "invalid_arguments")
-        if not token:
-            token = row["token"]
         enabled = payload.get("enabled", bool(row["enabled"]))
         if not isinstance(enabled, bool):
             raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        connection_changed = (base_url != row["base_url"] or token != row["token"])
-        revision = "rev_" + secrets.token_hex(16) if connection_changed else row["revision"]
         try:
             with self.service.lock, self.service.db:
-                self.service.db.execute(
-                    "UPDATE nodes SET name=?,base_url=?,token=?,enabled=?,revision=?,updated=? WHERE id=?",
-                    (name.strip(), base_url, token, int(enabled), revision, _now(), node_id))
+                self.service.db.execute("UPDATE nodes SET name=?,enabled=?,updated=? WHERE id=?",
+                                        (name.strip(), int(enabled), _now(), node_id))
         except sqlite3.IntegrityError:
             raise BridgeError("Node name is already in use", "conflict") from None
         if enabled:
             self.refresh_adapters(node_id)
         else:
             self._disconnect(row)
-        if connection_changed:
-            self._wake_runs()
         return self.public(self.get(node_id))
 
     def _disconnect(self, row: dict) -> None:
@@ -187,46 +126,15 @@ class NodeRegistry:
         self._disconnect(row)
         return {"deleted": node_id}
 
-    def test_connection(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {
-                "node_id", "name", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected Node test fields", "invalid_arguments")
-        if payload.get("node_id") and self.get(payload["node_id"]).get("transport", "http") != "http":
-            try:
-                status = self.client(payload["node_id"], timeout=5).status()
-            except BridgeError as exc:
-                return {"success": False, "code": exc.code,
-                        "message": "Node connection could not be verified."}
-            return {"success": True, "protocol": status.get("protocol"),
-                    "capabilities": status.get("capabilities", []),
-                    "allowed_root_count": len(status.get("allowed_roots", []))}
-        if payload.get("node_id"):
-            row = self.get(payload["node_id"])
-            token = payload.get("token") or row["token"]
-            base_url = validate_base_url(payload.get("base_url", row["base_url"]))
-            name = payload.get("name", row["name"])
-            revision = row["revision"]
-            enabled = payload.get("enabled", bool(row["enabled"]))
-        else:
-            token = payload.get("token")
-            base_url = validate_base_url(payload.get("base_url"))
-            name = payload.get("name", "New Node")
-            revision = "test"
-            enabled = True
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Node token is required", "invalid_arguments")
+    def test_connection(self, node_id: str) -> dict:
         try:
-            node_id = payload.get("node_id", "node_" + "0" * 24)
-            transport = getattr(self.service, "_node_transport", {}).get(node_id)
-            status = NodeClient({"id": node_id, "name": name, "base_url": base_url,
-                "token": token, "revision": revision, "enabled": enabled},
-                timeout=5, transport=transport).status()
-            return {"success": True, "protocol": status.get("protocol"),
-                    "capabilities": status.get("capabilities", []),
-                    "allowed_root_count": len(status.get("allowed_roots", []))}
+            status = self.client(node_id, timeout=5).status()
         except BridgeError as exc:
             return {"success": False, "code": exc.code,
                     "message": "Node connection could not be verified."}
+        return {"success": True, "protocol": status.get("protocol"),
+                "capabilities": status.get("capabilities", []),
+                "allowed_root_count": len(status.get("allowed_roots", []))}
 
     def refresh_adapters(self, node_id: str) -> list[dict]:
         client = self.client(node_id, timeout=5)

@@ -15,7 +15,7 @@ import uvicorn
 from websockets.asyncio.client import connect
 
 from admin_helpers import admin_cookie
-from workspace_bridge import pairing
+from workspace_bridge import __version__, pairing
 from workspace_bridge.api import make_admin
 from workspace_bridge.cli import enable_local_node, initialize
 from workspace_bridge.node_cli import initialize_node, load_node_config
@@ -93,7 +93,7 @@ def paired(tmp_path):
     service = Service(bridge_state, config, run_coordinator_background=False)
     gateway = _Gateway(service, port)
     node_state = tmp_path / "node-state"
-    initialize_node(node_state, [str(parent)], "127.0.0.1", _free_port())
+    initialize_node(node_state, [str(parent)])
     issued = service.create_node_pairing("Laptop")
     bridge = asyncio.run(pair(node_state, load_node_config(node_state), issued["pairing"]))
     node_service = NodeService(node_state, load_node_config(node_state))
@@ -197,7 +197,7 @@ def test_the_embedded_local_node_cannot_be_deleted(tmp_path):
 
 def test_pairing_codes_are_single_use(paired):
     second_state = paired["tmp"] / "second-node"
-    initialize_node(second_state, [str(paired["parent"])], "127.0.0.1", _free_port())
+    initialize_node(second_state, [str(paired["parent"])])
     with pytest.raises(BridgeError) as reused:
         asyncio.run(pair(second_state, load_node_config(second_state),
                          paired["issued"]["pairing"]))
@@ -212,7 +212,7 @@ def test_expired_pairing_code_is_refused(paired):
         service.db.execute("UPDATE node_pairings SET expires='2000-01-01T00:00:00+00:00' "
                            "WHERE used IS NULL")
     state = paired["tmp"] / "late-node"
-    initialize_node(state, [str(paired["parent"])], "127.0.0.1", _free_port())
+    initialize_node(state, [str(paired["parent"])])
     with pytest.raises(BridgeError) as expired:
         asyncio.run(pair(state, load_node_config(state), issued["pairing"]))
     assert expired.value.code == "pairing_rejected"
@@ -224,7 +224,7 @@ def test_wrong_gateway_certificate_is_refused_before_pairing(paired):
     url, fingerprint, code = pairing.parse_pairing(issued["pairing"])
     forged = pairing.format_pairing(url, "0" * 64, code)
     state = paired["tmp"] / "spoofed-node"
-    initialize_node(state, [str(paired["parent"])], "127.0.0.1", _free_port())
+    initialize_node(state, [str(paired["parent"])])
     with pytest.raises(BridgeError) as untrusted:
         asyncio.run(pair(state, load_node_config(state), forged))
     assert untrusted.value.code == "gateway_untrusted"
@@ -233,7 +233,8 @@ def test_wrong_gateway_certificate_is_refused_before_pairing(paired):
     assert unused["used"] is None
 
 
-async def _raw_hello(port: int, node_id: str, key, fingerprint: str, *, origin=None) -> dict:
+async def _raw_hello(port: int, node_id: str, key, fingerprint: str, *, origin=None,
+                     version: str | None = __version__) -> dict:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -242,7 +243,7 @@ async def _raw_hello(port: int, node_id: str, key, fingerprint: str, *, origin=N
                        additional_headers=headers) as websocket:
         challenge = json.loads(await websocket.recv())
         await websocket.send(json.dumps({
-            "type": "hello", "node_id": node_id,
+            "type": "hello", "node_id": node_id, "version": version,
             "signature": pairing.sign(key, "hello", challenge["nonce"], fingerprint, node_id)}))
         return json.loads(await websocket.recv())
 
@@ -256,6 +257,17 @@ def test_hello_with_a_different_key_is_refused(paired):
     real_key = pairing.load_or_create_node_key(paired["node_state"])
     replay = asyncio.run(_raw_hello(paired["port"], paired["node_id"], real_key, "f" * 64))
     assert replay == {"type": "error", "code": "auth_failed"}
+
+
+def test_an_incompatible_node_version_is_refused(paired):
+    key = pairing.load_or_create_node_key(paired["node_state"])
+    fingerprint = paired["service"].node_gateway.fingerprint()
+    for version in (None, "garbage", "99.0.0"):
+        answer = asyncio.run(_raw_hello(paired["port"], paired["node_id"], key, fingerprint,
+                                        version=version))
+        assert answer == {"type": "error", "code": "version_incompatible"}
+    assert pairing.compatible("1.4.2", "1.0.0") and pairing.compatible("0.3.1", "0.3.0")
+    assert not pairing.compatible("0.2.9", "0.3.0") and not pairing.compatible("2.0.0", "1.9.0")
 
 
 def test_browser_origin_is_refused(paired):
@@ -374,11 +386,10 @@ def test_paired_connection_states():
 
 
 def test_node_records_its_link_status(paired):
-    from workspace_bridge.node_launchd import probe_node_status
     from workspace_bridge.node_link import read_link_status
     state = paired["node_state"]
     assert (state / "link-status.json").stat().st_mode & 0o777 == 0o600
-    connected = probe_node_status(load_node_config(state), "", state)
+    connected = read_link_status(state)
     assert connected["status"] == "connected" and connected["since"]
     paired["link"].stop()
     assert read_link_status(state)["status"] == "stopped"

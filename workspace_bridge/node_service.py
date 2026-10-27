@@ -336,7 +336,6 @@ class NodeService:
                 "excludes": json.loads(row["excludes"]), "write_scope": row["write_scope"]}
 
     def status(self) -> dict:
-        from .release import node_release
         roots = []
         for root in self.allowed_roots:
             roots.append({"available": root.is_dir() and not root.is_symlink(),
@@ -344,8 +343,7 @@ class NodeService:
         # ``status()`` is a plain health/identity read: platform/arch
         # only, no installer probing, no login-shell PATH resolution,
         # no package-manager commands.
-        return {"status": "ok", "protocol": 1, "node_version": __version__,
-                "release": node_release(), "capabilities": [
+        return {"status": "ok", "protocol": 1, "node_version": __version__, "capabilities": [
             "files", "search", "git", "handoff-artifacts", "runtime-adapters", "checkpoints", "checks",
             "plan-files", "worktrees"],
             "host": _node_host_info(self.config),
@@ -920,8 +918,6 @@ class NodeService:
             result: dict = {"runtime_id": value.runtime_id, "display_name": value.display_name,
                     "adapter_version": value.adapter_version, "native_version": value.native_version,
                     "instance_id": value.instance_id, "features": value.features}
-            if value.release is not None:
-                result["release"] = value.release
             return result
         if operation == "models": return client.models(args["workspace_id"])
         if operation == "create_conversation": return client.create_conversation(args["payload"])

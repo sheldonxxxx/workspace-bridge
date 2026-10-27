@@ -1,7 +1,6 @@
 {
   "name": "workspace-bridge-pi-host-adapter",
   "version": "0.3.0",
-  "workspaceBridgeRelease": "0.3.0",
   "type": "module",
   "description": "Pi runtime adapter for Workspace Bridge: let ChatGPT plan and review while Pi builds on your machine.",
   "keywords": [
@@ -42,7 +41,6 @@
     "paths.mjs",
     "pi-adapter.mjs",
     "policy.mjs",
-    "release.mjs",
     "sdk-events.mjs",
     "sdk-transport.mjs",
     "stdio.mjs",
