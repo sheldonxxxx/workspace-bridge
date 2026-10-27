@@ -166,3 +166,15 @@ def unify_security_profiles(db: sqlite3.Connection) -> None:
             raise
     finally:
         db.execute("PRAGMA foreign_keys=ON")
+
+
+INTERACTION_DECISION_COLUMNS = ("decided_by", "reason", "decided")
+
+
+def add_interaction_decisions(db: sqlite3.Connection) -> None:
+    """Record who answered each interaction, why, and when, if missing."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(agent_interactions)")}
+    with db:
+        for column in INTERACTION_DECISION_COLUMNS:
+            if columns and column not in columns:
+                db.execute(f"ALTER TABLE agent_interactions ADD COLUMN {column} TEXT")

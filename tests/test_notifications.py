@@ -70,7 +70,7 @@ def test_discord_formats_only_safe_metadata_and_suppresses_mentions(monkeypatch)
     assert '"allowed_mentions": {"parse": []' in body
     assert "secret-token" not in body
     assert "permission.updated" not in body
-    assert records[0]["body"]["embeds"][0]["description"].startswith("Review the pending request")
+    assert records[0]["body"]["embeds"][0]["description"].startswith("Answer it in ChatGPT")
     assert records[1]["body"]["embeds"][0]["description"].startswith("Read the final run result")
     assert records[0]["headers"].get("user-agent") == BRIDGE_USER_AGENT
     assert "secret-token" not in BRIDGE_USER_AGENT

@@ -22,6 +22,7 @@ from .adapter_events import AdapterEventReader
 from .manager_events import RunEventHub
 from .keyed_locks import KeyedLocks
 from .run_checkpoints import RunCheckpoints
+from .schema_upgrade import add_interaction_decisions
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -30,6 +31,12 @@ def _sanitized_descriptor_code(code: Any, fallback: str = "descriptor_error") ->
     if isinstance(code, str) and _DESCRIPTOR_CODE_RE.fullmatch(code):
         return code
     return fallback
+
+
+# Who answered an interaction. ``owner`` is reported by ChatGPT when it relays
+# the user's own answer; the Bridge cannot verify it.
+DECIDERS = ("chatgpt", "owner")
+MAX_DECISION_REASON = 500
 
 
 def _now() -> str:
@@ -221,6 +228,7 @@ class RunCoordinator:
             native_id TEXT NOT NULL, kind TEXT NOT NULL,
             state TEXT NOT NULL, payload TEXT NOT NULL,
             response TEXT, created TEXT NOT NULL, updated TEXT NOT NULL,
+            decided_by TEXT, reason TEXT, decided TEXT,
             UNIQUE(run,native_id));
           CREATE TABLE IF NOT EXISTS agent_run_images (
             run TEXT PRIMARY KEY REFERENCES agent_runs(id), refs TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '[]');
@@ -242,6 +250,7 @@ class RunCoordinator:
                 raise BridgeError(
                     "Bridge state is incomplete for schema v4; use a fresh state path",
                     "state_schema_incompatible")
+            add_interaction_decisions(service.db)
         self.checkpoints = RunCheckpoints(self, read_only=read_only)
 
     @staticmethod
@@ -1097,7 +1106,8 @@ class RunCoordinator:
                     "SELECT state FROM agent_interactions WHERE run=? AND native_id=?",
                     (run["id"], native_id)).fetchone()
                 self.service.db.execute(
-                    "INSERT OR IGNORE INTO agent_interactions VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO agent_interactions(id,run,native_id,kind,state,"
+                    "payload,response,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
                     (bridge_id, run["id"], native_id, str(item.get("kind"))[:40],
                      "pending", payload, None, _now(), _now()))
                 if existing is None:
@@ -1264,12 +1274,10 @@ class RunCoordinator:
         run = self._run_row(ws, run_id)
         with self.service.lock:
             interactions = self.service.db.execute(
-                "SELECT id,kind,state,payload FROM agent_interactions WHERE run=? "
+                "SELECT * FROM agent_interactions WHERE run=? "
                 "ORDER BY created", (run_id,)).fetchall()
         result = {**self._public(run), "notifications": self.service.notification_manager.summary(run_id),
-                "interactions": [
-            {"id": item["id"], "kind": item["kind"], "state": item["state"],
-             "details": json.loads(item["payload"])} for item in interactions]}
+                  "interactions": [self._interaction_view(item) for item in interactions]}
         if sync_warning is not None:
             result["sync_warning"] = sync_warning
         checkpoint = self.checkpoints.view(ws, run_id)
@@ -1294,7 +1302,9 @@ class RunCoordinator:
         if adapter_id:
             sql += " AND adapter_id=?"
             args.append(adapter_id)
-        sql += " ORDER BY created DESC LIMIT ? OFFSET ?"
+        # Runs waiting on an answer come first, so they are not paged away.
+        sql += (" ORDER BY (phase='active' AND active_state='waiting_interaction') DESC,"
+                " created DESC LIMIT ? OFFSET ?")
         args.extend([limit + 1, offset])
         with self.service.lock:
             rows = self.service.db.execute(sql, args).fetchall()
@@ -1307,6 +1317,17 @@ class RunCoordinator:
         return {"workspace_id": ws["id"], "runs": runs,
                 "next_offset": offset + limit if len(rows) > limit else None}
 
+    @staticmethod
+    def _interaction_view(row) -> dict:
+        view = {"id": row["id"], "kind": row["kind"], "state": row["state"],
+                "details": json.loads(row["payload"])}
+        if row["decided_by"]:
+            response = json.loads(row["response"] or "{}")
+            view["decision"] = {"decided_by": row["decided_by"], "reason": row["reason"] or "",
+                                "decided": row["decided"],
+                                "choice_id": response.get("choiceId")}
+        return view
+
     def interaction(self, ws: dict, run_id: str, interaction_id: str) -> dict:
         self._run_row(ws, run_id)
         with self.service.lock:
@@ -1315,20 +1336,29 @@ class RunCoordinator:
                 (interaction_id, run_id)).fetchone()
         if row is None:
             raise BridgeError("Interaction not found in this run", "not_found")
-        return {"id": row["id"], "run_id": run_id, "kind": row["kind"],
-                "state": row["state"], "details": json.loads(row["payload"])}
+        return {**self._interaction_view(row), "run_id": run_id}
 
     def resolve(self, ws: dict, run_id: str, interaction_id: str,
-                response: dict) -> dict:
-        # Two answers to one interaction must not both reach the runtime.
+                response: dict, decided_by: str, reason: str) -> dict:
+        if decided_by not in DECIDERS:
+            raise BridgeError("decided_by must be chatgpt or owner", "invalid_arguments")
+        if (not isinstance(reason, str) or not reason.strip()
+                or len(reason) > MAX_DECISION_REASON):
+            raise BridgeError("A reason of at most 500 characters is required",
+                              "invalid_arguments")
+        if not isinstance(response, dict):
+            raise BridgeError("Invalid interaction response", "invalid_arguments")
         with self.input_lock(run_id):
-            self._resolve_locked(ws, run_id, interaction_id, response)
+            self._resolve_locked(ws, run_id, interaction_id, response, decided_by,
+                                 " ".join(reason.split()))
         return self.read(ws, run_id)
 
     def _resolve_locked(self, ws: dict, run_id: str, interaction_id: str,
-                        response: dict) -> None:
+                        response: dict, decided_by: str, reason: str) -> None:
         run = self._run_row(ws, run_id)
         interaction = self.interaction(ws, run_id, interaction_id)
+        if interaction["state"] == "resolved":
+            raise BridgeError("Interaction was already answered", "already_answered")
         if interaction["state"] != "pending" or run["phase"] != "active":
             raise BridgeError("Interaction is stale", "interaction_stale")
         adapter = self._bound_run_adapter(ws, run)
@@ -1344,12 +1374,62 @@ class RunCoordinator:
             choice_id = response.get("choiceId")
             if choice_id not in {choice.get("id") for choice in live[native_id].get("choices", [])}:
                 raise BridgeError("Choice is not available", "invalid_arguments")
-        adapter.resolve(native_id, response)
+        # Compare-and-set before forwarding: only the first answer reaches
+        # the plugin, whichever process or connection sent it.
         with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "UPDATE agent_interactions SET state='resolved',response=?,updated=? WHERE id=?",
-                (_safe_payload(response), _now(), interaction_id))
+            claimed = self.service.db.execute(
+                "UPDATE agent_interactions SET state='resolved',response=?,decided_by=?,"
+                "reason=?,decided=?,updated=? WHERE id=? AND state='pending'",
+                (_safe_payload(response), decided_by, _safe(reason, MAX_DECISION_REASON),
+                 _now(), _now(), interaction_id)).rowcount
+        if not claimed:
+            current = self.interaction(ws, run_id, interaction_id)
+            if current["state"] == "resolved":
+                raise BridgeError("Interaction was already answered", "already_answered")
+            raise BridgeError("Interaction is stale", "interaction_stale")
+        try:
+            adapter.resolve(native_id, response)
+        except BaseException as exc:
+            # The plugin refused or could not be reached: the answer did not
+            # take effect, so the claim is released. A stale native request
+            # stays stale instead of becoming answerable again.
+            state = "stale" if getattr(exc, "code", "") == "interaction_stale" else "pending"
+            with self.service.lock, self.service.db:
+                self.service.db.execute(
+                    "UPDATE agent_interactions SET state=?,response=NULL,decided_by=NULL,"
+                    "reason=NULL,decided=NULL,updated=? WHERE id=? AND state='resolved'",
+                    (state, _now(), interaction_id))
+            raise
         self.run_events.publish(run_id)
+
+    def decisions(self, decided_by: str | None = None, offset: int = 0,
+                  limit: int = 50) -> dict:
+        """The approval log: answered interactions, newest first."""
+        if decided_by is not None and decided_by not in DECIDERS:
+            raise BridgeError("decided_by must be chatgpt or owner", "invalid_arguments")
+        sql = ("SELECT i.*,r.workspace,r.adapter_id,r.runtime_type FROM agent_interactions i "
+               "JOIN agent_runs r ON r.id=i.run WHERE i.decided_by IS NOT NULL")
+        args: list = []
+        if decided_by is not None:
+            sql += " AND i.decided_by=?"
+            args.append(decided_by)
+        sql += " ORDER BY i.decided DESC, i.id LIMIT ? OFFSET ?"
+        args.extend([limit + 1, offset])
+        with self.service.lock:
+            rows = self.service.db.execute(sql, args).fetchall()
+        items = []
+        for row in rows[:limit]:
+            view = self._interaction_view(row)
+            details = view["details"]
+            choice_id = view["decision"]["choice_id"]
+            label = next((item.get("label") for item in details.get("choices", [])
+                          if isinstance(item, dict) and item.get("id") == choice_id), None)
+            items.append({"interaction_id": row["id"], "run_id": row["run"],
+                          "workspace_id": row["workspace"], "adapter_id": row["adapter_id"],
+                          "runtime_type": row["runtime_type"], "kind": row["kind"],
+                          "title": details.get("title"), "choice_label": label,
+                          **view["decision"]})
+        return {"decisions": items, "next_offset": offset + limit if len(rows) > limit else None}
 
     def cancel(self, ws: dict, run_id: str) -> dict:
         run = self._run_row(ws, run_id)

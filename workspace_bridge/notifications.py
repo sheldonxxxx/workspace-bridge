@@ -324,7 +324,7 @@ class DiscordChannel:
                   "run_blocked": 0x9E6B2E, "run_failed": 0xC0392B,
                   "run_cancelled": 0x6B7280, "run_interrupted": 0x6B7280,
                   "run_orphaned": 0x6B7280}
-        description = ("Review the pending request in ChatGPT/local manager; details are not sent to Discord."
+        description = ("Answer it in ChatGPT; this notice cannot answer, and details are not sent to Discord."
                        if attention else "Read the final run result in ChatGPT/local manager.")
         embed = {"title": headline, "color": colors[event.event_type],
                  "description": description, "fields": fields,

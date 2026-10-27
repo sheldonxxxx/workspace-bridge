@@ -194,7 +194,7 @@ sequenceDiagram
     N->>A: Runtime Protocol v1 conversation + run
     A-->>B: run snapshot (active, waiting, terminal)
     B-->>C: read_agent_run (state, evidence, delivery)
-    C->>B: respond_agent_interaction (live choice only)
+    C->>B: respond_agent_interaction (live choice, decided_by, reason)
     B->>N: forward after liveness recheck
     N->>A: resolve native request
 ```

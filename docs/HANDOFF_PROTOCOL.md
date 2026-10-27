@@ -97,8 +97,8 @@ an outcome. Terminal outcomes include `succeeded`, `failed`, `cancelled`,
 `interrupted`, and `orphaned`.
 
 `respond_agent_interaction` resolves only a live request with its exact
-adapter-provided choice or validated form answers. The manager can request
-cancellation of a run bound to that conversation. A corrective iteration creates
+adapter-provided choice or validated form answers, once, recording who decided
+and why. The Manager cannot answer; it can request cancellation of a run bound to that conversation. A corrective iteration creates
 a new Bridge run and can reuse a terminal conversation only after live ownership
 of the stored native conversation (same adapter, same workspace, idle) and
 compatible security are proven. See `MCP_TOOLS.md` and

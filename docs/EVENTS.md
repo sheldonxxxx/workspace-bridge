@@ -142,8 +142,9 @@ completion/error codes, without subscription arguments, destinations or secrets.
    subsequent matching runs do not trigger this subscription.
 
 For interaction testing, monitor `workspace_bridge.run.needs_attention` and
-ask ChatGPT to describe the current request and wait for your decision. It must
-not approve automatically. Test refresh, restart recovery and access revocation
+start a run whose request falls in the skill's ask-the-user list. ChatGPT must
+describe the request and wait for your decision, then answer with
+`decided_by: "owner"`; check the decision with `read_agent_interaction`. Test refresh, restart recovery and access revocation
 in an isolated test state before changing a live route or credential.
 
 The focused checks are `tests/test_event_broker.py`, `tests/test_event_protocol.py`,

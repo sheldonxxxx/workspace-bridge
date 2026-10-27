@@ -170,7 +170,8 @@ def test_tool_approval_is_resolved_through_the_bridge(claude_env):
                   if item["semantic"] == "approve")
     service.call(ws_id, token, "respond_agent_interaction", {
         "run_id": started["run_id"], "interaction_id": interaction["id"],
-        "response": {"choiceId": choice["id"]}})
+        "response": {"choiceId": choice["id"]},
+        "decided_by": "chatgpt", "reason": "Matches the handoff"})
     finished = _until(lambda: (lambda row: row if row["outcome"] else None)(
         _read(service, ws_id, token, started["run_id"])))
     assert finished["outcome"] == "succeeded"

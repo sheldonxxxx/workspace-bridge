@@ -418,7 +418,8 @@ def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
     with pytest.raises(BridgeError) as resolve_error:
         service.call(ws_id, token, "respond_agent_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"}})
+            "response": {"choiceId": "accept"},
+            "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
     cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
     assert cancelled["outcome"] == "interrupted"
@@ -453,7 +454,8 @@ def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_call
     with pytest.raises(BridgeError) as resolve_error:
         service.call(ws_id, token, "respond_agent_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"}})
+            "response": {"choiceId": "accept"},
+            "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
     cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
     assert cancelled["outcome"] == "interrupted"
@@ -549,7 +551,8 @@ async def test_admin_abandon_marks_run_orphaned_without_runtime_calls(
     with pytest.raises(BridgeError) as resolve_error:
         service.call(ws_id, token, "respond_agent_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"}})
+            "response": {"choiceId": "accept"},
+            "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
 
 
@@ -638,7 +641,8 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         with pytest.raises(BridgeError) as resolve_error:
             service.call(ws_id, token, "respond_agent_interaction", {
                 "run_id": started["run_id"], "interaction_id": interaction_id,
-                "response": {"choiceId": "accept"}})
+                "response": {"choiceId": "accept"},
+            "decided_by": "chatgpt", "reason": "Runs the tests"})
         assert resolve_error.value.code == "adapter_changed"
         with pytest.raises(BridgeError) as cancel_error:
             service.call(ws_id, token, "cancel_agent_run",
@@ -795,7 +799,8 @@ def test_bridge_start_reconcile_interaction_and_activity(modern_env):
                   if item["semantic"] == "approve")
     service.call(ws_id, token, "respond_agent_interaction", {
         "run_id": bridge_id, "interaction_id": interaction["id"],
-        "response": {"choiceId": choice["id"]}})
+        "response": {"choiceId": choice["id"]},
+        "decided_by": "chatgpt", "reason": "Runs the tests the handoff names"})
     assert rpc.responses == [(99, {"decision": "accept"}, None)]
     native._notification("item/completed", {
         "threadId": "native-thread-1", "turnId": "native-turn-1",

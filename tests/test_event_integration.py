@@ -24,7 +24,8 @@ def test_coordinator_completion_and_attention_reach_the_shared_outbox_once(moder
     interaction = view['interactions'][0]
     choice = next(item for item in interaction['details']['choices'] if item['semantic'] == 'deny')
     service.call(ws_id, token, 'respond_agent_interaction', {
-        'run_id': run_id, 'interaction_id': interaction_id, 'response': {'choiceId': choice['id']}})
+        'run_id': run_id, 'interaction_id': interaction_id, 'response': {'choiceId': choice['id']},
+        'decided_by': 'owner', 'reason': 'The user declined in the chat'})
     _finish_test_run(service, native, ws_id, run_id)
     service.call(ws_id, token, 'read_agent_run', {'run_id': run_id})
     service.event_broker.drain_once()

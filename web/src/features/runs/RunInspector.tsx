@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, CircleHelp, Command, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
@@ -18,7 +17,6 @@ import {
   displayState,
   jsonText,
   runtimeName,
-  type Json,
   type Run,
 } from "@/lib/api";
 import type { ConfirmState, TextDetail } from "@/components/manager-types";
@@ -113,7 +111,6 @@ export function RunInspector({
   const [tab, setTab] = useState<"summary" | "activity" | "executions">(
     "summary",
   );
-  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [inputText, setInputText] = useState("");
   const [sendingInput, setSendingInput] = useState(false);
   const inputAttemptRef = useRef<{
@@ -224,21 +221,6 @@ export function RunInspector({
       panel.removeEventListener("touchcancel", resetPull);
     };
   }, [load, onNotice, onRefresh, run]);
-  async function replyInteraction(interactionId: string, body: Json) {
-    if (!run) return;
-    try {
-      await api(
-        `/api/runs/${run.run_id}/interactions/${interactionId}`,
-        "POST",
-        body,
-      );
-      onNotice("Request answered.");
-      await load(run.run_id);
-      await onRefresh();
-    } catch (error) {
-      onNotice((error as Error).message);
-    }
-  }
   async function sendInput(mode: "steer" | "queue") {
     if (!run || !inputText.trim() || sendingInputRef.current) return;
     const previous = inputAttemptRef.current;
@@ -287,6 +269,7 @@ export function RunInspector({
   const pending = (current.interactions || []).filter(
     (i) => i.state === "pending",
   );
+  const answered = (current.interactions || []).filter((i) => i.decision);
   return (
     <Sheet open={Boolean(run)} onOpenChange={(value) => !value && onClose()}>
       <SheetContent ref={panelRef} side="right" className="run-sheet">
@@ -514,95 +497,32 @@ export function RunInspector({
                   {item.details?.requested && (
                     <pre>{jsonText(item.details.requested)}</pre>
                   )}
-                  {(item.details?.choices || []).map((choice) => (
-                    <Button
-                      key={choice.id}
-                      variant={
-                        choice.semantic === "approve" ? "default" : "outline"
-                      }
-                      size="sm"
-                      onClick={() =>
-                        onConfirm({
-                          title: `Submit ${choice.label}?`,
-                          description:
-                            "This answers the live agent request and lets the same run continue.",
-                          action: () =>
-                            replyInteraction(item.id, { choiceId: choice.id }),
-                        })
-                      }
-                    >
-                      {choice.label}
-                    </Button>
-                  ))}
-                  {item.kind === "form" && (
-                    <>
-                      <div className="form-answers">
-                        {(item.details?.fields || [])
-                          .filter((f) => f.id)
-                          .map((field) => (
-                            <div className="form-field" key={field.id}>
-                              <Label htmlFor={`answer-${field.id}`}>
-                                {field.question || field.header || field.id}
-                              </Label>
-                              <Input
-                                id={`answer-${field.id}`}
-                                value={answers[field.id] || ""}
-                                onChange={(e) =>
-                                  setAnswers((old) => ({
-                                    ...old,
-                                    [field.id]: e.target.value,
-                                  }))
-                                }
-                              />
-                              {field.options?.length ? (
-                                <small>
-                                  Options:{" "}
-                                  {field.options.map((o) => o.label).join(", ")}
-                                </small>
-                              ) : null}
-                            </div>
-                          ))}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          const fields = (item.details?.fields || []).filter(
-                            (f) => f.id,
-                          );
-                          if (
-                            fields.some(
-                              (f) =>
-                                f.required !== false && !answers[f.id]?.trim(),
-                            )
-                          ) {
-                            onNotice(
-                              "Answer every question before submitting.",
-                            );
-                            return;
-                          }
-                          void replyInteraction(item.id, {
-                            answers: Object.fromEntries(
-                              fields.map((f) => [
-                                f.id,
-                                {
-                                  answers: answers[f.id]?.trim()
-                                    ? [answers[f.id].trim()]
-                                    : [],
-                                },
-                              ]),
-                            ),
-                          });
-                        }}
-                      >
-                        Submit answers
-                      </Button>
-                    </>
-                  )}
+                  {item.details?.choices?.length ? (
+                    <small>
+                      Options:{" "}
+                      {item.details.choices.map((c) => c.label).join(", ")}
+                    </small>
+                  ) : null}
+                  <p className="muted-note">
+                    Answer this in the ChatGPT chat that started the run. The
+                    Manager can only stop the run.
+                  </p>
                 </section>
               ))}
               {!pending.length && (
                 <p className="muted-note">No live requests are waiting.</p>
               )}
+              {answered.map((item) => (
+                <p className="muted-note" key={item.id}>
+                  {item.details?.title || item.kind}:{" "}
+                  {item.details?.choices?.find(
+                    (c) => c.id === item.decision?.choice_id,
+                  )?.label || "answered"}
+                  , decided by{" "}
+                  {item.decision?.decided_by === "owner" ? "you" : "ChatGPT"}{" "}
+                  {dateTime(item.decision?.decided)}. {item.decision?.reason}
+                </p>
+              ))}
               {current.phase === "active" && (
                 <section className="request-panel run-input-panel">
                   <h3>Send a message</h3>

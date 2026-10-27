@@ -661,9 +661,14 @@ class Service:
                                interaction_id: str) -> dict:
         return self.run_coordinator.interaction(ws, run_id, interaction_id)
 
-    def respond_agent_interaction(self, ws: dict, run_id: str,
-                                  interaction_id: str, response: dict) -> dict:
-        return self.run_coordinator.resolve(ws, run_id, interaction_id, response)
+    def respond_agent_interaction(self, ws: dict, run_id: str, interaction_id: str,
+                                  response: dict, decided_by: str, reason: str) -> dict:
+        return self.run_coordinator.resolve(ws, run_id, interaction_id, response,
+                                            decided_by, reason)
+
+    def interaction_decisions(self, decided_by: str | None = None, offset: int = 0,
+                              limit: int = 50) -> dict:
+        return self.run_coordinator.decisions(decided_by, offset, limit)
 
     def list_agent_activities(self, ws: dict, run_id: str,
                               offset: int = 0, limit: int = 50) -> dict:

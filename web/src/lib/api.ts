@@ -307,6 +307,12 @@ export interface Interaction {
   id: string;
   kind: string;
   state: string;
+  decision?: {
+    decided_by: "chatgpt" | "owner";
+    reason: string;
+    decided: string;
+    choice_id?: string | null;
+  };
   details?: {
     title?: string;
     resource?: string;

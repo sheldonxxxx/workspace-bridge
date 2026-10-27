@@ -403,7 +403,12 @@ or model policy. The Manager shows the owning Node and adapter name and ID,
 runtime type, Bridge run and conversation IDs, handoff, model, immutable
 security-used snapshot, state, timestamps, and notification delivery. Run
 details show current interactions plus bounded activity and execution
-records. Only live, adapter-provided choices can be submitted.
+records. The Manager does not answer interactions: a waiting request shows its
+action and choices with a note to answer it in ChatGPT, and the Manager can
+only stop the run. Answered interactions show who decided (ChatGPT or you, as
+ChatGPT reports it) and the stated reason. `GET /api/approvals`, optionally
+with `decided_by=chatgpt` or `decided_by=owner`, returns that approval log
+newest first.
 
 On startup and during active runs, the Bridge reconciles durable records
 with adapter snapshots. It rebinds only operations the adapter positively

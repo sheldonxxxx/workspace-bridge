@@ -308,7 +308,7 @@ queue_agent_run(workspace_id, run_id, instruction, request_id)
 list_agent_executions(workspace_id, run_id, offset=0, limit=50)
 read_agent_execution(workspace_id, run_id, execution_id)
 read_agent_interaction(workspace_id, run_id, interaction_id)
-respond_agent_interaction(workspace_id, run_id, interaction_id, response)
+respond_agent_interaction(workspace_id, run_id, interaction_id, response, decided_by, reason)
 list_agent_activities(workspace_id, run_id, offset=0, limit=50)
 read_agent_activity(workspace_id, run_id, activity_id)
 ```
@@ -399,10 +399,21 @@ capture time and error code, `late`, `overlapping_runs`, and after the post
 capture `changed_paths` with up to 100 `changes` (`path`, `status`, optional
 `not_captured`). See [Run checkpoints](#run-checkpoints).
 Use `read_agent_interaction` to inspect the exact live request and supported
-choices. Submit the adapter's opaque choice ID unchanged with
-`respond_agent_interaction` only when the user has authorized that response; the
-Bridge rechecks that the interaction remains live before forwarding it. Form
-interactions accept only validated answers. A stale interaction fails closed.
+choices. ChatGPT is the only place an interaction is answered: the Manager and
+Discord only show that a run is waiting, and nothing answers on a timeout.
+`list_agent_runs` lists runs waiting on an answer first. Submit the adapter's
+opaque choice ID unchanged with `respond_agent_interaction`, with `decided_by`
+(`chatgpt` when ChatGPT decided under the project-lead skill's approval rules,
+`owner` when it relays the user's own answer) and a `reason` of up to 500
+characters. The Bridge cannot verify `owner`; it records what ChatGPT reports.
+An interaction is answered once: the Bridge claims it with compare-and-set,
+then rechecks that the native request is still live and forwards it, so a
+retry or a second answer fails with `already_answered`. If the plugin refuses
+the answer, the claim is released, or the interaction becomes stale when the
+native request is gone. Form interactions accept only validated answers. A
+stale interaction fails closed. Answered interactions carry a `decision`
+(`decided_by`, `reason`, `decided`, `choice_id`); the Manager's approval log
+at `GET /api/approvals?decided_by=chatgpt|owner` lists them newest first.
 Activities and executions are bounded adapter evidence and do not independently
 verify the agent's final claim.
 

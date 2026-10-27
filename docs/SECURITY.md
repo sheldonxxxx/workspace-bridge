@@ -63,7 +63,13 @@ as `.env.example` excepted), and the root `checks.toml` are always protected.
 | `reviewed` | Workspace; ask outside | Workspace only | Ask |
 | `trusted` | Anywhere | Workspace; ask outside | Allow |
 
-`ask` pauses the run until someone answers the interaction. A route names one
+`ask` pauses the run until ChatGPT answers the interaction, on its own under
+the project-lead skill's approval rules or by asking you in the chat. Nothing
+answers on a timeout, and the Manager can only cancel the run. Each answer is
+recorded with `decided_by` (`chatgpt` or `owner`, as ChatGPT reports it) and a
+reason. The skill is guidance, not enforcement, so put anything that must
+never be approved without you under `deny`, not `ask`, and review the
+approval log filtered to `chatgpt` now and then. A route names one
 profile, or `native` for a plugin that can follow the agent's own security
 (Codex and Claude Code). A route is refused when its plugin cannot enforce every restrictive
 rule of the profile: Codex, for example, keeps reads, web access, and

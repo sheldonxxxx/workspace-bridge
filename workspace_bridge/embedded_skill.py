@@ -9,7 +9,7 @@ from hashlib import sha256
 from importlib.resources import files
 
 SKILL_NAME = "project-lead"
-SKILL_VERSION = "3.4.0"
+SKILL_VERSION = "3.5.0"
 SKILLS_EXTENSION = "io.modelcontextprotocol/skills"
 SKILL_URI = f"skill://workspace-bridge/{SKILL_NAME}/SKILL.md"
 

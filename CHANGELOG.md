@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Breaking:** approvals are answered only in ChatGPT.
+  `respond_agent_interaction` now requires `decided_by` (`chatgpt` or
+  `owner`) and a `reason`, both recorded with the chosen option and time. An
+  interaction is answered once; a retry or second answer fails with
+  `already_answered`. The Manager no longer answers interactions (its
+  `POST /api/runs/{id}/interactions/{id}` route is removed): it shows a
+  waiting request read-only, who decided an answered one, and an approval log
+  at `GET /api/approvals?decided_by=…`. `list_agent_runs` lists runs waiting
+  on an answer first, and the Discord notice points to ChatGPT.
+- The project-lead skill (3.5.0) says which requests ChatGPT approves on its
+  own and which it asks you about, and subscribes to run events before every
+  run, telling you plainly when the chat cannot receive them.
 - Claude Code routes can use native security: runs keep Claude Code's own
   tools and permission settings, and each permission prompt becomes a Bridge
   interaction. The plugin's new `permission_mode` setting picks the mode, for

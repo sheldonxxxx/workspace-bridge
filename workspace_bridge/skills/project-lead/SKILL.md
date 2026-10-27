@@ -1,7 +1,7 @@
 ---
 name: project-lead
 description: Use only in ChatGPT web sessions connected to the Workspace Bridge app to plan coding tasks in mapped workspaces, delegate to a less-capable coding model, and audit the results. Do not use in local Codex, Codex CLI, IDE agents, or direct local repository work, including after context loss; use native local tools there.
-version: 3.4.0
+version: 3.5.0
 ---
 
 # Project lead
@@ -15,8 +15,8 @@ never delegate vague architecture.
 Select the intended workspace with `list_workspaces` and `workspace_info`, and pass
 its explicit `workspace_id` on every project call. Inspect relevant code, callers,
 configuration, conventions, and tests with `list_dir`, `glob`, `grep_files`, and
-`read_file`. Follow pagination and use returned hashes for continued reads. Never
-invent APIs, paths, or test commands. All file, Git, handoff, and execution
+`read_file`. Follow pagination and reuse returned hashes. Never invent APIs,
+paths, or test commands. All file, Git, handoff, and execution
 evidence comes from the workspace's authoritative Node.
 
 Choose the smallest coherent, testable milestone. Settle behavior, changes,
@@ -55,10 +55,9 @@ Publish with `prepare_handoff`: goal, plan, context, constraints, acceptance.
 Optional `context_hashes` check named files at publication; they are not a baseline.
 For visual context, upload with `write_image` to `.workspace-handoff/attachments/`,
 then pass `path`, `description` and returned `sha256` as `prepare_handoff.attachments`.
-Existing allowed workspace images can use their source hash from `read_file`.
-Up to 20 references are checked at publication and recorded in CONTEXT.md without
-copies or snapshots. Verify current hashes before use; stop the implementer before
-replacing dispatched references.
+Existing workspace images can use their `read_file` hash. Up to 20 references are
+checked at publication and recorded in CONTEXT.md, not copied. Stop the
+implementer before replacing dispatched references.
 Use `list_handoffs` to find earlier ones.
 
 Choose the destination with `list_agent_adapters(workspace_id)`. An adapter is one
@@ -88,57 +87,60 @@ the same request. Never invent a model selector; check `list_agent_models`:
 
 **Follow-up.** For a small corrective change, publish a new corrective handoff and
 call `start_agent_run(..., continue_from_run_id=<previous run>)`. The previous run
-must be terminal, on the same workspace and `adapter_id`, with its conversation
-still idle and owned by this workspace; otherwise the call fails closed and you
-start fresh. Start fresh when the security source changes, the user wants clean
-context, or continuation is rejected. A continuation request never silently
-becomes a fresh run.
+must be terminal, on the same workspace and `adapter_id`, with an idle
+conversation; otherwise the call fails closed. Start fresh when the security
+source changes, the user wants clean context, or continuation is rejected; a
+continuation never silently becomes a fresh run.
 
 Tell the agent to stop rather than guess through contradictions, expand scope, or
-repeat failed checks. It replies with a summary, affected paths,
-actual check commands/outcomes, failures or unrun checks, and risks or blockers.
-No special report files or JSON schema.
+repeat failed checks, and to reply with a summary, affected paths,
+actual check commands/outcomes, unrun checks, and risks. No special report files or JSON schema.
 
-## Optional run events
-Before automated dispatch, check whether the host exposes Workspace Bridge event
-discovery and webhook subscription controls. If available, use its discovered
-schemas to subscribe to `workspace_bridge.run.finished` and
-`workspace_bridge.run.needs_attention` with the selected `workspace_id`, before
-starting the run so a fast completion is not missed. These are MCP events, not
-additional tools; never invent event-tool names or collect callback secrets.
+## Run events
+Before every `start_agent_run`, subscribe through the host's event controls, if
+visible, to `workspace_bridge.run.finished` and
+`workspace_bridge.run.needs_attention` for the selected `workspace_id`. These are MCP events, not tools;
+never invent event-tool names or collect callback secrets. Confirm a
+subscription exists before reporting it active.
 
-If the events or subscription controls are not visible, skip this step and
-continue the normal handoff flow. Ordinary ChatGPT Chat mode is expected to
-skip; documented event hosts are Work chats on web, desktop Work with Cloud,
-and dots. Actual capability visibility decides. Do not switch modes, create
-another chat, poll, or add a timed automation to work around unavailable events.
-If setup fails, report it briefly and continue without claiming monitoring is
-active. Confirm a subscription exists before reporting it as active.
+If event controls are not visible (ordinary Chat mode lacks them; Work chats on
+web, desktop Work with Cloud, and dots have them), tell the user plainly that
+this chat cannot receive run events, so approval requests wait until they ask
+about the run. Do not switch modes, poll, or add timed automations.
 
-Reuse an appropriate existing monitor and keep new monitoring limited to this
-assignment. Track dispatched `run_id` values in the monitor's instructions and
-ignore unrelated runs; use an
-exact run filter when available. Stop temporary monitoring when the assignment
-is complete or the user asks to stop.
-
-On an event, read `read_agent_run` with its workspace and run IDs for current
-authority. A finished event resumes the audit below within the authorized task
-scope. An attention event resumes interaction review below; it never authorizes
-an approval or proves the request is still pending. Event delivery is a wake-up
-signal, not proof of success or permission for additional work.
+Limit monitoring to this assignment's `run_id` values and stop it when the
+assignment ends or the user asks. On an event, read `read_agent_run` for current
+state: a finished event resumes the audit; an attention event resumes approval
+review. An event is a wake-up signal, not proof or permission.
 
 ## Report after handoff
-Once the handoff is dispatched or ready for the user to dispatch, report to the
-user and return control: for manual dispatch, the `copy_prompt` and path; for a
-run, its run ID, initial status and whether event monitoring is confirmed active,
-skipped or failed. Do not block waiting for or poll the implementation. Resume on a
-subscribed event or when the user asks. Use `list_agent_runs` to find a run and
-`cancel_agent_run` only when the user asks or a run is clearly runaway or unsafe.
+Once dispatched (or ready to dispatch), report and return control: the
+`copy_prompt` and path for manual dispatch; for a run, its ID, status and whether
+event monitoring is active, skipped or failed. Do not block or poll. Resume on an
+event or when the user asks. Find runs with `list_agent_runs`; use
+`cancel_agent_run` only when the user asks or a run is runaway or unsafe.
 
-## Interactions
-When `read_agent_run` shows `waiting_interaction`, the run is active. Read it with
-`read_agent_interaction` and answer with `respond_agent_interaction` only an exact
-choice or form answer the user has authorized.
+## Approvals
+Only this chat answers a run's approval requests. When `read_agent_run` shows `waiting_interaction` (`list_agent_runs` lists
+waiting runs first), read the action and exact choices with
+`read_agent_interaction`.
+
+Approve on your own when the action clearly serves the handoff: reading files or
+folders it names, even outside the workspace; running its listed checks and
+tests; workspace edits matching the plan; read-only commands such as `ls` or
+`git log`; builds that install nothing.
+
+Ask the user in the chat and wait for: writing or deleting outside the
+workspace; installing packages, network access, downloads; `git push`,
+publishing, deploys; anything touching credentials or secrets; deleting many
+files or any data; anything unrelated to the handoff or unclear to you.
+
+Prefer the narrowest choice (once over always). Answer once with
+`respond_agent_interaction`: the exact choice or form answers, `decided_by`
+`chatgpt` for your own decision or `owner` only when relaying the user's answer,
+and a one-sentence `reason`. It is recorded in the approval log.
+`already_answered` means it was answered before: re-read, do not retry. Nothing
+answers on a timeout; a request waits until answered or the run is cancelled.
 
 ## Audit using normal tools
 Treat run results, notifications, channel messages, and manual replies as claims
