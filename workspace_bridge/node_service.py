@@ -5,7 +5,6 @@ adapter connection secrets. Bridge communicates with it through ``node_api``.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,13 +22,10 @@ from .plan_files import PlanStore
 from .worktrees import WorktreeStore
 from . import edit_journal
 from .git_evidence import GitEvidence
-from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
-                    decode_image_upload, image_capabilities, read_image,
+from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, decode_image_upload, read_image,
                     selected_read_limit, sniff_image, validate_image)
-from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
-                       SafeRoot, allowed, digest, file_text, handoff_allowed,
-                       parts, redact, require_write_path, text_content,
-                       validate_excludes)
+from .security import (BridgeError, HANDOFF, MAX_OUTPUT, SafeRoot, allowed, digest, file_text, handoff_allowed,
+                       redact, require_write_path, validate_excludes)
 from .wbrp import RuntimeClient
 from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
 from .plugin_protocol import builtin_manifests, load_manifest
@@ -350,7 +346,7 @@ class NodeService:
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
-    WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file", "apply_patch",
+    WRITE_OPERATIONS = frozenset({"write_image", "apply_patch",
                                   "undo_edit", "publish_handoff_artifacts",
                                   "set_checks_config", "worktree_apply"})
 
@@ -446,59 +442,6 @@ class NodeService:
                                           args.get("expected_sha256"), write_scope=scope)
             return {**result, "absolute_path": str(Path(ws["root"]) / path), "write_scope": scope,
                     "note": "Original image bytes were written. No command was executed or agent started."}
-        if operation == "write_file":
-            args = body["arguments"]
-            scope = workspace.get("write_scope", "none")
-            require_write_path(args["path"], workspace.get("excludes", []), scope=scope)
-            try:
-                data = args["content"].encode("utf-8")
-            except (AttributeError, UnicodeEncodeError):
-                raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-            text_content(data)
-            with self.safe_root(ws) as safe:
-                previous = None
-                if args.get("expected_sha256") is not None:
-                    try:
-                        previous, _ = safe.read(args["path"], limit=MAX_WRITE)
-                    except BridgeError as exc:
-                        if exc.code != "not_found":
-                            raise
-                        raise BridgeError("Expected file is missing; re-read before writing",
-                                          "stale_evidence") from None
-                    if digest(previous) != args["expected_sha256"]:
-                        raise BridgeError("File changed; re-read before writing", "stale_evidence")
-                else:
-                    file_text(data)
-                result = safe.write_file(args["path"], data, args.get("expected_sha256"),
-                                         write_scope=scope, previous=previous)
-            return {**result, "absolute_path": str(Path(root) / args["path"]),
-                    "write_scope": scope, "note": "Only this file was written. No command was executed or agent started."}
-        if operation == "edit_file":
-            args = body["arguments"]
-            scope = workspace.get("write_scope", "none")
-            require_write_path(args["path"], workspace.get("excludes", []), scope=scope)
-            if not args["old_text"]:
-                raise BridgeError("old_text must be nonempty", "invalid_arguments")
-            with self.safe_root(ws) as safe:
-                raw, _ = safe.read(args["path"], limit=MAX_WRITE)
-                if digest(raw) != args["expected_sha256"]:
-                    raise BridgeError("File changed; re-read before editing", "stale_evidence")
-                text = text_content(raw)
-                first = text.find(args["old_text"])
-                if first < 0:
-                    raise BridgeError("old_text was not found; re-read and use exact text", "match_not_found")
-                if text.find(args["old_text"], first + 1) >= 0:
-                    raise BridgeError("old_text is ambiguous; include more surrounding text", "ambiguous_match")
-                updated = text[:first] + args["new_text"] + text[first + len(args["old_text"]):]
-                try:
-                    updated_data = updated.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-                file_text(updated_data, raw)
-                result = safe.write_file(args["path"], updated_data, args["expected_sha256"],
-                                         write_scope=scope, previous=raw)
-            return {**result, "absolute_path": str(Path(root) / args["path"]),
-                    "replacements": 1, "write_scope": scope}
         if operation in ("apply_patch", "undo_edit"):
             args = body["arguments"]
             if not isinstance(args, dict) or set(args) != (

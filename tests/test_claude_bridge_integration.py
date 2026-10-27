@@ -90,7 +90,7 @@ def claude_env(tmp_path, payload):
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "reviewed")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["default"], "default")
-    job = service.call(ws_id, token, "prepare_handoff",
+    job = service.call(ws_id, token, "save_handoff",
                        Handoff.model_validate(payload).model_dump())
     yield service, ws_id, token, job, native, sdk
     service.close()
@@ -99,7 +99,7 @@ def claude_env(tmp_path, payload):
 
 
 def _read(service, ws_id, token, run_id):
-    return service.call(ws_id, token, "read_agent_run", {"run_id": run_id})
+    return service.call(ws_id, token, "read_run", {"run_id": run_id})
 
 
 def _until(fn, timeout=10.0):
@@ -114,7 +114,7 @@ def _until(fn, timeout=10.0):
 
 def test_adapter_is_listed_as_a_claude_instance(claude_env):
     service, ws_id, token, _, _, _ = claude_env
-    listed = service.call(ws_id, token, "list_agent_adapters", {})
+    listed = service.call(ws_id, token, "list_targets", {})
     row = next(item for item in listed["adapters"] if item["adapter_id"] == ADAPTER_ID)
     assert row["runtime_type"] == "claude"
     assert "token" not in str(row)
@@ -133,7 +133,7 @@ def test_run_completes_through_the_bridge_with_usage(claude_env):
                             usage={"input_tokens": 7, "output_tokens": 3})
 
     sdk.scenario = scenario
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-1"})
     assert started["runtime_type"] == "claude"
     finished = _until(lambda: (lambda row: row if row["outcome"] else None)(
@@ -141,7 +141,7 @@ def test_run_completes_through_the_bridge_with_usage(claude_env):
     assert finished["outcome"] == "succeeded"
     assert finished["token_usage"] == {"input_tokens": 7, "output_tokens": 3,
                                        "total_tokens": 10}
-    retry = service.call(ws_id, token, "start_agent_run", {
+    retry = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-1"})
     assert retry["run_id"] == started["run_id"] and retry["idempotent"] is True
 
@@ -160,7 +160,7 @@ def test_tool_approval_is_resolved_through_the_bridge(claude_env):
         yield ResultMessage(result="ok")
 
     sdk.scenario = scenario
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-2"})
     viewed = _until(lambda: (lambda row: row if row.get("interactions") else None)(
         _read(service, ws_id, token, started["run_id"])))
@@ -168,9 +168,9 @@ def test_tool_approval_is_resolved_through_the_bridge(claude_env):
     interaction = viewed["interactions"][0]
     choice = next(item for item in interaction["details"]["choices"]
                   if item["semantic"] == "approve")
-    service.call(ws_id, token, "respond_agent_interaction", {
+    service.call(ws_id, token, "answer_interaction", {
         "run_id": started["run_id"], "interaction_id": interaction["id"],
-        "response": {"choiceId": choice["id"]},
+        "choice_id": choice["id"],
         "decided_by": "chatgpt", "reason": "Matches the handoff"})
     finished = _until(lambda: (lambda row: row if row["outcome"] else None)(
         _read(service, ws_id, token, started["run_id"])))

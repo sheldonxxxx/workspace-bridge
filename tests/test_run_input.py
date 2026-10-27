@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from admin_helpers import admin_cookie
+from mcp_helpers import McpTransport
 from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.runtime import RuntimeUnavailable, RuntimeUnsupported
 from workspace_bridge.security import BridgeError
@@ -14,7 +15,7 @@ from test_run_coordinator import ADAPTER_ID, modern_env  # noqa: F401
 
 def start(env):
     service, ws_id, token, job, _, _ = env
-    run = service.call(ws_id, token, "start_agent_run", {
+    run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "input-run"})
     return run
 
@@ -25,8 +26,8 @@ def test_input_tools_keep_run_identity_and_receipts(modern_env, mode):
     run = start(modern_env)
     body = {"run_id": run["run_id"], "instruction": "Review the edge case.",
             "request_id": "message-1"}
-    first = service.call(ws_id, token, mode + "_agent_run", body)
-    retry = service.call(ws_id, token, mode + "_agent_run", body)
+    first = service.call(ws_id, token, "send_run_input", {**body, "mode": mode})
+    retry = service.call(ws_id, token, "send_run_input", {**body, "mode": mode})
     assert first["run_id"] == retry["run_id"] == run["run_id"]
     assert first["conversation_id"] == run["conversation_id"]
     assert first["input_message"] == retry["input_message"]
@@ -35,7 +36,7 @@ def test_input_tools_keep_run_identity_and_receipts(modern_env, mode):
     assert "Review the edge case" not in json.dumps(first["input_messages"])
     if mode == "steer":
         assert sum(method == "turn/steer" for method, _ in rpc.calls) == 1
-    snapshot = service.call(ws_id, token, "read_agent_run", {"run_id": run["run_id"]})
+    snapshot = service.call(ws_id, token, "read_run", {"run_id": run["run_id"]})
     assert snapshot["input_capabilities"] == {"steer": True, "queue": True}
     assert snapshot["input_messages"] == first["input_messages"]
 
@@ -48,8 +49,8 @@ def test_disabled_route_cannot_send_input(modern_env, mode):
     service.set_workspace_route(ws, ADAPTER_ID, False, "trusted")
     before = len(rpc.calls)
     with pytest.raises(BridgeError) as raised:
-        service.call(ws_id, token, mode + "_agent_run", {
-            "run_id": run["run_id"], "instruction": "More work", "request_id": "blocked"})
+        service.call(ws_id, token, "send_run_input", {
+            "run_id": run["run_id"], "instruction": "More work", "request_id": "blocked", "mode": mode})
     assert raised.value.code == "route_disabled"
     assert len(rpc.calls) == before
 
@@ -66,8 +67,8 @@ def test_input_rejects_changed_security_before_delivery(modern_env, monkeypatch)
 
     monkeypatch.setattr(adapter, "run", changed)
     with pytest.raises(BridgeError) as raised:
-        service.call(ws_id, token, "steer_agent_run", {
-            "run_id": run["run_id"], "instruction": "Correction", "request_id": "blocked"})
+        service.call(ws_id, token, "send_run_input", {
+            "run_id": run["run_id"], "instruction": "Correction", "request_id": "blocked", "mode": "steer"})
     assert raised.value.code == "binding_mismatch"
     assert not any(method == "turn/steer" for method, _ in rpc.calls)
 
@@ -88,14 +89,14 @@ async def test_manager_and_mcp_use_the_same_input_contract(modern_env):
             "instruction": "Correction", "request_id": "bad", "model": "foreign"})
         assert invalid.status_code == 400
         assert (await client.get(f"/api/runs/{run['run_id']}/queue")).status_code == 405
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(service)),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(service)),
                                 base_url="http://127.0.0.1:8765",
                                 headers={"X-Bridge-Token": token,
                                          "Accept": "application/json, text/event-stream"}) as client:
         sent = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
-            "method": "tools/call", "params": {"name": "steer_agent_run", "arguments": {
+            "method": "tools/call", "params": {"name": "send_run_input", "arguments": {
                 "workspace_id": ws_id, "run_id": run["run_id"], "instruction": "Review now.",
-                "request_id": "mcp-steer"}}})
+                "request_id": "mcp-steer", "mode": "steer"}}})
         assert sent.status_code == 200
         result = sent.json()["result"]
         assert not result["isError"]
@@ -122,8 +123,8 @@ def test_runtime_receipts_drop_prompt_and_internal_fields():
 def test_stale_receipt_snapshot_does_not_undo_delivery(modern_env):
     service, ws_id, token, _, native, _ = modern_env
     run = start(modern_env)
-    service.call(ws_id, token, "steer_agent_run", {
-        "run_id": run["run_id"], "instruction": "Correction", "request_id": "one"})
+    service.call(ws_id, token, "send_run_input", {
+        "run_id": run["run_id"], "instruction": "Correction", "request_id": "one", "mode": "steer"})
     ws = service.workspace(ws_id)
     stored = service.run_coordinator._run_row(ws, run["run_id"])
     snapshot = native.run(stored["native_id"])
@@ -137,12 +138,11 @@ def test_stale_receipt_snapshot_does_not_undo_delivery(modern_env):
 
 def test_input_tools_are_scoped_mutating_open_world():
     from workspace_bridge.api import DESTRUCTIVE_TOOLS, OPEN_WORLD_TOOLS
-    for name in ("steer_agent_run", "queue_agent_run"):
-        model, _, readonly, idempotent = TOOLS[name]
-        assert not readonly and idempotent
-        assert name in DESTRUCTIVE_TOOLS and name in OPEN_WORLD_TOOLS
-        assert set(model.model_json_schema()["required"]) == {
-            "workspace_id", "run_id", "instruction", "request_id"}
+    model, _, readonly, idempotent = TOOLS["send_run_input"]
+    assert not readonly and idempotent
+    assert "send_run_input" in DESTRUCTIVE_TOOLS and "send_run_input" in OPEN_WORLD_TOOLS
+    assert set(model.model_json_schema()["required"]) == {
+        "workspace_id", "run_id", "instruction", "request_id", "mode"}
 
 
 @pytest.mark.parametrize("mode", ["queue", "steer"])

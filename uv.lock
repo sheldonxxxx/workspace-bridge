@@ -1218,6 +1218,7 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+    { name = "mcp" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "regex" },
@@ -1242,6 +1243,7 @@ requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.163,<0.3" },
     { name = "cryptography", specifier = ">=44,<47" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.28,<1" },
+    { name = "mcp", specifier = ">=2.2,<3" },
     { name = "pillow", specifier = ">=12.3,<13" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<10" },

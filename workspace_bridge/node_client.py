@@ -115,8 +115,8 @@ class NodeClient:
                              {"excludes": excludes, "write_scope": write_scope})
 
     def workspace(self, operation: str, workspace: dict, arguments: dict):
-        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file", "write_image",
-                   "edit_file", "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff", "read_handoff_artifact",
+        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_image",
+                   "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff", "read_handoff_artifact",
                    "hash_files", "publish_handoff_artifacts", "checkpoint_capture",
                    "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats",
                    "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan",

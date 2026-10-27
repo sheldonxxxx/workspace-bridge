@@ -7,6 +7,7 @@ import sqlite3
 import httpx
 import pytest
 
+from mcp_helpers import McpTransport
 from workspace_bridge.api import Handoff, INSTRUCTIONS, TOOLS, make_admin, make_mcp
 from workspace_bridge.embedded_skill import read_project_lead_skill
 from workspace_bridge.security import BridgeError, HANDOFF, SafeRoot, digest
@@ -14,23 +15,18 @@ from workspace_bridge.service import Service
 
 RETIRED = ('review_changes', 'read_change', 'record_audit')
 EXPECTED = {'list_workspaces', 'workspace_info',
-            'list_dir', 'read_file', 'glob', 'grep_files',
-            'prepare_handoff', 'list_handoffs', 'read_handoff', 'write_file', 'write_image', 'edit_file',
-            'list_agent_models', 'start_agent_run', 'list_agent_runs',
-            'list_agent_adapters',
-            'read_agent_run',
-            'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
-            'list_agent_executions', 'read_agent_execution',
-            'read_agent_interaction', 'respond_agent_interaction',
-            'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff', 'run_checks',
-            'apply_patch', 'undo_edit', 'apply_run', 'discard_run'}
-MUTATING = {'prepare_handoff', 'write_file', 'write_image', 'edit_file', 'apply_patch', 'undo_edit', 'run_checks',
-            'start_agent_run', 'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
-            'respond_agent_interaction', 'apply_run', 'discard_run'}
+            'list_dir', 'glob', 'grep', 'read_file',
+            'apply_patch', 'undo_edit', 'upload_image',
+            'git_status', 'git_diff', 'run_checks',
+            'save_handoff', 'list_handoffs',
+            'list_targets', 'start_run', 'list_runs', 'read_run', 'run_log',
+            'send_run_input', 'cancel_run', 'apply_run', 'discard_run', 'answer_interaction'}
+MUTATING = {'apply_patch', 'undo_edit', 'upload_image', 'run_checks', 'save_handoff',
+            'start_run', 'send_run_input', 'cancel_run', 'apply_run', 'discard_run', 'answer_interaction'}
 
 
 def publish(env, payload):
-    return env['service'].call(env['id'], env['token'], 'prepare_handoff',
+    return env['service'].call(env['id'], env['token'], 'save_handoff',
                                Handoff.model_validate(payload).model_dump())
 
 
@@ -49,9 +45,9 @@ def test_workspace_info_describes_exact_adapter_workflow(env):
     info = env['service'].call(env['id'], env['token'], 'workspace_info', {})
     workflow = info['workflow']
     assert 'explicit runtime' not in workflow
-    assert workflow.index('list_agent_adapters') < workflow.index('adapter_id')
-    assert workflow.index('adapter_id') < workflow.index('list_agent_models')
-    assert workflow.index('list_agent_models') < workflow.index('start_agent_run')
+    assert workflow.index('save_handoff') < workflow.index('list_targets')
+    assert workflow.index('list_targets') < workflow.index('adapter_id')
+    assert workflow.index('adapter_id') < workflow.index('start_run')
 
 
 def test_fresh_state_has_no_review_or_audit_tables(env):
@@ -123,7 +119,7 @@ def test_general_reads_observe_current_source_without_result_files(env, payload)
 def test_exclusion_change_does_not_invalidate_handoff(env, payload):
     job = publish(env, payload)
     env['service'].manage_workspace(env['id'], 'set_excludes', ['README.md'])
-    task = env['service'].call(env['id'], env['token'], 'read_handoff',
+    task = env['service'].call(env['id'], env['token'], 'list_handoffs',
         dict(job_id=job['id'], document='TASK.md', start_line=1, max_lines=100))
     assert task['matches_published']
     with pytest.raises(BridgeError):
@@ -133,7 +129,7 @@ def test_exclusion_change_does_not_invalidate_handoff(env, payload):
 
 def test_stored_handoff_documents_match_what_was_published(env, payload):
     job = publish(env, payload)
-    task = env['service'].call(env['id'], env['token'], 'read_handoff',
+    task = env['service'].call(env['id'], env['token'], 'list_handoffs',
         dict(job_id=job['id'], document='TASK.md', start_line=1, max_lines=100))
     assert task['matches_published'] is True
     assert task['trust'] == 'untrusted_handoff_content'
@@ -143,7 +139,7 @@ def test_stored_handoff_documents_match_what_was_published(env, payload):
 def test_retired_and_arbitrary_handoff_documents_rejected(env, payload, document):
     job = publish(env, payload)
     with pytest.raises(BridgeError) as e:
-        env['service'].call(env['id'], env['token'], 'read_handoff',
+        env['service'].call(env['id'], env['token'], 'list_handoffs',
             dict(job_id=job['id'], document=document, start_line=1, max_lines=100))
     assert e.value.code == 'invalid_arguments'
 
@@ -153,7 +149,7 @@ async def test_retired_tools_are_rejected_at_http_and_service(env, name):
     with pytest.raises(BridgeError) as e:
         env['service'].call(env['id'], env['token'], name, {})
     assert e.value.code == 'unknown_tool'
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env['service'])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env['service'])),
                                 base_url='http://127.0.0.1:8765') as c:
         r = await c.post('/mcp', headers={'X-Bridge-Token': env['token'], 'Accept':'application/json'},
             json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':{'workspace_id':env['id']}}})

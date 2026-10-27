@@ -15,14 +15,19 @@ from test_run_coordinator import ADAPTER_ID, modern_env, _finish_test_run, _pers
 
 
 def _start(service, ws_id, token, job, request_id):
-    return service.call(ws_id, token, "start_agent_run", {
+    return service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": request_id})["run_id"]
+
+
+def _interaction(service, ws_id, token, ref):
+    run = service.call(ws_id, token, "read_run", {"run_id": ref["run_id"]})
+    return next(item for item in run["interactions"] if item["id"] == ref["interaction_id"])
 
 
 def _waiting(service, ws_id, token, job, native, request_id):
     run_id = _start(service, ws_id, token, job, request_id)
     interaction_id = _persist_pending_interaction(service, ws_id, token, native, run_id)
-    item = service.call(ws_id, token, "read_agent_interaction", {
+    item = _interaction(service, ws_id, token, {
         "run_id": run_id, "interaction_id": interaction_id})
     choices = {choice["semantic"]: choice["id"] for choice in item["details"]["choices"]}
     return run_id, interaction_id, choices
@@ -32,9 +37,9 @@ def test_an_answer_is_recorded_with_who_decided_and_cannot_be_repeated(modern_en
     service, ws_id, token, job, native, rpc = modern_env
     run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-1")
     answer = {"run_id": run_id, "interaction_id": interaction_id,
-              "response": {"choiceId": choices["approve"]}, "decided_by": "chatgpt",
+              "choice_id": choices["approve"], "decided_by": "chatgpt",
               "reason": "Runs   the tests\nthe handoff names"}
-    viewed = service.call(ws_id, token, "respond_agent_interaction", answer)
+    viewed = service.call(ws_id, token, "answer_interaction", answer)
     decision = viewed["interactions"][0]["decision"]
     assert decision["decided_by"] == "chatgpt"
     assert decision["reason"] == "Runs the tests the handoff names"
@@ -42,10 +47,10 @@ def test_an_answer_is_recorded_with_who_decided_and_cannot_be_repeated(modern_en
     assert rpc.responses == [(99, {"decision": "accept"}, None)]
 
     with pytest.raises(BridgeError) as again:
-        service.call(ws_id, token, "respond_agent_interaction", {**answer, "decided_by": "owner"})
+        service.call(ws_id, token, "answer_interaction", {**answer, "decided_by": "owner"})
     assert again.value.code == "already_answered"
     assert rpc.responses == [(99, {"decision": "accept"}, None)]
-    assert service.call(ws_id, token, "read_agent_interaction", {
+    assert _interaction(service, ws_id, token, {
         "run_id": run_id, "interaction_id": interaction_id})["decision"] == decision
 
     log = service.interaction_decisions("chatgpt")["decisions"]
@@ -63,13 +68,13 @@ def test_an_answer_needs_a_known_decider_and_a_bounded_reason(modern_env, change
     service, ws_id, token, job, native, rpc = modern_env
     run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-2")
     with pytest.raises(BridgeError) as rejected:
-        service.call(ws_id, token, "respond_agent_interaction", {
+        service.call(ws_id, token, "answer_interaction", {
             "run_id": run_id, "interaction_id": interaction_id,
-            "response": {"choiceId": choices["deny"]}, "decided_by": "owner",
+            "choice_id": choices["deny"], "decided_by": "owner",
             "reason": "The user said no", **change})
     assert rejected.value.code == "invalid_arguments"
     assert rpc.responses == []
-    assert service.call(ws_id, token, "read_agent_interaction", {
+    assert _interaction(service, ws_id, token, {
         "run_id": run_id, "interaction_id": interaction_id})["state"] == "pending"
     _finish_test_run(service, native, ws_id, run_id)
 
@@ -80,7 +85,7 @@ def test_an_answer_the_plugin_refuses_is_not_recorded(modern_env, monkeypatch, c
     service, ws_id, token, job, native, rpc = modern_env
     run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-3")
     answer = {"run_id": run_id, "interaction_id": interaction_id,
-              "response": {"choiceId": choices["approve"]}, "decided_by": "chatgpt",
+              "choice_id": choices["approve"], "decided_by": "chatgpt",
               "reason": "Runs the tests"}
     original = native.resolve
 
@@ -89,15 +94,15 @@ def test_an_answer_the_plugin_refuses_is_not_recorded(modern_env, monkeypatch, c
 
     monkeypatch.setattr(native, "resolve", refuse)
     with pytest.raises(BridgeError) as refused:
-        service.call(ws_id, token, "respond_agent_interaction", answer)
+        service.call(ws_id, token, "answer_interaction", answer)
     assert refused.value.code == code
-    item = service.call(ws_id, token, "read_agent_interaction", {
+    item = _interaction(service, ws_id, token, {
         "run_id": run_id, "interaction_id": interaction_id})
     assert item["state"] == state and "decision" not in item
     assert service.interaction_decisions()["decisions"] == []
     monkeypatch.setattr(native, "resolve", original)
     if state == "pending":
-        service.call(ws_id, token, "respond_agent_interaction", answer)
+        service.call(ws_id, token, "answer_interaction", answer)
         assert rpc.responses == [(99, {"decision": "accept"}, None)]
     _finish_test_run(service, native, ws_id, run_id)
 
@@ -115,10 +120,10 @@ def test_runs_waiting_on_an_answer_are_listed_first(modern_env):
                           for name in columns)
         service.db.execute(f"INSERT INTO agent_runs({','.join(columns)}) "
                            f"SELECT {copied} FROM agent_runs WHERE id=?", (waiting,))
-    listed = service.call(ws_id, token, "list_agent_runs", {})["runs"]
+    listed = service.call(ws_id, token, "list_runs", {})["runs"]
     assert [item["run_id"] for item in listed] == [waiting, "run_newer"]
     _finish_test_run(service, native, ws_id, waiting)
-    listed = service.call(ws_id, token, "list_agent_runs", {})["runs"]
+    listed = service.call(ws_id, token, "list_runs", {})["runs"]
     assert [item["run_id"] for item in listed] == ["run_newer", waiting]
 
 
@@ -141,9 +146,9 @@ def test_decision_columns_are_added_to_existing_state():
 async def test_the_manager_reads_the_approval_log_but_cannot_answer(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     run_id, interaction_id, choices = _waiting(service, ws_id, token, job, native, "relay-4")
-    service.call(ws_id, token, "respond_agent_interaction", {
+    service.call(ws_id, token, "answer_interaction", {
         "run_id": run_id, "interaction_id": interaction_id,
-        "response": {"choiceId": choices["deny"]}, "decided_by": "owner",
+        "choice_id": choices["deny"], "decided_by": "owner",
         "reason": "The user declined in the chat"})
     app = make_admin(service)
     headers = {"Cookie": admin_cookie(app)}

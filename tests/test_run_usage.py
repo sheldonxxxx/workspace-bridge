@@ -522,7 +522,7 @@ def test_bridge_normalize_usage_maps_camel_to_snake():
 def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-persist-1"})
     run = service.run_coordinator._run_row(ws, started["run_id"])
@@ -547,12 +547,12 @@ def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
                         "outputTokens": 35, "totalTokens": 195},
         }})
     # Reconcile through the durable snapshot path.
-    read = service.call(ws_id, token, "read_agent_run",
+    read = service.call(ws_id, token, "read_run",
                         {"run_id": started["run_id"]})
     assert read["token_usage"] == {"input_tokens": 150,
                                    "cached_input_tokens": 30,
                                    "output_tokens": 35, "total_tokens": 195}
-    listed = service.call(ws_id, token, "list_agent_runs", {})["runs"]
+    listed = service.call(ws_id, token, "list_runs", {})["runs"]
     assert next(item for item in listed
                 if item["run_id"] == started["run_id"])["token_usage"] == {
         "input_tokens": 150, "cached_input_tokens": 30,
@@ -568,10 +568,10 @@ def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
 def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-absent-1"})
-    assert service.call(ws_id, token, "read_agent_run",
+    assert service.call(ws_id, token, "read_run",
                         {"run_id": started["run_id"]})["token_usage"] is None
     run = service.run_coordinator._run_row(ws, started["run_id"])
     snapshot = service.run_coordinator.adapter(ADAPTER_ID).run(run["native_id"])
@@ -579,7 +579,7 @@ def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
                 "outcome": "failed", "result": "",
                 "usage": {"inputTokens": 9, "totalTokens": 9}}
     service.run_coordinator._persist_snapshot(run, terminal, [], [])
-    failed = service.call(ws_id, token, "read_agent_run",
+    failed = service.call(ws_id, token, "read_run",
                           {"run_id": started["run_id"]})
     assert failed["outcome"] == "failed"
     assert failed["token_usage"] == {"input_tokens": 9, "total_tokens": 9}
@@ -588,7 +588,7 @@ def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
 def test_bridge_rejects_malformed_native_usage(modern_env):
     service, ws_id, token, job, _, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-malformed-1"})
     run = service.run_coordinator._run_row(ws, started["run_id"])
@@ -650,7 +650,7 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
 
 def test_bridge_admin_and_mcp_share_canonical_run_shape(modern_env):
     service, ws_id, token, job, _, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-canonical-1"})
     admin = service.admin_read_agent_run(started["run_id"])

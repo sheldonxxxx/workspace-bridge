@@ -400,12 +400,6 @@ class SafeRoot:
         return digest(data)
 
 
-    def write_file(self, path: str, data: bytes, expected_sha256: str | None = None, *,
-                   write_scope: str = "handoff", previous: bytes | None = None) -> dict:
-        """``previous`` is the replaced content; secret-like matches it already holds may stay."""
-        return self._write_file(path, data, expected_sha256, write_scope=write_scope,
-                                validator=lambda raw: file_text(raw, previous), max_bytes=MAX_WRITE)[0]
-
     def write_image(self, path: str, data: bytes, mime_type: str,
                     expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:
         from .media import MAX_INPUT_BYTES, validate_image

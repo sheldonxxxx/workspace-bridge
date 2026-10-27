@@ -67,7 +67,7 @@ def iso_env(tmp_path, payload):
     service.manage_workspace(ws_id, "set_write_scope", write_scope="workspace")
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "trusted")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test")
-    job = service.call(ws_id, token, "prepare_handoff", Handoff.model_validate(payload).model_dump())
+    job = service.call(ws_id, token, "save_handoff", Handoff.model_validate(payload).model_dump())
     env = {"service": service, "ws_id": ws_id, "token": token, "job": job, "native": native,
            "root": root, "payload": payload, "node": node["service"]}
     yield env
@@ -81,7 +81,7 @@ def _call(env, name, **arguments):
 
 
 def _start(env, request_id="iso-1", **extra):
-    return _call(env, "start_agent_run", adapter_id=ADAPTER_ID, job_id=env["job"]["id"],
+    return _call(env, "start_run", adapter_id=ADAPTER_ID, job_id=env["job"]["id"],
                  request_id=request_id, **extra)
 
 
@@ -190,7 +190,7 @@ def test_isolated_run_works_apart_and_applies_as_one_undoable_edit(iso_env, monk
     assert not path.exists() and branch not in _git(root, "branch", "--list", "wb/*")
     again = _call(iso_env, "apply_run", run_id=run["run_id"])
     assert again["repeated"] is True
-    read = _call(iso_env, "read_agent_run", run_id=run["run_id"])
+    read = _call(iso_env, "read_run", run_id=run["run_id"])
     assert read["isolation"]["state"] == "applied" and read["isolation"]["edit_id"] == applied["edit_id"]
     _call(iso_env, "undo_edit", edit_id=applied["edit_id"])
     assert (root / "app.py").read_text() == "print('one')\n" and not (root / "new.py").exists()
@@ -213,9 +213,9 @@ def test_chatgpt_reads_and_checks_an_unapplied_worktree(iso_env):
     assert read["lines"] == [{"line": 1, "text": "print('two')"}]
     plain = _call(iso_env, "read_file", path="app.py", start_line=1, max_lines=10, expected_sha256=None)
     assert plain["lines"] == [{"line": 1, "text": "print('one')"}]
-    hits = _call(iso_env, "grep_files", pattern="two", run_id=run["run_id"])
+    hits = _call(iso_env, "grep", pattern="two", run_id=run["run_id"])
     assert {item["path"] for item in hits["matches"]} == {"app.py", "lib/helper.py"}
-    assert _call(iso_env, "grep_files", pattern="two")["matches"] == []
+    assert _call(iso_env, "grep", pattern="two")["matches"] == []
     found = _call(iso_env, "glob", pattern="**/*.py", run_id=run["run_id"])
     assert {item["path"] for item in found["entries"]} == {"app.py", "lib/helper.py"}
     listed = _call(iso_env, "list_dir", path="", depth=2, run_id=run["run_id"])
@@ -280,10 +280,10 @@ def test_continuation_keeps_the_worktree(iso_env, monkeypatch):
     (path / "first.txt").write_text("1\n")
     second_job = _second_job(iso_env["service"], iso_env["ws_id"], iso_env["token"], iso_env["payload"], "job-2")
     with pytest.raises(BridgeError) as caught:
-        _call(iso_env, "start_agent_run", adapter_id=ADAPTER_ID, job_id=second_job["id"], request_id="iso-2",
+        _call(iso_env, "start_run", adapter_id=ADAPTER_ID, job_id=second_job["id"], request_id="iso-2",
               continue_from_run_id=first["run_id"], isolation="none")
     assert caught.value.code == "isolation_mismatch"
-    second = _call(iso_env, "start_agent_run", adapter_id=ADAPTER_ID, job_id=second_job["id"],
+    second = _call(iso_env, "start_run", adapter_id=ADAPTER_ID, job_id=second_job["id"],
                    request_id="iso-2", continue_from_run_id=first["run_id"])
     assert second["isolation"]["worktree_id"] == first["isolation"]["worktree_id"]
     with pytest.raises(BridgeError) as caught:
@@ -295,7 +295,7 @@ def test_continuation_keeps_the_worktree(iso_env, monkeypatch):
     assert {item["path"] for item in applied["files"]} == {"first.txt", "second.txt"}
     third_job = _second_job(iso_env["service"], iso_env["ws_id"], iso_env["token"], iso_env["payload"], "job-3")
     with pytest.raises(BridgeError) as caught:
-        _call(iso_env, "start_agent_run", adapter_id=ADAPTER_ID, job_id=third_job["id"], request_id="iso-3",
+        _call(iso_env, "start_run", adapter_id=ADAPTER_ID, job_id=third_job["id"], request_id="iso-3",
               continue_from_run_id=second["run_id"])
     assert caught.value.code == "worktree_unavailable"
 
@@ -309,7 +309,7 @@ def test_ordinary_runs_report_no_isolation(iso_env):
     assert caught.value.code == "not_isolated"
     second_job = _second_job(iso_env["service"], iso_env["ws_id"], iso_env["token"], iso_env["payload"], "job-2")
     with pytest.raises(BridgeError) as caught:
-        _call(iso_env, "start_agent_run", adapter_id=ADAPTER_ID, job_id=second_job["id"], request_id="iso-2",
+        _call(iso_env, "start_run", adapter_id=ADAPTER_ID, job_id=second_job["id"], request_id="iso-2",
               continue_from_run_id=run["run_id"], isolation="worktree")
     assert caught.value.code == "isolation_mismatch"
 
@@ -324,7 +324,7 @@ def test_idempotent_retry_must_match_isolation(iso_env):
 
 
 def test_isolation_needs_plugin_support_and_edit_scope_to_apply(iso_env, monkeypatch):
-    listed = _call(iso_env, "list_agent_adapters")["adapters"]
+    listed = _call(iso_env, "list_targets")["adapters"]
     assert [item["isolation"] for item in listed] == [["none", "worktree"]]
     monkeypatch.setattr(RunWorktrees, "supported", staticmethod(lambda adapter: False))
     with pytest.raises(BridgeError) as caught:
@@ -366,7 +366,7 @@ def test_retention_removes_idle_worktrees_after_fourteen_days(iso_env):
     assert worktrees.apply_retention(time.time() + RETENTION_SECONDS + 60) == 1
     path = Path(run["isolation"]["path"])
     assert not path.exists()
-    assert _call(iso_env, "read_agent_run", run_id=run["run_id"])["isolation"]["state"] == "expired"
+    assert _call(iso_env, "read_run", run_id=run["run_id"])["isolation"]["state"] == "expired"
     with pytest.raises(BridgeError) as caught:
         _call(iso_env, "apply_run", run_id=run["run_id"])
     assert caught.value.code == "worktree_unavailable"

@@ -181,7 +181,7 @@ def wait_until(predicate, timeout=2):
 
 def start_run(env, request_id):
     service, ws_id, token, job, _, _ = env
-    run = service.call(ws_id, token, "start_agent_run", {
+    run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": request_id})
     return service.run_coordinator, service.workspace(ws_id), run["run_id"]
 
@@ -419,13 +419,13 @@ def test_starting_run_reconciliation_waits_for_admitted_native_submission(modern
     assert outcomes == ["run_completed"]
 
 
-@pytest.mark.parametrize("operation", ["cancel_agent_run", "steer_agent_run"])
+@pytest.mark.parametrize("operation", ["cancel_run", "send_run_input"])
 def test_mcp_mutation_does_not_invert_locks_against_background_reconciliation(modern_env, operation):
     service, _, token, _, _, _ = modern_env
     coordinator, ws, run_id = start_run(modern_env, "mutation-lock-" + operation)
     direct = coordinator.adapter(ADAPTER_ID)
     original_run = direct.run
-    original_mutation = direct.cancel if operation == "cancel_agent_run" else direct.steer
+    original_mutation = direct.cancel if operation == "cancel_run" else direct.steer
     entered, release, mutated = (threading.Event() for _ in range(3))
     errors, results = [], []
 
@@ -442,7 +442,7 @@ def test_mcp_mutation_does_not_invert_locks_against_background_reconciliation(mo
         return result
 
     direct.run = blocked
-    setattr(direct, "cancel" if operation == "cancel_agent_run" else "steer", native_mutation)
+    setattr(direct, "cancel" if operation == "cancel_run" else "steer", native_mutation)
 
     def reconcile():
         try:
@@ -453,8 +453,8 @@ def test_mcp_mutation_does_not_invert_locks_against_background_reconciliation(mo
     def mutation():
         try:
             arguments = {"run_id": run_id}
-            if operation == "steer_agent_run":
-                arguments.update(instruction="Review this now", request_id="mutation-lock-input")
+            if operation == "send_run_input":
+                arguments.update(instruction="Review this now", request_id="mutation-lock-input", mode="steer")
             results.append(service.call(ws["id"], token, operation, arguments))
         except Exception as exc:
             errors.append(exc)
@@ -475,7 +475,7 @@ def test_mcp_mutation_does_not_invert_locks_against_background_reconciliation(mo
         mutation_thread.join(2)
     assert not background.is_alive() and not mutation_thread.is_alive()
     assert errors == [] and len(results) == 1
-    if operation == "steer_agent_run":
+    if operation == "send_run_input":
         assert results[0]["input_message"]["status"] == "delivered"
     else:
         # Cancellation admission is asynchronous; native completion decides
@@ -511,7 +511,7 @@ def test_concurrent_manager_and_mcp_start_with_same_request_submit_native_once(m
     def mcp_start():
         attempted.set()
         try:
-            results.append(service.call(ws_id, token, "start_agent_run", {
+            results.append(service.call(ws_id, token, "start_run", {
                 "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "shared-admission"}))
         except Exception as exc:
             errors.append(exc)
@@ -546,7 +546,7 @@ def test_queued_mcp_mutation_reauthenticates_after_gateway_token_rotation(modern
     def mutation():
         attempted.set()
         try:
-            service.call(ws_id, token, "start_agent_run", {
+            service.call(ws_id, token, "start_run", {
                 "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "queued-old-token"})
         except Exception as exc:
             errors.append(exc)

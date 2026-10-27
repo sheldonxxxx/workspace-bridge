@@ -206,7 +206,7 @@ async def test_manager_stream_cancellation_during_headers_releases_slot(env):
 
 async def test_manager_stream_bound_snapshot_change_and_unchanged_read(modern_env):
     service, ws_id, token, job, native, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "stream-projection"})
     run_id = started["run_id"]
     app = make_admin(service)

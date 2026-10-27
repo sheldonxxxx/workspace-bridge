@@ -130,7 +130,7 @@ class EventBroker:
         base = {"workspace_id": {"type": "string"}, "run_id": {"type": "string"},
                 "adapter_id": {"type": "string"}, "runtime_type": {"enum": ["pi", "codex", "claude", "opencode"]}}
         return {"events": [
-            {"name": FINISHED, "description": "A run finished in the selected workspace. Read read_agent_run for its authoritative result and audit evidence.",
+            {"name": FINISHED, "description": "A run finished in the selected workspace. Read read_run for its authoritative result and audit evidence.",
              "delivery": ["webhook"], "inputSchema": filters,
              "payloadSchema": {"type": "object", "additionalProperties": False,
                                "required": [*base, "outcome"],

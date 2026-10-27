@@ -12,7 +12,7 @@ from test_run_coordinator import ADAPTER_ID, _finish_test_run, _second_job, mode
 
 
 def _start(service, ws_id, token, job, request_id="checkpoint-run"):
-    return service.call(ws_id, token, "start_agent_run", {
+    return service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": request_id})
 
 
@@ -21,7 +21,7 @@ def _root(service, ws_id) -> Path:
 
 
 def _read(service, ws_id, token, run_id):
-    return service.call(ws_id, token, "read_agent_run", {"run_id": run_id})
+    return service.call(ws_id, token, "read_run", {"run_id": run_id})
 
 
 def _row(service, run_id):
@@ -274,6 +274,7 @@ async def test_manager_and_mcp_http_surfaces(modern_env):
     import httpx
 
     from admin_helpers import admin_cookie
+    from mcp_helpers import McpTransport
     from workspace_bridge.api import make_admin, make_mcp
     service, ws_id, token, job, native, _ = modern_env
     run = _start(service, ws_id, token, job)
@@ -294,7 +295,7 @@ async def test_manager_and_mcp_http_surfaces(modern_env):
         assert purged.status_code == 200 and purged.json()["removed"] == 2
         expired = await client.get(f"/api/runs/{run['run_id']}/diff")
         assert expired.status_code == 400
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(service)),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(service)),
                                  base_url="http://127.0.0.1:8765",
                                  headers={"X-Bridge-Token": token,
                                           "Accept": "application/json, text/event-stream"}) as client:

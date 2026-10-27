@@ -8,6 +8,7 @@ import sys
 import httpx
 import pytest
 
+from mcp_helpers import McpTransport
 from workspace_bridge.api import TOOLS, make_mcp
 from workspace_bridge.security import BridgeError
 
@@ -399,7 +400,7 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
     _repo(env["root"])
     app = make_mcp(env["service"])
     headers = {"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+    async with httpx.AsyncClient(transport=McpTransport(app),
                                  base_url="http://127.0.0.1:8765", headers=headers) as client:
         listed = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = {item["name"]: item for item in listed.json()["result"]["tools"]}
@@ -416,4 +417,4 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
             "params": {"name": "git_diff", "arguments": {"workspace_id": env["id"],
                                                                   "mode": "head", "ref": "HEAD~1"}}})
         assert invalid.json()["error"]["code"] == -32602
-    assert len(TOOLS) == 33
+    assert len(TOOLS) == 24

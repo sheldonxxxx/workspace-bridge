@@ -53,7 +53,7 @@ def simplified_env(tmp_path, payload):
     # (column default 0) and must not gate runs.
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True,
                                 "trusted")
-    job = service.call(ws_id, token, "prepare_handoff",
+    job = service.call(ws_id, token, "save_handoff",
                        Handoff.model_validate(payload).model_dump())
     yield service, ws_id, token, job, native, native_rpc
     service.close()
@@ -66,7 +66,7 @@ def test_terminal_failed_cancelled_interrupted_continuation_with_owned_idle_conv
         modern_env, outcome):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "term-" + outcome})
     _finish_test_run(service, native, ws_id, first["run_id"])
     with service.lock, service.db:
@@ -74,11 +74,11 @@ def test_terminal_failed_cancelled_interrupted_continuation_with_owned_idle_conv
             "UPDATE agent_runs SET outcome=?,result='',error='simulated',updated=? WHERE id=?",
             (outcome, service.run_coordinator._run_row(ws, first["run_id"])["updated"],
              first["run_id"]))
-    second_job = service.call(ws_id, token, "prepare_handoff", Handoff.model_validate({
+    second_job = service.call(ws_id, token, "save_handoff", Handoff.model_validate({
         "request_id": "term-second-job-" + outcome, "title": "Second", "goal": "g",
         "plan": "p", "acceptance": "a", "constraints": "c", "context": "c",
         "context_hashes": {}}).model_dump())
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "cont-" + outcome, "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
@@ -108,11 +108,11 @@ def test_continuation_allows_model_change(modern_env, monkeypatch):
         return original_start(conversation_id, body)
 
     monkeypatch.setattr(client, "start_run", recording_start)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "model-first"})
     assert captured[-1]["model"] == "gpt-test"
     _finish_test_run(service, native, ws_id, first["run_id"])
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "model-second",
         "continue_from_run_id": first["run_id"], "model": "gpt-second"})
     assert second["conversation_id"] == first["conversation_id"]
@@ -123,7 +123,7 @@ def test_continuation_allows_model_change(modern_env, monkeypatch):
 def test_missing_native_conversation_fails_closed_before_prompt(modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "missing-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     conversation = service.run_coordinator._conversation(
@@ -133,7 +133,7 @@ def test_missing_native_conversation_fails_closed_before_prompt(modern_env, monk
                           (conversation["native_id"],))
         native.db.execute("DELETE FROM conversations WHERE id=?",
                           (conversation["native_id"],))
-    second_job = service.call(ws_id, token, "prepare_handoff", Handoff.model_validate({
+    second_job = service.call(ws_id, token, "save_handoff", Handoff.model_validate({
         "request_id": "missing-second-job", "title": "Second", "goal": "g",
         "plan": "p", "acceptance": "a", "constraints": "c", "context": "c",
         "context_hashes": {}}).model_dump())
@@ -145,7 +145,7 @@ def test_missing_native_conversation_fails_closed_before_prompt(modern_env, monk
     before = service.db.execute(
         "SELECT count(*) FROM agent_runs WHERE workspace=?", (ws_id,)).fetchone()[0]
     with pytest.raises(BridgeError):
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "missing-cont", "continue_from_run_id": first["run_id"]})
     assert calls == []
@@ -157,7 +157,7 @@ def test_missing_native_conversation_fails_closed_before_prompt(modern_env, monk
 def test_foreign_conversation_fails_closed_before_prompt(modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "foreign-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     conversation = service.run_coordinator._conversation(
@@ -171,7 +171,7 @@ def test_foreign_conversation_fails_closed_before_prompt(modern_env, monkeypatch
                         lambda *a, **k: calls.append("start") or (_ for _ in ()).throw(
                             AssertionError("native start must not run")))
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"],
             "request_id": "foreign-cont", "continue_from_run_id": first["run_id"]})
     assert calls == []
@@ -194,7 +194,7 @@ def test_no_policy_native_default_run_is_ready_and_uses_no_selector(simplified_e
     monkeypatch.setattr(client, "start_run",
                         lambda conversation_id, body: captured.append(body)
                         or original_start(conversation_id, body))
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "native-default"})
     assert captured[-1].get("model") is None
     assert started["model"] is None
@@ -207,12 +207,12 @@ def test_no_policy_native_default_run_is_ready_and_uses_no_selector(simplified_e
 
 def test_no_policy_explicit_live_model_and_unknown_rejected(simplified_env):
     service, ws_id, token, job, native, _ = simplified_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "explicit-model",
         "model": "gpt-test"})
     assert started["model"] == "gpt-test"
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "bad-model",
             "model": "not-in-catalog"})
     assert exc.value.code == "model_unavailable"
@@ -237,7 +237,7 @@ def test_models_presentation_marks_unrestricted_without_policy(simplified_env):
 def test_configured_policy_still_enforces_allowlist(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "allowlist",
             "model": "gpt-not-enabled"})
     assert exc.value.code == "model_not_enabled"
@@ -265,7 +265,7 @@ def test_reasoning_default_only_for_configured_policy(simplified_env, monkeypatc
     monkeypatch.setattr(client, "start_run",
                         lambda conversation_id, body: captured.append(body)
                         or original_start(conversation_id, body))
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "no-reasoning"})
     assert "reasoning" not in captured[-1]
     assert started["reasoning"] is None
@@ -273,11 +273,11 @@ def test_reasoning_default_only_for_configured_policy(simplified_env, monkeypatc
     service.run_coordinator.set_model_policy(
         ADAPTER_ID, ["gpt-test"], "gpt-test", ws,
         reasoning_defaults={"gpt-test": "low"})
-    second_job = service.call(ws_id, token, "prepare_handoff", Handoff.model_validate({
+    second_job = service.call(ws_id, token, "save_handoff", Handoff.model_validate({
         "request_id": "reasoning-second-job", "title": "Second", "goal": "g",
         "plan": "p", "acceptance": "a", "constraints": "c", "context": "c",
         "context_hashes": {}}).model_dump())
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "with-reasoning"})
     assert captured[-1]["reasoning"] == "low"
     assert second["reasoning"] == "low"
@@ -289,13 +289,13 @@ def test_agent_enabled_false_does_not_block_runs(simplified_env):
     with service.lock:
         assert service.db.execute("SELECT agent_enabled FROM workspaces WHERE id=?",
                                   (ws_id,)).fetchone()["agent_enabled"] == 0
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "switch-off"})
     assert started["phase"] == "active"
 
 
 def _direct_instruction(service, ws_id, token, request_id, instruction, **extra):
-    return service.call(ws_id, token, "start_agent_run", {
+    return service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "request_id": request_id,
         "instruction": instruction, **extra})
 
@@ -315,7 +315,7 @@ def test_direct_instruction_auto_handoff_is_auditable_and_idempotent(simplified_
                                   (ws_id,)).fetchone()[0]
     assert len(jobs) == jobs_before + 1 and runs == 1
     # The generated audit handoff carries the instruction as its goal.
-    task = service.call(ws_id, token, "read_handoff", {
+    task = service.call(ws_id, token, "list_handoffs", {
         "job_id": first["job_id"], "document": "TASK.md", "start_line": 1,
         "max_lines": 100})
     assert instruction in task["content"]
@@ -385,7 +385,7 @@ def test_direct_instruction_mutual_exclusion_validation(simplified_env):
                             job_id=job["id"])
     assert both.value.code == "invalid_arguments"
     with pytest.raises(BridgeError) as neither:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "request_id": "neither-1"})
     assert neither.value.code == "invalid_arguments"
     with pytest.raises(ValueError):
@@ -399,17 +399,18 @@ def test_direct_instruction_mutual_exclusion_validation(simplified_env):
 @pytest.mark.asyncio
 async def test_direct_instruction_works_over_mcp_tool_surface(simplified_env):
     import httpx
+    from mcp_helpers import McpTransport
     from workspace_bridge.api import make_mcp
 
     service, ws_id, token, job, native, _ = simplified_env
     app = make_mcp(service)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+    async with httpx.AsyncClient(transport=McpTransport(app),
                                  base_url="http://127.0.0.1:8765",
                                  headers={"X-Bridge-Token": token,
                                           "Accept": "application/json"}) as client:
         response = await client.post("/mcp", json={
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "start_agent_run", "arguments": {
+            "params": {"name": "start_run", "arguments": {
                 "workspace_id": ws_id, "adapter_id": ADAPTER_ID,
                 "request_id": "mcp-direct-1",
                 "instruction": "Summarize the module layout."}}})
@@ -421,7 +422,7 @@ async def test_direct_instruction_works_over_mcp_tool_surface(simplified_env):
         # Both/neither is rejected at schema validation.
         invalid = await client.post("/mcp", json={
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "start_agent_run", "arguments": {
+            "params": {"name": "start_run", "arguments": {
                 "workspace_id": ws_id, "adapter_id": ADAPTER_ID,
                 "request_id": "mcp-direct-2"}}})
         assert invalid.status_code == 200
@@ -457,7 +458,7 @@ def test_direct_instruction_explicit_source_control_authorization_not_contradict
     started = _direct_instruction(service, ws_id, token, "direct-authorized-1",
                                   instruction)
     assert started["phase"] == "active"
-    task = service.call(ws_id, token, "read_handoff", {
+    task = service.call(ws_id, token, "list_handoffs", {
         "job_id": started["job_id"], "document": "TASK.md", "start_line": 1,
         "max_lines": 100})
     assert instruction in task["content"]

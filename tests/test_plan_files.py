@@ -52,12 +52,12 @@ def test_store_rejects_bad_identities_and_documents(tmp_path, workspace_id, job_
 
 
 def test_published_handoff_gets_a_read_only_copy_named_in_the_prompt(env, payload):
-    job = call(env, "prepare_handoff", **payload)
+    job = call(env, "save_handoff", **payload)
     folder = Path(job["plan_folder"])
     node_state = env["node"]["service"].state
     assert folder == node_state / "handoffs" / env["id"] / job["id"]
     assert (folder / "TASK.md").read_text() == call(
-        env, "read_handoff", job_id=job["id"], document="TASK.md", start_line=1, max_lines=200)["content"] + "\n"
+        env, "list_handoffs", job_id=job["id"], document="TASK.md", start_line=1, max_lines=200)["content"] + "\n"
     assert json.dumps(str(folder)) in job["copy_prompt"]
     assert "Re-read TASK.md" in job["copy_prompt"]
     assert not (env["root"] / ".workspace-handoff").exists()
@@ -67,14 +67,14 @@ def test_publishing_works_when_the_node_cannot_save_plan_files(env, payload, mon
     def fail(self, *args):
         raise BridgeError("Unknown Node workspace operation", "not_found")
     monkeypatch.setattr(PlanStore, "write", fail)
-    job = call(env, "prepare_handoff", **payload)
+    job = call(env, "save_handoff", **payload)
     assert "plan_folder" not in job
     assert "There are no handoff files to open." in job["copy_prompt"]
 
 
 def test_run_reads_its_plan_folder_and_a_changed_copy_is_restored(modern_env, payload, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "plan-first"})
     folder = Path(first["effective_security"]["plan_folder"])
     assert folder.name == job["id"]
@@ -86,7 +86,7 @@ def test_run_reads_its_plan_folder_and_a_changed_copy_is_restored(modern_env, pa
     client = service.run_coordinator.adapter(ADAPTER_ID)
     original = client.start_run
     monkeypatch.setattr(client, "start_run", lambda ident, body: captured.append(body) or original(ident, body))
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "plan-second"})
     assert (folder / "TASK.md").read_text() == task
     body = captured[0]
@@ -101,12 +101,12 @@ def test_a_run_needs_the_node_to_save_its_plan_unless_the_node_predates_plan_fil
     monkeypatch.setattr(PlanStore, "write", lambda self, *a: (_ for _ in ()).throw(
         BridgeError("The Node could not save the plan files", "plan_unavailable")))
     with pytest.raises(BridgeError) as caught:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "plan-fails"})
     assert caught.value.code == "plan_unavailable"
     monkeypatch.setattr(PlanStore, "write", lambda self, *a: (_ for _ in ()).throw(
         BridgeError("Unknown Node workspace operation", "not_found")))
-    run = service.call(ws_id, token, "start_agent_run", {
+    run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "plan-old-node"})
     assert "plan_folder" not in run["effective_security"]
 

@@ -96,7 +96,7 @@ class PiDirectAdapter(DirectAdapter):
 def test_profile_rules_travel_with_every_run_and_reach_continuations(modern_env, payload):
     service, ws_id, token, first_job, native, rpc = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "rules-first"})
     trusted = sp.BUILTINS["trusted"]
     assert first["effective_security"]["source"] == "profile"
@@ -116,7 +116,7 @@ def test_profile_rules_travel_with_every_run_and_reach_continuations(modern_env,
     service.set_workspace_route(ws, ADAPTER_ID, True, "team")
     second_job = _second_job(service, ws_id, token, payload, "rules-second-job")
     threads = sum(method == "thread/start" for method, _ in rpc.calls)
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "rules-second",
         "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
@@ -132,7 +132,7 @@ def test_native_route_runs_without_rules_and_cannot_continue_a_profile_thread(
         modern_env, payload, monkeypatch):
     service, ws_id, token, first_job, native, rpc = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "native-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     service.set_workspace_route(ws, ADAPTER_ID, True, security_source="native")
@@ -142,13 +142,13 @@ def test_native_route_runs_without_rules_and_cannot_continue_a_profile_thread(
         AssertionError("native start must not run")))
     before = _run_counts(service, ws_id)
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "native-continue", "continue_from_run_id": first["run_id"]})
     assert exc.value.code == "security_source_changed"
     assert _run_counts(service, ws_id) == before
     monkeypatch.undo()
-    fresh = service.call(ws_id, token, "start_agent_run", {
+    fresh = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"], "request_id": "native-fresh"})
     assert fresh["conversation_id"] != first["conversation_id"]
     assert fresh["effective_security"]["source"] == "native"
@@ -288,7 +288,7 @@ def modern_env(tmp_path, payload):
     service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
     service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "trusted")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test")
-    job = service.call(ws_id, token, "prepare_handoff",
+    job = service.call(ws_id, token, "save_handoff",
                        Handoff.model_validate(payload).model_dump())
     yield service, ws_id, token, job, native, native_rpc
     service.close()
@@ -325,16 +325,16 @@ def test_two_pi_instances_start_and_persist_as_distinct_destinations(modern_env,
         service.set_workspace_route(ws, adapter_id, True, "read-only")
 
     request_id = "shared-pi-request"
-    local = service.call(ws_id, token, "start_agent_run", {
+    local = service.call(ws_id, token, "start_run", {
         "adapter_id": ids[0], "job_id": job["id"], "request_id": request_id})
-    gpu = service.call(ws_id, token, "start_agent_run", {
+    gpu = service.call(ws_id, token, "start_run", {
         "adapter_id": ids[1], "job_id": job["id"], "request_id": request_id})
     assert local["adapter_id"] == ids[0] and gpu["adapter_id"] == ids[1]
     assert local["runtime_type"] == gpu["runtime_type"] == "pi"
     assert local["conversation_id"] != gpu["conversation_id"]
-    local_retry = service.call(ws_id, token, "start_agent_run", {
+    local_retry = service.call(ws_id, token, "start_run", {
         "adapter_id": ids[0], "job_id": job["id"], "request_id": request_id})
-    gpu_retry = service.call(ws_id, token, "start_agent_run", {
+    gpu_retry = service.call(ws_id, token, "start_run", {
         "adapter_id": ids[1], "job_id": job["id"], "request_id": request_id})
     assert local_retry["run_id"] == local["run_id"]
     assert local_retry["conversation_id"] == local["conversation_id"]
@@ -390,7 +390,7 @@ def _persist_pending_interaction(service, ws_id, token, native, run_id):
     native._request(99, "item/fileChange/requestApproval", {
         "threadId": "native-thread-1", "turnId": "native-turn-1",
         "reason": "Run tests", "availableDecisions": ["accept", "decline"]})
-    viewed = service.call(ws_id, token, "read_agent_run", {"run_id": run_id})
+    viewed = service.call(ws_id, token, "read_run", {"run_id": run_id})
     assert viewed["interactions"]
     return viewed["interactions"][0]["id"]
 
@@ -399,7 +399,7 @@ def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "node-drift"})
     interaction_id = _persist_pending_interaction(service, ws_id, token, native,
                                                    started["run_id"])
@@ -413,7 +413,7 @@ def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
     with pytest.raises(BridgeError) as reconcile_error:
         service.run_coordinator.reconcile(ws, started["run_id"])
     assert reconcile_error.value.code == "node_changed"
-    snapshot = service.call(ws_id, token, "read_agent_run", {"run_id": started["run_id"]})
+    snapshot = service.call(ws_id, token, "read_run", {"run_id": started["run_id"]})
     assert snapshot["sync_warning"]["code"] == "node_changed"
     assert "interrupted" in snapshot["sync_warning"]["message"]
     assert snapshot["effective_security"] == started["effective_security"]
@@ -423,12 +423,12 @@ def test_existing_run_node_revision_drift_interrupts_run_without_runtime_calls(
     assert snapshot["error"] == "runtime_authority_changed"
     assert [item["state"] for item in snapshot["interactions"]] == ["stale"]
     with pytest.raises(BridgeError) as resolve_error:
-        service.call(ws_id, token, "respond_agent_interaction", {
+        service.call(ws_id, token, "answer_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"},
+            "choice_id": "accept",
             "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
-    cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
+    cancelled = service.call(ws_id, token, "cancel_run", {"run_id": started["run_id"]})
     assert cancelled["outcome"] == "interrupted"
     assert calls == []
     assert service.node_registry.get(ws["node_id"])["revision"] != original_node["revision"]
@@ -438,7 +438,7 @@ def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_call
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "adapter-drift"})
     interaction_id = _persist_pending_interaction(service, ws_id, token, native,
                                                    started["run_id"])
@@ -449,7 +449,7 @@ def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_call
     with pytest.raises(BridgeError) as reconcile_error:
         service.run_coordinator.reconcile(ws, started["run_id"])
     assert reconcile_error.value.code == "adapter_changed"
-    snapshot = service.call(ws_id, token, "read_agent_run", {"run_id": started["run_id"]})
+    snapshot = service.call(ws_id, token, "read_run", {"run_id": started["run_id"]})
     assert snapshot["sync_warning"]["code"] == "adapter_changed"
     assert "interrupted" in snapshot["sync_warning"]["message"]
     assert snapshot["effective_security"] == started["effective_security"]
@@ -459,12 +459,12 @@ def test_existing_run_adapter_revision_drift_interrupts_run_without_runtime_call
     assert snapshot["error"] == "runtime_authority_changed"
     assert [item["state"] for item in snapshot["interactions"]] == ["stale"]
     with pytest.raises(BridgeError) as resolve_error:
-        service.call(ws_id, token, "respond_agent_interaction", {
+        service.call(ws_id, token, "answer_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"},
+            "choice_id": "accept",
             "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
-    cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": started["run_id"]})
+    cancelled = service.call(ws_id, token, "cancel_run", {"run_id": started["run_id"]})
     assert cancelled["outcome"] == "interrupted"
     assert calls == []
     assert service.adapter_registry.get(ADAPTER_ID)["revision"] != original_adapter["revision"]
@@ -491,7 +491,7 @@ def _one_sweep(coordinator, monkeypatch):
 def test_sweep_interrupts_runs_stranded_by_an_adapter_connection_change(
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "stranded"})
     calls = _record_native_calls(native, monkeypatch)
     service.adapter_registry.update(ADAPTER_ID, {"settings": {"log_level": "DEBUG"}})
@@ -512,7 +512,7 @@ def test_sweep_interrupts_runs_stranded_by_an_adapter_connection_change(
 def test_disabled_adapter_keeps_runs_recoverable_and_out_of_the_sweep(
         modern_env, monkeypatch):
     service, ws_id, token, job, _, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "disabled-adapter"})
     coordinator = service.run_coordinator
     reconciled = []
@@ -534,7 +534,7 @@ def test_disabled_adapter_keeps_runs_recoverable_and_out_of_the_sweep(
 async def test_admin_abandon_marks_run_orphaned_without_runtime_calls(
         modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "abandon-me"})
     interaction_id = _persist_pending_interaction(service, ws_id, token, native,
                                                    started["run_id"])
@@ -556,9 +556,9 @@ async def test_admin_abandon_marks_run_orphaned_without_runtime_calls(
     assert repeated.json()["outcome"] == "orphaned"
     assert calls == []
     with pytest.raises(BridgeError) as resolve_error:
-        service.call(ws_id, token, "respond_agent_interaction", {
+        service.call(ws_id, token, "answer_interaction", {
             "run_id": started["run_id"], "interaction_id": interaction_id,
-            "response": {"choiceId": "accept"},
+            "choice_id": "accept",
             "decided_by": "chatgpt", "reason": "Runs the tests"})
     assert resolve_error.value.code == "interaction_stale"
 
@@ -620,9 +620,9 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         ws = service.workspace(ws_id)
         service.set_workspace_route(ws, ADAPTER_ID, True, "trusted")
         service.run_coordinator.set_model_policy(ADAPTER_ID, ["gpt-test"], "gpt-test", ws)
-        job = service.call(ws_id, token, "prepare_handoff",
+        job = service.call(ws_id, token, "save_handoff",
                            Handoff.model_validate(payload).model_dump())
-        started = service.call(ws_id, token, "start_agent_run", {
+        started = service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"],
             "request_id": "node-adapter-race"})
         interaction_id = _persist_pending_interaction(
@@ -641,18 +641,18 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         with pytest.raises(BridgeError) as reconcile_error:
             service.run_coordinator.reconcile(ws, started["run_id"])
         assert reconcile_error.value.code == "adapter_changed"
-        snapshot = service.call(ws_id, token, "read_agent_run",
+        snapshot = service.call(ws_id, token, "read_run",
                                 {"run_id": started["run_id"]})
         assert snapshot["sync_warning"]["code"] == "adapter_changed"
         assert snapshot["effective_security"] == started["effective_security"]
         with pytest.raises(BridgeError) as resolve_error:
-            service.call(ws_id, token, "respond_agent_interaction", {
+            service.call(ws_id, token, "answer_interaction", {
                 "run_id": started["run_id"], "interaction_id": interaction_id,
-                "response": {"choiceId": "accept"},
+                "choice_id": "accept",
             "decided_by": "chatgpt", "reason": "Runs the tests"})
         assert resolve_error.value.code == "adapter_changed"
         with pytest.raises(BridgeError) as cancel_error:
-            service.call(ws_id, token, "cancel_agent_run",
+            service.call(ws_id, token, "cancel_run",
                          {"run_id": started["run_id"]})
         assert cancel_error.value.code == "adapter_changed"
         assert old_calls == replacement_calls == constructed == []
@@ -672,7 +672,7 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         # Refreshing the Bridge inventory permits a new run on the new
         # revision, while the old conversation remains permanently pinned.
         service.node_registry.refresh_adapters(node_record["id"])
-        fresh = service.call(ws_id, token, "start_agent_run", {
+        fresh = service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"],
             "request_id": "node-adapter-race-fresh"})
         assert fresh["effective_security"]["adapter_revision"] == updated["revision"]
@@ -683,7 +683,7 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
         # missing on the replacement adapter, so the ownership proof fails
         # closed before any prompt and no native start runs.
         with pytest.raises(BridgeError) as continuation_error:
-            service.call(ws_id, token, "start_agent_run", {
+            service.call(ws_id, token, "start_run", {
                 "adapter_id": ADAPTER_ID, "job_id": job["id"],
                 "request_id": "node-adapter-race-continuation",
                 "continue_from_run_id": started["run_id"]})
@@ -699,7 +699,7 @@ def test_node_adapter_revision_race_blocks_existing_run_before_any_runtime_call(
 def test_continuation_ignores_benign_revision_churn_and_rename_keeps_conversation(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     original = service.adapter_registry.get(ADAPTER_ID)
@@ -709,7 +709,7 @@ def test_continuation_ignores_benign_revision_churn_and_rename_keeps_conversatio
     renamed = service.adapter_registry.update(ADAPTER_ID, {"name": "Renamed Codex"})
     assert renamed["revision"] == original["revision"]
 
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-rename-continuation",
         "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
@@ -729,7 +729,7 @@ def test_continuation_ignores_benign_revision_churn_and_rename_keeps_conversatio
     assert node_info["revision"] != first_run["node_revision"]
     drifted_adapter = service.adapter_registry.get(ADAPTER_ID)
     assert drifted_adapter["revision"] != original["revision"]
-    third = service.call(ws_id, token, "start_agent_run", {
+    third = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "revision-drift-continuation",
         "continue_from_run_id": second["run_id"]})
     assert third["conversation_id"] == first["conversation_id"]
@@ -762,7 +762,7 @@ def test_wrong_node_route_and_start_fail_before_native_call(modern_env, tmp_path
             service.set_workspace_route(ws, wrong_adapter["id"], True, "read-only")
         assert route_error.value.code == "adapter_node_mismatch"
         with pytest.raises(BridgeError) as start_error:
-            service.call(ws_id, token, "start_agent_run", {
+            service.call(ws_id, token, "start_run", {
                 "adapter_id": wrong_adapter["id"], "job_id": job["id"],
                 "request_id": "wrong-node-start"})
         assert start_error.value.code == "adapter_node_mismatch"
@@ -775,35 +775,35 @@ def test_bridge_start_reconcile_interaction_and_activity(modern_env):
     service, ws_id, token, job, native, rpc = modern_env
     recorder = RecordingChannel()
     manager = attach_notification_channel(service, recorder)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "modern-1"})
     bridge_id = started["run_id"]
     assert started["phase"] == "active" and started["runtime_type"] == "codex"
     assert started["adapter_id"] == ADAPTER_ID
-    repeated = service.call(ws_id, token, "start_agent_run", {
+    repeated = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "modern-1"})
     assert repeated["run_id"] == bridge_id and repeated["idempotent"] is True
     with pytest.raises(BridgeError) as conflict:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "modern-1",
             "model": "different-model"})
     assert conflict.value.code == "conflict"
     native._request(99, "item/fileChange/requestApproval", {
         "threadId": "native-thread-1", "turnId": "native-turn-1",
         "reason": "Run tests", "availableDecisions": ["accept", "decline"]})
-    viewed = service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
+    viewed = service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert viewed["active_state"] == "waiting_interaction"
     wait_for_notifications(manager)
     assert [event.event_type for event in recorder.calls] == ["run_needs_attention"]
     assert recorder.calls[0].subject_id == viewed["interactions"][0]["id"]
-    service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
+    service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert len(recorder.calls) == 1
     interaction = viewed["interactions"][0]
     choice = next(item for item in interaction["details"]["choices"]
                   if item["semantic"] == "approve")
-    service.call(ws_id, token, "respond_agent_interaction", {
+    service.call(ws_id, token, "answer_interaction", {
         "run_id": bridge_id, "interaction_id": interaction["id"],
-        "response": {"choiceId": choice["id"]},
+        "choice_id": choice["id"],
         "decided_by": "chatgpt", "reason": "Runs the tests the handoff names"})
     assert rpc.responses == [(99, {"decision": "accept"}, None)]
     native._notification("item/completed", {
@@ -812,14 +812,14 @@ def test_bridge_start_reconcile_interaction_and_activity(modern_env):
     native._notification("turn/completed", {
         "threadId": "native-thread-1", "turn": {"id": "native-turn-1",
                                                   "status": "completed"}})
-    finished = service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
+    finished = service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert finished["outcome"] == "succeeded"
     wait_for_notifications(manager)
-    service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
+    service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert [event.event_type for event in recorder.calls] == [
         "run_needs_attention", "run_completed"]
     assert manager.summary(bridge_id)["overall"] == "sent"
-    activities = service.call(ws_id, token, "list_agent_activities",
+    activities = service.call(ws_id, token, "run_log",
                               {"run_id": bridge_id})["activities"]
     assert activities[0]["kind"] == "command"
 
@@ -842,7 +842,7 @@ def test_snapshot_terminal_outcomes_create_one_event(modern_env, outcome, event_
     service, ws_id, token, job, native, _ = modern_env
     recorder = RecordingChannel()
     manager = attach_notification_channel(service, recorder)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "outcome-" + outcome})
     coordinator = service.run_coordinator
     ws = service.workspace(ws_id)
@@ -878,7 +878,7 @@ def test_slow_notification_does_not_block_run_state_transition(modern_env):
 
     channel = BlockingChannel()
     manager = attach_notification_channel(service, channel)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "slow-notification"})
     coordinator = service.run_coordinator
     ws = service.workspace(ws_id)
@@ -915,7 +915,7 @@ def test_distinct_runtime_interactions_notify_once_without_contents(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     recorder = RecordingChannel()
     manager = attach_notification_channel(service, recorder)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "interaction-dedupe"})
     coordinator = service.run_coordinator
     ws = service.workspace(ws_id)
@@ -958,7 +958,7 @@ def test_runtime_rejected_after_bridge_run_creation_records_failure(modern_env, 
 
     monkeypatch.setattr(native, "start_run", reject)
     with pytest.raises(RuntimeRejected):
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "reject-notification"})
     wait_for_notifications(manager)
     with service.lock:
@@ -1001,14 +1001,14 @@ def test_workspace_route_defaults_off_for_new_workspace(tmp_path):
 
 def test_unconfirmed_bridge_run_rebinds_by_client_run_id(modern_env):
     service, ws_id, token, job, native, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "rebind-1"})
     bridge_id = started["run_id"]
     with service.lock, service.db:
         service.db.execute(
             "UPDATE agent_runs SET native_id=NULL,phase='starting',active_state=NULL "
             "WHERE id=?", (bridge_id,))
-    recovered = service.call(ws_id, token, "read_agent_run", {"run_id": bridge_id})
+    recovered = service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert recovered["phase"] == "active"
     assert recovered["run_id"] == bridge_id
 
@@ -1016,7 +1016,7 @@ def test_unconfirmed_bridge_run_rebinds_by_client_run_id(modern_env):
 def _second_job(service, ws_id, token, payload, request_id):
     body = dict(payload)
     body["request_id"] = request_id
-    return service.call(ws_id, token, "prepare_handoff",
+    return service.call(ws_id, token, "save_handoff",
                           Handoff.model_validate(body).model_dump())
 
 
@@ -1031,7 +1031,7 @@ def _run_counts(service, ws_id):
 
 def test_cross_handoff_continuation_reuses_conversation_with_new_prompt(modern_env, payload, monkeypatch):
     service, ws_id, token, first_job, native, _ = modern_env
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "cross-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     second_job = _second_job(service, ws_id, token, payload, "cross-second-job")
@@ -1045,7 +1045,7 @@ def test_cross_handoff_continuation_reuses_conversation_with_new_prompt(modern_e
         return original_start(conversation_id, body)
 
     monkeypatch.setattr(client, "start_run", recording_start)
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "cross-second", "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]
@@ -1067,21 +1067,21 @@ def test_cross_handoff_continuation_reuses_conversation_with_new_prompt(modern_e
 
 def test_cross_handoff_continuation_idempotent_with_canonical_parent(modern_env, payload):
     service, ws_id, token, first_job, native, _ = modern_env
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "idem-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     second_job = _second_job(service, ws_id, token, payload, "idem-second-job")
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "idem-second", "continue_from_run_id": first["run_id"]})
     # Exact retry with omitted parent returns the same run.
-    retry = service.call(ws_id, token, "start_agent_run", {
+    retry = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "idem-second", "continue_from_run_id": first["run_id"]})
     assert retry["run_id"] == second["run_id"]
     assert retry["idempotent"] is True
     # Retry that spells the canonical parent explicitly is the same content.
-    explicit = service.call(ws_id, token, "start_agent_run", {
+    explicit = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "idem-second", "continue_from_run_id": first["run_id"],
         "parent_run_id": first["run_id"]})
@@ -1091,10 +1091,10 @@ def test_cross_handoff_continuation_idempotent_with_canonical_parent(modern_env,
 
 def test_continuation_parent_mismatch_fails_without_native_start(modern_env, payload, monkeypatch):
     service, ws_id, token, first_job, native, _ = modern_env
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "mismatch-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
-    other = service.call(ws_id, token, "start_agent_run", {
+    other = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "mismatch-other"})
     _finish_test_run(service, native, ws_id, other["run_id"])
     second_job = _second_job(service, ws_id, token, payload, "mismatch-second-job")
@@ -1106,7 +1106,7 @@ def test_continuation_parent_mismatch_fails_without_native_start(modern_env, pay
                           lambda *a, **k: (calls.append((a, k)), (_ for _ in ()).throw(AssertionError("native create must not run"))))
     before = _run_counts(service, ws_id)
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "mismatch-continuation",
             "continue_from_run_id": first["run_id"], "parent_run_id": other["run_id"]})
@@ -1124,21 +1124,21 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     # The Bridge must reject nonterminal sources before any native
     # start/create, while a failed terminal source may continue when the
     # live adapter still owns and proves the idle conversation.
-    active = service.call(ws_id, token, "start_agent_run", {
+    active = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-active"})
     _finish_test_run(service, native, ws_id, active["run_id"])
     with service.lock, service.db:
         service.db.execute(
             "UPDATE agent_runs SET phase='active',active_state='thinking',outcome=NULL WHERE id=?",
             (active["run_id"],))
-    finished = service.call(ws_id, token, "start_agent_run", {
+    finished = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-terminal"})
     _finish_test_run(service, native, ws_id, finished["run_id"])
     with service.lock, service.db:
         service.db.execute(
             "UPDATE agent_runs SET outcome='failed',result='',error='boom',updated=? WHERE id=?",
             (service.run_coordinator.read(ws, finished["run_id"], sync=False)["updated"], finished["run_id"]))
-    good = service.call(ws_id, token, "start_agent_run", {
+    good = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "fail-model-good"})
     _finish_test_run(service, native, ws_id, good["run_id"])
     second_job = _second_job(service, ws_id, token, payload, "fail-second-job")
@@ -1158,7 +1158,7 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     before = _run_counts(service, ws_id)
     # Nonterminal source is ineligible.
     with pytest.raises(BridgeError) as exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "fail-active-continuation",
             "continue_from_run_id": active["run_id"]})
@@ -1168,7 +1168,7 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     # A failed terminal source with an owned idle conversation may now
     # continue: the historical outcome does not gate a proven conversation.
     monkeypatch.undo()
-    resumed = service.call(ws_id, token, "start_agent_run", {
+    resumed = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "fail-failed-continuation",
         "continue_from_run_id": finished["run_id"]})
@@ -1177,7 +1177,7 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
     _finish_test_run(service, native, ws_id, resumed["run_id"])
     # Explicit model that cannot resolve stays a safe model error with no run.
     with pytest.raises(BridgeError) as model_exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "fail-model-continuation",
             "continue_from_run_id": good["run_id"], "model": "missing-model"})
@@ -1187,7 +1187,7 @@ def test_continuation_source_failure_modes_stay_unavailable(modern_env, payload,
 def test_cross_handoff_continuation_busy_and_owned_drift(modern_env, payload, monkeypatch):
     service, ws_id, token, first_job, native, rpc = modern_env
     ws = service.workspace(ws_id)
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": first_job["id"], "request_id": "drift-first"})
     _finish_test_run(service, native, ws_id, first["run_id"])
     second_job = _second_job(service, ws_id, token, payload, "drift-second-job")
@@ -1208,7 +1208,7 @@ def test_cross_handoff_continuation_busy_and_owned_drift(modern_env, payload, mo
     rpc.status = "active"
     before = _run_counts(service, ws_id)
     with pytest.raises(BridgeError) as busy_exc:
-        service.call(ws_id, token, "start_agent_run", {
+        service.call(ws_id, token, "start_run", {
             "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
             "request_id": "drift-busy", "continue_from_run_id": first["run_id"]})
     assert busy_exc.value.code == "conversation_busy"
@@ -1224,7 +1224,7 @@ def test_cross_handoff_continuation_busy_and_owned_drift(modern_env, payload, mo
     with service.lock, service.db:
         service.db.execute("UPDATE nodes SET revision=? WHERE id=?",
                            (node_row["revision"] + "-drifted", ws["node_id"]))
-    second = service.call(ws_id, token, "start_agent_run", {
+    second = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": second_job["id"],
         "request_id": "drift-node", "continue_from_run_id": first["run_id"]})
     assert second["conversation_id"] == first["conversation_id"]

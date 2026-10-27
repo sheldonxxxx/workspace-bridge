@@ -108,13 +108,13 @@ def image_capabilities() -> dict:
             "max_input_bytes": MAX_INPUT_BYTES, "max_pixels": MAX_PIXELS,
             "default_max_dimension": DEFAULT_DIMENSION, "max_dimension": MAX_DIMENSION,
             "max_preview_bytes": MAX_PREVIEW_BYTES, "max_response_bytes": MAX_IMAGE_RESPONSE_BYTES,
-            "frame_policy": "first_frame_only", "writes": "write_image_handoff_only",
+            "frame_policy": "first_frame_only", "writes": "upload_image_handoff_only",
             "privacy": "Metadata removed; visible secrets in pixels are NOT detected or redacted.",
             "delivery": "Native MCP image content; exact client/tunnel model visibility requires live validation."}
 
 
 def image_write_capabilities() -> dict:
-    return {"tool": "write_image", "formats": list(SUPPORTED_FORMATS),
+    return {"tool": "upload_image", "formats": list(SUPPORTED_FORMATS),
             "mime_types": list(IMAGE_MIME_TYPES.values()), "path_prefix": ".workspace-handoff/",
             "encoding": "base64", "max_input_bytes": MAX_INPUT_BYTES,
             "max_base64_chars": MAX_IMAGE_BASE64_CHARS, "max_request_bytes": MAX_IMAGE_REQUEST_BYTES,

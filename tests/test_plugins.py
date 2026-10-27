@@ -267,12 +267,12 @@ def test_a_real_codex_adapter_runs_as_a_plugin_through_the_bridge(tmp_path, payl
         assert [a["descriptor"]["status"] for a in listed] == ["ok"]
         service.set_workspace_route(ws, adapter["id"], True, "trusted")
         service.run_coordinator.set_model_policy(adapter["id"], ["gpt-test"], "gpt-test")
-        job = service.call(ws_id, token, "prepare_handoff",
+        job = service.call(ws_id, token, "save_handoff",
                            Handoff.model_validate(payload).model_dump())
-        started = service.call(ws_id, token, "start_agent_run", {
+        started = service.call(ws_id, token, "start_run", {
             "adapter_id": adapter["id"], "job_id": job["id"], "request_id": "plugin-1"})
         assert started["phase"] in {"starting", "active"}
-        read = service.call(ws_id, token, "read_agent_run", {"run_id": started["run_id"]})
+        read = service.call(ws_id, token, "read_run", {"run_id": started["run_id"]})
         assert read["run_id"] == started["run_id"] and "sync_warning" not in read
         # The run went through a supervised child process, not an HTTP URL.
         process = node_service.plugins._processes[adapter["id"]][1]

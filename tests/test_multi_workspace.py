@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from mcp_helpers import McpTransport
 from workspace_bridge.api import make_admin, make_mcp, TOOLS, Handoff
 from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
@@ -24,7 +25,7 @@ def add(env, name="Beta", enabled=True):
 
 
 async def request(env, name, args=None, *, token=None, route="/mcp"):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])),
                                  base_url="http://127.0.0.1:8765") as c:
         return await c.post(route, headers={"X-Bridge-Token": token or env["token"], "Accept": "application/json"},
                             json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -91,7 +92,7 @@ async def test_bridge_pause_resume_rotation_and_old_header_rejection(env):
     rotated = s.manage_bridge("rotate_token")["token"]
     assert (await request(env, "list_workspaces")).status_code == 401
     assert value(await request(env, "list_workspaces", token=rotated))["total"] == 1
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(s)), base_url="http://127.0.0.1:8765") as c:
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(s)), base_url="http://127.0.0.1:8765") as c:
         r = await c.post("/mcp", headers={"X-Workspace-Token": rotated, "Accept": "application/json"},
                          json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         assert r.status_code == 401
@@ -112,17 +113,17 @@ async def test_admin_and_bridge_credentials_are_not_interchangeable(env):
 
 
 async def test_duplicate_bridge_header_rejected(env):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])), base_url="http://127.0.0.1:8765") as c:
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])), base_url="http://127.0.0.1:8765") as c:
         r = await c.post("/mcp", headers=[("X-Bridge-Token", env["token"]), ("X-Bridge-Token", "wrong")], json={})
         assert r.status_code == 403
 
 
 def test_cross_project_handoff_id_rejected(env, payload):
     s = env["service"]
-    job = s.call(env["id"], env["token"], "prepare_handoff", Handoff.model_validate(payload).model_dump())
+    job = s.call(env["id"], env["token"], "save_handoff", Handoff.model_validate(payload).model_dump())
     beta, _ = add(env)
     with pytest.raises(BridgeError, match="not found"):
-        s.call(beta, env["token"], "read_handoff", {"job_id": job["id"], "document": "TASK.md", "start_line": 1, "max_lines": 40})
+        s.call(beta, env["token"], "list_handoffs", {"job_id": job["id"], "document": "TASK.md", "start_line": 1, "max_lines": 40})
 
 
 

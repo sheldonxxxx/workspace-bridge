@@ -3,11 +3,12 @@ import json
 import time
 import httpx
 import pytest
+from mcp_helpers import McpTransport
 from workspace_bridge.api import make_admin, make_mcp, TOOLS, AdminSessionStore
 
 @pytest.fixture
 def mcp(env):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])), base_url="http://127.0.0.1:8765", headers={"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"})
+    return httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])), base_url="http://127.0.0.1:8765", headers={"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"})
 
 async def rpc(client, env, method, params=None, call_id=1):
     params = dict(params or {})
@@ -22,12 +23,12 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) == 33
+        assert len(tools) == len(TOOLS) == 24
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)
         schemas = {tool["name"]: tool["inputSchema"] for tool in tools}
-        for name in ("list_agent_models", "start_agent_run", "list_agent_runs"):
+        for name in ("list_targets", "start_run", "list_runs"):
             assert "adapter_id" in schemas[name]["properties"]
             assert "runtime" not in schemas[name]["properties"]
 
@@ -64,8 +65,12 @@ async def test_notifications_no_write_and_invalid_batch(env, mcp):
         path = "/mcp"
         r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"notifications/initialized"})
         assert r.status_code == 202 and not r.content
-        r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"tools/call", "params":{"name":"prepare_handoff"}})
-        assert r.status_code == 400
+        # A tool call sent as a notification is acknowledged and never run.
+        r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"tools/call", "params":{"name":"save_handoff",
+            "arguments":{"workspace_id": env["id"], "request_id":"note", "title":"t", "goal":"g", "plan":"p", "acceptance":"a"}}})
+        assert r.status_code == 202 and not r.content
+        r = await rpc(mcp, env, "tools/call", {"name":"list_handoffs", "arguments":{}})
+        assert json.loads(r.json()["result"]["content"][0]["text"])["handoffs"] == []
         r = await mcp.post(path, json=[{"jsonrpc":"2.0", "id":1, "method":"ping"}])
         assert r.status_code == 400
         r = await mcp.post(path, content="{broken", headers={"Content-Type":"application/json"})
@@ -117,14 +122,14 @@ async def test_body_limits(env, mcp):
 
 async def test_http_handoff_roundtrip(env, mcp, payload):
     async with mcp:
-        r = await rpc(mcp, env, "tools/call", {"name":"prepare_handoff", "arguments":payload})
+        r = await rpc(mcp, env, "tools/call", {"name":"save_handoff", "arguments":payload})
         assert not r.json()["result"]["isError"]
         job = json.loads(r.json()["result"]["content"][0]["text"])
         (env["root"] / "README.md").write_text("# Updated\n")
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"README.md"}})
         value = json.loads(r.json()["result"]["content"][0]["text"])
         assert value["lines"][0]["text"] == "# Updated"
-        r = await rpc(mcp, env, "tools/call", {"name":"read_handoff", "arguments":{"job_id":job["id"],"document":"PROMPT.md"}})
+        r = await rpc(mcp, env, "tools/call", {"name":"list_handoffs", "arguments":{"job_id":job["id"],"document":"PROMPT.md"}})
         prompt = json.loads(r.json()["result"]["content"][0]["text"])
         assert "paste your reply" in prompt["content"]
         assert "===== TASK.md =====" in prompt["content"]
@@ -273,7 +278,7 @@ async def test_admin_node_reads_run_off_the_event_loop(env, mcp, payload, monkey
     import threading
     service = env["service"]
     async with mcp:
-        r = await rpc(mcp, env, "tools/call", {"name": "prepare_handoff", "arguments": payload})
+        r = await rpc(mcp, env, "tools/call", {"name": "save_handoff", "arguments": payload})
         job = json.loads(r.json()["result"]["content"][0]["text"])
     loop_thread = threading.current_thread()
     seen = {}

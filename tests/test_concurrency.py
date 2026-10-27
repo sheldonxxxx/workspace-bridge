@@ -78,7 +78,7 @@ def test_slow_node_read_blocks_neither_other_workspaces_nor_admin(env):
         assert other["lines"][0]["text"] == "# Beta"
         assert {row["id"] for row in service.list_workspaces()} == {alpha, beta}
         service.manage_workspace(beta, "set_write_scope", write_scope="workspace")
-        written = service.call(beta, token, "write_file", {"path": "notes.md", "content": "hi\n"})
+        written = service.call(beta, token, "apply_patch", {"changes": [{"op": "create", "path": "notes.md", "content": "hi\n"}], "message": "Add notes.md."})
         assert written["workspace_id"] == beta
         assert slow.is_alive()
     finally:
@@ -90,14 +90,14 @@ def test_slow_node_read_blocks_neither_other_workspaces_nor_admin(env):
 def test_writes_to_one_workspace_queue_while_its_reads_continue(env):
     service, token, alpha = env["service"], env["token"], env["id"]
     service.manage_workspace(alpha, "set_write_scope", write_scope="workspace")
-    entered, release = _block_node(env, alpha, {"write_file"})
+    entered, release = _block_node(env, alpha, {"apply_patch"})
     first, first_outcome = _background(lambda: service.call(
-        alpha, token, "write_file", {"path": "a.md", "content": "a\n"}))
+        alpha, token, "apply_patch", {"changes": [{"op": "create", "path": "a.md", "content": "a\n"}], "message": "Add a.md."}))
     second = None
     try:
         assert entered.wait(5)
         second, second_outcome = _background(lambda: service.call(
-            alpha, token, "write_file", {"path": "b.md", "content": "b\n"}))
+            alpha, token, "apply_patch", {"changes": [{"op": "create", "path": "b.md", "content": "b\n"}], "message": "Add b.md."}))
         second.join(0.3)
         assert second.is_alive(), "a second write to the same workspace did not wait"
         assert not (env["root"] / "b.md").exists()
@@ -116,7 +116,7 @@ def test_writes_to_one_workspace_queue_while_its_reads_continue(env):
 
 def test_slow_native_start_does_not_block_cancel_or_reads_of_other_runs(modern_env):
     service, ws_id, token, job, native, _ = modern_env
-    first = service.call(ws_id, token, "start_agent_run", {
+    first = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "first"})
     direct = service.run_coordinator.adapter(ADAPTER_ID)
     original = direct.start_run
@@ -128,15 +128,15 @@ def test_slow_native_start_does_not_block_cancel_or_reads_of_other_runs(modern_e
         return original(*args)
 
     direct.start_run = slow_start
-    slow, outcome = _background(lambda: service.call(ws_id, token, "start_agent_run", {
+    slow, outcome = _background(lambda: service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "second"}))
     try:
         assert entered.wait(5)
-        read = service.call(ws_id, token, "read_agent_run", {"run_id": first["run_id"]})
+        read = service.call(ws_id, token, "read_run", {"run_id": first["run_id"]})
         assert read["run_id"] == first["run_id"]
-        listed = service.call(ws_id, token, "list_agent_runs", {})
+        listed = service.call(ws_id, token, "list_runs", {})
         assert first["run_id"] in {run["run_id"] for run in listed["runs"]}
-        cancelled = service.call(ws_id, token, "cancel_agent_run", {"run_id": first["run_id"]})
+        cancelled = service.call(ws_id, token, "cancel_run", {"run_id": first["run_id"]})
         assert cancelled["run_id"] == first["run_id"]
         assert slow.is_alive()
         native.rpc.status = "idle"  # the fake runtime tracks a single turn
@@ -148,7 +148,7 @@ def test_slow_native_start_does_not_block_cancel_or_reads_of_other_runs(modern_e
     _finish_test_run(service, native, ws_id, outcome["value"]["run_id"])
 
 
-@pytest.mark.parametrize("name", ["steer_agent_run", "respond_agent_interaction"])
+@pytest.mark.parametrize("name", ["send_run_input", "answer_interaction"])
 def test_run_input_queues_on_its_own_run(modern_env, name):
     service, ws_id, *_ = modern_env
     assert service._tool_queue(ws_id, name, {"run_id": "run_x"}) is not None

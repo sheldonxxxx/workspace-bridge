@@ -8,6 +8,7 @@ import pytest
 
 from admin_helpers import admin_cookie
 from workspace_bridge import checks as module
+from mcp_helpers import McpTransport
 from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.event_broker import EventBroker
 from workspace_bridge.notifications import DiscordChannel, NotificationEvent
@@ -166,7 +167,7 @@ def test_checks_toml_lives_in_node_state_and_the_node_restarts_cleanly(ws):
 def test_after_run_checks_hold_the_finished_notice(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     configure(service, ws_id, after_run=["ok", "bad"])
-    run = service.call(ws_id, token, "start_agent_run", {
+    run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "checked-run"})
     _finish_test_run(service, native, ws_id, run["run_id"])
 
@@ -175,7 +176,7 @@ def test_after_run_checks_hold_the_finished_notice(modern_env):
             "SELECT event_type FROM notification_events WHERE run_id=?", (run["run_id"],))]
 
     assert "run_completed" not in events()
-    read = service.call(ws_id, token, "read_agent_run", {"run_id": run["run_id"]})
+    read = service.call(ws_id, token, "read_run", {"run_id": run["run_id"]})
     assert read["checks"] == {"state": "waiting", "names": ["ok", "bad"]}
     run_checks = service.run_coordinator.run_checks
     assert run_checks.process() == 0  # the post snapshot comes first
@@ -186,7 +187,7 @@ def test_after_run_checks_hold_the_finished_notice(modern_env):
         service.db.execute("UPDATE agent_run_checks SET next_attempt=0")
         run_checks.process()
         time.sleep(0.1)
-    view = service.call(ws_id, token, "read_agent_run", {"run_id": run["run_id"]})["checks"]
+    view = service.call(ws_id, token, "read_run", {"run_id": run["run_id"]})["checks"]
     assert view["state"] == "complete" and view["passed"] == 1 and view["failed"] == 1
     assert [item["status"] for item in view["results"]] == ["passed", "failed"]
     row = service.db.execute("SELECT * FROM notification_events WHERE run_id=? AND event_type='run_completed'",
@@ -203,7 +204,7 @@ def test_after_run_checks_hold_the_finished_notice(modern_env):
 def test_after_run_checks_report_unavailable_and_skip_cancelled_runs(modern_env, monkeypatch):
     service, ws_id, token, job, native, _ = modern_env
     configure(service, ws_id, after_run=["ok"])
-    run = service.call(ws_id, token, "start_agent_run", {
+    run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "unavailable-run"})
     _finish_test_run(service, native, ws_id, run["run_id"])
     service.run_coordinator.checkpoints.process_pending()
@@ -251,7 +252,7 @@ async def test_mcp_schema_and_manager_api(env):
         assert [item["name"] for item in saved.json()["checks"]] == ["ok", "bad"]
         bad = await client.put(f"/api/workspaces/{env['id']}/checks", json={"text": "[checks]\nX = 1\n"})
         assert bad.status_code == 400
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(service)),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(service)),
                                  base_url="http://127.0.0.1:8765",
                                  headers={"X-Bridge-Token": env["token"],
                                           "Accept": "application/json, text/event-stream"}) as client:

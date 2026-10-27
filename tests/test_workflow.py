@@ -9,7 +9,7 @@ def call(env, name, **args):
     return env["service"].call(env["id"], env["token"], name, args)
 
 def prepare(env, payload):
-    return call(env, "prepare_handoff", **Handoff.model_validate(payload).model_dump())
+    return call(env, "save_handoff", **Handoff.model_validate(payload).model_dump())
 
 
 

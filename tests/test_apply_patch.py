@@ -10,6 +10,7 @@ import pytest
 
 from admin_helpers import admin_cookie
 from workspace_bridge import edit_journal
+from mcp_helpers import McpTransport
 from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.security import BridgeError, allowed, digest, validate_excludes
 
@@ -178,19 +179,20 @@ def test_secret_check_blocks_only_new_matches(ws):
     call(ws, 'apply_patch', message='turn on debug', changes=[
         {'op': 'edit', 'path': 'settings.py', 'sha256': sha(ws, 'settings.py'),
          'old': 'DEBUG = False', 'new': 'DEBUG = True'}])
-    edited = call(ws, 'edit_file', path='settings.py', old_text='DEBUG = True', new_text='DEBUG = 1',
-                  expected_sha256=sha(ws, 'settings.py'))
-    call(ws, 'write_file', path='settings.py', content=f'# keys\n{SECRET}\nDEBUG = 2\n',
-         expected_sha256=edited['sha256'])
+    call(ws, 'apply_patch', message='rewrite settings', changes=[
+        {'op': 'edit', 'path': 'settings.py', 'sha256': sha(ws, 'settings.py'),
+         'old': 'DEBUG = True', 'new': '# keys\nDEBUG = 2'}])
     for name, args in [
         ('apply_patch', dict(message='copy key', changes=[
             {'op': 'edit', 'path': 'settings.py', 'sha256': sha(ws, 'settings.py'),
              'old': 'DEBUG = 2', 'new': SECRET}])),
         ('apply_patch', dict(message='new key', changes=[
             {'op': 'create', 'path': 'keys.py', 'content': 'token = "ghp_abcdefghijklmnopqrstuvwxyz"\n'}])),
-        ('edit_file', dict(path='settings.py', old_text='DEBUG = 2', new_text='password = "hunter2hunter2"',
-                           expected_sha256=sha(ws, 'settings.py'))),
-        ('write_file', dict(path='notes.md', content=SECRET)),
+        ('apply_patch', dict(message='add password', changes=[
+            {'op': 'edit', 'path': 'settings.py', 'sha256': sha(ws, 'settings.py'),
+             'old': 'DEBUG = 2', 'new': 'password = "hunter2hunter2"'}])),
+        ('apply_patch', dict(message='copy key to notes', changes=[
+            {'op': 'create', 'path': 'notes.md', 'content': SECRET}])),
     ]:
         with pytest.raises(BridgeError) as exc:
             call(ws, name, **args)
@@ -261,7 +263,7 @@ async def test_mcp_schema_large_patch_and_manager_journal(ws):
     schema = TOOLS['apply_patch'][0].model_json_schema()
     assert schema['additionalProperties'] is False and {'workspace_id', 'changes', 'message'} <= set(schema['required'])
     content = 'line\n' * 160_000  # Over the ordinary 1 MiB MCP body once two files carry it.
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(ws['service'])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(ws['service'])),
                                  base_url='http://127.0.0.1:8765') as client:
         headers = {'X-Bridge-Token': ws['token'], 'Accept': 'application/json'}
         listed = (await client.post('/mcp', headers=headers, json={

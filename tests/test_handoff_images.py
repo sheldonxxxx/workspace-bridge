@@ -16,7 +16,7 @@ import pytest
 from workspace_bridge.api import Handoff, TOOLS, make_mcp
 from workspace_bridge.media import (IMAGE_MIME_TYPES, MAX_IMAGE_BASE64_CHARS,
                                     MAX_IMAGE_REQUEST_BYTES, MAX_INPUT_BYTES)
-from workspace_bridge.protocol import MODERN, PREFIX, VERSIONS
+from mcp_helpers import McpTransport, MODERN, PREFIX, VERSIONS
 from workspace_bridge.security import BridgeError, HANDOFF, digest
 
 
@@ -42,14 +42,14 @@ def raster(fmt="PNG", *, size=(80, 60), noisy=False, **kwargs):
 
 
 def upload(env, data=None, path=PATH, mime_type="image/png", **kwargs):
-    return env["service"].call(env["id"], env["token"], "write_image", {
+    return env["service"].call(env["id"], env["token"], "upload_image", {
         "path": path, "data_base64": base64.b64encode(data if data is not None else raster()).decode(),
         "mime_type": mime_type, **kwargs})
 
 
 def publish(env, payload, attachments):
     args = Handoff.model_validate({**payload, "attachments": attachments}).model_dump()
-    return env["service"].call(env["id"], env["token"], "prepare_handoff", args)
+    return env["service"].call(env["id"], env["token"], "save_handoff", args)
 
 
 def reference(path, sha):
@@ -136,7 +136,7 @@ def test_invalid_upload_never_creates_parent_directories(env, kind):
     else:
         args["data_base64"] = "A" * (MAX_IMAGE_BASE64_CHARS + 4)
     with pytest.raises(BridgeError):
-        env["service"].call(env["id"], env["token"], "write_image", args)
+        env["service"].call(env["id"], env["token"], "upload_image", args)
     assert not (env["root"] / HANDOFF).exists()
 
 
@@ -228,7 +228,7 @@ def test_existing_workspace_image_and_matching_context_hash_are_supported(env, p
 
 
 def test_empty_attachments_preserve_previous_handoff_retry_identity(env, payload):
-    job = env["service"].call(env["id"], env["token"], "prepare_handoff", payload)
+    job = env["service"].call(env["id"], env["token"], "save_handoff", payload)
     assert publish(env, payload, [])["id"] == job["id"]
 
 
@@ -278,28 +278,30 @@ async def test_large_image_upload_publication_and_native_readback_over_both_http
     # Crosses both the old MCP/Node server 1 MiB and Node client 2 MiB limits.
     data = raster(size=(1100, 900), noisy=True)
     assert len(data) > 2 * 1024 * 1024
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])),
                                  base_url="http://127.0.0.1:8765") as client:
-        response = await rpc(client, env, version, "write_image", {
+        response = await rpc(client, env, version, "upload_image", {
             "path": PATH, "data_base64": base64.b64encode(data).decode(), "mime_type": "image/png"})
         assert response.status_code == 200
         result = response.json()["result"]
         assert not result["isError"], result
         written = json.loads(result["content"][0]["text"])
-        prepared = await rpc(client, env, version, "prepare_handoff", {
+        prepared = await rpc(client, env, version, "save_handoff", {
             **payload, "attachments": [reference(PATH, written["sha256"])]})
         assert not prepared.json()["result"]["isError"], prepared.text
         readback = await rpc(client, env, version, "read_file", {"path": PATH, "expected_sha256": written["sha256"]})
         assert [b["type"] for b in readback.json()["result"]["content"]] == ["text", "image"]
         assert (env["root"] / PATH).read_bytes() == data
-        too_large_text = await rpc(client, env, version, "write_file", {
-            "path": HANDOFF + "/blocked.md", "content": "x" * (1024 * 1024)})
-        assert too_large_text.status_code == 400
-        assert not (env["root"] / HANDOFF / "blocked.md").exists()
+        # Only an image upload may use the large body; text keeps its own bound.
+        too_large_text = await rpc(client, env, version, "apply_patch", {
+            "message": "Add a large note.",
+            "changes": [{"op": "create", "path": "blocked.md", "content": "x" * (1024 * 1024 + 1)}]})
+        assert too_large_text.json()["error"]["code"] == -32602
+        assert not (env["root"] / "blocked.md").exists()
 
 
 def test_image_capabilities_and_tool_permissions(env):
-    schema, _, readonly, idempotent = TOOLS["write_image"]
+    schema, _, readonly, idempotent = TOOLS["upload_image"]
     assert not readonly and not idempotent
     assert "workspace_id" in schema.model_json_schema()["required"]
     info = env["service"].info(env["service"].workspace(env["id"]))

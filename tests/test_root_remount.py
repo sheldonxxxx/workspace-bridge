@@ -19,7 +19,7 @@ def test_authoritative_node_serves_info_reads_and_search(env):
     result = call(env, "read_file", path="src/main.py", start_line=1, max_lines=200,
                   expected_sha256=None)
     assert any("return a + b" in line["text"] for line in result["lines"])
-    assert call(env, "grep_files", pattern="return", include="**/*.py")["matches"]
+    assert call(env, "grep", pattern="return", include="**/*.py")["matches"]
 
 
 def test_same_path_after_replacement_stays_node_authoritative(env):

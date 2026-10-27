@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Breaking:** the MCP endpoint runs on the official MCP Python SDK
+  (`mcp` 2.2) and serves both the 2025 protocol versions and 2026-07-28.
+  The tool surface is 24 tools under new names: `grep` (was `grep_files`),
+  `upload_image` (`write_image`), `save_handoff` (`prepare_handoff`),
+  `list_handoffs` (list, summary and documents, replacing `read_handoff`),
+  `list_targets` (agents, or one agent's models, replacing
+  `list_agent_adapters` and `list_agent_models`), `start_run`, `list_runs`,
+  `read_run` (with interactions and check results), `run_log` (activities,
+  paged), `send_run_input` with `mode` `steer` or `queue`, `cancel_run`,
+  and `answer_interaction` with `choice_id` or `answers`, `decided_by` and
+  `reason`. `write_file` and `edit_file` are removed: a single-file change is
+  an `apply_patch` with one change. A request without an id is a
+  notification and is never executed; GET on `/mcp` answers 405. The
+  project-lead skill is 4.0.0.
 - **Breaking:** one service module runs the Bridge and the Node. `service
   install|status|start|stop|restart|uninstall` installs a user service by
   default (a LaunchAgent on macOS, a systemd user unit on Linux); `--root`
