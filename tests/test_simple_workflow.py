@@ -66,8 +66,8 @@ def test_handoff_does_not_read_or_walk_project(env, payload, monkeypatch):
     monkeypatch.setattr(SafeRoot, 'walk', fail)
     monkeypatch.setattr(SafeRoot, 'read', fail)
     job = publish(env, payload)
-    folder = Path(job['path'])
-    assert {p.name for p in folder.iterdir()} == {'TASK.md', 'CONTEXT.md', 'ACCEPTANCE.md'}
+    assert set(job['documents']) == {'TASK.md', 'CONTEXT.md', 'ACCEPTANCE.md'}
+    assert not (env['root'] / HANDOFF).exists()
     assert (env['root'] / 'src/main.py').read_bytes() == before
     assert not any(k in job for k in ['baseline_files', 'baseline_sha256', 'review_id', 'verdict'])
     assert job['completion_tracking'] == 'not_tracked'
@@ -112,7 +112,7 @@ def test_general_reads_observe_current_source_without_result_files(env, payload)
     current = read(env, 'src/main.py')
     assert current['sha256'] != first['sha256']
     assert 'int(a)' in current['lines'][1]['text']
-    assert not (Path(job['path'])/'result').exists()
+    assert not (env['root'] / HANDOFF).exists()
     with pytest.raises(BridgeError) as e:
         read(env, 'src/main.py', first['sha256'])
     assert e.value.code == 'stale_evidence'
@@ -131,12 +131,11 @@ def test_exclusion_change_does_not_invalidate_handoff(env, payload):
     assert read(env, 'src/main.py')['lines']
 
 
-def test_handoff_integrity_is_visible_but_not_an_audit_gate(env, payload):
+def test_stored_handoff_documents_match_what_was_published(env, payload):
     job = publish(env, payload)
-    (Path(job['path'])/'TASK.md').write_text('Modified locally')
     task = env['service'].call(env['id'], env['token'], 'read_handoff',
         dict(job_id=job['id'], document='TASK.md', start_line=1, max_lines=100))
-    assert task['matches_published'] is False
+    assert task['matches_published'] is True
     assert task['trust'] == 'untrusted_handoff_content'
 
 

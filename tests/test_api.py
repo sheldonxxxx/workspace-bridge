@@ -124,9 +124,10 @@ async def test_http_handoff_roundtrip(env, mcp, payload):
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"README.md"}})
         value = json.loads(r.json()["result"]["content"][0]["text"])
         assert value["lines"][0]["text"] == "# Updated"
-        r = await rpc(mcp, env, "tools/call", {"name":"read_handoff", "arguments":{"job_id":job["id"],"document":"TASK.md"}})
-        task = json.loads(r.json()["result"]["content"][0]["text"])
-        assert "paste your reply" in task["content"]
+        r = await rpc(mcp, env, "tools/call", {"name":"read_handoff", "arguments":{"job_id":job["id"],"document":"PROMPT.md"}})
+        prompt = json.loads(r.json()["result"]["content"][0]["text"])
+        assert "paste your reply" in prompt["content"]
+        assert "===== TASK.md =====" in prompt["content"]
         assert job["completion_tracking"] == "not_tracked"
 
 

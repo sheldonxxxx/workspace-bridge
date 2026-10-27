@@ -43,35 +43,42 @@ def test_generic_tools_replace_handoff_names_without_aliases(env):
         assert 'pattern' not in schema['properties']['path']  # Paths aren't tied to a handoff prefix.
 
 
-@pytest.mark.parametrize('value', ['none','handoff','workspace'])
+@pytest.mark.parametrize('value', ['none','workspace'])
 def test_scope_is_exposed_in_discovery_and_info_and_does_not_limit_reads(env, value):
     scope(env, value)
     info = call(env, 'workspace_info')
     assert info['write_scope'] == value and info['read_scope'] == 'workspace'
-    assert info['writable_path_prefix'] == {'none':None,'handoff':HANDOFF+'/','workspace':''}[value]
+    assert info['writable_path_prefix'] == {'none':None,'workspace':''}[value]
     assert info['source_access'] == ('read_write' if value=='workspace' else 'read_only')
     listed = env['service'].call(None, env['token'], 'list_workspaces', {})
     assert listed['workspaces'][0]['write_scope'] == value
     assert read(env, 'src/main.py')['lines'][0]['text'].startswith('def add')
 
 
-def test_default_stays_handoff_and_read_only_mode_has_no_prepare_bypass(env, payload):
-    assert call(env, 'workspace_info')['write_scope'] == 'handoff'
+def test_default_is_read_only_and_handoffs_still_work(env, payload):
+    assert call(env, 'workspace_info')['write_scope'] == 'none'
     note = HANDOFF + '/plan.md'
-    created = call(env,'write_file',path=note,content='keep\n')
-    scope(env,'none')
     for name,args in [
-        ('write_file',dict(path=note,content='replace\n',expected_sha256=created['sha256'])),
-        ('edit_file',dict(path=note,old_text='keep',new_text='changed',expected_sha256=created['sha256'])),
+        ('write_file',dict(path=note,content='replace\n')),
         ('write_file',dict(path='new/plan.md',content='no')),
-        ('prepare_handoff',payload),
+        ('apply_patch',dict(changes=[{'op':'create','path':'new/plan.md','content':'no'}],message='no')),
     ]:
         with pytest.raises(BridgeError) as exc: call(env,name,**args)
         assert exc.value.code=='policy_denied'
-    assert read(env,note)['sha256']==created['sha256']
-    assert not (env['root']/'new').exists()
-    assert not (env['root']/HANDOFF/'jobs').exists()
-    assert not env['service'].db.execute('SELECT * FROM jobs').fetchall()
+    assert not (env['root']/'new').exists() and not (env['root']/HANDOFF).exists()
+    job = call(env,'prepare_handoff',**payload)
+    assert job['state']=='prepared' and not (env['root']/HANDOFF).exists()
+
+
+def test_old_handoff_scope_becomes_read_only(env):
+    svc=env['service']
+    with svc.lock, svc.db:
+        svc.db.execute("UPDATE workspaces SET write_scope='handoff' WHERE id=?",(env['id'],))
+    from workspace_bridge.schema_upgrade import store_handoffs_in_bridge
+    store_handoffs_in_bridge(svc.db)
+    assert svc.workspace(env['id'])['write_scope']=='none'
+    with pytest.raises(BridgeError) as exc: scope(env,'handoff')
+    assert exc.value.code=='invalid_arguments'
 
 
 def test_workspace_enable_and_revoke_without_changing_tool_schema(env):
@@ -84,10 +91,11 @@ def test_workspace_enable_and_revoke_without_changing_tool_schema(env):
     assert result['write_scope']=='workspace'
     assert (env['root']/'src/main.py').read_text().endswith('return a - b\n')
     call(env,'write_file',path='docs/design.md',content='# Design\n')
-    scope(env,'handoff')
+    scope(env,'none')
     with pytest.raises(BridgeError):
         call(env,'write_file',path='src/main.py',content='no',expected_sha256=result['sha256'])
-    call(env,'write_file',path=HANDOFF+'/allowed.md',content='allowed')
+    with pytest.raises(BridgeError):
+        call(env,'write_file',path=HANDOFF+'/denied.md',content='denied')
     assert schemas == {name: model.model_json_schema() for name,(model,*_) in TOOLS.items()}
 
 
@@ -110,7 +118,7 @@ def test_workspace_scope_respects_admin_exclusions(env,rule):
 @pytest.mark.parametrize('value',[None,'','all','read_write','WORKSPACE',False])
 def test_invalid_policy_cannot_broaden_access(env,value):
     with pytest.raises(BridgeError):scope(env,value)
-    assert call(env,'workspace_info')['write_scope']=='handoff'
+    assert call(env,'workspace_info')['write_scope']=='none'
     assert not write_allowed('src/main.py',scope=value)
 
 
@@ -165,7 +173,7 @@ def test_workspace_stale_hash_and_unique_edit_are_enforced(env):
 def test_permissions_are_per_workspace_and_new_mappings_never_inherit(env):
     scope(env,'workspace');svc=env['service'];root=env['parent']/'beta';root.mkdir()
     ident=svc.add_workspace('Beta',str(root),[])['workspace']['id'];svc.manage_workspace(ident,'enable')
-    assert svc.workspace(ident)['write_scope']=='handoff'
+    assert svc.workspace(ident)['write_scope']=='none'
     with pytest.raises(BridgeError):svc.call(ident,env['token'],'write_file',dict(path='note.md',content='no'))
     call(env,'write_file',path='note.md',content='alpha')
     assert not (root/'note.md').exists()
@@ -180,7 +188,7 @@ def test_queued_call_uses_current_policy_not_old_discovery(env):
         # The write waits in its workspace queue while the policy changes.
         with svc.workspace_lock(env['id']):
             future=pool.submit(queued);assert entered.wait(2)
-            scope(env,'handoff')
+            scope(env,'none')
         with pytest.raises(BridgeError):future.result(timeout=3)
     assert not (env['root']/'queued.md').exists()
 

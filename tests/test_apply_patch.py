@@ -159,7 +159,7 @@ def test_patch_checks(ws, changes, code):
 
 def test_write_scope_governs_patches_and_undo(ws):
     service = ws['service']
-    service.manage_workspace(ws['id'], 'set_write_scope', write_scope='handoff')
+    service.manage_workspace(ws['id'], 'set_write_scope', write_scope='none')
     with pytest.raises(BridgeError) as exc:
         call(ws, 'apply_patch', changes=five_files(ws), message='denied')
     assert exc.value.code == 'policy_denied'

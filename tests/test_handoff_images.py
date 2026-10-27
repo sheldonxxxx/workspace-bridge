@@ -23,6 +23,14 @@ from workspace_bridge.security import BridgeError, HANDOFF, digest
 PATH = HANDOFF + "/attachments/settings.png"
 
 
+
+@pytest.fixture(autouse=True)
+def _edit_scope(request):
+    """Notes and images under .workspace-handoff/ are ordinary edits now."""
+    if "env" in request.fixturenames:
+        env = request.getfixturevalue("env")
+        env["service"].manage_workspace(env["id"], "set_write_scope", write_scope="workspace")
+
 def raster(fmt="PNG", *, size=(80, 60), noisy=False, **kwargs):
     if noisy:
         image = Image.frombytes("RGB", size, random.Random(123).randbytes(size[0] * size[1] * 3))
@@ -78,9 +86,7 @@ def test_upload_keeps_metadata_while_reader_strips_it(env):
         assert "Comment" not in image.info
 
 
-@pytest.mark.parametrize("scope", ["handoff", "workspace"])
-def test_upload_is_handoff_only_even_with_workspace_scope(env, scope, monkeypatch):
-    env["service"].manage_workspace(env["id"], "set_write_scope", write_scope=scope)
+def test_upload_is_handoff_only_even_with_workspace_scope(env, monkeypatch):
     monkeypatch.setattr("workspace_bridge.media.read_image", lambda *a, **k: pytest.fail("denied path decoded"))
     with pytest.raises(BridgeError) as exc:
         upload(env, path="src/reference.png")
@@ -173,8 +179,7 @@ def test_attachment_manifest_uses_original_hash_and_retries_keep_same_job(env, p
     job = publish(env, payload, attachments)
     again = publish(env, payload, attachments)
     assert job["id"] == again["id"] and job["state"] == "prepared"
-    context_path = env["root"] / HANDOFF / "jobs" / job["id"] / "CONTEXT.md"
-    text = context_path.read_text()
+    text = json.loads(env["service"].job(env["service"].workspace(env["id"]), job["id"])["content"])["CONTEXT.md"]
     manifest = json.loads(text.split("## Image attachments", 1)[1].split("```json\n", 1)[1].split("```", 1)[0])
     assert manifest == [{**attachments[0], "mime_type": "image/png", "source_format": "PNG",
                          "width": 80, "height": 60, "bytes": written["bytes"]}]
@@ -217,7 +222,7 @@ def test_existing_workspace_image_and_matching_context_hash_are_supported(env, p
     data = raster("JPEG")
     (env["root"] / path).write_bytes(data)
     job = publish(env, {**payload, "context_hashes": {path: digest(data)}}, [reference(path, digest(data))])
-    context = (env["root"] / HANDOFF / "jobs" / job["id"] / "CONTEXT.md").read_text()
+    context = json.loads(env["service"].job(env["service"].workspace(env["id"]), job["id"])["content"])["CONTEXT.md"]
     assert '"mime_type": "image/jpeg"' in context
     assert (env["root"] / path).read_bytes() == data
 

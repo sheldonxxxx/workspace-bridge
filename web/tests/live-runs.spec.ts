@@ -178,7 +178,7 @@ async function mockApi(page: Page) {
             name: "Alpine archive",
             root: "/Projects/alpine",
             enabled: true,
-            write_scope: "handoff",
+            write_scope: "none",
             excludes: "[]",
             node_id: "node_local",
             node_name: "Local Mac",

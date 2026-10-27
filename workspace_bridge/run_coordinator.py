@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
-from .security import BridgeError, HANDOFF, digest, redact
+from .security import BridgeError, digest, redact
 from .notifications import codex_quota_summary
 from .wbrp import validate_run_state
 from .adapter_events import AdapterEventReader
@@ -23,6 +23,7 @@ from .manager_events import RunEventHub
 from .keyed_locks import KeyedLocks
 from .run_checkpoints import RunCheckpoints
 from .run_checks import RunChecks
+from . import handoffs
 from .schema_upgrade import add_interaction_decisions
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
@@ -652,20 +653,7 @@ class RunCoordinator:
         return effort
 
     def _prompt(self, ws: dict, job: dict) -> str:
-        directory = str(ws["root"])
-        folder = f"{directory}/{HANDOFF}/jobs/{job['id']}"
-        return (
-            f"Work only in this project: {json.dumps(directory)}. "
-            f"Read {json.dumps(folder + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md "
-            "in the same folder. Preserve pre-existing edits and unrelated work. "
-            "Follow the plan and satisfy every acceptance criterion. Run the agreed checks. "
-            "Do not access secrets unless the handoff explicitly requires and authorizes it. "
-            "Do not make unrelated destructive actions, expand scope, or edit the handoff "
-            "documents unless the handoff explicitly permits them. "
-            "Stop and report a blocker when assumptions fail or the work exceeds "
-            "scope. Report changed files, exact checks "
-            "and outcomes, and remaining risks."
-        )
+        return handoffs.agent_prompt(str(ws["root"]), job)
 
     def _run_row(self, ws: dict, run_id: str) -> dict:
         with self.service.lock:

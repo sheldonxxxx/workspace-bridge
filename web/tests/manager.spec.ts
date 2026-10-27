@@ -61,7 +61,7 @@ const workspace = {
   root: "/Projects/alpine-archive",
   enabled: true,
   agent_enabled: true,
-  write_scope: "handoff" as const,
+  write_scope: "none" as const,
   excludes: "[]",
   node_id: LOCAL_NODE,
   node_name: "Local Mac",

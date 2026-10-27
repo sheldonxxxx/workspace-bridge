@@ -1051,7 +1051,9 @@ def test_cross_handoff_continuation_reuses_conversation_with_new_prompt(modern_e
     assert captured, "native start_run was not called"
     prompt = captured[0][1]["input"][0]["text"]
     assert second_job["id"] in prompt
-    assert f"jobs/{second_job['id']}/TASK.md" in prompt
+    # The prompt carries the handoff text itself; nothing is read from the repo.
+    assert f"Handoff {second_job['id']}" in prompt and "===== TASK.md =====" in prompt
+    assert ".workspace-handoff" not in prompt
     ws = service.workspace(ws_id)
     stored = service.run_coordinator._run_row(ws, second["run_id"])
     assert stored["handoff"] == second_job["id"]

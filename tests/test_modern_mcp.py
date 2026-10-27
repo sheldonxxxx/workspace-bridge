@@ -70,4 +70,5 @@ async def test_modern_handoff_workflow(env, payload):
     result = r.json()['result']
     assert not result['isError']
     handoff = json.loads(result['content'][0]['text'])
-    assert (env['root']/'.workspace-handoff'/'jobs'/handoff['id']/'TASK.md').is_file()
+    assert handoff['stored'] == 'bridge'
+    assert not (env['root']/'.workspace-handoff').exists()

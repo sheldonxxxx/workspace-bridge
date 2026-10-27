@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Breaking:** handoffs live in Bridge state, not in the workspace.
+  `prepare_handoff` writes nothing to the project, so handoffs never show in
+  `git status`; the run prompt and the copy-paste prompt carry the full TASK,
+  CONTEXT and ACCEPTANCE text, and `read_handoff` also serves the copy-paste
+  prompt as `PROMPT.md`. Handoffs published by earlier versions are still
+  read from their `.workspace-handoff/` folder.
+- **Breaking:** the write scope is either read-only (`none`, now the default)
+  or edit (`workspace`). Preparing handoffs and starting runs need no write
+  scope; editing files, `write_image` and ad hoc `run_checks` need edit.
+  Workspaces set to the old `handoff` scope become read-only.
+- New MCP tool `run_checks` runs checks the local administrator named in the
+  workspace's `checks.toml`, kept in Node state outside the repository and
+  edited through the Manager API (`/api/workspaces/{id}/checks`). Commands run
+  without a shell, with a timeout and a bounded, redacted output tail. A
+  workspace can also run named checks after each run: `read_agent_run`, the
+  `run.finished` event and the Discord notice report how many passed and
+  failed.
+- `git_diff` with `mode=run` lists the `apply_patch` edits ChatGPT made
+  during the run as `chatgpt_edits`.
 - New MCP tools `apply_patch` and `undo_edit`. `apply_patch` edits, creates,
   moves and deletes up to 50 files (1 MiB of text) in one step: every
   existing file needs its current hash, and all changes apply or none do. It

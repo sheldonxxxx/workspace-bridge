@@ -17,6 +17,14 @@ from workspace_bridge.service import Service
 NOTE = HANDOFF + '/notes/plan.md'
 
 
+@pytest.fixture(autouse=True)
+def _edit_scope(request):
+    """Notes and images under .workspace-handoff/ are ordinary edits now."""
+    if "env" in request.fixturenames:
+        env = request.getfixturevalue("env")
+        env["service"].manage_workspace(env["id"], "set_write_scope", write_scope="workspace")
+
+
 def call(env, tool, **args):
     return env['service'].call(env['id'], env['token'], tool, args)
 
@@ -60,7 +68,7 @@ def test_create_only_no_silent_overwrite(env):
 @pytest.mark.parametrize('tool', ['write_file', 'edit_file'])
 @pytest.mark.parametrize('path', ['src/main.py','README.md','../outside.txt','/tmp/outside.txt',
     HANDOFF, HANDOFF+'/../src/main.py', HANDOFF+'/notes/../../src/main.py',
-    HANDOFF+'-other/note.md', 'nested/'+HANDOFF+'/note.md', '.WORKSPACE-HANDOFF/note.md',
+    'nested/'+HANDOFF+'/note.md', '.WORKSPACE-HANDOFF/note.md',
     HANDOFF+'//note.md', HANDOFF+'/./note.md', HANDOFF+'/bad\\name.md',
     'C:\\Projects\\note.md', HANDOFF+'/bad:name.md', HANDOFF+'/bad\x00name.md'])
 def test_denied_paths_leave_source_untouched(env, tool, path):
@@ -193,20 +201,23 @@ def test_explicit_general_browsing_no_default_source_scan_of_handoff(env):
     assert call(env,'list_dir',path=HANDOFF,depth=2)['entries']
 
 
-def test_edit_published_plan_keeps_original_hash_as_publication_reference(env,payload):
+def test_published_handoff_lives_in_bridge_state_not_the_workspace(env,payload):
+    env['service'].manage_workspace(env['id'],'set_write_scope',write_scope='none')
     job=call(env,'prepare_handoff',**payload)
-    before=call(env,'read_handoff',job_id=job['id'],document='TASK.md',start_line=1,max_lines=200)
-    path=f"{HANDOFF}/jobs/{job['id']}/TASK.md"
-    edit(env,before['sha256'],'Improve arithmetic behavior','Document arithmetic behavior',path)
-    after=call(env,'read_handoff',job_id=job['id'],document='TASK.md',start_line=1,max_lines=200)
-    assert before['matches_published'] and after['matches_published'] is False
-    assert 'Document arithmetic behavior' in after['content']
+    assert job['stored']=='bridge' and 'path' not in job
+    assert not (env['root']/HANDOFF).exists()
+    task=call(env,'read_handoff',job_id=job['id'],document='TASK.md',start_line=1,max_lines=200)
+    assert task['matches_published'] and 'Improve arithmetic behavior' in task['content']
+    assert task['sha256']==job['documents']['TASK.md']['sha256']
+    prompt=call(env,'read_handoff',job_id=job['id'],document='PROMPT.md',start_line=1,max_lines=200)
+    assert '===== ACCEPTANCE.md =====' in prompt['content'] and prompt['content'] in job['copy_prompt']
     assert call(env,'list_handoffs',offset=0,limit=20)['handoffs'][0]['state']=='prepared'
 
 
 def test_two_workspaces_same_relative_path_isolated(env):
     other=env['parent']/'beta';other.mkdir()
     svc=env['service'];ws=svc.add_workspace('Beta',str(other),[])['workspace']['id'];svc.manage_workspace(ws,'enable')
+    svc.manage_workspace(ws,'set_write_scope',write_scope='workspace')
     one=write(env,'alpha\n')
     two=svc.call(ws,env['token'],'write_file',dict(path=NOTE,content='beta\n'))
     assert (env['root']/NOTE).read_text()=='alpha\n' and (other/NOTE).read_text()=='beta\n'
@@ -332,9 +343,12 @@ async def test_http_write_edit_read_and_destructive_annotations(env,version):
 @pytest.mark.parametrize('kind',['secret','excluded'])
 def test_prepare_handoff_uses_same_policy_before_publication(env,payload,kind):
     if kind=='secret':payload['context']='sk-'+'A'*30
-    else:env['service'].manage_workspace(env['id'],'set_excludes',['*.md'])
+    else:
+        env['service'].manage_workspace(env['id'],'set_excludes',['*.md'])
+        payload['context_hashes']={'README.md':digest((env['root']/'README.md').read_bytes())}
     with pytest.raises(BridgeError):call(env,'prepare_handoff',**payload)
     assert not (env['root']/HANDOFF).exists()
+    assert env['service'].db.execute('SELECT count(*) FROM jobs').fetchone()[0]==0
 
 
 async def test_http_large_bounded_write_and_notification_denial(env):

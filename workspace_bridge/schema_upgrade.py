@@ -178,3 +178,18 @@ def add_interaction_decisions(db: sqlite3.Connection) -> None:
         for column in INTERACTION_DECISION_COLUMNS:
             if columns and column not in columns:
                 db.execute(f"ALTER TABLE agent_interactions ADD COLUMN {column} TEXT")
+
+
+def store_handoffs_in_bridge(db: sqlite3.Connection) -> None:
+    """Keep handoff text in Bridge state and drop the handoff-only write scope.
+
+    Handoffs published before this keep ``content`` NULL; their documents
+    stay in the workspace's .workspace-handoff/ folder and are read from there.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+    scoped = bool(list(db.execute("PRAGMA table_info(workspaces)")))
+    with db:
+        if columns and "content" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN content TEXT")
+        if scoped:
+            db.execute("UPDATE workspaces SET write_scope='none' WHERE write_scope='handoff'")

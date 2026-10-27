@@ -408,11 +408,10 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                 "Agent execution is governed by the exact enabled workspace route; "
                 "the legacy workspace-wide agent switch is no longer a run gate.",
                 workspace_id=wid)
-        write_ok = ws["write_scope"] in {"handoff", "workspace"}
-        out.add("workspace.write_scope", "workspaces",
-                "pass" if write_ok else "action_required",
-                "Workspace permits handoff writes." if write_ok else
-                "Workspace write scope blocks prepared handoffs.", workspace_id=wid)
+        # Handoffs live in Bridge state, so either scope can plan and run.
+        out.add("workspace.write_scope", "workspaces", "pass",
+                "ChatGPT can edit allowed files and run checks." if ws["write_scope"] == "workspace" else
+                "Workspace is read-only for ChatGPT; handoffs and runs still work.", workspace_id=wid)
         if ws["enabled"]:
             git_status, git_summary = "pass", "Read-only Git evidence is available."
             if root_ok:
@@ -520,8 +519,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     for row in adapters}
     # write_scope is deliberately absent from run prerequisites: run
     # admission does not check it. A read-only workspace may still have an
-    # existing prepared handoff/conversation that is runnable. Handoff
-    # publication capability stays its own separate diagnostic below.
+    # existing prepared handoff/conversation that is runnable.
     prerequisites = {ws["id"]: [
         code for code, okay in (("workspace.root_accessible", bool(ws.get("enabled") and ws["root"])),
                                 ("workspace.enabled", bool(ws["enabled"])))

@@ -903,11 +903,7 @@ function WorkspaceCard({
         <span>
           <StateBadge value={ws.enabled ? "Bridge on" : "Bridge off"} />{" "}
           <span className="write-summary">
-            {ws.write_scope === "none"
-              ? "Read only"
-              : ws.write_scope === "handoff"
-                ? "Handoff writes"
-                : "Workspace writes"}
+            {ws.write_scope === "workspace" ? "Edits allowed" : "Read only"}
           </span>
         </span>
         <Button
@@ -923,7 +919,7 @@ function WorkspaceCard({
       {settingsOpen && (
         <div className="workspace-settings">
           <div className="settings-field">
-            <Label htmlFor={`write-${ws.id}`}>File write access</Label>
+            <Label htmlFor={`write-${ws.id}`}>ChatGPT file access</Label>
             <select
               id={`write-${ws.id}`}
               className="native-select"
@@ -933,9 +929,8 @@ function WorkspaceCard({
               }
             >
               <option value="none">Read only</option>
-              <option value="handoff">Handoff files only</option>
               <option value="workspace">
-                Permitted files across workspace
+                Edit permitted files and run checks
               </option>
             </select>
           </div>
