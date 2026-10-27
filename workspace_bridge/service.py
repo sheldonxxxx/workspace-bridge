@@ -713,10 +713,6 @@ class Service:
         self.event(ws["id"], "abandon_agent_run", result["outcome"] or "ok")
         return result
 
-    def admin_input_agent_run(self, run_id: str, instruction: str, request_id: str, mode: str) -> dict:
-        ws = self._admin_run_workspace(run_id)
-        return self.run_coordinator.input(ws, run_id, instruction, request_id, mode)
-
     def admin_list_agent_activities(self, run_id: str, limit: int = 50,
                                     before_created: str | None = None,
                                     before_id: str | None = None) -> dict:

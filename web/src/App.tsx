@@ -1325,8 +1325,6 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [runImagePaths, setRunImagePaths] = useState("");
-  const [startingHandoff, setStartingHandoff] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -1340,7 +1338,6 @@ export default function App() {
   const liveRefreshRef = useRef<ReturnType<typeof createRefreshQueue> | null>(
     null,
   );
-  const startRequestIds = useRef(new Map<string, string>());
   const notify = useCallback((text: string) => {
     setNotice(text);
     window.setTimeout(() => setNotice(""), 6500);
@@ -1821,75 +1818,6 @@ export default function App() {
       await loadWorkspaceDetails(ws.id);
     } catch (error) {
       notify((error as Error).message);
-    }
-  }
-  async function startPreparedHandoff(handoff: Handoff, route: RunnableRoute) {
-    if (startingHandoff) return;
-    const images = runImagePaths
-      .split("\n")
-      .map((path) => path.trim())
-      .filter(Boolean)
-      .map((path) => ({ path }));
-    if (images.length > 4) {
-      notify("Choose at most four images.");
-      return;
-    }
-    const key = `${selectedWorkspace}:${handoff.id}:${route.adapter_id}:${JSON.stringify(images)}`;
-    let requestId = startRequestIds.current.get(key);
-    if (!requestId) {
-      requestId = crypto.randomUUID();
-      startRequestIds.current.set(key, requestId);
-    }
-    setStartingHandoff(key);
-    try {
-      const response = await fetch(
-        `/api/workspaces/${selectedWorkspace}/jobs/${handoff.id}/runs`,
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            adapter_id: route.adapter_id,
-            request_id: requestId,
-            ...(images.length ? { images } : {}),
-          }),
-        },
-      );
-      const result = (await response.json().catch(() => ({}))) as Run & {
-        error?: string;
-      };
-      if (!response.ok) {
-        if (response.status >= 400 && response.status < 500)
-          startRequestIds.current.delete(key);
-        notify(
-          result.error ||
-            (response.status >= 500
-              ? "The start outcome is uncertain. Retry to reuse the same request ID."
-              : `Could not start the prepared handoff (HTTP ${response.status}).`),
-        );
-        return;
-      }
-      if (!result.run_id) {
-        notify(
-          "The start outcome is uncertain. Retry to reuse the same request ID.",
-        );
-        return;
-      }
-      startRequestIds.current.delete(key);
-      notify(
-        `Started ${route.adapter_name} run${result.model ? ` with ${result.model}` : ""}.`,
-      );
-      await Promise.allSettled([
-        refresh({ silent: true }),
-        loadWorkspaceDetails(selectedWorkspace || ""),
-      ]);
-      navigate("runs");
-    } catch {
-      notify(
-        "The start outcome is uncertain. Retry to reuse the same request ID.",
-      );
-    } finally {
-      setStartingHandoff(null);
     }
   }
   function openProfile(ws: Workspace, adapterId: string) {
@@ -3109,27 +3037,11 @@ export default function App() {
                       ) : (
                         <p className="diagnostic-unavailable">
                           {diagnosticsUnavailable
-                            ? "Route readiness is unavailable. Start is disabled until diagnostics refresh."
+                            ? "Route readiness is unavailable until diagnostics refresh."
                             : "No diagnostic route is available for this workspace."}
                         </p>
                       )}
                     </div>
-                    <label className="field">
-                      <span>Run images (optional)</span>
-                      <textarea
-                        aria-label="Run image paths"
-                        value={runImagePaths}
-                        onChange={(event) =>
-                          setRunImagePaths(event.target.value)
-                        }
-                        placeholder="One workspace image path per line, up to four"
-                        rows={3}
-                      />
-                      <small>
-                        The owning Node reads previews. The selected adapter and
-                        model must support images.
-                      </small>
-                    </label>
                     {handoffs.length ? (
                       handoffs.map((h) => (
                         <div className="handoff-row" key={h.id}>
@@ -3143,28 +3055,6 @@ export default function App() {
                             <p className="path-text">{h.path}</p>
                           </div>
                           <div className="row-actions">
-                            {h.state === "prepared" && (
-                              <Button
-                                size="sm"
-                                disabled={
-                                  !selectedRoute ||
-                                  diagnosticsUnavailable ||
-                                  selectedRoute.ready !== true ||
-                                  Boolean(startingHandoff)
-                                }
-                                onClick={() =>
-                                  selectedRoute &&
-                                  void startPreparedHandoff(h, selectedRoute)
-                                }
-                              >
-                                <Play size={14} />
-                                {startingHandoff?.startsWith(
-                                  `${selectedWorkspace}:${h.id}:${selectedRoute?.adapter_id}:`,
-                                )
-                                  ? "Starting…"
-                                  : "Start run"}
-                              </Button>
-                            )}
                             <Button
                               variant="outline"
                               size="sm"

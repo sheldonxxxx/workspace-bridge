@@ -2,8 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, CircleHelp, Command, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
 import {
   Sheet,
   SheetContent,
@@ -106,19 +104,10 @@ export function RunInspector({
     loadingOlder,
     load,
     loadOlder,
-    updateRun,
   } = useRunInspector(run, onNotice);
   const [tab, setTab] = useState<"summary" | "activity" | "executions">(
     "summary",
   );
-  const [inputText, setInputText] = useState("");
-  const [sendingInput, setSendingInput] = useState(false);
-  const inputAttemptRef = useRef<{
-    mode: "steer" | "queue";
-    instruction: string;
-    request_id: string;
-  } | null>(null);
-  const sendingInputRef = useRef(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const loadOlderRef = useRef<HTMLDivElement | null>(null);
   const pullStartY = useRef<number | null>(null);
@@ -221,49 +210,6 @@ export function RunInspector({
       panel.removeEventListener("touchcancel", resetPull);
     };
   }, [load, onNotice, onRefresh, run]);
-  async function sendInput(mode: "steer" | "queue") {
-    if (!run || !inputText.trim() || sendingInputRef.current) return;
-    const previous = inputAttemptRef.current;
-    const attempt =
-      previous?.mode === mode && previous.instruction === inputText
-        ? previous
-        : { mode, instruction: inputText, request_id: crypto.randomUUID() };
-    inputAttemptRef.current = attempt;
-    sendingInputRef.current = true;
-    setSendingInput(true);
-    try {
-      const result = await api<Run>(`/api/runs/${run.run_id}/${mode}`, "POST", {
-        instruction: attempt.instruction,
-        request_id: attempt.request_id,
-      });
-      updateRun(result);
-      const status = result.input_message?.status;
-      if (status === "queued" || status === "delivered") {
-        setInputText("");
-        inputAttemptRef.current = null;
-        onNotice(
-          status === "queued"
-            ? mode === "steer"
-              ? "Correction queued."
-              : "Follow-up queued."
-            : "Message sent.",
-        );
-      } else {
-        onNotice(
-          status === "discarded"
-            ? "Message discarded because the run stopped."
-            : "Delivery is unconfirmed. This message will not be resent.",
-        );
-      }
-    } catch (error) {
-      onNotice((error as Error).message);
-      // Keep the request ID: a manual retry checks the same receipt and
-      // cannot submit an already accepted instruction a second time.
-    } finally {
-      sendingInputRef.current = false;
-      setSendingInput(false);
-    }
-  }
   if (!run) return null;
   const current = data || run;
   const pending = (current.interactions || []).filter(
@@ -523,58 +469,6 @@ export function RunInspector({
                   {dateTime(item.decision?.decided)}. {item.decision?.reason}
                 </p>
               ))}
-              {current.phase === "active" && (
-                <section className="request-panel run-input-panel">
-                  <h3>Send a message</h3>
-                  <p>
-                    Steer corrects the current work. Queue adds a follow-up
-                    after this response finishes. Claude pauses the response
-                    before applying a correction.
-                  </p>
-                  <Label htmlFor="run-input">Correction or follow-up</Label>
-                  <Textarea
-                    id="run-input"
-                    value={inputText}
-                    maxLength={8000}
-                    rows={4}
-                    disabled={sendingInput}
-                    onChange={(event) => {
-                      setInputText(event.target.value);
-                      inputAttemptRef.current = null;
-                    }}
-                  />
-                  <div className="inspector-actions">
-                    <Button
-                      size="sm"
-                      disabled={
-                        sendingInput ||
-                        !inputText.trim() ||
-                        !current.input_capabilities?.steer
-                      }
-                      onClick={() => void sendInput("steer")}
-                    >
-                      Steer
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        sendingInput ||
-                        !inputText.trim() ||
-                        !current.input_capabilities?.queue
-                      }
-                      onClick={() => void sendInput("queue")}
-                    >
-                      Queue
-                    </Button>
-                    <small>{inputText.length.toLocaleString()} / 8,000</small>
-                  </div>
-                  {!current.input_capabilities?.steer &&
-                    !current.input_capabilities?.queue && (
-                      <p>Message controls are unavailable for this run.</p>
-                    )}
-                </section>
-              )}
               {Boolean(current.input_messages?.length) && (
                 <section className="request-panel" aria-live="polite">
                   <h3>Recent messages</h3>

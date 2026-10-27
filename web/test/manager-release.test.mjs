@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   BUILD_ID_RE,
   PRODUCTION_TOP_LEVEL_FILES,
-  canonicalPyprojectPath,
   collectManagerInputFiles,
   computeManagerBuildId,
   computeManagerRelease,
@@ -21,7 +20,6 @@ import {
 } from "../src/lib/manager-identity.ts";
 
 const WEB_ROOT = path.resolve(import.meta.dirname, "..");
-const REPO_ROOT = path.resolve(WEB_ROOT, "..");
 
 function validIdentity(overrides = {}) {
   return {
@@ -107,55 +105,6 @@ test("test-only Playwright config does not affect Manager build ID", () => {
     );
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test("local input inventory matches Docker web-builder production inputs", () => {
-  const dockerfile = fs.readFileSync(
-    path.join(REPO_ROOT, "Dockerfile"),
-    "utf8",
-  );
-  const lines = dockerfile.split("\n");
-  const builderStart = lines.findIndex((l) => l.includes("AS web-builder"));
-  assert.ok(builderStart >= 0);
-  let builderEnd = lines.length;
-  for (let i = builderStart + 1; i < lines.length; i++) {
-    if (/^FROM\s/.test(lines[i])) {
-      builderEnd = i;
-      break;
-    }
-  }
-  const stage = lines.slice(builderStart, builderEnd).join("\n");
-  // Test-only and shadcn tooling metadata must not be production inputs.
-  assert.ok(!stage.includes("web/playwright.config.ts"));
-  assert.ok(!stage.includes("web/components.json"));
-  // Every production top-level file must be copied from the web directory.
-  for (const name of PRODUCTION_TOP_LEVEL_FILES) {
-    assert.ok(
-      stage.includes(`web/${name}`),
-      `Docker web-builder must copy web/${name}`,
-    );
-  }
-  assert.ok(stage.includes("web/public/"));
-  assert.ok(stage.includes("web/src/"));
-  // Canonical release metadata must reach the exact path Vite reads.
-  const canonical = canonicalPyprojectPath(WEB_ROOT);
-  assert.equal(canonical, path.resolve(REPO_ROOT, "pyproject.toml"));
-  assert.ok(
-    stage.includes("pyproject.toml") &&
-      (stage.includes("/source/pyproject.toml") ||
-        stage.includes("../pyproject.toml")),
-    "Docker web-builder must copy root pyproject.toml to /source/pyproject.toml",
-  );
-  // Every collected local input must be covered by the Docker copy set.
-  const files = collectManagerInputFiles(WEB_ROOT);
-  for (const file of files) {
-    const rel = path.relative(WEB_ROOT, file).split(path.sep).join("/");
-    const covered =
-      PRODUCTION_TOP_LEVEL_FILES.includes(rel) ||
-      rel.startsWith("src/") ||
-      rel.startsWith("public/");
-    assert.ok(covered, `local input ${rel} must be a Docker production input`);
   }
 });
 

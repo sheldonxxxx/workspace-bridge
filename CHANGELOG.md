@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Breaking:** the Manager no longer starts, steers or queues runs. The
+  `POST /api/workspaces/{workspace}/jobs/{job_id}/runs`,
+  `/api/runs/{run_id}/steer` and `/api/runs/{run_id}/queue` routes and their
+  UI controls are gone; ChatGPT does this through `start_run` and
+  `send_run_input`. The Manager still shows runs, their messages and
+  approval decisions, and keeps stop and abandon.
 - **Breaking:** nothing is written to or read from `.workspace-handoff/`
   any more. `upload_image` takes only `data_base64` and `mime_type`; the Node
   keeps the image by hash in its own state, so read-only workspaces take

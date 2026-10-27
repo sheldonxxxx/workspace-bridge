@@ -235,13 +235,6 @@ export function useRunInspector(
     [feeds.runId, feeds.activityCursor, feeds.executionCursor, runId, current],
   );
 
-  const updateRun = useCallback(
-    (value: Run) => {
-      const session = sessionRef.current;
-      if (session?.id === value.run_id && current(session)) setData(value);
-    },
-    [current],
-  );
   const visibleFeeds = feeds.runId === runId ? feeds : emptyFeeds(runId);
   return {
     data: data?.run_id === runId ? data : run,
@@ -249,6 +242,5 @@ export function useRunInspector(
     loadingOlder: loadingOlderRun === runId,
     load,
     loadOlder,
-    updateRun,
   };
 }

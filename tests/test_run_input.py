@@ -73,22 +73,19 @@ def test_input_rejects_changed_security_before_delivery(modern_env, monkeypatch)
     assert not any(method == "turn/steer" for method, _ in rpc.calls)
 
 
-async def test_manager_and_mcp_use_the_same_input_contract(modern_env):
-    service, ws_id, token, _, _, _ = modern_env
+async def test_only_mcp_sends_run_input(modern_env):
+    service, ws_id, token, _, _, rpc = modern_env
     run = start(modern_env)
     app = make_admin(service)
     cookie = admin_cookie(app)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                 base_url="http://127.0.0.1:8766",
                                 headers={"Cookie": cookie}) as client:
-        sent = await client.post(f"/api/runs/{run['run_id']}/queue", json={
-            "instruction": "Then review tests.", "request_id": "manager-queue"})
-        assert sent.status_code == 200
-        assert sent.json()["input_message"]["status"] == "queued"
-        invalid = await client.post(f"/api/runs/{run['run_id']}/steer", json={
-            "instruction": "Correction", "request_id": "bad", "model": "foreign"})
-        assert invalid.status_code == 400
-        assert (await client.get(f"/api/runs/{run['run_id']}/queue")).status_code == 405
+        for mode in ("queue", "steer"):
+            sent = await client.post(f"/api/runs/{run['run_id']}/{mode}", json={
+                "instruction": "Then review tests.", "request_id": f"manager-{mode}"})
+            assert sent.status_code in {404, 405}
+    assert not any(method == "turn/steer" for method, _ in rpc.calls)
     async with httpx.AsyncClient(transport=McpTransport(make_mcp(service)),
                                 base_url="http://127.0.0.1:8765",
                                 headers={"X-Bridge-Token": token,

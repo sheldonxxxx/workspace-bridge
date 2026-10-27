@@ -195,43 +195,18 @@ def test_diagnostics_ignores_profile_revision_drift(modern_env):
 
 
 @pytest.mark.asyncio
-async def test_admin_prepared_handoff_start_is_strict_and_idempotent(modern_env):
+async def test_the_manager_cannot_start_a_run(modern_env):
     service, ws_id, _, job, _, _ = modern_env
     app = make_admin(service)
-    token = admin_cookie(app)
-    headers = {"Cookie": token}
-    path = f"/api/workspaces/{ws_id}/jobs/{job['id']}/runs"
+    headers = {"Cookie": admin_cookie(app)}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://127.0.0.1:8766") as client:
-        assert (await client.post(path, json={
-            "adapter_id": ADAPTER_ID, "request_id": "manager-start-1"
-        })).status_code == 401
-
-        extra = await client.post(path, headers=headers, json={
-            "adapter_id": ADAPTER_ID, "request_id": "manager-start-1",
-            "prompt": "run arbitrary instructions", "model": "gpt-test",
-            "path": "/tmp/unrelated",
-        })
-        assert extra.status_code == 400
-
-        malformed_path = await client.post(
-            f"/api/workspaces/{ws_id}/jobs/not-a-job/runs", headers=headers,
+        started = await client.post(
+            f"/api/workspaces/{ws_id}/jobs/{job['id']}/runs", headers=headers,
             json={"adapter_id": ADAPTER_ID, "request_id": "manager-start-1"})
-        assert malformed_path.status_code == 400
-
-        body = {"adapter_id": ADAPTER_ID, "request_id": "manager-start-1"}
-        first = await client.post(path, headers=headers, json=body)
-        assert first.status_code == 200, first.text
-        repeated = await client.post(path, headers=headers, json=body)
-        assert repeated.status_code == 200, repeated.text
-        assert first.json()["run_id"] == repeated.json()["run_id"]
-        assert repeated.json()["idempotent"] is True
-        with service.lock:
-            count = service.db.execute(
-                "SELECT count(*) FROM agent_runs WHERE workspace=? AND request_id=?",
-                (ws_id, body["request_id"]),
-            ).fetchone()[0]
-        assert count == 1
+        assert started.status_code in {404, 405}
+    with service.lock:
+        assert service.db.execute("SELECT count(*) FROM agent_runs").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio

@@ -292,8 +292,7 @@ async function mockApi(
     remoteAdapter?: boolean;
     blockedDefault?: boolean;
     runSnapshot?: boolean;
-    inputControls?: boolean;
-    inputFailureOnce?: boolean;
+    activeRun?: boolean;
     codexProfilesUnavailable?: boolean;
     codexQuota?:
       "ok" | "empty" | "error" | "ordinary-unavailable" | "same-duration";
@@ -409,17 +408,18 @@ async function mockApi(
     node_revision: "node-run-rev",
     adapter_revision: "adapter-run-rev",
     runtime_type: "pi",
-    phase: options.inputControls ? "active" : "terminal",
-    outcome: options.inputControls ? null : "succeeded",
+    phase: options.activeRun ? "active" : "terminal",
+    outcome: options.activeRun ? null : "succeeded",
     input_capabilities: {
-      steer: Boolean(options.inputControls),
-      queue: Boolean(options.inputControls),
+      steer: Boolean(options.activeRun),
+      queue: Boolean(options.activeRun),
     },
-    input_messages: [] as Array<{
-      requestId: string;
-      mode: string;
-      status: string;
-    }>,
+    input_messages: options.activeRun
+      ? [
+          { requestId: "chatgpt-queue", mode: "queue", status: "queued" },
+          { requestId: "chatgpt-steer", mode: "steer", status: "delivered" },
+        ]
+      : [],
     workspace_id: WS_ID,
     workspace_name: workspace.name,
     job_id: JOB_ID,
@@ -477,7 +477,6 @@ async function mockApi(
     body?: Record<string, unknown>;
     query?: Record<string, string>;
   }> = [];
-  const starts: Array<Record<string, unknown>> = [];
   const tests: Array<Record<string, unknown>> = [];
   const updates: Array<{ id: string; body: Record<string, unknown> }> = [];
   const respond = async (route: Route, body: unknown, status = 200) =>
@@ -542,36 +541,6 @@ async function mockApi(
     }
     if (path === `/api/runs/${snapshotRun.run_id}` && method === "GET") {
       await respond(route, snapshotRun);
-      return;
-    }
-    if (
-      method === "POST" &&
-      (path === `/api/runs/${snapshotRun.run_id}/steer` ||
-        path === `/api/runs/${snapshotRun.run_id}/queue`)
-    ) {
-      const mode = path.endsWith("/queue") ? "queue" : "steer";
-      const receipt = {
-        requestId: String(body?.request_id),
-        mode,
-        status: mode === "queue" ? "queued" : "delivered",
-      };
-      if (
-        !snapshotRun.input_messages.some(
-          (item) => item.requestId === receipt.requestId,
-        )
-      ) {
-        snapshotRun.input_messages.push(receipt);
-      }
-      if (options.inputFailureOnce) {
-        options.inputFailureOnce = false;
-        await respond(
-          route,
-          { error: "Receipt response was lost. Retry to confirm." },
-          502,
-        );
-      } else {
-        await respond(route, { ...snapshotRun, input_message: receipt });
-      }
       return;
     }
     if (
@@ -841,25 +810,6 @@ async function mockApi(
       }
     }
     if (
-      path.startsWith(`/api/workspaces/${WS_ID}/jobs/`) &&
-      path.endsWith("/runs") &&
-      method === "POST"
-    ) {
-      starts.push(body || {});
-      const selected = adapters.find((item) => item.id === body?.adapter_id);
-      await respond(route, {
-        run_id: `run-${starts.length}`,
-        conversation_id: `conversation-${starts.length}`,
-        adapter_id: selected?.id,
-        adapter_name: selected?.name,
-        runtime_type: selected?.runtime_type,
-        phase: "active",
-        active_state: "running",
-        model: selected?.model_policy.default,
-      });
-      return;
-    }
-    if (
       path.startsWith(`/api/workspaces/${WS_ID}/routes/`) &&
       method === "POST"
     ) {
@@ -868,7 +818,7 @@ async function mockApi(
     }
     await respond(route, { ok: true });
   });
-  return { calls, starts, tests, updates, adapters };
+  return { calls, tests, updates, adapters };
 }
 
 async function navigate(page: Page, title: string) {
@@ -965,7 +915,7 @@ test("Versions shows one target, grouped status, and optional build details", as
   ).toBeLessThanOrEqual(390);
 });
 
-test("same-runtime adapter instances stay distinct in workspaces and exact handoff start", async ({
+test("same-runtime adapter instances stay distinct in workspaces and handoff targets", async ({
   page,
 }) => {
   const api = await mockApi(page);
@@ -988,18 +938,13 @@ test("same-runtime adapter instances stay distinct in workspaces and exact hando
   await expect(
     page.getByText("The Local Codex default model is unavailable."),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
   await target.selectOption(GPU_PI);
-  await expect(page.getByRole("button", { name: "Start run" })).toBeEnabled();
-  await page.getByRole("button", { name: "Start run" }).click();
-  await expect(page.getByRole("heading", { name: "Agent runs" })).toBeVisible();
-  expect(api.starts).toHaveLength(1);
-  expect(api.starts[0]?.adapter_id).toBe(GPU_PI);
-  expect("runtime" in api.starts[0]).toBe(false);
-  expect(Object.keys(api.starts[0] || {}).sort()).toEqual([
-    "adapter_id",
-    "request_id",
-  ]);
+  await expect(page.getByRole("button", { name: "Start run" })).toHaveCount(0);
+  expect(
+    api.calls.some(
+      (call) => call.method === "POST" && call.path.endsWith("/runs"),
+    ),
+  ).toBe(false);
   expect(errors).toEqual([]);
 });
 
@@ -1671,7 +1616,7 @@ test("zero-route workspaces offer only same-Node targets and no implicit fallbac
   await expect(
     route.getByRole("option", { name: "No canonical route reported" }),
   ).toHaveCount(1);
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Start run" })).toHaveCount(0);
 });
 
 test("handoff summaries, blocked defaults, and run security snapshots stay explicit", async ({
@@ -1739,7 +1684,6 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(
     page.getByText("Blocked by route.security_freshness."),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start run" })).toBeDisabled();
   await page.getByRole("button", { name: "TASK" }).click();
   await expect(
     page.getByText("Handoff summary: inspect the project"),
@@ -1758,39 +1702,26 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
 });
 
-test("run message controls retain request IDs on retry and show receipts", async ({
+test("run messages show ChatGPT's receipts without send controls", async ({
   page,
 }) => {
-  const mock = await mockApi(page, {
-    runSnapshot: true,
-    inputControls: true,
-    inputFailureOnce: true,
-  });
+  const mock = await mockApi(page, { runSnapshot: true, activeRun: true });
   await page.goto("./");
   await navigate(page, "Runs");
   await page.getByRole("button", { name: "Open run" }).click();
-  const text = page.getByLabel("Correction or follow-up");
+  const receipts = page.locator(".run-input-receipts");
+  await expect(receipts).toContainText("queued");
+  await expect(receipts).toContainText("delivered");
+  await expect(page.getByLabel("Correction or follow-up")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Steer", exact: true }),
-  ).toBeDisabled();
-  await text.fill("Review the tests after this response.");
-  await page.getByRole("button", { name: "Queue", exact: true }).click();
+  ).toHaveCount(0);
   await expect(
-    page.getByText("Receipt response was lost. Retry to confirm."),
-  ).toBeVisible();
-  await expect(text).toHaveValue("Review the tests after this response.");
-  await page.getByRole("button", { name: "Queue", exact: true }).click();
-  await expect(text).toHaveValue("");
-  await expect(page.locator(".run-input-receipts")).toContainText("queued");
-  const queued = mock.calls.filter((call) => call.path.endsWith("/queue"));
-  expect(queued).toHaveLength(2);
-  expect(queued[0].body).toEqual(queued[1].body);
-  await text.fill("Keep the current public API.");
-  await page.getByRole("button", { name: "Steer", exact: true }).click();
-  await expect(text).toHaveValue("");
-  await expect(page.locator(".run-input-receipts")).toContainText("delivered");
-  const steered = mock.calls.find((call) => call.path.endsWith("/steer"));
-  expect(steered?.body?.request_id).not.toEqual(queued[0].body?.request_id);
+    page.getByRole("button", { name: "Queue", exact: true }),
+  ).toHaveCount(0);
+  expect(mock.calls.some((call) => /\/(steer|queue)$/.test(call.path))).toBe(
+    false,
+  );
 });
 
 test("admin login requires a password change and supports later changes", async ({
@@ -1954,24 +1885,4 @@ test("OpenCode can be registered as an exact native adapter", async ({
   await expect(
     page.getByText("private-test-token", { exact: true }),
   ).toHaveCount(0);
-});
-
-test("handoff image paths are forwarded to the exact selected adapter", async ({
-  page,
-}) => {
-  const api = await mockApi(page);
-  await page.goto("./");
-  await navigate(page, "Handoffs");
-  await page.getByLabel("Workspace", { exact: true }).selectOption(WS_ID);
-  await page
-    .getByLabel("Execution target", { exact: true })
-    .selectOption(GPU_PI);
-  await page
-    .getByLabel("Run image paths")
-    .fill("reference.png\nassets/detail.jpg");
-  await page.getByRole("button", { name: "Start run" }).click();
-  expect(api.starts.at(-1)).toMatchObject({
-    adapter_id: GPU_PI,
-    images: [{ path: "reference.png" }, { path: "assets/detail.jpg" }],
-  });
 });

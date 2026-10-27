@@ -235,17 +235,6 @@ class AgentStartRun(Input):
         return self
 
 
-class PreparedHandoffRun(Input):
-    """Small local-admin wrapper for starting a path-owned prepared handoff."""
-    images: list[RunImage] = Field(default_factory=list, max_length=4)
-    adapter_id: AdapterID
-    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
-
-
-class PreparedHandoffPath(Input):
-    job_id: JobID
-
-
 class AgentRunList(Page):
     adapter_id: AdapterID | None = Field(default=None, description="Optional exact AdapterInstance filter. Omit to list this workspace's runs across configured adapters.")
 
@@ -1240,11 +1229,6 @@ def make_admin(service: Service, port: int = 8766, *,
                     return JSONResponse(await run_in_threadpool(service.admin_stop_agent_run, run_id))
                 if len(parts) == 4 and parts[3] == "abandon":
                     return JSONResponse(await run_in_threadpool(service.admin_abandon_agent_run, run_id))
-                if len(parts) == 4 and parts[3] in {"steer", "queue"}:
-                    model = RunInput.model_validate(await body_json(request))
-                    return JSONResponse(await run_in_threadpool(
-                        service.admin_input_agent_run, run_id, model.instruction,
-                        model.request_id, parts[3]))
                 if len(parts) == 4 and parts[3] == "activities":
                     try:
                         limit = max(1, min(int(request.query_params.get("limit", "50")), 50))
@@ -1297,17 +1281,6 @@ def make_admin(service: Service, port: int = 8766, *,
                     rows = [dict(r) for r in service.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 100")]
                 return JSONResponse({"events": rows})
             ws_id = request.path_params["workspace"]
-            if "job_id" in request.path_params:
-                if request.method != "POST":
-                    return JSONResponse({"error": "Method not allowed"}, 405)
-                path_model = PreparedHandoffPath.model_validate(
-                    {"job_id": request.path_params["job_id"]})
-                model = PreparedHandoffRun.model_validate(await body_json(request))
-                with service.lock:
-                    ws = service.workspace(ws_id, False)
-                return JSONResponse(await run_in_threadpool(
-                    service.start_agent_run, ws, model.adapter_id,
-                    path_model.job_id, model.request_id, images=[i.model_dump(exclude_none=True) for i in model.images]))
             if path.endswith("/routes") or "/routes/" in path:
                 with service.lock:
                     ws = service.workspace(ws_id, False)
@@ -1416,15 +1389,12 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/runs/{run_id}", api),
         Route("/api/runs/{run_id}/stop", api, methods=["POST"]),
         Route("/api/runs/{run_id}/abandon", api, methods=["POST"]),
-        Route("/api/runs/{run_id}/steer", api, methods=["POST"]),
-        Route("/api/runs/{run_id}/queue", api, methods=["POST"]),
         Route("/api/runs/{run_id}/activities", api),
         Route("/api/runs/{run_id}/executions", api),
         Route("/api/runs/{run_id}/executions/{execution_id}", api),
         Route("/api/runs/{run_id}/diff", api),
         Route("/api/bridge", api, methods=["GET", "POST"]),
         Route("/api/workspaces", api, methods=["GET", "POST"]),
-        Route("/api/workspaces/{workspace}/jobs/{job_id}/runs", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}/jobs", api),
         Route("/api/workspaces/{workspace}/runs", api),
         Route("/api/workspaces/{workspace}/document", api),
