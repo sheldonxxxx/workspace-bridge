@@ -21,6 +21,8 @@ from .media import MAX_IMAGE_REQUEST_BYTES
 
 MAX_REQUEST = 1024 * 1024
 MAX_RUNTIME_REQUEST = 2 * 1024 * 1024
+# 1 MiB of patch text can grow to about 6 MiB once JSON escapes it.
+MAX_PATCH_REQUEST = 8 * 1024 * 1024
 MAX_RESPONSE = 20 * 1024 * 1024
 
 
@@ -28,6 +30,8 @@ def request_limit(method: str, path: str) -> int:
     """Largest request body accepted for one Node route."""
     if method == "POST" and path == "/v1/workspaces/write_image":
         return MAX_IMAGE_REQUEST_BYTES
+    if method == "POST" and path == "/v1/workspaces/apply_patch":
+        return MAX_PATCH_REQUEST
     if method == "POST" and path.startswith("/v1/runtime/"):
         return MAX_RUNTIME_REQUEST
     return MAX_REQUEST

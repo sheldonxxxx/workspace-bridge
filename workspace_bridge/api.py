@@ -131,6 +131,47 @@ class FileEdit(Input):
     new_text: str = Field(max_length=262144, description="Literal replacement; empty text removes the matched text, not the file.")
     expected_sha256: HashString = Field(description="Current SHA-256 from read_file/read_handoff or the preceding successful write.")
 
+PATCH_TEXT = 1024 * 1024
+
+
+class PatchEdit(Input):
+    op: Literal["edit"]
+    path: PathString = Field(description="Existing workspace-relative text file.")
+    sha256: HashString = Field(description="The file's current SHA-256 before this patch. Several edits to one file all give this same original hash and apply in order.")
+    old: str = Field(min_length=1, max_length=PATCH_TEXT, description="Exact case-sensitive text occurring once in the file at this point. No regex or fuzzy matching.")
+    new: str = Field(max_length=PATCH_TEXT, description="Literal replacement; empty text removes the match.")
+
+
+class PatchCreate(Input):
+    op: Literal["create"]
+    path: PathString = Field(description="New workspace-relative file; fails if anything exists there. Missing folders are created.")
+    content: str = Field(max_length=PATCH_TEXT, description="Complete UTF-8 text, at most 256 KiB encoded.")
+
+
+class PatchMove(Input):
+    op: Literal["move"]
+    path: PathString = Field(description="Existing workspace-relative file to move.")
+    to: PathString = Field(description="New workspace-relative path; a move never overwrites.")
+    sha256: HashString = Field(description="Current SHA-256 of the file being moved.")
+
+
+class PatchDelete(Input):
+    op: Literal["delete"]
+    path: PathString = Field(description="Existing workspace-relative file to delete.")
+    sha256: HashString = Field(description="Current SHA-256 of the file being deleted.")
+
+
+class ApplyPatch(Input):
+    changes: list[Annotated[PatchEdit | PatchCreate | PatchMove | PatchDelete, Field(discriminator="op")]] = Field(
+        min_length=1, max_length=200,
+        description="Applied together or not at all: up to 50 files and 1 MiB of text. Each file appears once, except several edit changes to one file.")
+    message: str = Field(min_length=1, max_length=500, description="One sentence saying what the patch does; recorded in the edit journal.")
+
+
+class UndoEdit(Input):
+    edit_id: str = Field(pattern=r"^edit_[0-9a-f]{24}$", description="edit_id returned by apply_patch or an earlier undo_edit.")
+
+
 class Directory(Files):
     depth: int = Field(default=1, ge=1, le=4, description="1 = immediate children, up to 4 levels. Root path is the empty string.")
     expected_listing_sha256: HashString | None = None
@@ -272,7 +313,9 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "prepare_handoff": (Handoff, "After following the project-lead skill, publish an implementer-ready plan into this workspace's handoff folder. Optional existing image attachments are validated and recorded with paths, descriptions and original-file hashes in CONTEXT.md. Returns absolute path and copyable instructions. No snapshot, attachment copy or agent launch.", False, True),
     "write_file": (FileWrite, "Create or replace an allowed UTF-8 file in the selected workspace. Check workspace_info.write_scope: none denies all writes, handoff restricts .workspace-handoff/, workspace permits allowed source paths. Omit expected_sha256 for create-only; replacement requires its current hash. No execution or permission changes.", False, False),
     "write_image": (ImageWrite, "Upload a validated PNG/JPEG/WebP/GIF/BMP/TIFF image inside .workspace-handoff/ through the authoritative Node. Requires handoff or workspace write scope. MIME and suffix must match bytes; 20 MiB/40MP, first frame validation. Original bytes and embedded metadata are preserved; visible secrets are NOT redacted. Create-only unless current expected_sha256 is supplied. No source image writes, URL fetch, execution or permission changes.", False, False),
-    "edit_file": (FileEdit, "Edit one exact unique text occurrence in an allowed workspace file. Server write_scope applies (default handoff-only); cannot expand it. Requires current expected_sha256; stale, missing or ambiguous matches fail. No execution.", False, False),
+    "edit_file": (FileEdit, "Edit one exact unique text occurrence in an allowed workspace file. Server write_scope applies (default handoff-only); cannot expand it. Requires current expected_sha256; stale, missing or ambiguous matches fail. Not journaled; prefer apply_patch for source changes. No execution.", False, False),
+    "apply_patch": (ApplyPatch, "Change several workspace files in one atomic step: edit (exact unique text), create, move, delete. Every existing file needs its current sha256; all changes apply or none do. Server write_scope and exclusions apply; a change that adds new secret-like text is refused, while matches a file already holds may stay. Returns edit_id and the new hashes; the Node journals the earlier content so undo_edit can restore it. No execution.", False, False),
+    "undo_edit": (UndoEdit, "Restore the files an apply_patch changed, if each still matches the hash that patch wrote; otherwise nothing changes and the changed paths are listed. Recorded as a new journal entry. Edits expire from the journal after 30 days or past 500 MiB per workspace. No execution.", False, False),
     "list_handoffs": (Page, "List this workspace's handoffs and copyable manual-dispatch prompts. State is not inferred from agent self-report.", True, True),
     "read_handoff": (Artifact, "Read TASK.md, CONTEXT.md or ACCEPTANCE.md. Use normal source browsing to audit the agent result. No completion report files are required.", True, True),
     "list_agent_adapters": (Empty, "List sanitized AdapterInstances and exact workspace-route availability plus bounded descriptor diagnostics (status/features/versions or safe code; observability only, never changes readiness). Runtime type describes protocol behavior; adapter_id selects the destination. Never infer a target from runtime type.", True, True),
@@ -293,7 +336,7 @@ TOOLS: dict[str, tuple[type[Input], str, bool, bool]] = {
     "git_diff": (GitDiff, "Read a bounded patch from HEAD, the index, or the worktree for policy-allowed changed paths, or with mode run and run_id the changes between that run's pre and post checkpoints. A run diff covers the run's time window: edits by people or overlapping runs (listed in read_agent_run checkpoint) are included and authorship is not proven. No caller-supplied Git commands, refs, or options; patch content is secret-redacted and paginated.", True, True),
 }
 # Tool-effect annotations for open-world/agent operations.
-DESTRUCTIVE_TOOLS = frozenset({"write_file", "write_image", "edit_file",
+DESTRUCTIVE_TOOLS = frozenset({"write_file", "write_image", "edit_file", "apply_patch", "undo_edit",
                                "start_agent_run", "respond_agent_interaction",
                                "steer_agent_run", "queue_agent_run"})
 OPEN_WORLD_TOOLS = frozenset({"list_agent_models", "start_agent_run", "list_agent_runs",
@@ -321,7 +364,7 @@ INSTRUCTIONS = (
     "Normal loop: plan in ChatGPT, publish prepare_handoff, call list_agent_adapters for the workspace, choose an exact available adapter_id, optionally inspect that adapter's models with list_agent_models, then start_agent_run with the prepared handoff or a bounded direct instruction. Runtime type is descriptive; never map pi or codex to an arbitrary adapter. Exact workspace route and adapter enablement are the execution gate; only the local administrator can change policy. "
     "For a Runtime Protocol v1 run (read_agent_run includes phase), a waiting_interaction is active and only this chat can answer it: read its exact interaction, decide under the project-lead skill's approval rules or ask the user in the chat, then answer once with respond_agent_interaction, setting decided_by (chatgpt, or owner when relaying the user's answer) and a short reason. Audit material activity summaries with list_agent_activities/read_agent_activity and inspect current source independently. "
     "After completion (or a Discord waiting/completion notice), read the run and activities. When read_agent_run reports checkpoint status complete or partial, read git_diff with mode run and run_id first: it shows the changes made during the run window, so earlier dirty-tree edits are excluded, but people and checkpoint.overlapping_runs can still contribute. Then read git_status and targeted git_diff pages with the returned status_sha256, and inspect current code, callers and tests with list_dir/glob/grep_files/read_file. Git evidence and checkpoints do not establish authorship. "
-    "Use general read_file/write_file/edit_file with workspace-relative paths. Check workspace_info.write_scope before writing: none, handoff (default), or workspace. Only the local administrator can change write or agent policy; never attempt to broaden policy via tool arguments or repository edits. "
+    "Use read_file with workspace-relative paths; change source with apply_patch (atomic, journaled, undo_edit restores) and handoff notes with write_file/edit_file. Check workspace_info.write_scope before writing: none, handoff (default), or workspace. Only the local administrator can change write or agent policy; never attempt to broaden policy via tool arguments or repository edits. "
     "For visual handoffs, upload original raster bytes with write_image to .workspace-handoff/attachments/, then pass their paths, descriptions and returned sha256 values as prepare_handoff attachments. Existing allowed workspace images can also be referenced. Uploads preserve embedded metadata and do not redact pixels; no URL fetch occurs. "
     "Read before replacing, supply the current hash and reconcile conflicts; never force stale writes. Workspace-wide permission is capability, not user authorization to take over an implementation. "
     "Browse handoff files with normal tools using an explicit .workspace-handoff path. Do not change dispatched plans while the local agent is working. "
@@ -478,6 +521,10 @@ class Boundary:
             await send(message)
         await self.app(scope, receive, secured_send)
 
+# Tool calls that may carry more than the ordinary MCP request limit.
+LARGE_TOOL_BODIES = {"write_image": MAX_IMAGE_REQUEST_BYTES, "apply_patch": 8 * 1024 * 1024}
+
+
 async def body_json(request: Request, max_bytes: int = 96000, *, allow_image_upload: bool = False):
     if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
         raise BridgeError("Content-Type must be application/json", "media_type")
@@ -485,7 +532,7 @@ async def body_json(request: Request, max_bytes: int = 96000, *, allow_image_upl
     async with asyncio.timeout(10):
         async for chunk in request.stream():
             data.extend(chunk)
-            if len(data) > (MAX_IMAGE_REQUEST_BYTES if allow_image_upload else max_bytes):
+            if len(data) > (max(LARGE_TOOL_BODIES.values()) if allow_image_upload else max_bytes):
                 raise BridgeError("Request body too large", "body_limit")
     try:
         value = json.loads(data)
@@ -493,8 +540,9 @@ async def body_json(request: Request, max_bytes: int = 96000, *, allow_image_upl
         raise BridgeError("Invalid JSON", "invalid_json") from None
     if len(data) > max_bytes:
         params = value.get("params") if isinstance(value, dict) else None
+        name = params.get("name") if isinstance(params, dict) else None
         if not (allow_image_upload and isinstance(value, dict) and value.get("method") == "tools/call"
-                and isinstance(params, dict) and params.get("name") == "write_image"):
+                and len(data) <= LARGE_TOOL_BODIES.get(name, 0)):
             raise BridgeError("Request body too large", "body_limit")
     return value
 
@@ -1322,6 +1370,13 @@ def make_admin(service: Service, port: int = 8766, *,
             if path.endswith("/jobs"):
                 return JSONResponse(await run_in_threadpool(
                     lambda: service.list_handoffs(service.workspace(ws_id, False), 0, 40)))
+            if path.endswith("/edits"):
+                try:
+                    offset = max(0, int(request.query_params.get("offset", "0")))
+                    limit = max(1, min(int(request.query_params.get("limit", "50")), 100))
+                except ValueError:
+                    offset, limit = 0, 50
+                return JSONResponse(await run_in_threadpool(service.list_edits, ws_id, offset, limit))
             if path.endswith("/checkpoints"):
                 ws = await run_in_threadpool(service.workspace, ws_id, False)
                 checkpoints = service.run_coordinator.checkpoints
@@ -1400,6 +1455,7 @@ def make_admin(service: Service, port: int = 8766, *,
         Route("/api/workspaces/{workspace}/document", api),
         Route("/api/workspaces/{workspace}/routes", api, methods=["GET"]),
         Route("/api/workspaces/{workspace}/checkpoints", api, methods=["GET", "DELETE"]),
+        Route("/api/workspaces/{workspace}/edits", api, methods=["GET"]),
         Route("/api/workspaces/{workspace}/routes/default", api, methods=["POST", "DELETE"]),
         Route("/api/workspaces/{workspace}/routes/{adapter_id}", api, methods=["POST"]),
         Route("/api/workspaces/{workspace}", api, methods=["POST"])])

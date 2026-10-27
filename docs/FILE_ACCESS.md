@@ -8,6 +8,8 @@ read_file(workspace_id, path, offset=1, limit=200, expected_sha256=null,
 write_file(workspace_id, path, content, expected_sha256=null)
 edit_file(workspace_id, path, old_text, new_text, expected_sha256)
 write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)
+apply_patch(workspace_id, changes, message)
+undo_edit(workspace_id, edit_id)
 ```
 
 All paths are relative to the selected workspace, never the handoff folder itself.
@@ -79,6 +81,43 @@ exact edits also return `replacements: 1`. Important changes should be read back
 Tool annotations classify mutations as potentially destructive and non-idempotent;
 those hints are not the access-control mechanism.
 
+## Atomic patches and undo
+
+For source changes, `apply_patch` edits, creates, moves and deletes up to 50
+files in one step: all changes apply or none do. The Node journals each
+touched file's earlier content, keyed by the returned `edit_id`, and
+`undo_edit` restores them while the files still hold what the patch wrote.
+See [apply_patch and undo_edit](MCP_TOOLS.md#apply_patch-and-undo_edit).
+`write_file` and `edit_file` are not journaled.
+
+## Secret-like content
+
+A write is refused when it adds secret-like text (private keys, cloud and
+GitHub tokens, `password = ...` style assignments) that the file did not
+already hold the same number of times. A file that already contains such a
+match stays editable, and moving or deleting it is allowed. Reads still redact
+matches, so edit around them rather than through them. The detector is a
+pattern list, not a complete secret scanner.
+
+## Exclusions and showing hidden folders
+
+Two built-in lists apply in every mode:
+
+- Always denied: version-control and credential names (`.git`, `.ssh`, `.aws`,
+  `.config`, `.npmrc`, `.netrc`, `.claude`, `.mcp.json`, `.env*`, `*.pem`,
+  `*.key`, `*credentials*`, `secrets`, `*.sqlite*`, `*.db` and similar) and the
+  handoff folder outside explicit handoff access.
+- Hidden by default: generated and dependency folders (`node_modules`, `.venv`,
+  `venv`, `__pycache__`, tool caches, `dist`, `build`, `target`, `.next`,
+  `.nuxt`, `coverage`, `vendor`, `.DS_Store`, `*.log`).
+
+An administrator exclusion list adds case-insensitive globs. An entry `!name`
+shows one hidden-by-default name exactly as listed, for example `!build` or
+`!vendor`; anything else after `!`, including the always-denied names, is
+rejected. A path denied by any other rule stays denied, so `!vendor` does not
+expose `vendor/.env`. `workspace_info` reports `shown_default_hidden` and
+`extra_exclusions` separately.
+
 ## Reading images
 
 `read_file` now returns native MCP image previews for supported raster images,
@@ -92,7 +131,7 @@ for its 20 MiB/40MP bounds, matching MIME/suffix checks and hash-protected repla
 ## Bounds and limits
 
 Text writes accept UTF-8 only, at most 256 KiB before and after writing; request JSON up to 1 MiB.
-Built-in and administrator exclusions, secret-like/binary/control rejection,
+Built-in and administrator exclusions, new secret-like and binary/control rejection,
 no-follow paths, single-link regular-file requirements, root pinning and device
 checks apply in every mode. Internal `.wb-write-*` staging files are never exposed.
 New files use 0600; newly created directories use 0700. Source replacements preserve
@@ -104,9 +143,11 @@ Complete content is staged and published without truncating the original inode.
 Identity/hash rechecks and per-workspace write serialization (on the Bridge and
 on the Node) detect tested ordinary races,
 not arbitrary hostile local writers. This is not an OS sandbox, portable atomic
-compare-and-swap, multi-file transaction, complete secret detector or per-chat ACL.
-No aggregate storage quota, history, automatic cleanup, delete or rename is added.
-Errors/termination can leave empty parent directories or hidden staging files.
+compare-and-swap, filesystem transaction, complete secret detector or per-chat ACL.
+`apply_patch` rolls back in the application, so a crash midway can leave a
+partial patch; its journal entry is then marked `interrupted` and `undo_edit`
+restores the files it reached. Errors/termination can leave empty parent
+directories or hidden staging files.
 
 ## Handoff and review stay simple
 

@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 import time
+from collections import Counter
 from contextlib import contextmanager
 from typing import Callable, Iterator
 
@@ -20,15 +21,27 @@ MAX_WRITE = 256 * 1024
 MAX_FILE = 512 * 1024
 MAX_FILES = 10000
 MAX_OUTPUT = 24000
-DENY_NAMES = frozenset({
+# Credential, VCS and Bridge-internal names are always denied.
+ALWAYS_DENY_NAMES = frozenset({
     ".git", ".hg", ".svn", ".ssh", ".aws", ".azure", ".kube", ".gnupg",
-    ".claude", ".mcp.json", HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc", ".DS_Store", "node_modules",
-    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "dist", "build", "target", ".next", ".nuxt", "coverage", "vendor",
+    ".claude", ".mcp.json", HANDOFF, ".config", ".npmrc", ".pypirc", ".netrc",
 })
-DENY_GLOBS = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
-              "*.sqlite*", "*.db", "id_rsa*", "id_ed25519*", "*credentials*",
-              "secrets", "secrets.*", "*.secret", "*.log")
+ALWAYS_DENY_GLOBS = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore",
+                     "*.sqlite*", "*.db", "id_rsa*", "id_ed25519*", "*credentials*",
+                     "secrets", "secrets.*", "*.secret")
+# Generated and dependency names are hidden by default; a workspace may show
+# one with a "!name" exclusion entry naming it exactly.
+DEFAULT_DENY_NAMES = frozenset({
+    ".DS_Store", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "dist", "build", "target", ".next", ".nuxt",
+    "coverage", "vendor",
+})
+DEFAULT_DENY_GLOBS = ("*.log",)
+DENY_NAMES = ALWAYS_DENY_NAMES | DEFAULT_DENY_NAMES
+DENY_GLOBS = ALWAYS_DENY_GLOBS + DEFAULT_DENY_GLOBS
+OVERRIDABLE = {name.casefold(): name for name in (*DEFAULT_DENY_NAMES, *DEFAULT_DENY_GLOBS)}
+_ALWAYS_FOLDED = frozenset(name.casefold() for name in ALWAYS_DENY_NAMES)
+MAX_EXCLUDES = 40
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----"),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
@@ -66,6 +79,40 @@ def parts(path: str, allow_empty: bool = False) -> list[str]:
     return result
 
 
+def validate_excludes(excludes: object) -> list[str]:
+    """Extra deny patterns, plus "!name" entries that show one default-denied name."""
+    if not isinstance(excludes, list) or len(excludes) > MAX_EXCLUDES or any(
+            not isinstance(value, str) or not value or len(value) > 120 for value in excludes):
+        raise BridgeError("Invalid workspace exclusions", "invalid_arguments")
+    for value in excludes:
+        if value.startswith("!") and value[1:].casefold() not in OVERRIDABLE:
+            raise BridgeError(f"{value[1:]!r} is not a default-hidden name that can be shown; "
+                              "credential and version-control paths are always denied",
+                              "invalid_arguments")
+    return excludes
+
+
+def _split_excludes(extra: list[str] | None) -> tuple[list[str], frozenset[str]]:
+    denies = [value for value in extra or [] if not value.startswith("!")]
+    shown = frozenset(value[1:].casefold() for value in extra or [] if value.startswith("!"))
+    return denies, shown
+
+
+def _default_denied(name: str, shown: frozenset[str]) -> bool:
+    folded = name.casefold()
+    if folded in _ALWAYS_FOLDED or any(
+            fnmatch.fnmatchcase(folded, g) for g in ALWAYS_DENY_GLOBS):
+        return True
+    return any(entry not in shown and (folded == entry or fnmatch.fnmatchcase(folded, entry))
+               for entry in OVERRIDABLE)
+
+
+def _extra_denied(path: str, ps: list[str], denies: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path.casefold(), g.casefold()) or
+               any(fnmatch.fnmatchcase(p.casefold(), g.casefold()) for p in ps)
+               for g in denies)
+
+
 def allowed(path: str, extra: list[str] | None = None) -> bool:
     try:
         ps = parts(path)
@@ -73,13 +120,12 @@ def allowed(path: str, extra: list[str] | None = None) -> bool:
         return False
     if any(p.casefold().startswith(".wb-write-") for p in ps):
         return False
-    if any(p.lower() in {n.lower() for n in DENY_NAMES} or
-           any(fnmatch.fnmatchcase(p.lower(), g) for g in DENY_GLOBS) for p in ps):
+    denies, shown = _split_excludes(extra)
+    if any(_default_denied(p, shown) for p in ps):
         return False
     if ps[0].casefold() == HANDOFF.casefold():
         return False
-    return not any(fnmatch.fnmatchcase(path.casefold(), g.casefold()) or any(fnmatch.fnmatchcase(p.casefold(), g.casefold()) for p in ps)
-                   for g in (extra or []))
+    return not _extra_denied(path, ps, denies)
 
 
 def handoff_allowed(path: str, extra: list[str] | None = None, *, allow_root: bool = False) -> bool:
@@ -95,9 +141,7 @@ def handoff_allowed(path: str, extra: list[str] | None = None, *, allow_root: bo
         return False
     if len(ps) > 1 and not allowed("/".join(ps[1:]), extra):
         return False
-    return not any(fnmatch.fnmatchcase(path.casefold(), g.casefold()) or
-                   any(fnmatch.fnmatchcase(p.casefold(), g.casefold()) for p in ps)
-                   for g in (extra or []))
+    return not _extra_denied(path, ps, _split_excludes(extra)[0])
 
 
 WRITE_SCOPES = frozenset({"none", "handoff", "workspace"})
@@ -117,9 +161,9 @@ def require_write_path(path: str, extra: list[str] | None = None, *, scope: str 
         raise BridgeError("Write denied by workspace write scope or path exclusions", "policy_denied")
 
 
-def file_text(data: bytes) -> str:
-    """Writes reject binary/secret-bearing text, rather than silently redacting it."""
-    if len(data) > MAX_WRITE:
+def text_content(data: bytes, limit: int = MAX_WRITE) -> str:
+    """UTF-8 text without binary or control characters."""
+    if len(data) > limit:
         raise BridgeError("File exceeds the 256 KiB write limit", "too_large")
     try:
         text = data.decode("utf-8")
@@ -127,8 +171,36 @@ def file_text(data: bytes) -> str:
         raise BridgeError("Writes require UTF-8 text", "binary_file") from None
     if any((ord(c) < 32 and c not in "\n\r\t") or ord(c) == 127 for c in text):
         raise BridgeError("Binary/control characters are not accepted in files", "binary_file")
-    if redact(text)[1]:
-        raise BridgeError("Secret-like content cannot be written or replaced; remove it locally first", "secret_content")
+    return text
+
+
+def secret_matches(text: str) -> Counter:
+    return Counter(match.group(0) for pattern in SECRET_PATTERNS for match in pattern.finditer(text))
+
+
+def adds_secrets(before: str | None, after: str) -> bool:
+    """True when after holds a secret-like match that before did not hold as often."""
+    found = secret_matches(after)
+    if not found:
+        return False
+    existing = secret_matches(before) if before else Counter()
+    return any(count > existing[match] for match, count in found.items())
+
+
+def file_text(data: bytes, previous: bytes | None = None) -> str:
+    """Writes reject binary text and newly added secret-like content, never redacting it.
+
+    Matches already present in ``previous`` stay, so a file holding one remains editable.
+    """
+    text = text_content(data)
+    before = None
+    if previous is not None:
+        try:
+            before = previous.decode("utf-8")
+        except UnicodeError:
+            before = None
+    if adds_secrets(before, text):
+        raise BridgeError("The change adds secret-like content; add it locally instead", "secret_content")
     return text
 
 
@@ -328,9 +400,11 @@ class SafeRoot:
         return digest(data)
 
 
-    def write_file(self, path: str, data: bytes, expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:
+    def write_file(self, path: str, data: bytes, expected_sha256: str | None = None, *,
+                   write_scope: str = "handoff", previous: bytes | None = None) -> dict:
+        """``previous`` is the replaced content; secret-like matches it already holds may stay."""
         return self._write_file(path, data, expected_sha256, write_scope=write_scope,
-                                validator=file_text, max_bytes=MAX_WRITE)[0]
+                                validator=lambda raw: file_text(raw, previous), max_bytes=MAX_WRITE)[0]
 
     def write_image(self, path: str, data: bytes, mime_type: str,
                     expected_sha256: str | None = None, *, write_scope: str = "handoff") -> dict:

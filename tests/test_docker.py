@@ -403,7 +403,7 @@ def test_health_unavailable(monkeypatch):
 def test_remote_tool_count_and_embedded_skill_version():
     from workspace_bridge.api import TOOLS
     from workspace_bridge.embedded_skill import SKILL_VERSION
-    assert len(TOOLS)==28 and SKILL_VERSION=='3.5.0'
+    assert len(TOOLS)==30 and SKILL_VERSION=='3.6.0'
     assert not any('docker' in name or 'container' in name for name in TOOLS)
 
 

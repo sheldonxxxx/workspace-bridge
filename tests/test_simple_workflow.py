@@ -22,8 +22,9 @@ EXPECTED = {'list_workspaces', 'workspace_info',
             'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
             'list_agent_executions', 'read_agent_execution',
             'read_agent_interaction', 'respond_agent_interaction',
-            'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff'}
-MUTATING = {'prepare_handoff', 'write_file', 'write_image', 'edit_file',
+            'list_agent_activities', 'read_agent_activity', 'git_status', 'git_diff',
+            'apply_patch', 'undo_edit'}
+MUTATING = {'prepare_handoff', 'write_file', 'write_image', 'edit_file', 'apply_patch', 'undo_edit',
             'start_agent_run', 'cancel_agent_run', 'steer_agent_run', 'queue_agent_run',
             'respond_agent_interaction'}
 

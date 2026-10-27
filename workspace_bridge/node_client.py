@@ -82,7 +82,9 @@ class NodeClient:
         raw_body = None if body is None else json.dumps(
             body, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         from .media import MAX_IMAGE_REQUEST_BYTES
-        request_limit = MAX_IMAGE_REQUEST_BYTES if path == "/v1/workspaces/write_image" else 2 * 1024 * 1024
+        from .node_api import MAX_PATCH_REQUEST
+        request_limit = {"/v1/workspaces/write_image": MAX_IMAGE_REQUEST_BYTES,
+                         "/v1/workspaces/apply_patch": MAX_PATCH_REQUEST}.get(path, 2 * 1024 * 1024)
         if raw_body is not None and len(raw_body) > request_limit:
             raise BridgeError("Node request exceeds the payload limit", "too_large")
         try:
@@ -139,7 +141,7 @@ class NodeClient:
 
     def workspace(self, operation: str, workspace: dict, arguments: dict):
         allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file", "write_image",
-                   "edit_file", "git_status", "git_diff", "read_handoff_artifact",
+                   "edit_file", "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff", "read_handoff_artifact",
                    "hash_files", "publish_handoff_artifacts", "checkpoint_capture",
                    "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats"}
         if operation not in allowed:

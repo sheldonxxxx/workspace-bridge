@@ -941,7 +941,11 @@ function WorkspaceCard({
           </div>
           <div className="settings-field">
             <Label htmlFor={`excludes-${ws.id}`}>Extra exclusions</Label>
-            <p>Built-in exclusions always apply. One pattern per line.</p>
+            <p>
+              Built-in exclusions always apply. One pattern per line. A line
+              such as <code>!build</code> or <code>!vendor</code> shows a folder
+              hidden by default; credential and Git paths stay hidden.
+            </p>
             <Textarea
               id={`excludes-${ws.id}`}
               rows={3}

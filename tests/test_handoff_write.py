@@ -155,12 +155,22 @@ def test_bad_new_content_rejected_before_creating_folders(env,content,error):
     assert not (env['root']/HANDOFF).exists()
 
 
-@pytest.mark.parametrize('raw,error', [(b'\xff\xfe','binary_file'),(b'a\x00b','binary_file'),(('sk-'+'A'*30).encode(),'secret_content')])
-def test_existing_binary_or_secret_content_not_overwritten(env,raw,error):
+@pytest.mark.parametrize('raw,error', [(b'\xff\xfe','binary_file'),(b'a\x00b','binary_file')])
+def test_existing_binary_content_not_overwritten(env,raw,error):
     p=env['root']/NOTE;p.parent.mkdir(parents=True);p.write_bytes(raw)
     with pytest.raises(BridgeError) as exc:write(env,'replacement',expected_sha256=digest(raw))
     assert exc.value.code==error
     assert p.read_bytes()==raw
+
+
+def test_existing_secret_content_stays_editable_but_cannot_grow(env):
+    raw=('sk-'+'A'*30).encode()
+    p=env['root']/NOTE;p.parent.mkdir(parents=True);p.write_bytes(raw)
+    kept=write(env,raw.decode()+'\nnotes\n',expected_sha256=digest(raw))
+    with pytest.raises(BridgeError) as exc:write(env,(raw.decode()+'\n')*2,expected_sha256=kept['sha256'])
+    assert exc.value.code=='secret_content'
+    write(env,'replacement',expected_sha256=kept['sha256'])
+    assert p.read_bytes()==b'replacement'
 
 
 def test_write_byte_budget_and_empty_file(env):
@@ -280,7 +290,7 @@ def test_logs_do_not_contain_document_content_or_paths(env):
 
 def test_skill_and_tools_describe_handoff_only_and_manual_review():
     skill=read_project_lead_skill()
-    assert skill['version']=='3.5.0'
+    assert skill['version']=='3.6.0'
     for value in ['write_file','edit_file','expected_sha256','.workspace-handoff/','re-read and reconcile','No special report files','Audit using normal tools']:
         assert value in skill['content']
     for name in ['write_file','edit_file']:
@@ -305,7 +315,7 @@ async def test_http_write_edit_read_and_destructive_annotations(env,version):
             return response.json()
         tools=(await rpc('tools/list'))['result']['tools']
         for t in tools:
-            assert t['annotations']['destructiveHint']==(t['name'] in ['write_file','write_image','edit_file','start_agent_run','respond_agent_interaction','steer_agent_run','queue_agent_run'])
+            assert t['annotations']['destructiveHint']==(t['name'] in ['write_file','write_image','edit_file','apply_patch','undo_edit','start_agent_run','respond_agent_interaction','steer_agent_run','queue_agent_run'])
         def value(r):
             assert not r['result']['isError'],r
             return json.loads(r['result']['content'][0]['text'])

@@ -18,13 +18,15 @@ from datetime import datetime, timezone
 from .browse import Browser
 from .keyed_locks import KeyedLocks
 from .checkpoint_store import CheckpointStore
+from . import edit_journal
 from .git_evidence import GitEvidence
 from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
                     decode_image_upload, image_capabilities, read_image,
                     selected_read_limit, sniff_image, validate_image)
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        SafeRoot, allowed, digest, file_text, handoff_allowed,
-                       parts, redact, require_write_path)
+                       parts, redact, require_write_path, text_content,
+                       validate_excludes)
 from .wbrp import RuntimeClient
 from .schema_upgrade import add_plugin_adapters, widen_runtime_type_check
 from .plugin_protocol import builtin_manifests, load_manifest
@@ -182,6 +184,16 @@ class NodeService:
         self.browser = Browser(self)
         self.plugins = PluginRegistry(self.state / "plugins")
         self._checkpoints = None
+        self._journal = None
+
+    @property
+    def journal(self) -> edit_journal.EditJournal:
+        if self.read_only:
+            raise BridgeError("The edit journal is unavailable in read-only mode", "journal_unavailable")
+        with self.lock:
+            if self._journal is None:
+                self._journal = edit_journal.EditJournal(self.state / "edit-journal.sqlite3")
+            return self._journal
 
     @property
     def checkpoints(self) -> CheckpointStore:
@@ -194,6 +206,8 @@ class NodeService:
 
     def close(self) -> None:
         self.plugins.close()
+        if self._journal is not None:
+            self._journal.close()
         self.db.close()
 
     def safe_root(self, workspace: dict) -> SafeRoot:
@@ -217,12 +231,7 @@ class NodeService:
             raise BridgeError("Node state cannot be exposed through a workspace", "root_denied")
         if path.is_symlink() or not path.is_dir():
             raise BridgeError("Workspace root unavailable", "root_unavailable")
-        excludes = workspace.get("excludes", [])
-        if not isinstance(excludes, list) or len(excludes) > 40 or any(
-                not isinstance(value, str) or not value or len(value) > 120
-                for value in excludes):
-            raise BridgeError("Invalid workspace exclusions", "invalid_arguments")
-        return SafeRoot(raw, None, excludes)
+        return SafeRoot(raw, None, validate_excludes(workspace.get("excludes", [])))
 
     def validate_root(self, root: str, excludes: list[str] | None = None) -> dict:
         workspace = {"root": root, "excludes": excludes or []}
@@ -266,11 +275,9 @@ class NodeService:
             row = self.db.execute("SELECT * FROM node_workspaces WHERE id=?", (workspace_id,)).fetchone()
         if row is None:
             raise BridgeError("Workspace is not registered on this Node", "unknown_workspace")
+        validate_excludes(excludes)
         self.validate_root(row["root"], excludes)
-        if (not isinstance(excludes, list) or len(excludes) > 40
-                or any(not isinstance(item, str) or not item or len(item) > 120
-                       for item in excludes)
-                or write_scope not in {"none", "handoff", "workspace"}):
+        if write_scope not in {"none", "handoff", "workspace"}:
             raise BridgeError("Invalid workspace configuration", "invalid_arguments")
         with self.lock, self.db:
             self.db.execute("UPDATE node_workspaces SET excludes=?,write_scope=?,updated=? WHERE id=?",
@@ -305,8 +312,8 @@ class NodeService:
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
-    WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file",
-                                  "publish_handoff_artifacts"})
+    WRITE_OPERATIONS = frozenset({"write_image", "write_file", "edit_file", "apply_patch",
+                                  "undo_edit", "publish_handoff_artifacts"})
 
     def workspace_call(self, operation: str, body: dict):
         if operation in self.WRITE_OPERATIONS:
@@ -404,10 +411,23 @@ class NodeService:
                 data = args["content"].encode("utf-8")
             except (AttributeError, UnicodeEncodeError):
                 raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-            file_text(data)
+            text_content(data)
             with self.safe_root(ws) as safe:
-                result = safe.write_file(args["path"], data,
-                                         args.get("expected_sha256"), write_scope=scope)
+                previous = None
+                if args.get("expected_sha256") is not None:
+                    try:
+                        previous, _ = safe.read(args["path"], limit=MAX_WRITE)
+                    except BridgeError as exc:
+                        if exc.code != "not_found":
+                            raise
+                        raise BridgeError("Expected file is missing; re-read before writing",
+                                          "stale_evidence") from None
+                    if digest(previous) != args["expected_sha256"]:
+                        raise BridgeError("File changed; re-read before writing", "stale_evidence")
+                else:
+                    file_text(data)
+                result = safe.write_file(args["path"], data, args.get("expected_sha256"),
+                                         write_scope=scope, previous=previous)
             return {**result, "absolute_path": str(Path(root) / args["path"]),
                     "write_scope": scope, "note": "Only this file was written. No command was executed or agent started."}
         if operation == "edit_file":
@@ -420,7 +440,7 @@ class NodeService:
                 raw, _ = safe.read(args["path"], limit=MAX_WRITE)
                 if digest(raw) != args["expected_sha256"]:
                     raise BridgeError("File changed; re-read before editing", "stale_evidence")
-                text = file_text(raw)
+                text = text_content(raw)
                 first = text.find(args["old_text"])
                 if first < 0:
                     raise BridgeError("old_text was not found; re-read and use exact text", "match_not_found")
@@ -431,11 +451,28 @@ class NodeService:
                     updated_data = updated.encode("utf-8")
                 except UnicodeEncodeError:
                     raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-                file_text(updated_data)
-                result = safe.write_file(args["path"], updated_data,
-                                         args["expected_sha256"], write_scope=scope)
+                file_text(updated_data, raw)
+                result = safe.write_file(args["path"], updated_data, args["expected_sha256"],
+                                         write_scope=scope, previous=raw)
             return {**result, "absolute_path": str(Path(root) / args["path"]),
                     "replacements": 1, "write_scope": scope}
+        if operation in ("apply_patch", "undo_edit"):
+            args = body["arguments"]
+            if not isinstance(args, dict) or set(args) != (
+                    {"changes", "message"} if operation == "apply_patch" else {"edit_id"}):
+                raise BridgeError("Invalid edit arguments", "invalid_arguments")
+            if workspace.get("write_scope", "none") == "none":
+                raise BridgeError("Writes are disabled by workspace write scope", "policy_denied")
+            with self.safe_root(ws) as safe:
+                if operation == "apply_patch":
+                    result = edit_journal.apply_patch(safe, self.journal, ws, args["changes"], args["message"])
+                else:
+                    result = edit_journal.undo_edit(safe, self.journal, ws, args["edit_id"])
+            return {**result, "write_scope": workspace["write_scope"],
+                    "note": "Only these files changed. No command was executed or agent started."}
+        if operation == "list_edits":
+            args = body["arguments"]
+            return self.journal.list(workspace["id"], args.get("offset", 0), args.get("limit", 50))
         if operation == "git_status":
             with self.safe_root(ws) as safe:
                 return GitEvidence.status(safe, ws, **body["arguments"])

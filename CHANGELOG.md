@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- New MCP tools `apply_patch` and `undo_edit`. `apply_patch` edits, creates,
+  moves and deletes up to 50 files (1 MiB of text) in one step: every
+  existing file needs its current hash, and all changes apply or none do. It
+  returns an `edit_id`; the Node journals the earlier content (30 days, or
+  500 MiB per workspace) and `undo_edit` restores it while the files still
+  hold what the patch wrote, otherwise naming the files changed since. Both
+  follow the workspace write scope. The Manager API lists the journal at
+  `GET /api/workspaces/{id}/edits`.
+- Writes refuse only secret-like text that the file did not already hold, so
+  files containing such a match are editable again with `write_file`,
+  `edit_file` and `apply_patch`.
+- A workspace exclusion entry `!name` shows one hidden-by-default generated
+  or dependency folder, such as `!build` or `!vendor`. Credential and
+  version-control names stay denied and cannot be shown.
+- The project-lead skill (3.6.0) changes source with `apply_patch` and
+  reports the `edit_id` for undo.
 - **Breaking:** approvals are answered only in ChatGPT.
   `respond_agent_interaction` now requires `decided_by` (`chatgpt` or
   `owner`) and a `reason`, both recorded with the chosen option and time. An

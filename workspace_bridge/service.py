@@ -26,7 +26,7 @@ from .keyed_locks import KeyedLocks
 from . import pairing as node_pairing
 from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
                        WRITE_SCOPES, allowed, handoff_allowed, file_text, digest,
-                       redact, require_write_path)
+                       redact, require_write_path, validate_excludes)
 
 
 def now() -> str:
@@ -904,8 +904,7 @@ class Service:
             raise BridgeError("Workspace Node is disabled", "node_disabled")
         if not 1 <= len(name.strip()) <= 80 or any(ord(c) < 32 for c in name):
             raise BridgeError("Invalid workspace name")
-        if len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes):
-            raise BridgeError("Invalid exclusion patterns")
+        validate_excludes(excludes)
         # The overlap check and the insert are one step per Node; the
         # database lock is taken only around the statements themselves.
         with self.keyed_locks.hold(("node-mappings", node_id)):
@@ -941,9 +940,8 @@ class Service:
                 raise BridgeError("agent_enabled requires set_agent_enabled", "invalid_arguments")
             if operation in {"set_write_scope", "set_settings"} and write_scope not in WRITE_SCOPES:
                 raise BridgeError("write_scope must be none, handoff or workspace", "invalid_arguments")
-            if operation in {"set_settings", "set_excludes"} and (
-                    excludes is None or len(excludes) > 40 or any(not x or len(x) > 120 for x in excludes)):
-                raise BridgeError("Invalid exclusions")
+            if operation in {"set_settings", "set_excludes"}:
+                validate_excludes(excludes)
             if operation == "set_agent_enabled" and not isinstance(agent_enabled, bool):
                 raise BridgeError("agent_enabled must be a boolean", "invalid_arguments")
             if operation not in {"enable", "disable", "set_write_scope", "set_settings",
@@ -992,13 +990,18 @@ class Service:
                 "node_revision": node["revision"], "node_health": "healthy",
                 "node_capabilities": node_status.get("capabilities", []), **access,
                 "writes": {"none": "Disabled, including prepare_handoff and write_image", "handoff": "UTF-8 files and validated raster images inside .workspace-handoff/ only", "workspace": "Allowed UTF-8 files throughout this mapped workspace and validated raster images inside .workspace-handoff/; exclusions still apply"}[scope],
+                "source_edits": None if scope != "workspace" else (
+                    "apply_patch changes up to 50 files atomically and returns an edit_id; the Node journals "
+                    "earlier content for 30 days (500 MiB per workspace) so undo_edit can restore it."),
+                "secret_check": "A write that adds new secret-like text is refused; matches a file already holds may stay.",
+                "shown_default_hidden": sorted(value[1:] for value in json.loads(ws["excludes"]) if value.startswith("!")),
                 "agent_execution": "per-route",
                 "write_policy_control": "Local administrator only. Tool arguments and project content cannot expand permissions.",
                 "project_lead_skill": skill_hint(),
                 "handoff_folder": str(Path(ws["root"]) / HANDOFF / "jobs"),
                 "writable_folder": None if prefix is None else str(Path(ws["root"]) / prefix),
                 "writable_path_prefix": prefix,
-                "extra_exclusions": json.loads(ws["excludes"]),
+                "extra_exclusions": [value for value in json.loads(ws["excludes"]) if not value.startswith("!")],
                 "image_reading": image_capabilities(),
                 "image_writing": image_write_capabilities(),
                 "limits": {"max_write_bytes": MAX_WRITE, "max_file_bytes": MAX_FILE, "max_response_chars": MAX_OUTPUT},
@@ -1023,6 +1026,20 @@ class Service:
         return self.node_registry.client(ws["node_id"]).workspace("edit_file", ws, {
             "path": path, "old_text": old_text, "new_text": new_text,
             "expected_sha256": expected_sha256})
+
+    def apply_patch(self, ws: dict, changes: list[dict], message: str) -> dict:
+        self.access_policy(ws)
+        return self.node_registry.client(ws["node_id"]).workspace("apply_patch", ws, {
+            "changes": changes, "message": message})
+
+    def undo_edit(self, ws: dict, edit_id: str) -> dict:
+        self.access_policy(ws)
+        return self.node_registry.client(ws["node_id"]).workspace("undo_edit", ws, {"edit_id": edit_id})
+
+    def list_edits(self, ident: str, offset: int = 0, limit: int = 50) -> dict:
+        ws = self.workspace(ident, False)
+        return self.node_registry.client(ws["node_id"]).workspace("list_edits", ws, {
+            "offset": offset, "limit": limit})
 
     def write_image(self, ws: dict, path: str, data_base64: str, mime_type: str,
                     expected_sha256: str | None = None) -> dict:
@@ -1162,7 +1179,8 @@ class Service:
 
     # Tools that change workspace files serialize per workspace, so a
     # checked write never interleaves with another write or a policy change.
-    WORKSPACE_WRITES = frozenset({"write_file", "write_image", "edit_file", "prepare_handoff"})
+    WORKSPACE_WRITES = frozenset({"write_file", "write_image", "edit_file", "apply_patch",
+                                  "undo_edit", "prepare_handoff"})
     RUN_INPUTS = frozenset({"steer_agent_run", "queue_agent_run", "respond_agent_interaction"})
 
     def _tool_queue(self, ws_id: str | None, name: str, args: dict):
@@ -1202,6 +1220,7 @@ class Service:
             "list_handoffs": self.list_handoffs,
             "read_handoff": self.read_handoff,
             "write_file": self.write_file, "write_image": self.write_image, "edit_file": self.edit_file,
+            "apply_patch": self.apply_patch, "undo_edit": self.undo_edit,
             "prepare_handoff": lambda workspace, **arguments: self.prepare_handoff(workspace, arguments),
             "list_agent_adapters": self.list_agent_adapters,
             "list_agent_models": self.list_agent_models,

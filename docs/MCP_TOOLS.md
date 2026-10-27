@@ -1,6 +1,6 @@
 # MCP tool reference
 
-One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 28 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
+One endpoint: `/mcp`. Header: `X-Bridge-Token`. This header belongs in the local tunnel configuration/environment, not tool arguments. 30 tools are advertised. All arguments are strictly typed and unknown fields rejected. Starting/cancelling a run, steering/queueing input, and answering a permission are **not** read-only and are marked open-world; agent output is untrusted evidence.
 
 Local diagnostics are not an MCP tool. The authenticated local manager exposes
 `GET /api/diagnostics` and the Doctor CLI uses the same server-side report. A
@@ -160,8 +160,11 @@ that mapping's current `write_scope`: `none` denies all writes; `handoff` permit
 Without a hash, `write_file` is create-only and creates missing parents. Existing
 files require their current SHA-256. `edit_file` requires a hash plus one exact,
 unique, case-sensitive match; empty replacement removes text, not the file. Stale,
-ambiguous or missing matches fail. UTF-8 text is bounded to 256 KiB, and existing/new
-secret-like or binary content, unsafe paths and exclusions remain denied in all modes.
+ambiguous or missing matches fail. UTF-8 text is bounded to 256 KiB. A write that
+adds secret-like text the file did not already hold is refused (`secret_content`);
+matches already in the file may stay, so such files remain editable. Binary content,
+unsafe paths and exclusions remain denied in all modes. These two tools are not
+journaled; use `apply_patch` for source changes.
 
 Results return `path`, `absolute_path`, `sha256`, `previous_sha256`, `bytes`, `created`
 and `write_scope`; edits also return `replacements: 1`. Re-read lost or ambiguous
@@ -172,6 +175,46 @@ General reading and explicit handoff scanning stay unchanged. `read_handoff` is 
 optional helper; it is not needed to read ordinary notes. Free-form files create no
 jobs. Original generated-document publication hashes are retained after edits.
 See [file-access semantics and limits](FILE_ACCESS.md).
+
+## apply_patch and undo_edit
+
+```text
+apply_patch(workspace_id, changes, message)
+undo_edit(workspace_id, edit_id)
+```
+
+`changes` is a list of up to 200 operations touching at most 50 files and
+carrying at most 1 MiB of text:
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `edit` | `path`, `sha256`, `old`, `new` | Replace one exact, unique, case-sensitive occurrence |
+| `create` | `path`, `content` | New UTF-8 file (256 KiB at most); fails if anything exists there |
+| `move` | `path`, `to`, `sha256` | Move a file; never overwrites |
+| `delete` | `path`, `sha256` | Delete a file |
+
+Each file appears once, except that several `edit` operations may change one
+file: each gives that file's original hash and they apply in order. Every
+existing file needs its current SHA-256. The Node checks the whole patch
+first (write scope, exclusions, hashes, matches, the text and secret checks),
+journals the earlier content, stages every new file, and then switches them.
+A failed switch puts back the files already switched, so all changes apply or
+none do. `message` (1–500 characters) is recorded with the entry.
+
+The result holds `edit_id`, each file's `previous_sha256` and new `sha256`
+(`null` when absent), and `created_folders`. `undo_edit` restores every file
+of that edit while each still holds the hash the edit wrote; otherwise it
+changes nothing and returns `undo_conflict` naming the files changed since.
+It also removes folders the edit created while they are empty. An undo is
+its own journal entry, so it can be undone too; a second undo of the same
+edit returns `already_undone`. Both tools follow the current write scope, are
+marked destructive, and execute nothing.
+
+The journal lives on the Node and keeps entries for 30 days or until a
+workspace's entries pass 500 MiB, oldest first; an expired `edit_id` returns
+`not_found`. Each entry records the actor (`chatgpt`) and message. The
+Manager lists entries, without file content, at
+`GET /api/workspaces/{workspace}/edits`.
 
 ## Image upload
 

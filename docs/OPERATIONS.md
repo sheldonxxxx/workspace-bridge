@@ -31,6 +31,9 @@ checkpoints in the Node's `checkpoints/` directory are pruned after 14 days or
 when a workspace's store exceeds 1 GiB. That directory holds copies of
 workspace source; backups may exclude it, which only loses old run diffs.
 Workspace settings in the Manager show checkpoint storage and can clear it.
+The Node's `edit-journal.sqlite3` holds the earlier content of files changed by
+`apply_patch`, kept 30 days or up to 500 MiB per workspace; it is as
+sensitive as the source it copies, and losing it only loses undo.
 
 Keep package installs and tunnel profiles outside mapped projects. Bridge
 state cannot overlap a project. `--state` is a global CLI option placed
