@@ -2877,7 +2877,10 @@ export default function App() {
                           <div className="node-title">
                             <div className="adapter-heading">
                               <h3>
-                                {info.name} · {runtimeName(info.runtime_type)}
+                                {info.name.trim().toLowerCase() ===
+                                runtimeName(info.runtime_type).toLowerCase()
+                                  ? `${info.name} on ${info.node_name || "an unknown Node"}`
+                                  : `${info.name} · ${runtimeName(info.runtime_type)}`}
                               </h3>
                               <StateBadge value={health} />
                             </div>

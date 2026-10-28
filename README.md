@@ -153,7 +153,7 @@ workspace-to-adapter route you enabled. See
 
 ## Status
 
-Version `0.3.0`, an early release under active development. Updates are
+Version `1.0.0`. Updates are
 manual (`uv tool upgrade workspace-bridge`, then restart services); there is
 no auto-updater. Native Windows is not supported; use WSL2. Known gaps and
 validation status are listed in

@@ -1,6 +1,6 @@
 # Runtimes
 
-Consolidated Pi, Codex, Claude Code, and OpenCode runtime notes for Workspace Bridge `0.3.0`. For
+Consolidated Pi, Codex, Claude Code, and OpenCode runtime notes for Workspace Bridge `1.0.0`. For
 the wire contract see [Runtime Protocol](RUNTIME_PROTOCOL.md); for service
 commands see [Setup](SETUP.md) and [Operations](OPERATIONS.md).
 

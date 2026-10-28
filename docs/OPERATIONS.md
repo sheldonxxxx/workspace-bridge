@@ -174,7 +174,7 @@ IDs, or environment-only values, and no paths or file inventories are
 exposed.
 
 Product and component versions stay distinct: the product version is the
-Workspace Bridge release (`0.3.0`); the component version is that
+Workspace Bridge release (`1.0.0`); the component version is that
 component's own version. Adapter and native semantic versions, protocol and
 feature versions, and Node/adapter revisions remain separate fields.
 

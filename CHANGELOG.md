@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.0
+
 - **Breaking:** the Manager's live updates move from server-sent events
   (`/api/run-events`) to one WebSocket at `/api/ws` that carries only
   `state.changed`, `run.changed` and `reset` hints. Node health is cached
@@ -14,7 +16,8 @@
   or "The agent's own security" instead of "unknown"; Audit shows plain
   event names and attributes Bridge-level events to "Bridge" rather than
   "Admin"; the Tunnel setup sheet has a Copy button; the Adapters page links
-  to its Security profiles and Bridge connection sections.
+  to its Security profiles and Bridge connection sections. An adapter named
+  after its agent shows "Codex on <Node>" instead of "Codex · Codex".
 - The Manager can take manual control of runs as a last resort: start a run
   from a prepared handoff or a direct instruction, answer a waiting request,
   steer or queue an instruction, and stop or abandon a run. Each action uses
