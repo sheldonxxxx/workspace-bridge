@@ -690,6 +690,9 @@ function WorkspaceCard({
                   <span>Route readiness</span>
                   <StateBadge value={status} />
                 </div>
+                <span className="route-switch-label" aria-hidden="true">
+                  {grant.enabled ? "Route on" : "Route off"}
+                </span>
                 <Switch
                   aria-label={`${grant.name} route for ${ws.name}`}
                   checked={grant.enabled}
@@ -781,8 +784,14 @@ function WorkspaceCard({
         <div className="workspace-settings">
           <div className="settings-field">
             <Label htmlFor={`write-${ws.id}`}>ChatGPT file access</Label>
+            <p id={`write-help-${ws.id}`}>
+              {writeScope === "workspace"
+                ? "ChatGPT can edit files that are not excluded and run the workspace's checks. Agent runs are governed separately by each route's security profile."
+                : "ChatGPT can list and read files but cannot change anything. Agent runs are governed separately by each route's security profile."}
+            </p>
             <select
               id={`write-${ws.id}`}
+              aria-describedby={`write-help-${ws.id}`}
               className="native-select"
               value={writeScope}
               onChange={(e) =>
@@ -1593,6 +1602,13 @@ export default function App() {
     }
   }
   const selected = workspaces.find((w) => w.id === selectedWorkspace) || null;
+  const onlyWorkspace = workspaces.length === 1 ? workspaces[0] : null;
+  useEffect(() => {
+    // With a single workspace there is nothing to choose: open its handoffs.
+    if (section === "handoffs" && !selectedWorkspace && onlyWorkspace)
+      void openHandoffs(onlyWorkspace);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, selectedWorkspace, onlyWorkspace?.id]);
   const filtered = workspaces.filter((w) =>
     `${w.name} ${w.root}`.toLowerCase().includes(workspaceQuery.toLowerCase()),
   );
@@ -1739,6 +1755,9 @@ export default function App() {
     ];
   }, [diagnostics, diagnosticsUnavailable, readyRoutes]);
   const page = sections.find((s) => s.id === section)!;
+  useEffect(() => {
+    document.title = `${page.title} · Workspace Bridge`;
+  }, [page.title]);
   const ready = auth === "ready" && !changingPassword;
   useEffect(() => {
     if (!lastUpdated) return;
@@ -1809,6 +1828,24 @@ export default function App() {
         run: () => {
           navigate("workspaces");
           setAddOpen(true);
+        },
+      },
+      {
+        id: "pair-node",
+        group: "Actions",
+        label: "Pair a Node",
+        run: () => {
+          navigate("nodes");
+          setNodeDialog({ mode: "pair" });
+        },
+      },
+      {
+        id: "add-adapter",
+        group: "Actions",
+        label: "Add an adapter",
+        run: () => {
+          navigate("adapters");
+          setAdapterDialog({ mode: "create" });
         },
       },
       {
@@ -2124,6 +2161,7 @@ export default function App() {
             </Button>
             <Button
               variant="ghost"
+              className="topbar-password"
               onClick={() => {
                 setLoginError("");
                 setChangingPassword(true);
@@ -2354,6 +2392,14 @@ export default function App() {
                   ) : (
                     <Empty title="No runs yet">
                       Prepared handoffs will appear here when an agent starts.
+                      <br />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => navigate("handoffs")}
+                      >
+                        Open Handoffs
+                      </Button>
                     </Empty>
                   )}
                 </section>
@@ -2602,6 +2648,7 @@ export default function App() {
                 <select
                   id="handoff-workspace"
                   className="native-select"
+                  title={selected?.name}
                   value={selectedWorkspace || ""}
                   onChange={(e) => {
                     const ws = workspaces.find((w) => w.id === e.target.value);
@@ -2805,7 +2852,15 @@ export default function App() {
               ) : (
                 <Empty title="No runs yet">
                   Start an agent from a prepared handoff to see its progress
-                  here.
+                  here. A workspace needs an enabled execution target first.
+                  <br />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => navigate("handoffs")}
+                  >
+                    Open Handoffs
+                  </Button>
                 </Empty>
               )}
               {runsNext !== null && (
@@ -3319,6 +3374,18 @@ export default function App() {
                 {s.title}
               </button>
             ))}
+            <button
+              type="button"
+              className="nav-item"
+              onClick={() => {
+                setMobileNav(false);
+                setLoginError("");
+                setChangingPassword(true);
+              }}
+            >
+              <LockKeyhole size={17} />
+              Change password
+            </button>
           </nav>
         </SheetContent>
       </Sheet>

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Manager usability: each page sets its own browser tab title; the command
+  palette can pair a Node and add an adapter; the only workspace opens its
+  handoffs automatically; routes show "Route on/off" beside their switch;
+  workspace settings explain what each ChatGPT file access level allows;
+  empty run lists point to Handoffs; Change password moves into the mobile
+  menu; the profile editor stacks below 1100px.
+
 ## 1.0.0
 
 - **Breaking:** the Manager's live updates move from server-sent events

@@ -1898,6 +1898,75 @@ test("Tunnel setup can be copied from the details sheet", async ({
   );
 });
 
+test("each page sets its own tab title", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Audit");
+  await expect(page).toHaveTitle("Audit · Workspace Bridge");
+  await navigate(page, "Runs");
+  await expect(page).toHaveTitle("Runs · Workspace Bridge");
+});
+
+test("the command palette pairs a Node and adds an adapter", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await page.getByRole("button", { name: /Commands/ }).click();
+  await page.getByRole("option", { name: "Pair a Node" }).click();
+  await expect(page.getByRole("dialog", { name: /Pair a Node/ })).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: /Commands/ }).click();
+  await page.getByRole("option", { name: "Add an adapter" }).click();
+  await expect(page.getByRole("dialog", { name: /adapter/i })).toBeVisible();
+});
+
+test("workspace settings explain ChatGPT file access and routes show their state", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Workspaces");
+  await expect(page.getByText(/^Route o(n|ff)$/).first()).toBeVisible();
+  await page
+    .getByRole("button", { name: /Settings/ })
+    .first()
+    .click();
+  const select = page.getByLabel("ChatGPT file access");
+  await expect(select).toHaveAccessibleDescription(/cannot change anything/);
+  await select.selectOption("workspace");
+  await expect(select).toHaveAccessibleDescription(/can edit files/);
+});
+
+test("a single workspace opens its handoffs without choosing it", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Handoffs");
+  await expect(page.getByText("Prepared handoffs")).toBeVisible();
+  await expect(page.getByLabel("Workspace", { exact: true })).not.toHaveValue(
+    "",
+  );
+});
+
+test("mobile navigation holds Change password", async ({ page }) => {
+  await mockApi(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("./");
+  await expect(
+    page.getByRole("button", { name: "Change password" }),
+  ).toBeHidden();
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await page
+    .getByRole("navigation", { name: "Mobile navigation" })
+    .getByRole("button", { name: "Change password" })
+    .click();
+  await expect(
+    page.getByLabel("Current password", { exact: true }),
+  ).toBeVisible();
+});
+
 test("Profiles lists the shared profiles and shows a profile's rules", async ({
   page,
 }) => {
