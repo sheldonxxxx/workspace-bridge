@@ -20,6 +20,12 @@
   notice. The Manager shows when ChatGPT last called the Bridge. The
   project-lead skill is 4.1.0 and tells ChatGPT to re-read a run after a
   Manager action.
+- The Manager's Profiles page edits the shared security profile format
+  (deny, ask or allow per category, protected paths, outside folders and
+  command rules) through `/api/profiles`. It lists the routes using each
+  profile and asks for confirmation before a save that loosens a rule or that
+  an assigned agent cannot enforce. It replaces the 0.3 per-adapter editor,
+  which failed with HTTP 404.
 - The Manager's Audit page lists the approval log, filtered by who decided
   (ChatGPT or you), and a run inspector can abandon a run whose Node is gone.
 - The Bridge records each MCP client name and protocol version the first

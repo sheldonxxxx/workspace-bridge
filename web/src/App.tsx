@@ -3078,20 +3078,13 @@ export default function App() {
                   </Empty>
                 )}
               </div>
-              {adapters.length > 0 && (
-                <section className="surface-panel adapter-detail-panel">
-                  <SectionHeading
-                    title="Adapter security profiles"
-                    description="Native profiles are discovered separately for each adapter and workspace."
-                  />
-                  <ProfileManager
-                    adapters={adapters}
-                    workspaces={workspaces}
-                    onChanged={refresh}
-                    notify={notify}
-                  />
-                </section>
-              )}
+              <section className="surface-panel adapter-detail-panel">
+                <SectionHeading
+                  title="Security profiles"
+                  description="One format for every agent, assigned per workspace route."
+                />
+                <ProfileManager onChanged={refresh} notify={notify} />
+              </section>
               <div className="connection-panel">
                 <div className="connection-head">
                   <div className="connection-symbol">

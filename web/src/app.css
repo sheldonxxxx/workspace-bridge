@@ -3410,3 +3410,22 @@ a {
   max-height: 420px;
   overflow: auto;
 }
+.profile-rules {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.profile-rules th,
+.profile-rules td {
+  border-top: 1px solid var(--line);
+  padding: 8px 0;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.profile-rules th {
+  width: 40%;
+  padding-right: 12px;
+  color: var(--quiet);
+  font-weight: 600;
+}

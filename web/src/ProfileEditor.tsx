@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, runtimeName, type AdapterInfo, type Workspace } from "@/lib/api";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AlertDialog,
@@ -16,196 +15,182 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-type Mode = "choose" | "create" | "edit";
-type AccessMode = "allow" | "ask" | "deny";
+type AccessMode = "deny" | "ask" | "allow";
+type RootRule = { path: string; read?: AccessMode; write?: AccessMode };
+type CommandRule = { prefix: string; mode: AccessMode };
+type Rules = Record<(typeof categories)[number]["key"], AccessMode> & {
+  protected: string[];
+  external_roots: RootRule[];
+  commands: CommandRule[];
+};
+type RouteUse = {
+  workspace_id: string;
+  workspace_name: string;
+  adapter_id: string;
+  adapter_name: string;
+  enabled: boolean;
+};
 type Profile = {
   id: string;
   revision: string;
-  definitionRevision?: string;
-  mutable: boolean;
-  available?: boolean;
-  config: Record<string, unknown> | null;
+  builtin: boolean;
+  description?: string;
+  rules: Rules;
+  routes: RouteUse[];
 };
-type NativePermissionProfile = {
+type Confirmation = {
+  loosened: string[];
+  routes: RouteUse[];
+  unenforceable_routes: Array<RouteUse & { unenforced: string[] }>;
+};
+type Draft = {
   id: string;
-  description: string;
-  allowed: boolean;
+  categories: Record<string, AccessMode>;
+  protectedText: string;
+  roots: Array<{ path: string; read: string; write: string }>;
+  commands: CommandRule[];
 };
-type PiConfig = {
-  version: number;
-  write_tools_enabled: boolean;
-  tools: Record<"read" | "grep" | "find" | "ls" | "edit" | "write", AccessMode>;
-  protected_patterns: string[];
-  protected_template_exceptions: string[];
-  allow_session_always: boolean;
-  external_access: {
-    default_mode: AccessMode;
-    roots: Array<{ path: string; mode: AccessMode }>;
+type Mode = "choose" | "create" | "edit";
+
+const modes: AccessMode[] = ["deny", "ask", "allow"];
+const categories = [
+  { key: "read_inside", label: "Read inside the workspace" },
+  { key: "read_outside", label: "Read outside the workspace" },
+  { key: "write_inside", label: "Edit inside the workspace" },
+  { key: "write_outside", label: "Write outside the workspace" },
+  { key: "shell", label: "Run shell commands" },
+  { key: "web", label: "Web fetch and search" },
+  { key: "extensions", label: "Extensions and extra tools" },
+] as const;
+const keyLabels: Record<string, string> = {
+  ...Object.fromEntries(categories.map((item) => [item.key, item.label])),
+  protected: "Protected paths",
+  external_roots: "Outside folders",
+  commands: "Command rules",
+};
+const labelKeys = (keys: string[]) =>
+  keys.map((key) => keyLabels[key] || key).join(", ");
+
+function toDraft(id: string, rules: Rules): Draft {
+  return {
+    id,
+    categories: Object.fromEntries(
+      categories.map((item) => [item.key, rules[item.key]]),
+    ),
+    protectedText: rules.protected.join("\n"),
+    roots: rules.external_roots.map((root) => ({
+      path: root.path,
+      read: root.read || "",
+      write: root.write || "",
+    })),
+    commands: rules.commands.map((rule) => ({ ...rule })),
   };
-  shell_mode: AccessMode;
-};
-type CodexConfig = {
-  permissions: string;
-  approvalPolicy: "on-request" | "never";
-  approvalsReviewer: "user" | "auto_review";
-};
-type ClaudeConfig = {
-  edits: AccessMode;
-  shell: AccessMode;
-  web: AccessMode;
-  extensions: AccessMode;
-};
+}
 
-const fileTools = ["read", "grep", "find", "ls", "edit", "write"] as const;
-const accessModes: AccessMode[] = ["deny", "ask", "allow"];
-const lines = (value: string) =>
-  value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-const copy = (config: Record<string, unknown>) => structuredClone(config);
+function toRules(draft: Draft): Record<string, unknown> {
+  return {
+    ...draft.categories,
+    protected: draft.protectedText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+    external_roots: draft.roots
+      .filter((root) => root.path.trim())
+      .map((root) => ({
+        path: root.path.trim(),
+        ...(root.read ? { read: root.read } : {}),
+        ...(root.write ? { write: root.write } : {}),
+      })),
+    commands: draft.commands
+      .filter((rule) => rule.prefix.trim())
+      .map((rule) => ({ prefix: rule.prefix.trim(), mode: rule.mode })),
+  };
+}
 
-function SelectField({
+function ModeSelect({
   id,
-  label,
   value,
-  options,
   onChange,
-  hint,
+  inherit,
 }: {
   id: string;
-  label: string;
   value: string;
-  options: string[];
   onChange: (value: string) => void;
-  hint?: string;
+  inherit?: boolean;
 }) {
   return (
-    <div className="form-field">
-      <Label htmlFor={id}>{label}</Label>
-      <select
-        id={id}
-        className="native-select"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-      {hint && <small>{hint}</small>}
-    </div>
+    <select
+      id={id}
+      className="native-select"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    >
+      {inherit && <option value="">Same as outside</option>}
+      {modes.map((mode) => (
+        <option key={mode} value={mode}>
+          {mode}
+        </option>
+      ))}
+    </select>
   );
 }
 
 export function ProfileManager({
-  adapters,
-  workspaces,
   onChanged,
   notify,
 }: {
-  adapters: AdapterInfo[];
-  workspaces: Workspace[];
   onChanged: () => Promise<void>;
   notify: (message: string) => void;
 }) {
-  const [adapterId, setAdapterId] = useState(adapters[0]?.id || "");
-  const adapter = adapters.find((item) => item.id === adapterId);
-  const runtimeType = adapter?.runtime_type || "pi";
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [permissionProfiles, setPermissionProfiles] = useState<
-    NativePermissionProfile[]
-  >([]);
-  const [contextWorkspaceId, setContextWorkspaceId] = useState<string | null>(
-    null,
-  );
   const [selectedId, setSelectedId] = useState("");
   const [mode, setMode] = useState<Mode>("choose");
-  const [draftId, setDraftId] = useState("");
-  const [draft, setDraft] = useState<Record<string, unknown>>({});
-  const [protectedText, setProtectedText] = useState("");
-  const [exceptionText, setExceptionText] = useState("");
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const eligibleWorkspaces = adapter?.node_id
-    ? workspaces.filter(
-        (workspace) =>
-          Boolean(workspace.node_id) && workspace.node_id === adapter.node_id,
-      )
-    : [];
-  const effectiveContextWorkspaceId =
-    contextWorkspaceId === ""
-      ? ""
-      : eligibleWorkspaces.find(
-          (workspace) => workspace.id === contextWorkspaceId,
-        )?.id ||
-        eligibleWorkspaces[0]?.id ||
-        "";
   const selected = profiles.find((profile) => profile.id === selectedId);
-  const selectedConfig = selected?.config;
-  const available = Boolean(adapter);
-  const assignedWorkspaces = workspaces.filter(
-    (workspace) => workspace.routes?.[adapterId]?.profile?.id === selectedId,
-  );
-  const pi = draft as unknown as PiConfig;
-  const codex = draft as unknown as CodexConfig;
-  const claude = draft as unknown as ClaudeConfig;
 
-  useEffect(() => {
-    if (!available && adapters[0]) setAdapterId(adapters[0].id);
-  }, [available, adapters]);
-
-  const profilesUrl = useCallback(() => {
-    if (adapterId && effectiveContextWorkspaceId) {
-      const query = new URLSearchParams({
-        workspace_id: effectiveContextWorkspaceId,
-        fresh: "1",
-      });
-      return `/api/adapters/${adapterId}/profiles?${query.toString()}`;
-    }
-    return `/api/adapters/${adapterId}/profiles`;
-  }, [adapterId, effectiveContextWorkspaceId]);
+  const load = useCallback(async (selectId?: string) => {
+    const data = await api<{ profiles: Profile[] }>("/api/profiles");
+    const rows = data.profiles || [];
+    setProfiles(rows);
+    setSelectedId((current) => {
+      const wanted = selectId ?? current;
+      return rows.some((row) => row.id === wanted) ? wanted : rows[0]?.id || "";
+    });
+  }, []);
 
   useEffect(() => {
     let live = true;
-    if (!available) return;
-    setProfiles([]);
-    setSelectedId("");
-    setMode("choose");
-    setError("");
-    api<{
-      profiles: Profile[];
-      permissionProfiles?: NativePermissionProfile[];
-    }>(profilesUrl())
-      .then((data) => {
-        if (!live) return;
-        setProfiles(data.profiles || []);
-        setPermissionProfiles(data.permissionProfiles || []);
-        setSelectedId(data.profiles?.[0]?.id || "");
-      })
+    load()
       .catch((failure) => {
         if (live) setError((failure as Error).message);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
       });
     return () => {
       live = false;
     };
-  }, [adapterId, available, effectiveContextWorkspaceId, profilesUrl]);
+  }, [load]);
 
-  async function reload(selectId: string) {
-    const data = await api<{
-      profiles: Profile[];
-      permissionProfiles?: NativePermissionProfile[];
-    }>(profilesUrl());
-    setProfiles(data.profiles || []);
-    setPermissionProfiles(data.permissionProfiles || []);
-    setSelectedId(selectId);
+  function begin(next: "create" | "edit") {
+    if (!selected) return;
+    setDraft(toDraft(next === "edit" ? selected.id : "", selected.rules));
+    setError("");
+    setMode(next);
   }
 
-  async function saveDefinition() {
-    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(draftId)) {
+  function update(changes: Partial<Draft>) {
+    setDraft((current) => (current ? { ...current, ...changes } : current));
+  }
+
+  async function save(confirm: boolean) {
+    if (!draft) return;
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(draft.id)) {
       setError(
         "Use a lowercase ID with letters, numbers, hyphens or underscores.",
       );
@@ -214,29 +199,36 @@ export function ProfileManager({
     setBusy(true);
     setError("");
     try {
-      const saved = await api<Profile>(
-        `/api/adapters/${adapterId}/profiles`,
-        "POST",
-        {
-          id: draftId,
-          config: draft,
-          expected_revision:
-            mode === "edit"
-              ? (selected?.definitionRevision ?? selected?.revision)
-              : null,
-        },
-      );
-      await reload(saved.id);
-      await onChanged();
-      setMode("choose");
-      if (mode === "create") {
-        notify(`Profile ${saved.id} created. Assign it from a workspace.`);
-      } else {
-        notify(
-          `Profile ${saved.id} updated. Start a new conversation to use it.`,
-        );
+      const result = await api<
+        Partial<Confirmation> & {
+          saved?: boolean;
+          needs_confirmation?: boolean;
+          id: string;
+        }
+      >(`/api/profiles/${draft.id}`, "PUT", {
+        rules: toRules(draft),
+        expected_revision: mode === "edit" ? selected?.revision : null,
+        confirm,
+      });
+      if (result.needs_confirmation) {
+        setConfirmation({
+          loosened: result.loosened || [],
+          routes: result.routes || [],
+          unenforceable_routes: result.unenforceable_routes || [],
+        });
+        return;
       }
+      setConfirmation(null);
+      await load(draft.id);
+      await onChanged();
+      notify(
+        mode === "create"
+          ? `Profile ${draft.id} created. Assign it from a workspace.`
+          : `Profile ${draft.id} updated. New runs use it; a run in progress keeps its rules.`,
+      );
+      setMode("choose");
     } catch (failure) {
+      setConfirmation(null);
       setError((failure as Error).message);
     } finally {
       setBusy(false);
@@ -248,10 +240,9 @@ export function ProfileManager({
     setBusy(true);
     setError("");
     try {
-      await api(`/api/adapters/${adapterId}/profiles/${selected.id}`, "DELETE");
-      await reload(
-        profiles.find((profile) => profile.id !== selected.id)?.id || "",
-      );
+      await api(`/api/profiles/${selected.id}`, "DELETE");
+      await load(profiles.find((row) => row.id !== selected.id)?.id || "");
+      await onChanged();
       notify(`Profile ${selected.id} deleted.`);
     } catch (failure) {
       setError((failure as Error).message);
@@ -261,629 +252,463 @@ export function ProfileManager({
     }
   }
 
-  function begin(mode: "create" | "edit") {
-    if (!selected || !selectedConfig) return;
-    setDraftId(mode === "edit" ? selected.id : "");
-    setDraft(copy(selectedConfig));
-    if (runtimeType === "pi") {
-      const config = selectedConfig as unknown as PiConfig;
-      setProtectedText((config.protected_patterns || []).join("\n"));
-      setExceptionText((config.protected_template_exceptions || []).join("\n"));
-    }
-    setError("");
-    setMode(mode);
-  }
-
-  function updatePi(changes: Partial<PiConfig>) {
-    setDraft((current) => ({ ...current, ...changes }));
-  }
-
   return (
     <>
       <div className="profiles-page">
-        <div
-          className="profiles-runtime-tabs"
-          role="group"
-          aria-label="Adapter"
-        >
-          {adapters.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              aria-pressed={adapterId === item.id}
-              className={adapterId === item.id ? "current" : ""}
-              onClick={() => setAdapterId(item.id)}
-            >
-              {item.name} · {runtimeName(item.runtime_type)}
-            </button>
-          ))}
-        </div>
-        {adapters.length === 0 ? (
-          <p className="profiles-empty">
-            Add an adapter to manage its security profiles.
-          </p>
-        ) : (
-          <div className="profiles-layout">
-            <aside
-              className="profiles-list-panel"
-              aria-label={`${adapter?.name || "Adapter"} profiles`}
-            >
-              <h2>Saved profiles</h2>
-              <p>Choose one to inspect or use as a starting point.</p>
-              <div className="profiles-list">
-                {profiles.map((profile) => (
-                  <button
-                    key={profile.id}
-                    type="button"
-                    className={`profile-list-item ${selectedId === profile.id ? "current" : ""}`}
-                    aria-current={
-                      selectedId === profile.id ? "true" : undefined
-                    }
-                    onClick={() => {
-                      setSelectedId(profile.id);
-                      setMode("choose");
-                      setError("");
-                    }}
-                  >
-                    <strong>{profile.id}</strong>
-                    <span>
-                      {profile.mutable ? "Custom" : "Built in"}
-                      {profile.available === false ? " · unavailable here" : ""}
-                    </span>
-                  </button>
-                ))}
+        <div className="profiles-layout">
+          <aside className="profiles-list-panel" aria-label="Profiles">
+            <h2>Saved profiles</h2>
+            <p>Choose one to inspect or use as a starting point.</p>
+            <div className="profiles-list">
+              {profiles.map((profile) => (
+                <button
+                  key={profile.id}
+                  type="button"
+                  className={`profile-list-item ${selectedId === profile.id ? "current" : ""}`}
+                  aria-current={selectedId === profile.id ? "true" : undefined}
+                  onClick={() => {
+                    setSelectedId(profile.id);
+                    setMode("choose");
+                    setError("");
+                  }}
+                >
+                  <strong>{profile.id}</strong>
+                  <span>{profile.builtin ? "Built in" : "Custom"}</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+          <section
+            className="profiles-detail-panel"
+            aria-label="Profile controls"
+          >
+            <div className="profiles-detail-head">
+              <div>
+                <h2>
+                  {mode === "create"
+                    ? "Create profile"
+                    : mode === "edit"
+                      ? `Edit ${draft?.id}`
+                      : selected?.id || (loading ? "Loading" : "No profile")}
+                </h2>
+                <p>
+                  {mode === "choose"
+                    ? "One format for every agent. Assign a profile to a workspace's route; each agent enforces what it can."
+                    : "Edits apply to new runs, and to continuations at the next idle point. A run in progress keeps its rules."}
+                </p>
               </div>
-            </aside>
-            <section
-              className="profiles-detail-panel"
-              aria-label="Profile controls"
-            >
-              <div className="profiles-detail-head">
-                <div>
-                  <h2>
-                    {mode === "create"
-                      ? "Create profile"
-                      : mode === "edit"
-                        ? `Edit ${draftId}`
-                        : selected?.id || "Select a profile"}
-                  </h2>
-                  <p>
-                    {mode === "choose"
-                      ? "Profiles are shared across workspaces. Assign one from a workspace."
-                      : "Changes apply to new conversations. Existing conversations keep their profile revision."}
-                  </p>
-                </div>
-              </div>
-              {mode === "choose" ? (
-                <div className="profile-form">
-                  {selected && (
+            </div>
+            {mode === "choose" ? (
+              <div className="profile-form">
+                {selected && (
+                  <>
                     <div className="profile-summary">
                       <strong>
-                        {selected.mutable
-                          ? "Custom profile"
-                          : "Built-in starting point"}
+                        {selected.builtin
+                          ? "Built-in starting point"
+                          : "Custom profile"}
                       </strong>
-                      <span>Revision {selected.revision.slice(0, 12)}</span>
+                      <span>Revision {selected.revision.slice(0, 17)}</span>
+                      {selected.description && (
+                        <span>{selected.description}</span>
+                      )}
                       <span>
-                        {selectedConfig
-                          ? runtimeType === "pi"
-                            ? `Files outside workspace: ${(selectedConfig as unknown as PiConfig).external_access?.default_mode || "deny"}`
-                            : runtimeType === "claude" ||
-                                runtimeType === "opencode"
-                              ? `Edits ${(selectedConfig as unknown as ClaudeConfig).edits || "deny"} · shell ${(selectedConfig as unknown as ClaudeConfig).shell || "deny"} · web ${(selectedConfig as unknown as ClaudeConfig).web || "deny"} · extensions ${(selectedConfig as unknown as ClaudeConfig).extensions || "deny"}`
-                              : `Permission profile: ${(selectedConfig as unknown as CodexConfig).permissions || "unknown"}`
-                          : "Controls unavailable from the installed adapter"}
-                      </span>
-                      <span>
-                        Assigned to {assignedWorkspaces.length} workspace
-                        {assignedWorkspaces.length === 1 ? "" : "s"}
-                        {assignedWorkspaces.length > 0 &&
-                          `: ${assignedWorkspaces.map((workspace) => workspace.name).join(", ")}`}
+                        Used by {selected.routes.length} route
+                        {selected.routes.length === 1 ? "" : "s"}
+                        {selected.routes.length > 0 &&
+                          `: ${selected.routes
+                            .map(
+                              (route) =>
+                                `${route.workspace_name} · ${route.adapter_name}`,
+                            )
+                            .join(", ")}`}
                       </span>
                     </div>
+                    <table className="profile-rules" aria-label="Rules">
+                      <tbody>
+                        {categories.map((item) => (
+                          <tr key={item.key}>
+                            <th scope="row">{item.label}</th>
+                            <td>{selected.rules[item.key]}</td>
+                          </tr>
+                        ))}
+                        <tr>
+                          <th scope="row">Protected paths</th>
+                          <td>
+                            {selected.rules.protected.length
+                              ? selected.rules.protected.join(", ")
+                              : "Only the fixed protected paths"}
+                          </td>
+                        </tr>
+                        <tr>
+                          <th scope="row">Outside folders</th>
+                          <td>
+                            {selected.rules.external_roots.length
+                              ? selected.rules.external_roots
+                                  .map(
+                                    (root) =>
+                                      `${root.path} (read ${root.read || "default"}, write ${root.write || "default"})`,
+                                  )
+                                  .join("; ")
+                              : "None"}
+                          </td>
+                        </tr>
+                        <tr>
+                          <th scope="row">Command rules</th>
+                          <td>
+                            {selected.rules.commands.length
+                              ? selected.rules.commands
+                                  .map((rule) => `${rule.prefix}: ${rule.mode}`)
+                                  .join("; ")
+                              : "None"}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </>
+                )}
+                <div className="profile-actions">
+                  <Button
+                    variant="outline"
+                    onClick={() => begin("create")}
+                    disabled={!selected || busy}
+                  >
+                    Create from selected
+                  </Button>
+                  {selected && !selected.builtin && (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={() => begin("edit")}
+                        disabled={busy}
+                      >
+                        Edit rules
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setDeleteOpen(true)}
+                        disabled={busy || selected.routes.length > 0}
+                      >
+                        Delete
+                      </Button>
+                    </>
                   )}
-                  {selected && !selectedConfig && (
-                    <p className="profile-error" role="status">
-                      Update the native {runtimeName(runtimeType)} adapter to
-                      create or edit profiles. Existing profiles can still be
-                      assigned.
-                    </p>
-                  )}
-                  <div className="profile-actions">
-                    <Button
-                      variant="outline"
-                      onClick={() => begin("create")}
-                      disabled={!selectedConfig || busy}
-                    >
-                      Create from selected
-                    </Button>
-                    {selected?.mutable && (
-                      <>
-                        <Button
-                          variant="outline"
-                          onClick={() => begin("edit")}
-                          disabled={!selectedConfig || busy}
-                        >
-                          Edit controls
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => setDeleteOpen(true)}
-                          disabled={busy || assignedWorkspaces.length > 0}
-                        >
-                          Delete
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                  <small>
-                    To delete an assigned profile, assign another profile in
-                    every workspace first.
-                  </small>
                 </div>
-              ) : (
+                <small>
+                  To delete an assigned profile, assign another profile on every
+                  route that uses it first.
+                </small>
+                {error && (
+                  <p className="profile-error" role="alert">
+                    {error}
+                  </p>
+                )}
+              </div>
+            ) : (
+              draft && (
                 <div className="profile-form">
                   {mode === "create" && (
                     <div className="form-field">
                       <Label htmlFor="profile-id">Profile ID</Label>
                       <Input
                         id="profile-id"
-                        value={draftId}
-                        onChange={(event) => setDraftId(event.target.value)}
+                        value={draft.id}
+                        onChange={(event) => update({ id: event.target.value })}
                         placeholder="reviewed-external-files"
                         maxLength={64}
                       />
                     </div>
                   )}
-                  {runtimeType === "codex" && (
-                    <div className="form-field">
-                      <Label htmlFor="codex-discovery-workspace">
-                        Native profile choices
-                      </Label>
-                      <select
-                        id="codex-discovery-workspace"
-                        className="native-select"
-                        value={effectiveContextWorkspaceId}
-                        onChange={(event) =>
-                          setContextWorkspaceId(event.target.value)
-                        }
-                      >
-                        <option value="">No workspace context</option>
-                        {eligibleWorkspaces.map((workspace) => (
-                          <option key={workspace.id} value={workspace.id}>
-                            {workspace.name}
-                          </option>
-                        ))}
-                      </select>
-                      <small>
-                        Native profile choices are discovered for this exact
-                        adapter and workspace.
-                      </small>
-                    </div>
-                  )}
-                  {runtimeType === "pi" ? (
-                    <>
-                      <section className="profile-section">
-                        <h3>File tools</h3>
-                        <div className="profile-toggle">
-                          <div>
-                            <strong>Enable edit and write</strong>
-                            <small>
-                              Tool modes below decide whether each action asks.
-                            </small>
-                          </div>
-                          <Switch
-                            aria-label="Enable edit and write"
-                            checked={pi.write_tools_enabled}
-                            onCheckedChange={(value) =>
-                              updatePi({ write_tools_enabled: value })
+                  <section className="profile-section">
+                    <h3>What the agent may do</h3>
+                    <div className="profile-grid">
+                      {categories.map((item) => (
+                        <div className="form-field" key={item.key}>
+                          <Label htmlFor={`rule-${item.key}`}>
+                            {item.label}
+                          </Label>
+                          <ModeSelect
+                            id={`rule-${item.key}`}
+                            value={draft.categories[item.key]}
+                            onChange={(value) =>
+                              update({
+                                categories: {
+                                  ...draft.categories,
+                                  [item.key]: value as AccessMode,
+                                },
+                              })
                             }
                           />
                         </div>
-                        <div className="profile-grid">
-                          {fileTools.map((tool) => (
-                            <SelectField
-                              key={tool}
-                              id={`profile-tool-${tool}`}
-                              label={tool}
-                              value={pi.tools?.[tool] || "deny"}
-                              options={accessModes}
-                              onChange={(value) =>
-                                updatePi({
-                                  tools: {
-                                    ...pi.tools,
-                                    [tool]: value as AccessMode,
-                                  },
-                                })
-                              }
-                            />
-                          ))}
-                        </div>
-                      </section>
-                      <section className="profile-section">
-                        <h3>Outside the workspace</h3>
-                        <SelectField
-                          id="profile-external-default"
-                          label="Default file access"
-                          value={pi.external_access?.default_mode || "deny"}
-                          options={accessModes}
-                          onChange={(value) =>
-                            updatePi({
-                              external_access: {
-                                ...pi.external_access,
-                                default_mode: value as AccessMode,
-                              },
+                      ))}
+                    </div>
+                    <small>
+                      deny blocks the action, ask sends an approval request to
+                      ChatGPT, allow lets it through.
+                    </small>
+                  </section>
+                  <section className="profile-section">
+                    <h3>Protected paths</h3>
+                    <Label htmlFor="rule-protected">
+                      Workspace-relative globs, one per line
+                    </Label>
+                    <Textarea
+                      id="rule-protected"
+                      rows={4}
+                      value={draft.protectedText}
+                      onChange={(event) =>
+                        update({ protectedText: event.target.value })
+                      }
+                      placeholder={"secrets/**\n*.pem"}
+                    />
+                    <small>
+                      Git internals, environment files and checks.toml are
+                      always protected.
+                    </small>
+                  </section>
+                  <section className="profile-section">
+                    <h3>Outside folders</h3>
+                    {draft.roots.map((root, index) => (
+                      <div className="profile-root-row" key={index}>
+                        <Input
+                          aria-label={`Folder ${index + 1} path`}
+                          value={root.path}
+                          placeholder="/path/or/~/folder"
+                          onChange={(event) =>
+                            update({
+                              roots: draft.roots.map((item, at) =>
+                                at === index
+                                  ? { ...item, path: event.target.value }
+                                  : item,
+                              ),
                             })
                           }
-                          hint="Applies to Pi file tools; shell and extensions have separate authority."
                         />
-                        {(pi.external_access?.roots || []).map(
-                          (root, index) => (
-                            <div className="profile-root-row" key={index}>
-                              <Input
-                                aria-label={`External root ${index + 1}`}
-                                value={root.path}
-                                placeholder="/absolute/host/path"
-                                onChange={(event) => {
-                                  const roots = [...pi.external_access.roots];
-                                  roots[index] = {
-                                    ...root,
-                                    path: event.target.value,
-                                  };
-                                  updatePi({
-                                    external_access: {
-                                      ...pi.external_access,
-                                      roots,
-                                    },
-                                  });
-                                }}
-                              />
-                              <select
-                                className="native-select"
-                                aria-label={`Access for external root ${index + 1}`}
-                                value={root.mode}
-                                onChange={(event) => {
-                                  const roots = [...pi.external_access.roots];
-                                  roots[index] = {
-                                    ...root,
-                                    mode: event.target.value as AccessMode,
-                                  };
-                                  updatePi({
-                                    external_access: {
-                                      ...pi.external_access,
-                                      roots,
-                                    },
-                                  });
-                                }}
-                              >
-                                {accessModes.map((value) => (
-                                  <option key={value}>{value}</option>
-                                ))}
-                              </select>
-                              <Button
-                                variant="outline"
-                                onClick={() =>
-                                  updatePi({
-                                    external_access: {
-                                      ...pi.external_access,
-                                      roots: pi.external_access.roots.filter(
-                                        (_, i) => i !== index,
-                                      ),
-                                    },
-                                  })
-                                }
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                          ),
-                        )}
+                        <ModeSelect
+                          id={`root-read-${index}`}
+                          inherit
+                          value={root.read}
+                          onChange={(value) =>
+                            update({
+                              roots: draft.roots.map((item, at) =>
+                                at === index ? { ...item, read: value } : item,
+                              ),
+                            })
+                          }
+                        />
+                        <ModeSelect
+                          id={`root-write-${index}`}
+                          inherit
+                          value={root.write}
+                          onChange={(value) =>
+                            update({
+                              roots: draft.roots.map((item, at) =>
+                                at === index ? { ...item, write: value } : item,
+                              ),
+                            })
+                          }
+                        />
                         <Button
                           variant="outline"
+                          type="button"
                           onClick={() =>
-                            updatePi({
-                              external_access: {
-                                ...pi.external_access,
-                                roots: [
-                                  ...pi.external_access.roots,
-                                  { path: "", mode: "ask" },
-                                ],
-                              },
+                            update({
+                              roots: draft.roots.filter(
+                                (_, at) => at !== index,
+                              ),
                             })
                           }
-                          disabled={
-                            (pi.external_access?.roots.length || 0) >= 32
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() =>
+                        update({
+                          roots: [
+                            ...draft.roots,
+                            { path: "", read: "", write: "" },
+                          ],
+                        })
+                      }
+                    >
+                      Add folder
+                    </Button>
+                    <small>
+                      Each folder sets read then write access, overriding the
+                      outside-the-workspace rules above.
+                    </small>
+                  </section>
+                  <section className="profile-section">
+                    <h3>Command rules</h3>
+                    {draft.commands.map((rule, index) => (
+                      <div className="profile-root-row" key={index}>
+                        <Input
+                          aria-label={`Command ${index + 1} prefix`}
+                          value={rule.prefix}
+                          placeholder="git push"
+                          onChange={(event) =>
+                            update({
+                              commands: draft.commands.map((item, at) =>
+                                at === index
+                                  ? { ...item, prefix: event.target.value }
+                                  : item,
+                              ),
+                            })
+                          }
+                        />
+                        <ModeSelect
+                          id={`command-mode-${index}`}
+                          value={rule.mode}
+                          onChange={(value) =>
+                            update({
+                              commands: draft.commands.map((item, at) =>
+                                at === index
+                                  ? { ...item, mode: value as AccessMode }
+                                  : item,
+                              ),
+                            })
+                          }
+                        />
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() =>
+                            update({
+                              commands: draft.commands.filter(
+                                (_, at) => at !== index,
+                              ),
+                            })
                           }
                         >
-                          Add external root
+                          Remove
                         </Button>
-                      </section>
-                      <section className="profile-section">
-                        <h3>Shell and protected files</h3>
-                        <SelectField
-                          id="profile-shell"
-                          label="Shell commands"
-                          value={pi.shell_mode || "deny"}
-                          options={accessModes}
-                          onChange={(value) =>
-                            updatePi({ shell_mode: value as AccessMode })
-                          }
-                          hint="An approved shell command runs with the macOS user's file and network access."
-                        />
-                        <div className="form-field">
-                          <Label htmlFor="profile-protected">
-                            Protected paths
-                          </Label>
-                          <Textarea
-                            id="profile-protected"
-                            rows={3}
-                            value={protectedText}
-                            onChange={(event) => {
-                              setProtectedText(event.target.value);
-                              updatePi({
-                                protected_patterns: lines(event.target.value),
-                              });
-                            }}
-                          />
-                          <small>
-                            One workspace relative pattern per line.
-                          </small>
-                        </div>
-                        <div className="form-field">
-                          <Label htmlFor="profile-exceptions">
-                            Template exceptions
-                          </Label>
-                          <Textarea
-                            id="profile-exceptions"
-                            rows={2}
-                            value={exceptionText}
-                            onChange={(event) => {
-                              setExceptionText(event.target.value);
-                              updatePi({
-                                protected_template_exceptions: lines(
-                                  event.target.value,
-                                ),
-                              });
-                            }}
-                          />
-                        </div>
-                        <div className="profile-toggle">
-                          <div>
-                            <strong>Session grants</strong>
-                            <small>
-                              Allow an approved exact target for the rest of
-                              this session.
-                            </small>
-                          </div>
-                          <Switch
-                            aria-label="Session grants"
-                            checked={pi.allow_session_always}
-                            onCheckedChange={(value) =>
-                              updatePi({ allow_session_always: value })
-                            }
-                          />
-                        </div>
-                      </section>
-                    </>
-                  ) : runtimeType === "claude" || runtimeType === "opencode" ? (
-                    <section className="profile-section">
-                      <h3>{runtimeName(runtimeType)} security profile</h3>
-                      <small>
-                        Reading inside the workspace is always allowed. Git
-                        internals, <code>.env</code> files, and paths outside
-                        the workspace are always denied, and edits never reach{" "}
-                        {runtimeType === "opencode" ? (
-                          <>
-                            <code>.opencode</code>, <code>.agents</code>, or{" "}
-                            <code>opencode.json</code>.
-                          </>
-                        ) : (
-                          <>
-                            <code>.claude</code> or <code>.mcp.json</code>.
-                          </>
-                        )}
-                      </small>
-                      <SelectField
-                        id="profile-claude-edits"
-                        label="File edits"
-                        value={claude.edits || "deny"}
-                        options={accessModes}
-                        onChange={(value) =>
-                          setDraft((current) => ({ ...current, edits: value }))
-                        }
-                        hint="Edit, Write, and notebook edits inside the workspace."
-                      />
-                      <SelectField
-                        id="profile-claude-shell"
-                        label="Shell commands"
-                        value={claude.shell || "deny"}
-                        options={accessModes}
-                        onChange={(value) =>
-                          setDraft((current) => ({ ...current, shell: value }))
-                        }
-                        hint="Allowed commands run with this host user's authority and are not sandboxed. Prefer ask."
-                      />
-                      <SelectField
-                        id="profile-claude-web"
-                        label="Web access"
-                        value={claude.web || "deny"}
-                        options={accessModes}
-                        onChange={(value) =>
-                          setDraft((current) => ({ ...current, web: value }))
-                        }
-                        hint="Web fetch and web search."
-                      />
-                      <SelectField
-                        id="profile-claude-extensions"
-                        label="MCP extensions"
-                        value={claude.extensions || "deny"}
-                        options={accessModes}
-                        onChange={(value) =>
-                          setDraft((current) => ({
-                            ...current,
-                            extensions: value,
-                          }))
-                        }
-                        hint="Tools from MCP servers and plugins. Deny also stops those servers from starting. Sub-agents and skills are available, and every tool they call follows this profile."
-                      />
-                    </section>
-                  ) : (
-                    <>
-                      <section className="profile-section">
-                        <h3>Codex security profile</h3>
-                        {permissionProfiles.length > 0 && (
-                          <div className="form-field">
-                            <Label htmlFor="profile-native-permission">
-                              Permission profile
-                            </Label>
-                            <select
-                              id="profile-native-permission"
-                              className="native-select"
-                              value={
-                                permissionProfiles.some(
-                                  (profile) => profile.id === codex.permissions,
-                                )
-                                  ? codex.permissions
-                                  : "__custom__"
-                              }
-                              onChange={(event) =>
-                                setDraft((current) => ({
-                                  ...current,
-                                  permissions:
-                                    event.target.value === "__custom__"
-                                      ? ""
-                                      : event.target.value,
-                                }))
-                              }
-                            >
-                              {permissionProfiles.map((profile) => (
-                                <option key={profile.id} value={profile.id}>
-                                  {profile.id}
-                                  {profile.description
-                                    ? " — " + profile.description
-                                    : ""}
-                                </option>
-                              ))}
-                              <option value="__custom__">
-                                Enter a named profile ID
-                              </option>
-                            </select>
-                            <small>
-                              Choices come from Codex for{" "}
-                              {workspaces.find(
-                                (workspace) =>
-                                  workspace.id === effectiveContextWorkspaceId,
-                              )?.name || "the selected workspace"}
-                              .
-                            </small>
-                          </div>
-                        )}
-                        {!permissionProfiles.some(
-                          (profile) => profile.id === codex.permissions,
-                        ) && (
-                          <div className="form-field">
-                            <Label htmlFor="profile-permissions">
-                              Permission profile ID
-                            </Label>
-                            <Input
-                              id="profile-permissions"
-                              value={codex.permissions || ""}
-                              onChange={(event) =>
-                                setDraft((current) => ({
-                                  ...current,
-                                  permissions: event.target.value,
-                                }))
-                              }
-                              placeholder=":workspace or workspace-net"
-                              maxLength={128}
-                              autoComplete="off"
-                            />
-                            <small>
-                              Codex defines filesystem, network, domain, and
-                              socket rules in its permission profiles and
-                              config.toml. Bridge selects this ID and verifies
-                              it against the target workspace when assigned.
-                            </small>
-                          </div>
-                        )}
-                        <SelectField
-                          id="profile-approval"
-                          label="Approvals"
-                          value={codex.approvalPolicy || "on-request"}
-                          options={["on-request", "never"]}
-                          onChange={(value) =>
-                            setDraft((current) => ({
-                              ...current,
-                              approvalPolicy: value,
-                              approvalsReviewer:
-                                value === "never"
-                                  ? "user"
-                                  : current.approvalsReviewer,
-                            }))
-                          }
-                        />
-                        <SelectField
-                          id="profile-reviewer"
-                          label="Reviewer"
-                          value={codex.approvalsReviewer || "user"}
-                          options={
-                            codex.approvalPolicy === "never"
-                              ? ["user"]
-                              : ["user", "auto_review"]
-                          }
-                          onChange={(value) =>
-                            setDraft((current) => ({
-                              ...current,
-                              approvalsReviewer: value,
-                            }))
-                          }
-                          hint="User review sends approval requests to the Bridge interaction flow."
-                        />
-                      </section>
-                    </>
+                      </div>
+                    ))}
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() =>
+                        update({
+                          commands: [
+                            ...draft.commands,
+                            { prefix: "", mode: "ask" },
+                          ],
+                        })
+                      }
+                    >
+                      Add command rule
+                    </Button>
+                    <small>
+                      A rule applies to any command that starts with its prefix.
+                      Longer prefixes win; the shell rule covers the rest.
+                    </small>
+                  </section>
+                  {error && (
+                    <p className="profile-error" role="alert">
+                      {error}
+                    </p>
                   )}
+                  <div className="profile-actions">
+                    <Button onClick={() => save(false)} disabled={busy}>
+                      {mode === "create" ? "Create profile" : "Save profile"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setMode("choose");
+                        setError("");
+                      }}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
                 </div>
-              )}
-
-              {error && (
-                <p className="profile-error" role="alert">
-                  {error}
-                </p>
-              )}
-              {mode !== "choose" && (
-                <div className="profile-editor-actions">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setMode("choose");
-                      setError("");
-                    }}
-                    disabled={busy}
-                  >
-                    Back
-                  </Button>
-                  <Button onClick={() => void saveDefinition()} disabled={busy}>
-                    {mode === "create" ? "Create profile" : "Save controls"}
-                  </Button>
-                </div>
-              )}
-            </section>
-          </div>
-        )}
+              )
+            )}
+          </section>
+        </div>
       </div>
-      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <AlertDialog
+        open={deleteOpen}
+        onOpenChange={(open) => !busy && setDeleteOpen(open)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {selected?.id}?</AlertDialogTitle>
             <AlertDialogDescription>
-              Existing conversations using this profile cannot continue after
-              deletion. Assign another profile in every workspace first.
+              No route uses this profile. Deleting it cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void remove()}>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                void remove();
+              }}
+              disabled={busy}
+            >
               Delete profile
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={Boolean(confirmation)}
+        onOpenChange={(open) => !open && !busy && setConfirmation(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm this change</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                {confirmation && confirmation.loosened.length > 0 && (
+                  <p>
+                    This loosens {labelKeys(confirmation.loosened)}. It reaches
+                    new runs on{" "}
+                    {confirmation.routes.length
+                      ? confirmation.routes
+                          .map(
+                            (route) =>
+                              `${route.workspace_name} · ${route.adapter_name}`,
+                          )
+                          .join(", ")
+                      : "no route yet"}
+                    .
+                  </p>
+                )}
+                {confirmation &&
+                  confirmation.unenforceable_routes.length > 0 && (
+                    <p>
+                      Runs on these routes will be refused because the agent
+                      cannot enforce the rules:{" "}
+                      {confirmation.unenforceable_routes
+                        .map(
+                          (route) =>
+                            `${route.workspace_name} · ${route.adapter_name} (${labelKeys(route.unenforced)})`,
+                        )
+                        .join(", ")}
+                      .
+                    </p>
+                  )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                void save(true);
+              }}
+              disabled={busy}
+            >
+              Save anyway
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

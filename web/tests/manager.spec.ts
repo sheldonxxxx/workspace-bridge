@@ -254,54 +254,6 @@ function publicAdapter(row: AdapterRow) {
   return publicRow;
 }
 
-function profileCatalog(id: string, codexProfilesUnavailable = false) {
-  const profileId = id === GPU_PI ? "gpu-read-only" : "read-only";
-  const permission = id === LOCAL_CODEX ? ":read-only" : undefined;
-  return {
-    adapter_id: id,
-    profiles: [
-      {
-        id: profileId,
-        revision: `profile-rev-${id.slice(-3)}`,
-        mutable: false,
-        available: !(id === LOCAL_CODEX && codexProfilesUnavailable),
-        ...(id === LOCAL_CODEX && codexProfilesUnavailable
-          ? { unavailableReason: "legacy-sandbox-conflict" }
-          : {}),
-        config: permission
-          ? {
-              permissions: permission,
-              approvalPolicy: "on-request",
-              approvalsReviewer: "user",
-            }
-          : {
-              external_access: { default_mode: "deny", roots: [] },
-              protected_patterns: [".git/**", ".env*"],
-            },
-      },
-    ],
-    permissionProfiles: permission
-      ? [{ id: permission, allowed: true, description: "Read only" }]
-      : [],
-    ...(id === LOCAL_CODEX
-      ? {
-          runtimeConfig: {
-            supported: true,
-            available: true,
-            status: "ready",
-            revision: "codex-config-rev",
-            resolvedSummary: {
-              activePermissionProfile: ":read-only",
-              approvalPolicy: "on-request",
-              approvalsReviewer: "user",
-              provenance: "native",
-            },
-          },
-        }
-      : {}),
-  };
-}
-
 async function mockApi(
   page: Page,
   options: {
@@ -313,7 +265,6 @@ async function mockApi(
     runSnapshot?: boolean;
     activeRun?: boolean;
     pendingRequest?: boolean;
-    codexProfilesUnavailable?: boolean;
     codexQuota?:
       "ok" | "empty" | "error" | "ordinary-unavailable" | "same-duration";
     codexQuotaDelayMs?: number;
@@ -515,18 +466,50 @@ async function mockApi(
       features: ["steer", "queue"],
     },
   ];
-  const bridgeProfiles = [
+  const baseRules = {
+    read_inside: "allow",
+    read_outside: "deny",
+    write_inside: "deny",
+    write_outside: "deny",
+    shell: "deny",
+    web: "deny",
+    extensions: "deny",
+    protected: [] as string[],
+    external_roots: [] as unknown[],
+    commands: [] as unknown[],
+  };
+  const bridgeProfiles: Array<Record<string, unknown>> = [
     {
       id: "read-only",
       revision: "profile-rev-readonly",
       builtin: true,
+      description: "Reads the workspace; no edits, shell, web or extensions.",
+      rules: baseRules,
       restricts: ["write_inside", "write_outside"],
+      routes: [
+        {
+          workspace_id: "ws_aaaaaaaaaaaaaaaaaaaaaaaa",
+          workspace_name: "Alpha",
+          adapter_id: "adapter_codex",
+          adapter_name: "Local Codex",
+          enabled: true,
+        },
+      ],
     },
     {
       id: "reviewed",
       revision: "profile-rev-reviewed",
       builtin: true,
+      description: "Edits the workspace; asks before shell and web.",
+      rules: {
+        ...baseRules,
+        write_inside: "allow",
+        read_outside: "ask",
+        shell: "ask",
+        web: "ask",
+      },
       restricts: ["read_outside", "shell", "web"],
+      routes: [],
     },
   ];
   const calls: Array<{
@@ -557,8 +540,7 @@ async function mockApi(
       path,
       method,
       body,
-      ...(path.startsWith("/api/adapters/") &&
-      (path.endsWith("/profiles") || path.endsWith("/models"))
+      ...(path.startsWith("/api/adapters/") && path.endsWith("/models")
         ? { query: Object.fromEntries(url.searchParams.entries()) }
         : {}),
     });
@@ -724,6 +706,58 @@ async function mockApi(
       await respond(route, { profiles: bridgeProfiles });
       return;
     }
+    const profileMatch = path.match(/^\/api\/profiles\/([a-z][a-z0-9_-]*)$/);
+    if (profileMatch && method === "PUT") {
+      const id = profileMatch[1];
+      const existing = bridgeProfiles.find((item) => item.id === id);
+      const rules = body?.rules as typeof baseRules;
+      if (existing && body?.expected_revision !== existing.revision) {
+        await respond(
+          route,
+          { error: "Profile changed since it was read" },
+          409,
+        );
+        return;
+      }
+      const loosened =
+        existing &&
+        !body?.confirm &&
+        (existing.rules as typeof baseRules).shell === "ask" &&
+        rules.shell === "allow"
+          ? ["shell"]
+          : [];
+      if (loosened.length) {
+        await respond(route, {
+          saved: false,
+          needs_confirmation: true,
+          id,
+          loosened,
+          routes: existing.routes,
+          unenforceable_routes: [],
+        });
+        return;
+      }
+      const saved = {
+        id,
+        revision: `profile-rev-${id}-${bridgeProfiles.length}`,
+        builtin: false,
+        rules,
+        restricts: [],
+        routes: existing?.routes || [],
+      };
+      if (existing) Object.assign(existing, saved);
+      else bridgeProfiles.push(saved);
+      await respond(route, { saved: true, ...saved });
+      return;
+    }
+    if (profileMatch && method === "DELETE") {
+      const at = bridgeProfiles.findIndex(
+        (item) => item.id === profileMatch[1],
+      );
+      if (at >= 0) bridgeProfiles.splice(at, 1);
+      await respond(route, { deleted: true, id: profileMatch[1] });
+      return;
+    }
     const nodeMatch = path.match(/^\/api\/nodes\/(node_[0-9a-f]{24})$/);
     if (nodeMatch && method === "PATCH") {
       const node = nodes.find((item) => item.id === nodeMatch[1]);
@@ -823,13 +857,6 @@ async function mockApi(
           models: [model],
           policy: row.model_policy,
         });
-        return;
-      }
-      if (leaf === "profiles" && method === "GET") {
-        await respond(
-          route,
-          profileCatalog(id, options.codexProfilesUnavailable),
-        );
         return;
       }
       if (leaf === "usage-limits" && method === "GET") {
@@ -1052,7 +1079,7 @@ test("adapter forms pick a Node plugin and keep no URL or token", async ({
   });
 });
 
-test("model and profile discovery use each adapter ID", async ({ page }) => {
+test("model discovery uses each adapter ID", async ({ page }) => {
   const api = await mockApi(page);
   await page.goto("./");
   await navigate(page, "Adapters");
@@ -1070,20 +1097,6 @@ test("model and profile discovery use each adapter ID", async ({ page }) => {
     api.calls.some((call) => call.path === `/api/adapters/${GPU_PI}/models`),
   ).toBe(true);
   await page.getByRole("button", { name: "Cancel" }).click();
-
-  const profileTabs = page.getByRole("group", { name: "Adapter" });
-  await profileTabs.getByRole("button", { name: "GPU Pi · Pi" }).click();
-  await expect(
-    page.getByRole("heading", { name: "gpu-read-only" }),
-  ).toBeVisible();
-  expect(
-    api.calls.some((call) => call.path === `/api/adapters/${GPU_PI}/profiles`),
-  ).toBe(true);
-  expect(
-    api.calls.some(
-      (call) => call.path === `/api/adapters/${LOCAL_PI}/profiles`,
-    ),
-  ).toBe(true);
 });
 
 test("model discovery and policy save use only enabled workspaces on the adapter Node", async ({
@@ -1179,115 +1192,6 @@ for (const disabledWorkspace of [false, true]) {
     ).toEqual([]);
   });
 }
-
-test("profile discovery switches to a workspace on the selected adapter Node", async ({
-  page,
-}) => {
-  const api = await mockApi(page, {
-    remoteAdapter: true,
-    remoteWorkspace: true,
-  });
-  await page.goto("./");
-  await navigate(page, "Adapters");
-
-  const profileCalls = () =>
-    api.calls.filter(
-      (call) =>
-        call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
-        call.method === "GET",
-    );
-  const localCall = api.calls.find(
-    (call) =>
-      call.path === `/api/adapters/${LOCAL_PI}/profiles` &&
-      call.method === "GET",
-  );
-  expect(localCall?.query).toEqual({ workspace_id: WS_ID, fresh: "1" });
-
-  await page
-    .getByRole("group", { name: "Adapter" })
-    .getByRole("button", { name: "GPU-only Pi · Pi" })
-    .click();
-  await expect(page.getByRole("heading", { name: "read-only" })).toBeVisible();
-  await expect.poll(() => profileCalls().length).toBeGreaterThan(0);
-  expect(profileCalls().every((call) => call.query?.fresh === "1")).toBe(true);
-  expect(
-    profileCalls().every(
-      (call) =>
-        call.query?.workspace_id === "ws_cccccccccccccccccccccccc" &&
-        Object.keys(call.query).length === 2,
-    ),
-  ).toBe(true);
-});
-
-test("profile discovery omits workspace context when the adapter Node has no workspace", async ({
-  page,
-}) => {
-  const api = await mockApi(page, { remoteAdapter: true });
-  await page.goto("./");
-  await navigate(page, "Adapters");
-  await page
-    .getByRole("group", { name: "Adapter" })
-    .getByRole("button", { name: "GPU-only Pi · Pi" })
-    .click();
-  await expect(page.getByRole("heading", { name: "read-only" })).toBeVisible();
-  await expect
-    .poll(
-      () =>
-        api.calls.filter(
-          (call) =>
-            call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
-            call.method === "GET",
-        ).length,
-    )
-    .toBeGreaterThan(0);
-  const remoteCall = api.calls.find(
-    (call) =>
-      call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
-      call.method === "GET",
-  );
-  expect(remoteCall?.query).toEqual({});
-  expect(
-    api.calls
-      .filter(
-        (call) =>
-          call.path === `/api/adapters/${REMOTE_PI}/profiles` &&
-          call.method === "GET",
-      )
-      .every((call) => Object.keys(call.query || {}).length === 0),
-  ).toBe(true);
-});
-
-test("Codex native profile choices list only workspaces on its Node and allow no context", async ({
-  page,
-}) => {
-  const api = await mockApi(page, { remoteWorkspace: true });
-  await page.goto("./");
-  await navigate(page, "Adapters");
-  await page
-    .getByRole("group", { name: "Adapter" })
-    .getByRole("button", { name: "Local Codex · Codex" })
-    .click();
-  await page.getByRole("button", { name: "Create from selected" }).click();
-
-  const context = page.getByLabel("Native profile choices");
-  await expect(context.locator("option")).toHaveCount(2);
-  await expect(context.locator("option").nth(0)).toHaveText(
-    "No workspace context",
-  );
-  await expect(context.locator("option").nth(1)).toHaveText("Alpine archive");
-  await context.selectOption("");
-  await expect
-    .poll(
-      () =>
-        api.calls.filter(
-          (call) =>
-            call.path === `/api/adapters/${LOCAL_CODEX}/profiles` &&
-            call.method === "GET" &&
-            Object.keys(call.query || {}).length === 0,
-        ).length,
-    )
-    .toBeGreaterThan(0);
-});
 
 test("Codex security dialog says which profile keys the agent cannot enforce", async ({
   page,
@@ -1965,4 +1869,96 @@ test("Audit lists the approval log and filters it by who decided", async ({
   await page.getByLabel("Decided by").selectOption("chatgpt");
   await expect(page.getByText("Delete build folder")).toHaveCount(0);
   await expect(page.getByText(/decided by ChatGPT: Matches/)).toBeVisible();
+});
+
+test("Profiles lists the shared profiles and shows a profile's rules", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  const list = page.getByRole("complementary", { name: "Profiles" });
+  await expect(list.getByRole("button", { name: /read-only/ })).toBeVisible();
+  await expect(list.getByRole("button", { name: /reviewed/ })).toBeVisible();
+  const rules = page.getByRole("table", { name: "Rules" });
+  await expect(
+    rules.getByRole("row", { name: /Run shell commands/ }),
+  ).toContainText("deny");
+  await expect(
+    page.getByText("Used by 1 route: Alpha · Local Codex"),
+  ).toBeVisible();
+  expect(
+    api.calls.some(
+      (call) =>
+        call.path.startsWith("/api/adapters/") &&
+        call.path.endsWith("/profiles"),
+    ),
+  ).toBe(false);
+  await expect(page.getByText(/HTTP 404/)).toHaveCount(0);
+});
+
+test("a custom profile is created from a built-in one, edited with confirmation, and deleted", async ({
+  page,
+}) => {
+  const api = await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page.getByRole("button", { name: /^reviewed/ }).click();
+  await page.getByRole("button", { name: "Create from selected" }).click();
+  await page.getByLabel("Profile ID").fill("careful");
+  await page
+    .getByLabel("Workspace-relative globs, one per line")
+    .fill("secrets/**");
+  await page.getByRole("button", { name: "Add command rule" }).click();
+  await page.getByLabel("Command 1 prefix").fill("git push");
+  await page.locator("#command-mode-0").selectOption("deny");
+  await page.getByRole("button", { name: "Create profile" }).click();
+  await expect(page.getByText("Profile careful created.")).toBeVisible();
+  const created = api.calls.find(
+    (call) => call.path === "/api/profiles/careful" && call.method === "PUT",
+  );
+  expect(created?.body).toMatchObject({
+    expected_revision: null,
+    confirm: false,
+    rules: {
+      shell: "ask",
+      protected: ["secrets/**"],
+      commands: [{ prefix: "git push", mode: "deny" }],
+      external_roots: [],
+    },
+  });
+
+  await page.getByRole("button", { name: "Edit rules" }).click();
+  await page.locator("#rule-shell").selectOption("allow");
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await expect(
+    page.getByRole("alertdialog").getByText(/This loosens Run shell commands/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Save anyway" }).click();
+  await expect(page.getByText("Profile careful updated.")).toBeVisible();
+  const puts = api.calls.filter(
+    (call) => call.path === "/api/profiles/careful" && call.method === "PUT",
+  );
+  expect(puts.map((call) => call.body?.confirm)).toEqual([false, false, true]);
+
+  await page
+    .getByRole("region", { name: "Profile controls" })
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Delete profile" }).click();
+  await expect(page.getByText("Profile careful deleted.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^careful/ })).toHaveCount(0);
+});
+
+test("built-in profiles cannot be edited or deleted", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page.getByRole("button", { name: /^reviewed/ }).click();
+  await expect(page.getByRole("button", { name: "Edit rules" })).toHaveCount(0);
+  await expect(
+    page
+      .getByRole("region", { name: "Profile controls" })
+      .getByRole("button", { name: "Delete", exact: true }),
+  ).toHaveCount(0);
 });
