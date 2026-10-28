@@ -337,10 +337,10 @@ export function RunInspector({
               <section className="request-panel effective-security-panel">
                 <StateBadge
                   value={
-                    current.effective_security?.source === "runtime-config"
-                      ? "Codex runtime config"
-                      : current.effective_security?.source === "profile"
-                        ? "Bridge profile"
+                    current.effective_security?.source === "profile"
+                      ? "Bridge profile"
+                      : current.effective_security?.source === "native"
+                        ? "Agent's own security"
                         : "Security unavailable"
                   }
                 />
@@ -348,38 +348,14 @@ export function RunInspector({
                 {current.effective_security?.source === "profile" ? (
                   <p>
                     Profile {current.effective_security.profile_id || "unknown"}{" "}
-                    · bound revision{" "}
-                    {current.effective_security.bound_revision || "unknown"} ·
-                    effective revision{" "}
-                    {current.effective_security.effective_revision || "unknown"}
+                    · revision{" "}
+                    {current.effective_security.revision || "unknown"}
                   </p>
-                ) : current.effective_security?.source === "runtime-config" ? (
-                  <>
-                    <p>
-                      Bound revision{" "}
-                      {current.effective_security.bound_revision || "unknown"} ·
-                      effective revision{" "}
-                      {current.effective_security.effective_revision ||
-                        "unknown"}
-                    </p>
-                    <p>
-                      Active permission profile:{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.activePermissionProfile || "unknown",
-                      )}{" "}
-                      · approval{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalPolicy || "unknown",
-                      )}{" "}
-                      · reviewer{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalsReviewer || "unknown",
-                      )}
-                    </p>
-                  </>
+                ) : current.effective_security?.source === "native" ? (
+                  <p>
+                    The agent's own configuration decided; each approval it
+                    asked for became an interaction.
+                  </p>
                 ) : (
                   <p>The immutable security snapshot was not available.</p>
                 )}

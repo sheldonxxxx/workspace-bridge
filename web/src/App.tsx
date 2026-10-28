@@ -175,6 +175,27 @@ const pageSize = 25;
 // Codex account quota is read only while the Adapters section is visible and
 // refreshed at most once per adapter per minute; never from /api/status.
 const quotaRefreshMs = 60000;
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  node_paired: "Node paired",
+  node_pairing_created: "Node pairing created",
+  bridge_rotate_token: "Bridge token rotated",
+  bridge_enable: "Bridge access enabled",
+  bridge_disable: "Bridge access paused",
+  workspace_registered: "Workspace registered",
+  set_workspace_route: "Workspace route changed",
+  abandon_agent_run: "Agent run abandoned",
+  internal_error: "Internal error",
+  admin_internal_error: "Internal error",
+};
+
+/** Event codes are snake_case identifiers; show words, keep the code as a tooltip. */
+function auditActionLabel(action: string): string {
+  const known = AUDIT_ACTION_LABELS[action];
+  if (known) return known;
+  const words = action.replace(/[_.:]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : action;
+}
+
 function initialSection(): Section {
   const value = location.hash.slice(1);
   return sections.some((s) => s.id === value) ? (value as Section) : "overview";
@@ -251,11 +272,11 @@ function securityDetail(
   const effective = grant?.effective_security;
   if (!effective)
     return "Unavailable — route cannot run until security resolves.";
+  if (effective.error) return `Unavailable — ${effective.error}`;
   if (effective.source === "profile") {
-    return `Profile ${effective.profile_id || "unknown"} · revision ${(effective.bound_revision || "unknown").slice(0, 12)} · ${effective.freshness || "unknown"}`;
+    return `Profile ${effective.profile_id || "unknown"} · revision ${(effective.revision || "unknown").slice(0, 17)}`;
   }
-  const summary = effective.resolved_summary || {};
-  return `Codex runtime config · ${String(summary.activePermissionProfile || "permission profile unknown")} · approval ${String(summary.approvalPolicy || "unknown")} · reviewer ${String(summary.approvalsReviewer || "unknown")} · ${effective.status || "unavailable"}`;
+  return "The agent's own security; each approval it asks for becomes an interaction.";
 }
 function isDiagnosticReport(value: unknown): value is DiagnosticReport {
   if (!value || typeof value !== "object") return false;
@@ -2813,6 +2834,25 @@ export default function App() {
                 >
                   <Plus size={16} /> Add adapter
                 </Button>
+                <nav className="page-jumps" aria-label="On this page">
+                  {[
+                    ["adapter-profiles", "Security profiles"],
+                    ["adapter-connection", "Bridge connection"],
+                  ].map(([id, label]) => (
+                    <Button
+                      key={id}
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        document
+                          .getElementById(id)
+                          ?.scrollIntoView({ behavior: "smooth" })
+                      }
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </nav>
               </div>
               <div className="adapter-list">
                 {adapters.map((info) => {
@@ -3078,14 +3118,17 @@ export default function App() {
                   </Empty>
                 )}
               </div>
-              <section className="surface-panel adapter-detail-panel">
+              <section
+                id="adapter-profiles"
+                className="surface-panel adapter-detail-panel"
+              >
                 <SectionHeading
                   title="Security profiles"
                   description="One format for every agent, assigned per workspace route."
                 />
                 <ProfileManager onChanged={refresh} notify={notify} />
               </section>
-              <div className="connection-panel">
+              <div id="adapter-connection" className="connection-panel">
                 <div className="connection-head">
                   <div className="connection-symbol">
                     <Workflow size={21} />
@@ -3183,10 +3226,14 @@ export default function App() {
                     <div className="audit-row" key={`${event.at}-${index}`}>
                       <span className="audit-timeline" />
                       <div>
-                        <strong>{event.action}</strong>
+                        <strong title={event.action}>
+                          {auditActionLabel(event.action)}
+                        </strong>
                         <p>
-                          {workspaces.find((w) => w.id === event.workspace)
-                            ?.name || "Admin"}{" "}
+                          {event.workspace
+                            ? workspaces.find((w) => w.id === event.workspace)
+                                ?.name || "Removed workspace"
+                            : "Bridge"}{" "}
                           <span aria-hidden="true">/</span> {event.outcome}
                         </p>
                         {(event.node_name ||
@@ -3433,6 +3480,25 @@ export default function App() {
                 "Content shown as text from your local Bridge."}
             </SheetDescription>
           </SheetHeader>
+          <div className="detail-actions">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!textDetail}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    textDetail ? jsonText(textDetail.content) : "",
+                  );
+                  notify("Copied.");
+                } catch {
+                  notify("Copy is unavailable here; select the text instead.");
+                }
+              }}
+            >
+              <Clipboard size={14} /> Copy
+            </Button>
+          </div>
           <pre className="detail-pre">
             {textDetail ? jsonText(textDetail.content) : ""}
           </pre>

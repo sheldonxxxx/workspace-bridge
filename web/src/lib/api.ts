@@ -15,30 +15,13 @@ export interface WorkspaceRoute {
   security_binding?: {
     source: "profile" | "native";
     profile?: { id: string; revision?: string };
-    revision?: string;
-    status?: string;
-    observed_revision?: string | null;
-    resolved_summary?: {
-      activePermissionProfile?: string | null;
-      approvalPolicy?: string;
-      approvalsReviewer?: string;
-      provenance?: string;
-    } | null;
   } | null;
   profile?: { id: string; revision?: string } | null;
   effective_security?: {
     source?: string;
     profile_id?: string | null;
-    bound_revision?: string | null;
-    observed_revision?: string | null;
-    freshness?: string;
-    status?: string;
-    resolved_summary?: {
-      activePermissionProfile?: string | null;
-      approvalPolicy?: string;
-      approvalsReviewer?: string;
-      provenance?: string;
-    } | null;
+    revision?: string | null;
+    error?: string;
   } | null;
 }
 export interface AvailableAdapter {
@@ -301,9 +284,7 @@ export interface Run {
   effective_security?: {
     source?: string;
     profile_id?: string | null;
-    bound_revision?: string | null;
-    effective_revision?: string | null;
-    resolved_summary?: Record<string, unknown>;
+    revision?: string | null;
   };
 }
 export interface RunInputReceipt {

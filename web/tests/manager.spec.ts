@@ -102,8 +102,7 @@ const workspace = {
       effective_security: {
         source: "profile",
         profile_id: "read-only",
-        bound_revision: "local-profile-rev",
-        freshness: "current",
+        revision: "local-profile-rev",
       },
     },
     [GPU_PI]: {
@@ -123,8 +122,7 @@ const workspace = {
       effective_security: {
         source: "profile",
         profile_id: "gpu-read-only",
-        bound_revision: "gpu-profile-rev",
-        freshness: "current",
+        revision: "gpu-profile-rev",
       },
     },
     [LOCAL_CODEX]: {
@@ -136,27 +134,12 @@ const workspace = {
       adapter_enabled: true,
       enabled: true,
       is_default: false,
-      security_binding: {
-        source: "native" as const,
-        revision: "codex-config-rev",
-        status: "ready",
-        resolved_summary: {
-          activePermissionProfile: ":read-only",
-          approvalPolicy: "on-request",
-          approvalsReviewer: "user",
-        },
-      },
+      security_binding: { source: "native" as const },
       profile: null,
       effective_security: {
         source: "native",
-        bound_revision: "codex-config-rev",
-        freshness: "current",
-        status: "ready",
-        resolved_summary: {
-          activePermissionProfile: ":read-only",
-          approvalPolicy: "on-request",
-          approvalsReviewer: "user",
-        },
+        profile_id: null,
+        revision: null,
       },
     },
   },
@@ -396,8 +379,7 @@ async function mockApi(
     effective_security: {
       source: "profile",
       profile_id: "read-only",
-      bound_revision: "profile-run-rev",
-      effective_revision: "profile-run-rev",
+      revision: "profile-run-rev",
     },
     token_usage: {
       input_tokens: 120,
@@ -569,7 +551,22 @@ async function mockApi(
       return;
     }
     if (path === "/api/events") {
-      await respond(route, { events: [] });
+      await respond(route, {
+        events: [
+          {
+            at: "2026-10-28T01:00:00Z",
+            workspace: null,
+            action: "bridge_rotate_token",
+            outcome: "ok",
+          },
+          {
+            at: "2026-10-28T00:59:00Z",
+            workspace: "ws_gone",
+            action: "save_security_profile",
+            outcome: "saved",
+          },
+        ],
+      });
       return;
     }
     if (path === "/api/approvals") {
@@ -1541,9 +1538,7 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
     page.getByText(/Profile read-only · revision local-profil/).first(),
   ).toBeVisible();
   await expect(
-    page.getByText(
-      /Codex runtime config · :read-only · approval on-request · reviewer user/,
-    ),
+    page.getByText(/The agent's own security; each approval it asks for/),
   ).toBeVisible();
   const workspaceCard = page
     .locator(".workspace-entry")
@@ -1587,9 +1582,7 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   const routeSelector = page.getByLabel("Execution target", { exact: true });
   await routeSelector.selectOption(LOCAL_CODEX);
   await expect(
-    page.getByText(
-      /Security: Codex runtime config · :read-only · approval on-request · reviewer user/,
-    ),
+    page.getByText(/Security: The agent's own security; each approval/),
   ).toBeVisible();
   await routeSelector.selectOption(LOCAL_PI);
   await expect(
@@ -1606,7 +1599,7 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await page.getByRole("button", { name: "Open run" }).click();
   await expect(page.getByText("Security used for this run")).toBeVisible();
   await expect(
-    page.getByText(/Profile read-only · bound revision profile-run-rev/),
+    page.getByText(/Profile read-only · revision profile-run-rev/),
   ).toBeVisible();
   await expect(page.getByText(/Local Mac · rev node-run-rev/)).toBeVisible();
   await expect(page.getByText("Token usage")).toBeVisible();
@@ -1869,6 +1862,40 @@ test("Audit lists the approval log and filters it by who decided", async ({
   await page.getByLabel("Decided by").selectOption("chatgpt");
   await expect(page.getByText("Delete build folder")).toHaveCount(0);
   await expect(page.getByText(/decided by ChatGPT: Matches/)).toBeVisible();
+});
+
+test("Audit words event codes and does not blame Admin for Bridge events", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Audit");
+  const rotated = page
+    .locator(".audit-row")
+    .filter({ hasText: "Bridge token rotated" });
+  await expect(rotated).toContainText("Bridge / ok");
+  await expect(rotated).not.toContainText("Admin");
+  const saved = page
+    .locator(".audit-row")
+    .filter({ hasText: "Save security profile" });
+  await expect(saved).toContainText("Removed workspace / saved");
+});
+
+test("Tunnel setup can be copied from the details sheet", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await mockApi(page);
+  await page.goto("./");
+  await navigate(page, "Adapters");
+  await page.getByRole("button", { name: "Tunnel setup" }).click();
+  const sheet = page.getByRole("dialog", { name: "Tunnel setup" });
+  await sheet.getByRole("button", { name: "Copy" }).click();
+  await expect(page.getByText("Copied.")).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(
+    "config_version: 1",
+  );
 });
 
 test("Profiles lists the shared profiles and shows a profile's rules", async ({

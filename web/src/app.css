@@ -2241,6 +2241,11 @@ a {
     transform: rotate(1turn);
   }
 }
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 10px 22px 0;
+}
 .detail-pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -3428,4 +3433,10 @@ a {
   padding-right: 12px;
   color: var(--quiet);
   font-weight: 600;
+}
+
+.page-jumps {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
 }

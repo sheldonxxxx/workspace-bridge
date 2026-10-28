@@ -10,6 +10,11 @@
 - The Manager pairs a Node with a one-time pairing string and adds adapters by
   picking an agent plugin on a Node. The base URL, token, workspace-wide agent
   switch, release and Versions screens of 0.3 are removed.
+- Manager polish: route and run security read "Profile <id> · revision <id>"
+  or "The agent's own security" instead of "unknown"; Audit shows plain
+  event names and attributes Bridge-level events to "Bridge" rather than
+  "Admin"; the Tunnel setup sheet has a Copy button; the Adapters page links
+  to its Security profiles and Bridge connection sections.
 - The Manager can take manual control of runs as a last resort: start a run
   from a prepared handoff or a direct instruction, answer a waiting request,
   steer or queue an instruction, and stop or abandon a run. Each action uses
