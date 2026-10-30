@@ -122,10 +122,12 @@ def test_timeout_kills_the_command_and_output_is_capped_and_redacted(ws, monkeyp
     monkeypatch.setattr(module, "KEPT_OUTPUT", 4096)
     service = ws["service"]
     marker = ws["tmp"] / "survived"
+    hang_command = py(f'import time; time.sleep(30); open({str(marker)!r}, "w")')
+    noisy_command = py('print(chr(10).join(str(i) * 50 for i in range(2000))); print("token sk-proj-" + "a" * 30)')
     configure(service, ws["id"], (
         "[checks]\n"
-        f"hang = {{ command = {py(f'import time; time.sleep(30); open({str(marker)!r}, \"w\")')}, timeout_seconds = 1 }}\n"
-        f"noisy = {{ command = {py('print(chr(10).join(str(i) * 50 for i in range(2000))); print(\"token sk-proj-\" + \"a\" * 30)')} }}\n"
+        f"hang = {{ command = {hang_command}, timeout_seconds = 1 }}\n"
+        f"noisy = {{ command = {noisy_command} }}\n"
         "missing = 'definitely-not-a-command-wb --flag'\n"))
     result = finished(ws, call(ws, "run_checks", names=["hang", "noisy", "missing"], wait_seconds=20))
     hang, noisy, missing = result["results"]
