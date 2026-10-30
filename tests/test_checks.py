@@ -215,7 +215,7 @@ def test_after_run_checks_report_unavailable_and_skip_cancelled_runs(modern_env,
         service.db.execute("UPDATE workspace_checks SET after_run='[\"ok\"]'")
     service.run_coordinator.run_checks.process()
     assert service.run_coordinator.run_checks.view(run["run_id"])["error"] == "checks_unconfigured"
-    row = service.db.execute("SELECT checks FROM notification_events WHERE run_id=?", (run["run_id"],)).fetchone()
+    row = service.db.execute("SELECT checks FROM notification_events WHERE run_id=? AND event_type='run_completed'", (run["run_id"],)).fetchone()
     assert row["checks"] == "unavailable"
     assert service.run_coordinator.run_checks.defer_locked(
         {"id": "run_x", "workspace": ws_id, "node_id": "n"}, "run_cancelled", {}) is False

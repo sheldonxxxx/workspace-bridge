@@ -415,8 +415,8 @@ def test_starting_run_reconciliation_waits_for_admitted_native_submission(modern
     assert stored["phase"] == "terminal" and stored["outcome"] == "succeeded"
     with service.lock:
         outcomes = [item["event_type"] for item in service.db.execute(
-            "SELECT event_type FROM notification_events WHERE run_id=?", (row["id"],))]
-    assert outcomes == ["run_completed"]
+            "SELECT event_type FROM notification_events WHERE run_id=? ORDER BY rowid", (row["id"],))]
+    assert outcomes == ["run_action", "run_completed"]
 
 
 @pytest.mark.parametrize("operation", ["cancel_run", "send_run_input"])

@@ -10,7 +10,11 @@ from workspace_bridge.api import TOOLS, make_admin, make_mcp
 from workspace_bridge.runtime import RuntimeUnavailable, RuntimeUnsupported
 from workspace_bridge.security import BridgeError
 from workspace_bridge.wbrp import RuntimeClient, validate_run_state
-from test_run_coordinator import ADAPTER_ID, modern_env  # noqa: F401
+from notification_fakes import RecordingChannel
+from test_run_coordinator import (  # noqa: F401
+    ADAPTER_ID, modern_env, attach_notification_channel, wait_for_notifications,
+    _persist_pending_interaction,
+)
 
 
 def start(env):
@@ -18,6 +22,60 @@ def start(env):
     run = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "input-run"})
     return run
+
+
+@pytest.mark.parametrize("transport", ["mcp", "api"])
+async def test_run_actions_share_notification_delivery_and_retry_identity(modern_env, transport):
+    service, ws_id, token, job, native, _ = modern_env
+    channel = RecordingChannel()
+    manager = attach_notification_channel(service, channel)
+    app = make_admin(service) if transport == "api" else make_mcp(service)
+    headers = ({"Cookie": admin_cookie(app)} if transport == "api" else {
+        "X-Bridge-Token": token, "Accept": "application/json, text/event-stream"})
+    http_transport = httpx.ASGITransport(app=app) if transport == "api" else McpTransport(app)
+    async with httpx.AsyncClient(transport=http_transport,
+                                base_url=("http://127.0.0.1:8766" if transport == "api"
+                                          else "http://127.0.0.1:8765"), headers=headers) as client:
+        async def call(name, args):
+            if transport == "mcp":
+                response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                    "method": "tools/call", "params": {"name": name,
+                    "arguments": {"workspace_id": ws_id, **args}}})
+                result = response.json()["result"]
+                assert not result["isError"], result
+                return json.loads(result["content"][0]["text"])
+            body = dict(args)
+            run_id = body.pop("run_id", None)
+            path = (f"/api/workspaces/{ws_id}/runs" if name == "start_run" else
+                    f"/api/runs/{run_id}/" + {"send_run_input": "input",
+                        "answer_interaction": "answer", "cancel_run": "stop"}[name])
+            body.pop("decided_by", None)
+            response = await client.post(path, json=body)
+            assert response.status_code in (200, 201), response.text
+            return response.json()
+
+        args = {"adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "notice-run"}
+        started = await call("start_run", args)
+        run_id = started["run_id"]
+        assert (await call("start_run", args))["idempotent"] is True
+        for mode in ("queue", "steer"):
+            args = {"run_id": run_id, "instruction": "Private instruction",
+                    "request_id": f"notice-{mode}", "mode": mode}
+            await call("send_run_input", args)
+            await call("send_run_input", args)
+        interaction_id = _persist_pending_interaction(service, ws_id, token, native, run_id)
+        interaction = service.run_coordinator.interaction(service.workspace(ws_id), run_id, interaction_id)
+        choice = next(c for c in interaction["details"]["choices"] if c["semantic"] == "approve")
+        await call("answer_interaction", {"run_id": run_id, "interaction_id": interaction_id,
+            "choice_id": choice["id"], "decided_by": "chatgpt", "reason": "Approved"})
+        await call("cancel_run", {"run_id": run_id})
+        await call("cancel_run", {"run_id": run_id})
+    wait_for_notifications(manager)
+    actions = [event for event in channel.calls if event.event_type == "run_action"]
+    assert [event.action for event in actions] == ["started", "queued", "steered", "answered", "stopped"]
+    assert len({event.dedupe_key for event in actions}) == 5
+    assert not any(event.event_type == "run_manager_action" for event in channel.calls)
+    assert "Private instruction" not in json.dumps([event.__dict__ for event in channel.calls])
 
 
 @pytest.mark.parametrize("mode", ["steer", "queue"])
@@ -73,6 +131,38 @@ def test_input_rejects_changed_security_before_delivery(modern_env, monkeypatch)
     assert not any(method == "turn/steer" for method, _ in rpc.calls)
 
 
+@pytest.mark.parametrize("operation", ["steer", "queue", "cancel", "resolve"])
+def test_unaccepted_actions_do_not_create_action_notices(modern_env, monkeypatch, operation):
+    service, ws_id, token, _, native, _ = modern_env
+    run = start(modern_env)
+    run_id = run["run_id"]
+    interaction_id = _persist_pending_interaction(service, ws_id, token, native, run_id)
+    adapter = service.run_coordinator.adapter(ADAPTER_ID)
+
+    def unavailable(*args):
+        raise RuntimeUnavailable("Runtime unavailable")
+
+    monkeypatch.setattr(adapter, operation, unavailable)
+    if operation in {"steer", "queue"}:
+        name = "send_run_input"
+        args = {"instruction": "Private instruction", "request_id": "refused", "mode": operation}
+    elif operation == "cancel":
+        name, args = "cancel_run", {}
+    else:
+        interaction = service.run_coordinator.interaction(service.workspace(ws_id), run_id, interaction_id)
+        choice = next(c for c in interaction["details"]["choices"] if c["semantic"] == "approve")
+        name = "answer_interaction"
+        args = {"interaction_id": interaction_id, "choice_id": choice["id"],
+                "decided_by": "chatgpt", "reason": "Approved"}
+    with pytest.raises(RuntimeUnavailable):
+        service.call(ws_id, token, name, {"run_id": run_id, **args})
+    with service.lock:
+        actions = [row["action"] for row in service.db.execute(
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_action'",
+            (run_id,))]
+    assert actions == ["started"]
+
+
 async def test_manager_input_is_marked_and_chatgpt_input_is_not(modern_env):
     service, ws_id, token, _, _, rpc = modern_env
     run = start(modern_env)
@@ -103,9 +193,9 @@ async def test_manager_input_is_marked_and_chatgpt_input_is_not(modern_env):
                        "chat-1": "chatgpt"}
     with service.lock:
         kinds = {row["action"] for row in service.db.execute(
-            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_manager_action'",
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_action'",
             (run["run_id"],))}
-    assert kinds == {"queued", "steered"}
+    assert kinds == {"started", "queued", "steered"}
 
 
 async def test_manager_starts_stops_and_abandons_a_run_by_hand(modern_env):
@@ -131,11 +221,34 @@ async def test_manager_starts_stops_and_abandons_a_run_by_hand(modern_env):
         assert stopped.status_code == 200, stopped.text
     with service.lock:
         notices = sorted(row["action"] for row in service.db.execute(
-            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_manager_action'",
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_action'",
             (run_id,)))
         audit = {row["action"] for row in service.db.execute("SELECT action FROM events")}
     assert notices == ["started", "stopped"]
     assert {"start_agent_run", "stop_agent_run"} <= audit
+
+
+async def test_api_abandon_notifies_once_without_contacting_runtime(modern_env, monkeypatch):
+    service, ws_id, _, _, _, _ = modern_env
+    run_id = start(modern_env)["run_id"]
+    adapter = service.run_coordinator.adapter(ADAPTER_ID)
+
+    def unexpected(*args):
+        pytest.fail("Abandon must not contact the runtime")
+
+    monkeypatch.setattr(adapter, "cancel", unexpected)
+    monkeypatch.setattr(adapter, "run", unexpected)
+    app = make_admin(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                base_url="http://127.0.0.1:8766",
+                                headers={"Cookie": admin_cookie(app)}) as client:
+        for _ in range(2):
+            response = await client.post(f"/api/runs/{run_id}/abandon")
+            assert response.status_code == 200, response.text
+    with service.lock:
+        assert sorted(row["action"] for row in service.db.execute(
+            "SELECT action FROM notification_events WHERE run_id=? AND event_type='run_action'",
+            (run_id,))) == ["abandoned", "started"]
 
 
 async def test_manager_start_respects_route_enablement(modern_env):

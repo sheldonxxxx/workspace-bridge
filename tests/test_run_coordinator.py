@@ -477,8 +477,8 @@ def test_sweep_interrupts_runs_stranded_by_an_adapter_connection_change(
         "terminal", "interrupted", "runtime_authority_changed")
     with service.lock:
         events = [row["event_type"] for row in service.db.execute(
-            "SELECT event_type FROM notification_events WHERE run_id=?", (run["id"],))]
-    assert events == ["run_interrupted"]
+            "SELECT event_type FROM notification_events WHERE run_id=? ORDER BY rowid", (run["id"],))]
+    assert events == ["run_action", "run_interrupted"]
     assert service.run_coordinator.interrupt_stranded_runs() == []
     assert calls == []
 
@@ -767,10 +767,10 @@ def test_bridge_start_reconcile_interaction_and_activity(modern_env):
     viewed = service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert viewed["active_state"] == "waiting_interaction"
     wait_for_notifications(manager)
-    assert [event.event_type for event in recorder.calls] == ["run_needs_attention"]
-    assert recorder.calls[0].subject_id == viewed["interactions"][0]["id"]
+    assert [event.event_type for event in recorder.calls] == ["run_action", "run_needs_attention"]
+    assert recorder.calls[1].subject_id == viewed["interactions"][0]["id"]
     service.call(ws_id, token, "read_run", {"run_id": bridge_id})
-    assert len(recorder.calls) == 1
+    assert len(recorder.calls) == 2
     interaction = viewed["interactions"][0]
     choice = next(item for item in interaction["details"]["choices"]
                   if item["semantic"] == "approve")
@@ -790,7 +790,7 @@ def test_bridge_start_reconcile_interaction_and_activity(modern_env):
     wait_for_notifications(manager)
     service.call(ws_id, token, "read_run", {"run_id": bridge_id})
     assert [event.event_type for event in recorder.calls] == [
-        "run_needs_attention", "run_completed"]
+        "run_action", "run_needs_attention", "run_action", "run_completed"]
     assert manager.summary(bridge_id)["overall"] == "sent"
     activities = service.call(ws_id, token, "run_log",
                               {"run_id": bridge_id})["activities"]
@@ -826,7 +826,7 @@ def test_snapshot_terminal_outcomes_create_one_event(modern_env, outcome, event_
     coordinator._persist_snapshot(run, terminal, [], [])
     coordinator._persist_snapshot(run, terminal, [], [])
     wait_for_notifications(manager)
-    assert [event.event_type for event in recorder.calls] == [event_type]
+    assert [event.event_type for event in recorder.calls] == ["run_action", event_type]
     assert recorder.calls[0].node_id.startswith("node_")
     assert recorder.calls[0].node_name == "Local Node"
 
@@ -903,14 +903,14 @@ def test_distinct_runtime_interactions_notify_once_without_contents(modern_env):
     coordinator._persist_snapshot(run, snapshot, interactions, [])
     wait_for_notifications(manager)
     assert [event.event_type for event in recorder.calls] == [
-        "run_needs_attention", "run_needs_attention"]
-    assert len({event.subject_id for event in recorder.calls}) == 2
+        "run_action", "run_needs_attention", "run_needs_attention"]
+    assert len({event.subject_id for event in recorder.calls if event.event_type == "run_needs_attention"}) == 2
     with service.lock, service.db:
         service.db.execute(
             "UPDATE agent_interactions SET state='resolved' WHERE run=? AND native_id='native-a'",
             (run["id"],))
     coordinator._persist_snapshot(run, snapshot, interactions, [])
-    assert len(recorder.calls) == 2
+    assert len(recorder.calls) == 3
     with service.lock:
         raw = json.dumps([dict(row) for row in service.db.execute(
             "SELECT * FROM notification_events WHERE run_id=?", (run["id"],))])

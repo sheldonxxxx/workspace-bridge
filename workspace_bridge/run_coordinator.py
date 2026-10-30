@@ -454,6 +454,7 @@ class RunCoordinator:
                     if self._stop.is_set():
                         raise RuntimeUnavailable("Runtime coordination stopped")
                     self._terminate_locked(run, "orphaned", "abandoned_by_admin")
+                    self._record_action_event_locked(run, "abandoned", "abandon")
                 self.run_events.publish(run_id)
         return self.read(ws, run_id, sync=False)
 
@@ -967,6 +968,10 @@ class RunCoordinator:
                      native_run.get("outcome"), _safe(native_run.get("result")),
                      _safe(native_run.get("error"), 300), initial_usage_json,
                      _now(), bridge_run_id))
+                self._record_action_event_locked({
+                    "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
+                    "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"]},
+                    "started", "start")
                 if native_run["phase"] == "terminal":
                     self._record_outcome_event_locked({
                         "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
@@ -1436,6 +1441,8 @@ class RunCoordinator:
                     "reason=NULL,decided=NULL,updated=? WHERE id=? AND state='resolved'",
                     (state, _now(), interaction_id))
             raise
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(run, "answered", interaction_id)
         self.run_events.publish(run_id)
 
     def decisions(self, decided_by: str | None = None, offset: int = 0,
@@ -1472,6 +1479,8 @@ class RunCoordinator:
         if run["phase"] == "terminal":
             return self._public(run)
         self._bound_run_adapter(ws, run).cancel(run["native_id"])
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(run, "stopped", "stop")
         return self.read(ws, run_id)
 
     def input(self, ws: dict, run_id: str, instruction: str,
@@ -1526,6 +1535,9 @@ class RunCoordinator:
                                adapter.activities(run["native_id"]))
         if origin == "manager":
             self._mark_input_origin(run["id"], request_id, origin)
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(
+                run, "queued" if mode == "queue" else "steered", request_id)
         result = self.read(ws, run_id, sync=False)
         result["input_message"] = {**receipt, "origin": origin}
         if native["phase"] == "active":
@@ -1546,18 +1558,18 @@ class RunCoordinator:
                 self.service.db.execute("UPDATE agent_activities SET payload=? WHERE id=?",
                                         (_safe_payload(payload), row["id"]))
 
-    def note_manager_action(self, run_id: str, action: str, subject: str) -> None:
-        """Tell the notice channels that the Manager acted on a run by hand."""
-        with self.service.lock, self.service.db:
-            run = self.service.db.execute(
-                "SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
-            if run is None:
-                return
-            self.service.notification_manager.record_run_event_locked(
-                run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
-                adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
-                event_type="run_manager_action", subject_id=subject, action=action,
-                occurred_at=_now())
+    def _record_action_event_locked(self, run: dict, action: str, subject: str) -> None:
+        """One durable action-notice path for Manager/API and MCP operations.
+
+        Call only after native acceptance (or a local abandon transition).
+        Stable run/action/subject keys deduplicate successful retries.
+        The caller owns the service DB lock and transaction.
+        """
+        self.service.notification_manager.record_run_event_locked(
+            run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
+            adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
+            event_type="run_action", subject_id=subject, action=action,
+            occurred_at=_now())
 
     def activities(self, ws: dict, run_id: str, offset: int = 0,
                    limit: int = 50, *, newest_first: bool = False,

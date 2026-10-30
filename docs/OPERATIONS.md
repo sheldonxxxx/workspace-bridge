@@ -348,8 +348,12 @@ records. ChatGPT normally answers interactions. Under Manual control a waiting r
 shows its action and choices and can be answered, a run can be steered, queued
 or stopped, and a new run can be started from a prepared handoff or a direct
 instruction. Every such action is recorded with the actor `manager` in the
-approval log, the run's input receipts and the audit list, and sends a Discord
-notice when one is configured. Answered interactions show who decided
+approval log, the run's input receipts and the audit list. Successful starts,
+stops, interaction answers, steering, queued input and abandonment send a
+Discord action notice when configured, through the same coordinator path
+for Manager/API and MCP calls. Retries reuse the action's notification identity;
+rejected actions and requests to stop or abandon an already terminal run do
+not create new action notices. Answered interactions show who decided
 (ChatGPT, you as ChatGPT reports it, or you in the Manager) and the stated
 reason. `GET /api/approvals`, optionally with `decided_by=chatgpt`,
 `decided_by=owner` or `decided_by=manager`, returns that approval log newest

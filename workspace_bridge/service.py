@@ -702,15 +702,14 @@ class Service:
         """Cancel one Runtime Protocol run through the local admin plane."""
         ws = self._admin_run_workspace(run_id)
         result = self.run_coordinator.cancel(ws, run_id)
-        self._manager_acted(ws, run_id, "stopped", "stop", "stop_agent_run")
+        self._audit_manager_action(ws, run_id, "stop_agent_run")
         return result
 
-    def _manager_acted(self, ws: dict, run_id: str, action: str, subject: str, audit: str) -> None:
-        """Record a hand action in the audit list and tell the notice channels."""
+    def _audit_manager_action(self, ws: dict, run_id: str, audit: str) -> None:
+        """Keep the Manager audit; the coordinator owns action notifications."""
         with self.lock:
             run = self.db.execute("SELECT adapter_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
         self.event(ws["id"], audit, "ok", adapter_id=run["adapter_id"] if run else None)
-        self.run_coordinator.note_manager_action(run_id, action, subject)
 
     def admin_start_agent_run(self, workspace_id: str, adapter_id: str, request_id: str,
                               job_id: str | None = None, instruction: str | None = None,
@@ -722,7 +721,7 @@ class Service:
             ws, adapter_id, job_id, "manager-" + request_id, model, None,
             continue_from_run_id, instruction, None, isolation)
         if not result.get("idempotent"):
-            self._manager_acted(ws, result["run_id"], "started", "start", "start_agent_run")
+            self._audit_manager_action(ws, result["run_id"], "start_agent_run")
         return result
 
     def admin_answer_interaction(self, run_id: str, interaction_id: str,
@@ -734,7 +733,7 @@ class Service:
         result = self.respond_agent_interaction(
             ws, run_id, interaction_id, response, "manager",
             reason.strip() or "Answered in the Manager")
-        self._manager_acted(ws, run_id, "answered", interaction_id, "answer_agent_interaction")
+        self._audit_manager_action(ws, run_id, "answer_agent_interaction")
         return result
 
     def admin_send_run_input(self, run_id: str, instruction: str, request_id: str,
@@ -743,8 +742,7 @@ class Service:
         ws = self._admin_run_workspace(run_id)
         result = self.run_coordinator.input(
             ws, run_id, instruction, "manager-" + request_id, mode, "manager")
-        self._manager_acted(ws, run_id, f"{mode}d" if mode == "queue" else "steered",
-                            request_id, "send_agent_run_input")
+        self._audit_manager_action(ws, run_id, "send_agent_run_input")
         return result
 
     def admin_abandon_agent_run(self, run_id: str) -> dict:
@@ -752,7 +750,6 @@ class Service:
         ws = self._admin_run_workspace(run_id)
         result = self.run_coordinator.abandon(ws, run_id)
         self.event(ws["id"], "abandon_agent_run", result["outcome"] or "ok")
-        self.run_coordinator.note_manager_action(run_id, "abandoned", "abandon")
         return result
 
     def admin_list_agent_activities(self, run_id: str, limit: int = 50,

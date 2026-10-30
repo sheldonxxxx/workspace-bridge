@@ -132,10 +132,10 @@ def _manager(service):
     return app, {"Cookie": admin_cookie(app)}
 
 
-def _notices(service, run_id, event_type="run_manager_action"):
+def _notices(service, run_id, event_type="run_action"):
     with service.lock:
         return [dict(row) for row in service.db.execute(
-            "SELECT action,subject_id FROM notification_events WHERE run_id=? AND event_type=?",
+            "SELECT action,subject_id FROM notification_events WHERE run_id=? AND event_type=? ORDER BY rowid",
             (run_id, event_type))]
 
 
@@ -186,7 +186,9 @@ async def test_an_answer_in_the_manager_is_recorded_as_manager_and_announced(mod
     assert rpc.responses == [(99, {"decision": "accept"}, None)]
     seen = _interaction(service, ws_id, token, {"run_id": run_id, "interaction_id": interaction_id})
     assert seen["decision"]["decided_by"] == "manager"
-    assert _notices(service, run_id) == [{"action": "answered", "subject_id": interaction_id}]
+    assert _notices(service, run_id) == [
+        {"action": "started", "subject_id": "start"},
+        {"action": "answered", "subject_id": interaction_id}]
     with pytest.raises(BridgeError) as claimed:
         service.call(ws_id, token, "answer_interaction", {
             "run_id": run_id, "interaction_id": interaction_id,

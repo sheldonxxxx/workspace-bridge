@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Discord run-action notices now use one shared path for Manager/API and MCP
+  starts, stops, interaction answers, steering, queued input and abandonment.
+  Successful retries are deduplicated; rejected actions do not send notices.
+
 - Manager usability: each page sets its own browser tab title; the command
   palette can pair a Node and add an adapter; the only workspace opens its
   handoffs automatically; routes show "Route on/off" beside their switch;
