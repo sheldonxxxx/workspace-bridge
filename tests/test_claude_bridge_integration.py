@@ -20,7 +20,7 @@ ADAPTER_ID = "adapter_0000000000000000000000c1"
 
 
 class ClaudeDirect:
-    """In-process WBRP transport; production uses HttpRuntimeAdapter."""
+    """In-process adapter calls; production goes through the Node plugin client."""
 
     def __init__(self, native):
         self.native = native
@@ -31,22 +31,11 @@ class ClaudeDirect:
     def models(self, workspace_id):
         return self.native.models()["models"]
 
-    def profile_catalog(self, workspace_id=None, directory=None, *, fresh=False):
-        if workspace_id is None:
-            return self.native.profiles()
-        return self.native.profiles(workspace_id, directory, fresh=fresh)
-
-    def profiles(self):
-        return self.profile_catalog()["profiles"]
-
     def create_conversation(self, payload):
         return self.native.create_conversation(payload)
 
     def conversation(self, ident):
         return self.native.conversation(ident)
-
-    def rebind_conversation(self, ident, binding):
-        return self.native.rebind_conversation(ident, binding)
 
     def start_run(self, ident, payload):
         return self.native.start_run(ident, payload)
@@ -83,8 +72,7 @@ def claude_env(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     node, node_record = attach_test_node(service, tmp_path / "node-state", parent)
     create_test_adapter(service, node_record["id"], {
-        "name": "Local Claude", "runtime_type": "claude",
-        "base_url": "http://127.0.0.1:8774", "token": "claude-test-secret"}, ADAPTER_ID)
+        "name": "Local Claude", "plugin": "claude"}, ADAPTER_ID)
     client = ClaudeDirect(native)
     client_factory = service.adapter_registry.client
 
@@ -99,11 +87,9 @@ def claude_env(tmp_path, payload):
     ws_id = service.add_workspace("Alpha", str(root), [])["workspace"]["id"]
     token = service.manage_bridge("rotate_token")["token"]
     service.manage_workspace(ws_id, "enable")
-    service.manage_workspace(ws_id, "set_agent_enabled", agent_enabled=True)
-    service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True,
-                                "workspace-write-reviewed")
+    service.set_workspace_route(service.workspace(ws_id), ADAPTER_ID, True, "reviewed")
     service.run_coordinator.set_model_policy(ADAPTER_ID, ["default"], "default")
-    job = service.call(ws_id, token, "prepare_handoff",
+    job = service.call(ws_id, token, "save_handoff",
                        Handoff.model_validate(payload).model_dump())
     yield service, ws_id, token, job, native, sdk
     service.close()
@@ -112,7 +98,7 @@ def claude_env(tmp_path, payload):
 
 
 def _read(service, ws_id, token, run_id):
-    return service.call(ws_id, token, "read_agent_run", {"run_id": run_id})
+    return service.call(ws_id, token, "read_run", {"run_id": run_id})
 
 
 def _until(fn, timeout=10.0):
@@ -127,7 +113,7 @@ def _until(fn, timeout=10.0):
 
 def test_adapter_is_listed_as_a_claude_instance(claude_env):
     service, ws_id, token, _, _, _ = claude_env
-    listed = service.call(ws_id, token, "list_agent_adapters", {})
+    listed = service.call(ws_id, token, "list_targets", {})
     row = next(item for item in listed["adapters"] if item["adapter_id"] == ADAPTER_ID)
     assert row["runtime_type"] == "claude"
     assert "token" not in str(row)
@@ -146,7 +132,7 @@ def test_run_completes_through_the_bridge_with_usage(claude_env):
                             usage={"input_tokens": 7, "output_tokens": 3})
 
     sdk.scenario = scenario
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-1"})
     assert started["runtime_type"] == "claude"
     finished = _until(lambda: (lambda row: row if row["outcome"] else None)(
@@ -154,7 +140,7 @@ def test_run_completes_through_the_bridge_with_usage(claude_env):
     assert finished["outcome"] == "succeeded"
     assert finished["token_usage"] == {"input_tokens": 7, "output_tokens": 3,
                                        "total_tokens": 10}
-    retry = service.call(ws_id, token, "start_agent_run", {
+    retry = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-1"})
     assert retry["run_id"] == started["run_id"] and retry["idempotent"] is True
 
@@ -173,7 +159,7 @@ def test_tool_approval_is_resolved_through_the_bridge(claude_env):
         yield ResultMessage(result="ok")
 
     sdk.scenario = scenario
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"], "request_id": "claude-run-2"})
     viewed = _until(lambda: (lambda row: row if row.get("interactions") else None)(
         _read(service, ws_id, token, started["run_id"])))
@@ -181,9 +167,10 @@ def test_tool_approval_is_resolved_through_the_bridge(claude_env):
     interaction = viewed["interactions"][0]
     choice = next(item for item in interaction["details"]["choices"]
                   if item["semantic"] == "approve")
-    service.call(ws_id, token, "respond_agent_interaction", {
+    service.call(ws_id, token, "answer_interaction", {
         "run_id": started["run_id"], "interaction_id": interaction["id"],
-        "response": {"choiceId": choice["id"]}})
+        "choice_id": choice["id"],
+        "decided_by": "chatgpt", "reason": "Matches the handoff"})
     finished = _until(lambda: (lambda row: row if row["outcome"] else None)(
         _read(service, ws_id, token, started["run_id"])))
     assert finished["outcome"] == "succeeded"

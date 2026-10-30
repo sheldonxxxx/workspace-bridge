@@ -322,3 +322,19 @@ test("messages read the authoritative in-process transcript", async () => {
   assert.equal(messages[1].completed, 2);
   await adapter.shutdown();
 });
+
+test("native session changes notify the protocol layer; streaming deltas do not", async () => {
+  const projects = makeProjects();
+  const transport = createFakeTransport();
+  const adapter = makeAdapter(projects, transport);
+  const session = await adapter.createSession(projects.appA, "events");
+  const seen = [];
+  adapter.onSessionChange = (sessionId, kind) => seen.push([sessionId, kind]);
+  const native = adapter.sessions.get(session.id).session;
+  native.emit({ type: "message_update", message: { role: "assistant" } });
+  native.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read",
+    args: { path: "a.txt" } });
+  native.emit({ type: "agent_settled", aborted: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [[session.id, "activity"], [session.id, "run"]]);
+});

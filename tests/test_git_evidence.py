@@ -8,6 +8,7 @@ import sys
 import httpx
 import pytest
 
+from mcp_helpers import argument_error, McpTransport
 from workspace_bridge.api import TOOLS, make_mcp
 from workspace_bridge.security import BridgeError
 
@@ -326,6 +327,40 @@ def test_external_diff_and_textconv_are_never_executed(env):
     assert (index_path.read_bytes(), index_path.stat().st_mtime_ns) == index_before
 
 
+def test_repository_filter_drivers_are_never_executed(env):
+    _repo(env["root"])
+    sentinel = env["tmp"] / "filter-was-executed"
+    script = env["tmp"] / "malicious-filter"
+    script.write_text("#!/bin/sh\ntouch '" + str(sentinel) + "'\ncat\n")
+    script.chmod(0o700)
+    (env["root"] / ".gitattributes").write_text(
+        "tracked.txt filter=evil\n*.md filter=legacy\n")
+    _git(env["root"], "add", ".gitattributes")
+    _git(env["root"], "commit", "-qm", "add attributes")
+    # Configure the drivers after committing so the test's own Git calls never run them.
+    with (env["root"] / ".git" / "config").open("a") as config:
+        config.write(f'[filter "evil"]\n\tclean = {script}\n\tsmudge = {script}\n'
+                     f'\tprocess = {script}\n\trequired = true\n'
+                     f'[filter.Legacy]\n\tclean = {script}\n')
+    (env["root"] / "tracked.txt").write_text("changed\n")
+    (env["root"] / "notes.md").write_text("untracked\n")
+    status = _call(env, "git_status")
+    assert status["available"] is True
+    assert "changed" in _call(env, "git_diff", mode="worktree")["patch"]
+    assert "changed" in _call(env, "git_diff", mode="head")["patch"]
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("section", ['[filter "a\\"b"]', "[filter.]", '[filter "bad name"]'])
+def test_unparseable_filter_sections_fail_closed(env, section):
+    _repo(env["root"])
+    with (env["root"] / ".git" / "config").open("a") as config:
+        config.write(f"\n{section}\n\tclean = cat\n")
+    with pytest.raises(BridgeError) as exc:
+        _call(env, "git_status")
+    assert exc.value.code == "unsupported_repository_layout"
+
+
 def test_diff_output_time_bounds_and_git_errors_are_sanitized(env, tmp_path):
     from workspace_bridge.git_evidence import _run
 
@@ -365,7 +400,7 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
     _repo(env["root"])
     app = make_mcp(env["service"])
     headers = {"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+    async with httpx.AsyncClient(transport=McpTransport(app),
                                  base_url="http://127.0.0.1:8765", headers=headers) as client:
         listed = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = {item["name"]: item for item in listed.json()["result"]["tools"]}
@@ -381,5 +416,5 @@ async def test_mcp_discovers_strict_read_only_workspace_scoped_git_tools(env):
         invalid = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "git_diff", "arguments": {"workspace_id": env["id"],
                                                                   "mode": "head", "ref": "HEAD~1"}}})
-        assert invalid.json()["error"]["code"] == -32602
-    assert len(TOOLS) == 28
+        argument_error(invalid.json())
+    assert len(TOOLS) == 24

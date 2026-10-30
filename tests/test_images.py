@@ -18,7 +18,7 @@ from workspace_bridge.api import TOOLS, make_mcp
 from workspace_bridge.embedded_skill import read_project_lead_skill
 from workspace_bridge.media import (ImageReadResult, MAX_IMAGE_RESPONSE_BYTES, MAX_INPUT_BYTES,
                                     MAX_PIXELS, MAX_PREVIEW_BYTES, read_image, sniff_image)
-from workspace_bridge.protocol import LEGACY, MODERN, PREFIX
+from mcp_helpers import argument_error, McpTransport, LEGACY, MODERN, PREFIX
 from workspace_bridge.security import BridgeError, HANDOFF, MAX_FILE, SafeRoot, digest
 from workspace_bridge.service import Service
 
@@ -71,7 +71,7 @@ def test_signature_not_extension_decides_valid_image_format(env, name):
     assert read(env, name).metadata["source_format"] == "JPEG"
 
 
-@pytest.mark.parametrize("scope", ["none", "handoff", "workspace"])
+@pytest.mark.parametrize("scope", ["none", "workspace"])
 def test_read_in_every_write_scope_without_any_mutation(env, scope):
     env["service"].manage_workspace(env["id"], "set_write_scope", write_scope=scope)
     (env["root"] / "image.png").write_bytes(image_bytes())
@@ -80,7 +80,8 @@ def test_read_in_every_write_scope_without_any_mutation(env, scope):
     (folder / "shot.png").write_bytes(image_bytes())
     before = {p.relative_to(env["root"]): p.read_bytes() for p in env["root"].rglob("*") if p.is_file()}
     check_preview(read(env))
-    check_preview(read(env, f"{HANDOFF}/shot.png"))
+    with pytest.raises(BridgeError):  # The folder 0.3 kept handoffs in stays hidden.
+        read(env, f"{HANDOFF}/shot.png")
     after = {p.relative_to(env["root"]): p.read_bytes() for p in env["root"].rglob("*") if p.is_file()}
     assert before == after
     assert env["service"].workspace(env["id"])["write_scope"] == scope
@@ -106,7 +107,7 @@ def test_same_relative_path_is_bound_to_selected_workspace(env):
 def test_unsafe_paths_never_reach_decoder(env, monkeypatch, path):
     def forbidden(*args, **kwargs):
         raise AssertionError("decoder must not run on denied paths")
-    monkeypatch.setattr("workspace_bridge.service.read_image", forbidden)
+    monkeypatch.setattr("workspace_bridge.node_service.read_image", forbidden)
     with pytest.raises(BridgeError):
         read(env, path)
 
@@ -146,7 +147,7 @@ def test_stale_hash_rejected_before_decode(env, monkeypatch):
     original = read(env)
     (env["root"] / "image.png").write_bytes(image_bytes(size=(80, 120)))
     def forbidden(*a, **kw): raise AssertionError("must check hash before decode")
-    monkeypatch.setattr("workspace_bridge.service.read_image", forbidden)
+    monkeypatch.setattr("workspace_bridge.node_service.read_image", forbidden)
     with pytest.raises(BridgeError) as exc:
         read(env, expected_sha256=original.metadata["sha256"])
     assert exc.value.code == "stale_evidence"
@@ -227,7 +228,7 @@ def test_other_color_modes_are_previewed(env, fmt, mode):
 def test_input_image_limit_rejected_without_decoder(env, monkeypatch):
     (env["root"] / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * MAX_INPUT_BYTES)
     def forbidden(*a, **kw): raise AssertionError("oversized image must not decode")
-    monkeypatch.setattr("workspace_bridge.service.read_image", forbidden)
+    monkeypatch.setattr("workspace_bridge.node_service.read_image", forbidden)
     with pytest.raises(BridgeError) as exc: read(env)
     assert exc.value.code == "too_large"
 
@@ -367,8 +368,10 @@ def test_image_read_never_changes_migration_or_writing(env, payload):
     (env["root"] / "image.png").write_bytes(image_bytes())
     read(env)
     assert env["service"].workspace(env["id"]) == before
-    with pytest.raises(BridgeError):
-        env["service"].call(env["id"], env["token"], "prepare_handoff", payload)
+    # Uploads go to Node state, so they leave the read-only policy alone.
+    env["service"].call(env["id"], env["token"], "upload_image", {
+        "mime_type": "image/png", "data_base64": __import__("base64").b64encode(image_bytes()).decode()})
+    assert env["service"].workspace(env["id"]) == before
     # Reopening existing state must preserve the explicitly selected no-write policy.
     other = Service(env["state"], env["config"])
     try: assert other.workspace(env["id"])["write_scope"] == "none"
@@ -377,14 +380,14 @@ def test_image_read_never_changes_migration_or_writing(env, payload):
 
 def test_skill_and_capabilities_describe_image_boundary(env):
     skill = read_project_lead_skill()
-    assert skill["version"] == "3.4.0"
+    assert skill["version"] == "4.1.0"
     for fragment in ("native image", "visible secrets", "first frame", "text-only", "actually"):
         assert fragment in skill["content"]
     info = env["service"].info(env["service"].workspace(env["id"]))
     assert info["image_reading"]["formats"] == ["PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF"]
     assert info["limits"]["max_file_bytes"] == MAX_FILE
     assert info["image_reading"]["max_input_bytes"] == MAX_INPUT_BYTES
-    assert len(TOOLS) == 28
+    assert len(TOOLS) == 24
     schema = TOOLS["read_file"][0].model_json_schema()
     assert schema["properties"]["representation"]["default"] == "auto"
     assert "representation" not in schema["required"]
@@ -397,7 +400,7 @@ async def rpc(env, args, version=LEGACY[-1], token=None):
     if version == MODERN:
         params["_meta"] = {PREFIX + "protocolVersion": version, PREFIX + "clientCapabilities": {}}
         headers.update({"Mcp-Method": "tools/call", "Mcp-Name": "read_file"})
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])),
                                  base_url="http://127.0.0.1:8765") as client:
         return await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1,
                                                                "method": "tools/call", "params": params})
@@ -426,7 +429,7 @@ async def test_every_protocol_returns_actual_native_image(env, version):
                                   {"write_scope": "workspace"}, {"representation": None}])
 async def test_invalid_image_api_arguments(env, args):
     response = await rpc(env, {"path": "image.png", **args})
-    assert response.json()["error"]["code"] == -32602
+    argument_error(response.json())
 
 
 async def test_native_image_requires_valid_token_and_enablement(env):
@@ -456,14 +459,14 @@ def test_image_context_hash_uses_source_bytes_not_preview(env, payload):
     result = read(env)
     assert result.metadata["size_bytes"] > MAX_FILE
     payload["context_hashes"] = {"image.png": result.metadata["sha256"]}
-    job = env["service"].call(env["id"], env["token"], "prepare_handoff", payload)
+    job = env["service"].call(env["id"], env["token"], "save_handoff", payload)
     assert job["completion_tracking"] == "not_tracked"
     payload["request_id"] = "bad-preview-hash"
     payload["context_hashes"]["image.png"] = result.metadata["preview_sha256"]
     # Re-encoding is not assumed to produce identical bytes.
     if result.metadata["preview_sha256"] != result.metadata["sha256"]:
         with pytest.raises(BridgeError) as exc:
-            env["service"].call(env["id"], env["token"], "prepare_handoff", payload)
+            env["service"].call(env["id"], env["token"], "save_handoff", payload)
         assert exc.value.code == "stale_context"
 
 
@@ -479,6 +482,6 @@ def test_targeted_context_hashes_have_an_aggregate_budget(env, payload, monkeypa
     payload['context_hashes'] = {f'image-{i}.png': digest(data) for i in range(4)}
     monkeypatch.setattr(SafeRoot, 'read', lambda *args, **kw: (data, None))
     with pytest.raises(BridgeError) as exc:
-        env['service'].call(env['id'], env['token'], 'prepare_handoff', payload)
+        env['service'].call(env['id'], env['token'], 'save_handoff', payload)
     assert exc.value.code == 'context_limit'
     assert not (env['root'] / HANDOFF).exists()

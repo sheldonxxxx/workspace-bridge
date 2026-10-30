@@ -7,6 +7,7 @@ import test from "node:test";
 import { aggregatePiUsage, isCompletedModelCall, isUsageFinalModelCall, normalizePiUsage, sanitizeMessage } from "../adapter.mjs";
 import { PiRuntimeProtocol, terminalFailureError } from "../wbrp.mjs";
 import { redactExtensionText } from "../executions.mjs";
+import { securityBlock } from "./security-block.mjs";
 
 test("normalizePiUsage maps native fields and rejects malformed counters", () => {
   assert.deepEqual(normalizePiUsage({
@@ -150,12 +151,12 @@ test("Pi run aggregates every model call for that run only", async () => {
   try {
     const { adapter, directory, rawMessages } = fakeAdapter(root);
     const protocol = new PiRuntimeProtocol(adapter);
-    const profile = protocol.profileList().profiles[0];
+    const security = securityBlock();
     const conversation = await protocol.createConversation({
       workspaceId: "ws", directory,
-      securityProfile: { id: profile.id, revision: profile.revision },
+      security,
     });
-    const run = await protocol.startRun(conversation.id, {
+    const run = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "Do work" }],
     });
     assert.equal(run.usage, undefined);
@@ -181,12 +182,12 @@ test("Pi continuation starts a fresh accounting boundary", async () => {
   try {
     const { adapter, directory, rawMessages } = fakeAdapter(root);
     const protocol = new PiRuntimeProtocol(adapter);
-    const profile = protocol.profileList().profiles[0];
+    const security = securityBlock();
     const conversation = await protocol.createConversation({
       workspaceId: "ws", directory,
-      securityProfile: { id: profile.id, revision: profile.revision },
+      security,
     });
-    const first = await protocol.startRun(conversation.id, {
+    const first = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "First" }],
       clientRunId: "first",
     });
@@ -198,7 +199,7 @@ test("Pi continuation starts a fresh accounting boundary", async () => {
     assert.deepEqual((await protocol.run(first.id)).usage, {
       inputTokens: 100, outputTokens: 10, totalTokens: 110,
     });
-    const second = await protocol.startRun(conversation.id, {
+    const second = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "Second" }],
       clientRunId: "second",
     });
@@ -225,12 +226,12 @@ test("Pi absent provider usage stays absent and survives restart", async () => {
   try {
     const { adapter, directory, rawMessages } = fakeAdapter(root);
     const protocol = new PiRuntimeProtocol(adapter);
-    const profile = protocol.profileList().profiles[0];
+    const security = securityBlock();
     const conversation = await protocol.createConversation({
       workspaceId: "ws", directory,
-      securityProfile: { id: profile.id, revision: profile.revision },
+      security,
     });
-    const run = await protocol.startRun(conversation.id, {
+    const run = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "No usage" }],
     });
     rawMessages.set("native-session", [
@@ -297,12 +298,12 @@ test("Pi failed run retains usage with a useful sanitized error", async () => {
   try {
     const { adapter, directory, rawMessages } = fakeAdapter(root);
     const protocol = new PiRuntimeProtocol(adapter);
-    const profile = protocol.profileList().profiles[0];
+    const security = securityBlock();
     const conversation = await protocol.createConversation({
       workspaceId: "ws", directory,
-      securityProfile: { id: profile.id, revision: profile.revision },
+      security,
     });
-    const run = await protocol.startRun(conversation.id, {
+    const run = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "Do work" }],
     });
     rawMessages.set("native-session", [
@@ -331,12 +332,12 @@ test("Pi aborted run with secret-bearing error redacts and bounds", async () => 
   try {
     const { adapter, directory, rawMessages } = fakeAdapter(root);
     const protocol = new PiRuntimeProtocol(adapter);
-    const profile = protocol.profileList().profiles[0];
+    const security = securityBlock();
     const conversation = await protocol.createConversation({
       workspaceId: "ws", directory,
-      securityProfile: { id: profile.id, revision: profile.revision },
+      security,
     });
-    const run = await protocol.startRun(conversation.id, {
+    const run = await protocol.startRun(conversation.id, { security: securityBlock(),
       input: [{ type: "text", text: "Do work" }],
     });
     const secretError = `aborted after api_key=SECRET1234567890 ${"x".repeat(500)}`;

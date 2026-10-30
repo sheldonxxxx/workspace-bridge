@@ -1,0 +1,13 @@
+id = "codex"
+version = "1.0.0"
+protocol = 2
+runtime_type = "codex"
+python_module = "codex"
+description = "Codex through codex app-server"
+# Codex keeps profile threads read-only and asks before each write or command
+# outside that sandbox; the plugin decides those approvals from these rules.
+# Reads, web, and extensions inside the sandbox are not gated.
+enforces = ["write_inside", "write_outside", "protected", "commands"]
+# native_security: a route may run Codex under its own configuration.
+features = ["steer", "queue", "events", "usage_limits", "native_security", "worktrees"]
+settings = []

@@ -1,7 +1,7 @@
 # Operations
 
-Public operator guide for Workspace Bridge `0.3.0`: state, services, manual
-upgrades, release identity, logging, support bundles, notifications,
+Public operator guide for Workspace Bridge: state, services, manual
+upgrades, release identity, logging, notifications,
 recovery, and troubleshooting. For installation see [Setup](SETUP.md); for
 architecture see [Architecture](ARCHITECTURE.md).
 
@@ -9,11 +9,11 @@ architecture see [Architecture](ARCHITECTURE.md).
 
 Default Bridge state is `$HOME/.local/state/workspace-bridge` (mode `0700`).
 Configuration, SQLite database, and the salted admin password file (`admin-account.json`) are private;
-`bridge.sqlite3` is mode `0600`. Node connection tokens are stored in
-private Bridge SQLite and runtime adapter tokens in private Node SQLite.
+`bridge.sqlite3` is mode `0600`. Paired Nodes authenticate with keys and
+agent plugins have no tokens.
 Normal Manager APIs return only whether a token exists, and tokens are
 excluded from diagnostics, logs, errors, and events. Treat both state
-databases and project handoff folders as sensitive: the Bridge holds
+databases as sensitive; the Bridge database also holds handoff text: the Bridge holds
 sanitized adapter references while the Node holds adapter secrets and
 data-plane state.
 
@@ -26,7 +26,23 @@ untouched; use a fresh state path for them. Back up state before upgrading.
 Stop the service before a plain filesystem copy; preserve SQLite WAL/SHM
 files alongside the database. Alternatively use an explicitly managed SQLite
 online backup procedure. Do not copy only a live database file and assume it
-is consistent. No automatic backup or pruning is configured.
+is consistent. No automatic backup or pruning is configured, except that run
+checkpoints in the Node's `checkpoints/` directory are pruned after 14 days or
+when a workspace's store exceeds 1 GiB. That directory holds copies of
+workspace source; backups may exclude it, which only loses old run diffs.
+Workspace settings in the Manager show checkpoint storage and can clear it.
+The Node's `handoffs/` folder holds read-only copies of handoff plans that
+agents can re-read; the Bridge keeps the originals and restores a copy at each
+run start, so backups may skip it. The Node's `worktrees/` folder holds the
+checkouts of isolated runs, each with a `wb/<worktree_id>` branch in its
+workspace's repository; apply, discard or 14 idle days remove both. Back it up
+only if unapplied agent work matters to you. To remove one by hand, run `git
+worktree remove --force <path>` and `git branch -D wb/<worktree_id>` in the
+workspace; `apply_run` then fails with `worktree_unavailable`, and
+`discard_run` marks the run's worktree discarded.
+The Node's `edit-journal.sqlite3` holds the earlier content of files changed by
+`apply_patch`, kept 30 days or up to 500 MiB per workspace; it is as
+sensitive as the source it copies, and losing it only loses undo.
 
 Keep package installs and tunnel profiles outside mapped projects. Bridge
 state cannot overlap a project. `--state` is a global CLI option placed
@@ -42,8 +58,9 @@ credential when it may have leaked; save the new secret in the local tunnel
 environment and restart the tunnel process. Old credentials stop authorizing
 new operations across every mapping. Pausing the shared gateway rejects all
 MCP requests without changing individual mappings; re-enabling restores
-access to them. A current operation can finish before a serialized
-management change takes effect.
+access to them. An operation already in progress can finish after a
+management change; writes and run mutations still queued authenticate and
+reload policy when their turn comes, so they see the change.
 
 Shared-token rotation is available in the local Manager while serving, or
 via `workspace-bridge rotate-bridge-token` while stopped. It generates a new
@@ -62,11 +79,10 @@ private state directory (the Manager may remain running):
 workspace-bridge --state "$HOME/.local/state/workspace-bridge" reset-admin-password
 ```
 
-For Docker, use `docker compose exec bridge workspace-bridge --state /state
-reset-admin-password`. Recovery resets the account to username `admin` and
-temporary password `admin`, revokes existing sessions, and requires another
-password change on first login. It preserves mappings, run history, and MCP,
-Node, and adapter tokens.
+Recovery resets the account to username `admin` and temporary password
+`admin`, revokes existing sessions, and requires another password change on
+first login. It preserves mappings, run history, the MCP token and Node
+keys.
 
 Fresh state and upgraded token-login state bootstrap this same temporary
 account. Upgrade creates `admin-account.json` on first Manager startup; old
@@ -74,6 +90,13 @@ account. Upgrade creates `admin-account.json` on first Manager startup; old
 but no longer authenticate the Manager. Complete the first-login password
 change promptly. Passwords are stored only as salted scrypt hashes; normal
 APIs never return them. Failed sign-ins are limited to five per minute.
+
+Paired Nodes have no token. Disable one in the Manager to refuse its
+connection, or re-pair it with `workspace-bridge pairing create --name <name>
+--replace` to rotate its key; the old key is refused immediately and runs
+started under it become interrupted. The gateway certificate and key live in
+the Bridge state folder (`gateway-cert.pem`, `gateway-key.pem`); back them up
+with that folder, because a new certificate means pairing every Node again.
 
 ## Root replacement and moving projects
 
@@ -109,11 +132,9 @@ local-admin `GET /api/diagnostics` endpoint returns the same schema;
 `GET /api/diagnostics?offline=1` selects offline mode. Doctor and the API
 use one server-side evaluator.
 
-Doctor inspects only the selected state. For a native deployment, use
-`workspace-bridge --state /path/to/bridge-state doctor`; for Docker, use
-`docker exec workspace-bridge workspace-bridge --state /state doctor`.
-An unconfigured default host state does not describe a separate running
-Docker Bridge. Add `--offline` to either command to skip network probes.
+Doctor inspects only the selected state: use
+`workspace-bridge --state /path/to/bridge-state doctor`, and add `--offline`
+to skip network probes.
 
 Statuses are `pass`, `warning`, `action_required`, `failed`, and `unknown`.
 Overall severity ranks failed, action required, unknown, warning, then pass.
@@ -124,19 +145,17 @@ workspace/adapter mapping, accessible root, shared MCP gateway, enabled
 workspace route and adapter, and the adapter's current security profile all
 pass. A configured model policy is validated; an unconfigured policy is
 optional governance and the runtime chooses its own default. Write scope is
-not a run prerequisite — it governs only new handoff publication and is
-reported as its own diagnostic — so a read-only workspace may still run an
-existing prepared handoff. Git evidence is review-only and never blocks a
+not a run prerequisite — it governs only ChatGPT's own edits and checks and is
+reported as its own diagnostic — so a read-only workspace still prepares and
+runs handoffs. Git evidence is review-only and never blocks a
 route.
 
 Listener health, gateway state, runtime health, and runnable routes are
 distinct observations. The Manager treats only `runnable_routes[].ready`
 for the exact `(workspace_id, adapter_id)` pair as route readiness. If
-diagnostics are unavailable, the Manager disables starts and marks readiness
-unavailable while retaining other page data. The Handoff start action is an
-authenticated local-admin wrapper for an existing prepared handoff that
-delegates to the run policy path; it accepts no free-form prompt or model
-override. Offline Doctor opens SQLite read-only, starts no workers, recovers
+diagnostics are unavailable, the Manager marks readiness unavailable while
+retaining other page data. ChatGPT normally starts runs with `start_run`; the Manager can start one by
+hand as a last resort through the same route checks. Offline Doctor opens SQLite read-only, starts no workers, recovers
 no notification deliveries, and does not contend for the serve process lock.
 
 Diagnostics do not prove account authorization, model behavior, test
@@ -155,7 +174,7 @@ IDs, or environment-only values, and no paths or file inventories are
 exposed.
 
 Product and component versions stay distinct: the product version is the
-Workspace Bridge release (`0.3.0`); the component version is that
+Workspace Bridge release (`1.0.0`); the component version is that
 component's own version. Adapter and native semantic versions, protocol and
 feature versions, and Node/adapter revisions remain separate fields.
 
@@ -183,32 +202,16 @@ offline or unobserved identity is unknown. Release warnings never enter
 runnable-route blockers; protocol compatibility, security, model, and
 workspace readiness remain the execution authority.
 
-This is source and package identity, not a container image digest or
-code-signing provenance.
+This is source and package identity, not code-signing provenance.
 
-## Release target manifest and bundle
+## Release artifacts
 
-A deterministic release target manifest pins exact release identities for
-the deployed components with a content-addressed manifest ID over canonical
-content excluding the ID itself. Generate it with:
-
-```sh
-uv run python scripts/build_release_manifest.py [--output manifest.json]
-```
-
-`workspace-bridge release build --output <new-dir> [--json]` builds a
-content-addressed bundle from the current checkout, proves every artifact's
-embedded release identity matches a freshly generated target manifest, and
-never installs, restarts, deploys, contacts live Nodes or adapters, or
-mutates service state. `workspace-bridge release validate --bundle <dir>
-[--json]` re-runs the same pure validation. The bundle pins exact
-deployable bytes to exact release identities with content-addressed bundle
-and receipt IDs. Corrupt or tampered bundles fail before any use.
-
-Routine component updates do not transfer bundles: host owners install the
-published versions locally — Node, Codex and Claude Code from the Python package via
-`uv`, Pi from the npm package via `npm`. Bundles remain release
-verification and audit material, not update transport.
+A release is one Python wheel built with `uv build --wheel`, plus the Pi
+plugin's npm package. Host owners install the published versions
+locally: the Bridge, the Node and the Claude Code, Codex and OpenCode plugins
+from the Python package via `uv`, Pi from the npm package via `npm`. Versions
+show in `--version`, `/api/status` and `doctor`, and pairing refuses a Node
+whose version is incompatible with the Bridge.
 
 ## Version compatibility (read-only)
 
@@ -230,161 +233,106 @@ components.
 
 ## Service persistence
 
-On macOS the native Node persists through the per-user LaunchAgent
-`com.workspace-bridge.node`; on Linux through the system unit
-`workspace-bridge-node.service`. Neither is a Compose service. The managed
-macOS plist is `~/Library/LaunchAgents/com.workspace-bridge.node.plist`;
-Node state defaults to `$HOME/.local/state/workspace-bridge-node`; macOS
-output stays in its private `logs/` directory. The managed Linux unit is
-`/etc/systemd/system/workspace-bridge-node.service` with output in the
-system journal; `User=`/`Group=` keep the Node process non-root as the
-installing user. Node and native adapters therefore run as the same user
-and see the same absolute host workspace paths. The system unit starts at
-boot and survives logout with no extra step.
+The Bridge and the Node install as services with the same commands and the
+same module. By default the service is a user service:
 
-Use the host-admin CLI without leading `sudo`; the Manager does not control
-launchd or systemd:
+| Host | Bridge | Node |
+|---|---|---|
+| macOS | LaunchAgent `~/Library/LaunchAgents/com.workspace-bridge.bridge.plist` | LaunchAgent `~/Library/LaunchAgents/com.workspace-bridge.node.plist` |
+| Linux | user unit `~/.config/systemd/user/workspace-bridge.service` | user unit `~/.config/systemd/user/workspace-bridge-node.service` |
+
+```sh
+workspace-bridge service install
+workspace-bridge service status
+workspace-bridge service restart
+workspace-bridge service uninstall
+```
 
 ```sh
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service install
 workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service status
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service start
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service stop
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service uninstall
 ```
 
-`install` requires initialized state with mode `0700` and private
-config/token files, refuses an unmanaged or modified unit, and is idempotent
-for exact managed content. On macOS it uses user-domain launchd operations;
-on Linux the plain command runs unprivileged and the backend uses only fixed
-`sudo` operations for privileged mutation with no shell and no arbitrary
-`sudo` arguments. Run the command as the Node owner and authorize the narrow
-`sudo` prompts. `status` is read-only and distinguishes the managed unit,
-enabled/running/failed state, configured host and port, bounded
-authenticated Node health, and per-root availability. A reachable Node with
-an unavailable root is transport-healthy but root-degraded; verify root
-availability before testing a workspace. Linux `status` never exposes
-tokens, executable paths, `sudo` commands, home paths, raw environment,
-journal text, or raw service output. Inspect the journal manually with
-`journalctl -u workspace-bridge-node.service` when needed. Without
-systemd, systemctl, or `sudo` privilege, service management fails clearly
-while foreground `serve` remains available.
+Each also takes `start`, `stop` and `restart`. Run them as the account that
+owns the state folder, without `sudo`. `install` needs an initialized private
+(`0700`) state folder owned by that account; a Node must be paired first. A
+LaunchAgent runs in the login session. A Linux user unit starts at boot only
+when lingering is enabled for the account (`loginctl enable-linger`), and
+`status` reports `starts_at_boot`.
 
-Advanced root mode (intentional only): running the Node as root is supported
-when the operator deliberately chooses it. Initialize and manage a separate
-root-owned Node state as root; the unit then carries `User=root` and
-`Group=root` and the backend executes the same fixed helper commands
-directly without `sudo`. The executable (including any shim and its target)
-plus both parent chains must be root-owned and non-writable, otherwise
-install fails closed. Root mode grants the Node full root filesystem
-authority; it does not by itself make separately non-root adapter services
-root (a root-owned adapter state managed as root is what runs that adapter
-and its native agent as root). Ownership is strictly isolated with no takeover:
-a root invocation against an existing user-owned state is rejected rather
-than converted, a non-root invocation against root-owned state is rejected,
-and switching an installed service between root and non-root requires
-`service uninstall` first (or a fresh state).
+`--root` is the explicit opt-in for a system-wide service that starts at
+boot: a LaunchDaemon in `/Library/LaunchDaemons` or a system unit in
+`/etc/systemd/system`. Run the command as root, for example with `sudo`; a
+root invocation without `--root`, or `--root` without root, is refused. The
+service still runs as the account that owns the state folder, so the Node and
+its agent plugins run as root only when the state folder itself is root-owned.
+That gives them full filesystem authority; keep it for hosts that need it.
 
-On macOS, privacy controls can allow the LaunchAgent to start while still
-blocking access to a workspace under an external volume. Files & Folders,
+`install` writes the definition with a marker line and starts the service. It
+refuses to replace or remove a definition without that marker; remove such a
+file by hand first. `status` reports whether the definition is installed and
+running, which state folder it serves, and its health: for the Bridge whether
+both listeners answer on loopback, for a Node its dial-out connection.
+`uninstall` stops the service and removes only the definition; state, keys,
+adapters, bindings and logs are kept.
+
+A service has no shell environment. Put Bridge settings in `bridge.env` in the
+Bridge state folder (mode `0600`), one `KEY=value` per line. Only
+`WB_NODE_GATEWAY_HOST`, `WB_NODE_GATEWAY_URL`, `WB_DISCORD_WEBHOOK_URL`,
+`WB_ADMIN_ALLOWED_HOSTS` and `WB_LOG_LEVEL` are accepted; any other line is an
+error, and a variable set in the real environment wins. Restart the service
+after editing it. The Manager does not control launchd or systemd.
+
+On macOS, privacy controls can allow a service to start while still blocking
+access to a workspace under an external volume. Files & Folders,
 external-storage, or other privacy prompts may apply to the
 executable/interpreter and the selected workspace. Grant only the required
 access to the actual executable or interpreter when prompted; Full Disk
-Access is not mandatory when a narrower permission suffices. Root
-availability in `status` followed by a Manager workspace check is the
-verification path; do not automate the prompt.
+Access is not mandatory when a narrower permission suffices. A Manager
+workspace check is the verification path; do not automate the prompt.
 
-`uninstall` removes only the exact managed unit plus its state-local
-manifest and preserves Node state, adapters, bindings, allowed roots,
-tokens, and logs. Unsupported operating systems fail explicitly; a Node
-container is not part of this deployment.
+### Paired Node connection state
 
-### Adapter instances (Pi/Codex/Claude via `workspace-bridge adapter`)
+The Bridge records when each paired Node connected, was last seen (every
+30 seconds) and disconnected. `doctor` reports it as connected, disconnected
+since a time, never connected, or unknown when the running Bridge has not
+reported for 90 seconds (for example because it is stopped). Workspace roots
+on paired Nodes show as unknown in `doctor`; the Manager checks them live. On
+the Node, `node service status` reads the dial-out loop's private
+`link-status.json`: `connected` with the time, `disconnected` with the last
+error code, `stopped`, or `unknown` when the status is stale.
 
-Each adapter state owns exactly one Pi, Codex, or Claude Code AdapterInstance. The
-supported path is package installation (`uv tool install workspace-bridge`
-for the `workspace-bridge-codex-adapter` executable, `uv tool install
-'workspace-bridge[claude]'` for `workspace-bridge-claude-adapter`, `npm install -g
-workspace-bridge-pi-host-adapter` for `workspace-bridge-pi-adapter`)
-followed by `workspace-bridge adapter --state <path> init` (token printed
-once) plus `service install`; hand-written plists are not supported. The
-per-instance macOS label is
-`com.workspace-bridge.adapter.<runtime>.<opaque-id>` under
-`~/Library/LaunchAgents/`; the Linux unit is
-`workspace-bridge-adapter-<runtime>-<id>.service` under
-`/etc/systemd/system/`. Both artifacts run only the stable lexical
-`workspace-bridge adapter --state <state> serve` launcher and never contain
-the runtime token or projects root. `service status` combines OS service
-state with an authenticated descriptor health check and exposes only bounded
-readiness, version, and service fields. macOS starts after user login;
-Linux starts at boot. Root mode (root-owned state, root-controlled launcher
-plus runtime executable) gives the agent root filesystem authority and is
-intentional only. After every manual package update, explicitly run
-`service restart`; there is no auto-updater. `service uninstall` preserves
-config, token, runtime state, and logs.
+### Agent plugins
 
-The safe default Node listen host remains `127.0.0.1` for host-only use. If
-the Bridge runs in Docker Desktop, initialize the Node with an explicit
-non-loopback host such as `--host 0.0.0.0`, then register the host-alias
-Node URL in the Manager. A loopback-only Node is not assumed reachable from
-the container. Non-loopback binding requires a host firewall or private
-network review, while Node token authentication remains mandatory; the Node
-is never exposed through the MCP tunnel. Compose carries Bridge plus the MCP
-tunnel only, with restart policy, health check, non-root identity, and
-private persistent Bridge state. See [Docker](DOCKER.md).
+Agents are not separate services. Each adapter is a plugin the Node runs as
+a child process, as the Node's OS user, under the Node's own service (or the
+Bridge's, for the embedded Node); see [Runtimes](RUNTIMES.md#supervision).
+Add, test and remove them with `workspace-bridge node adapter ...` on the
+Node host. Each plugin's stderr goes to `plugins/<adapter-id>/plugin.log`
+in the Node state folder, capped at 5 MiB with one previous file kept.
 
-Setting `WB_ADMIN_ALLOWED_HOSTS` widens only the admin listener to
-`0.0.0.0` with those `Host` values allowed (MCP unaffected); invalid values
-fail closed. The tunnel client stays on the host; no Docker socket is
-mounted into the Bridge.
+A Node opens no listening port: it dials the Bridge's Node gateway, and it is
+never exposed through the MCP tunnel. Setting `WB_ADMIN_ALLOWED_HOSTS` widens
+only the admin listener to `0.0.0.0` with those `Host` values allowed (MCP
+unaffected); invalid values fail closed.
 
 The optional `scripts/run_tunnel.py` helper only launches the official
 client when manually invoked. It is not imported or callable by the MCP
 server. Runtime execution is available only through bounded, opt-in Runtime
-Protocol tools and separate host adapters; the server never exposes a shell
+Protocol tools and Node-supervised agent plugins; the server never exposes a shell
 or arbitrary command tool.
 
-## Native logging policy
+## Logging
 
-Docker Bridge and tunnel logs use Docker `json-file` rotation
-(`max-size: 10m`, `max-file: 3`).
-
-macOS managed Node and adapter services write private `<state>/logs/`
-`stdout.log` and `stderr.log` (`0700` directory, `0600` files). Each stream
-is bounded to a 10 MiB active file plus two 10 MiB archives under the same
-private state. A package-owned guard performs bounded copy-truncate rotation
-for managed services only; foreground `serve` never spawns it. The guard
-owns only those log files, emits nothing to the service logs, exits when its
-parent service is gone, and never supervises or restarts the service.
-
-Linux Node and adapter units declare journal output explicitly. Retention
-and rotation remain the host journald and administrator policy; Workspace
-Bridge does not install or edit journald, logrotate, timer, cron, or daemon
-configuration. Support exports bound what is read (newest lines via fixed
-`journalctl` only).
-
-## Support bundle
-
-`workspace-bridge support bundle --output <new-file.zip> [--offline]
-[--node-state <path>] [--adapter-state <path> ...]` creates a new private
-(`0600`) ZIP of at most 5 MiB for troubleshooting. It is a local-admin
-read and export operation only: no service or package mutation, no upload,
-and no network beyond the same bounded `doctor` probes unless `--offline`
-is set. Node and adapter states are explicit local-admin paths; the default
-Node state is included only when it exists and validates, adapter states
-only when explicitly supplied (deterministic order, at most 16). When Bridge
-state is unavailable, the bundle still contains a sanitized initialization
-diagnostic plus any readable local service evidence.
-
-The ZIP uses fixed generic names and contains only projected diagnostics and
-release identities, safe local service status, and bounded sanitized log
-excerpts (newest lines per service). It excludes tokens, credentials,
-prompts, results, tool arguments, provider payloads, absolute paths,
-environment dumps, webhook URLs, raw bodies and headers, private keys, and
-SQLite, config, and token files, and it never reads project files. The
-bundle is designed to be shareable but must still be reviewed before any
-external upload; no upload occurs automatically.
+In the foreground, `serve` logs to stderr. A managed service (the definition
+sets `WB_SERVICE=1`) writes its own log under `logs/` in its state folder:
+`bridge.log` or `node.log`, rotated at 10 MiB with two previous files kept
+(`0700` directory, `0600` files). launchd and systemd capture only what
+escapes logging, such as an interpreter crash, in `bridge.stderr.log` or
+`node.stderr.log` on macOS (or the journal for a Linux unit); the process
+empties that file at start once it passes 1 MiB. No helper process, journald,
+logrotate, timer or cron configuration is installed. `WB_LOG_LEVEL` sets the
+level.
 
 ## Runtime Protocol runs and restart recovery
 
@@ -396,7 +344,20 @@ or model policy. The Manager shows the owning Node and adapter name and ID,
 runtime type, Bridge run and conversation IDs, handoff, model, immutable
 security-used snapshot, state, timestamps, and notification delivery. Run
 details show current interactions plus bounded activity and execution
-records. Only live, adapter-provided choices can be submitted.
+records. ChatGPT normally answers interactions. Under Manual control a waiting request
+shows its action and choices and can be answered, a run can be steered, queued
+or stopped, and a new run can be started from a prepared handoff or a direct
+instruction. Every such action is recorded with the actor `manager` in the
+approval log, the run's input receipts and the audit list. Successful starts,
+stops, interaction answers, steering, queued input and abandonment send a
+Discord action notice when configured, through the same coordinator path
+for Manager/API and MCP calls. Retries reuse the action's notification identity;
+rejected actions and requests to stop or abandon an already terminal run do
+not create new action notices. Answered interactions show who decided
+(ChatGPT, you as ChatGPT reports it, or you in the Manager) and the stated
+reason. `GET /api/approvals`, optionally with `decided_by=chatgpt`,
+`decided_by=owner` or `decided_by=manager`, returns that approval log newest
+first.
 
 On startup and during active runs, the Bridge reconciles durable records
 with adapter snapshots. It rebinds only operations the adapter positively
@@ -405,18 +366,27 @@ cannot confirm an operation, the Bridge records an interrupted or orphaned
 outcome and marks pending interactions stale. Transient adapter failures are
 reported as availability errors and do not cause a prompt retry.
 
-Pi, Codex, and Claude Code adapters are Node-owned private processes using the same
-Runtime Protocol v1 contract. Native listen ports, bootstrap tokens, state
-paths, and service lifecycle remain configured on their hosts. Bridge Node
-endpoints and tokens are managed in the local Manager and stored in Bridge
-SQLite; Node adapter endpoints and tokens stay in Node SQLite. Changes apply
-to the next request without a Bridge restart. Native process logs are
-separate from Bridge logs. Set `WB_LOG_LEVEL` independently for the Bridge
-and each adapter, and `WB_TUNNEL_LOG_LEVEL` for the tunnel sidecar. Never
-enable raw HTTP tunnel logging: it may expose sensitive headers or bodies.
+Re-pairing a Node with a new key or changing an adapter's plugin settings
+gives it a new connection revision. The Bridge never sends control traffic for
+an existing run to the replacement, so active runs started under the old
+revision are marked `interrupted` with error `runtime_authority_changed` and
+their pending interactions become stale. The native agent may still be
+running; stop it on its host if needed. Disabling a Node or adapter keeps its
+revision, so its runs resume reconciliation when it is enabled again.
 
-The adapter `/health` endpoint is a minimal lock and readiness check; the
-authenticated descriptor reports protocol and adapter capabilities.
+For a run the Bridge can no longer reach for any other reason, the Manager
+API offers `POST /api/runs/<run_id>/abandon`. It marks the run `orphaned`
+with error `abandoned_by_admin` and stale interactions without contacting the
+runtime. It is local-admin only and never an MCP tool.
+
+Pi, Codex, Claude Code and OpenCode adapters are plugins the Node runs as
+child processes over Agent Protocol v2 on stdin and stdout; they open no port
+and hold no token. Adapter settings stay in Node state and apply to the next
+request without a Bridge restart. Plugin logs are separate from Bridge logs.
+Never enable raw HTTP tunnel logging: it may expose sensitive headers or
+bodies.
+
+The plugin descriptor reports protocol and adapter capabilities.
 Unsupported features fail closed. Live Doctor checks configured instances
 with bounded Runtime Protocol requests; offline Doctor reads local
 configuration and model policy without contacting the host. Run
@@ -433,60 +403,64 @@ the Manager remains loopback-only. Aggregate event delivery states are available
 under `mcp_events` in authenticated `/api/status`. Never enable raw HTTP/tunnel
 logging or inspect subscription signing secrets through a public API.
 
-## Runtime profiles
+## Security profiles
 
-Pi runs natively with the host user's authority, so its security profile is
-pre-tool policy rather than an OS sandbox. Profiles control supported file
-tools, external paths, protected paths, shell behavior, and session grants
-through the Pi host adapter's trusted permission extension. A profile
-revision is immutable for each conversation; changes take effect in new
-conversations. Review each profile's scope in the local Manager before
-assigning it. Each adapter instance has its own profile discovery and model
-policy even when two instances share one runtime type. Codex uses a separate
-native permission profile with an approval policy and reviewer; the two
-runtimes' profile claims are not equivalent. Claude Code profiles set
-`edits`, `shell`, `web`, and `extensions` (MCP tools) to `deny`, `ask`, or
-`allow` and are enforced by the adapter's tool list and permission hook;
-approved shell commands run with the host user's authority, and the host's
-Claude settings, hooks, skills, and MCP servers load unless
-`adapter init --claude-setting-sources` narrows them. See [Runtimes](RUNTIMES.md).
+Security profiles live in the Bridge and are edited by a local admin in the
+Manager (`/api/profiles`); no MCP tool reads or changes them. Each route names
+one profile, and every run carries that profile's current rules to the plugin,
+which enforces them as pre-tool policy rather than an OS sandbox. A run keeps
+the rules it started with; an edit reaches the next run, including a
+continuation. Before saving an edit that loosens a profile, or that a routed
+plugin cannot enforce, the Manager lists the affected rules and routes and
+asks for confirmation. A profile in use cannot be deleted. A route is refused
+when its plugin cannot enforce the profile's restrictive rules; Codex, for
+example, accepts `trusted` but not `read-only` or `reviewed`. See
+[Security profiles](SECURITY.md#security-profiles) and
+[Security on every run](RUNTIME_PROTOCOL.md#security-on-every-run).
 
-Codex workspaces may instead follow the effective native configuration
-security settings. The Bridge observes a security-only revision and bounded
-summary, then attempts to update an idle conversation before its next turn.
-A running turn keeps its captured settings. When Codex cannot represent or
-confirm an update, the Bridge starts a fresh conversation that resolves the
-current native configuration. This mode is distinct from assigning a Bridge
-profile and is unsupported for Pi.
+Approved shell commands run with the host user's authority. Claude Code loads
+the host's Claude settings, hooks, skills, and MCP servers unless the plugin's
+`setting_sources` setting narrows them. See
+[Runtimes](RUNTIMES.md).
 
-## Writable handoff notes
-
-Use the general write and edit tools with the default handoff-only policy
-for small UTF-8 documents. Current hashes are required for replacements and
-edits; no forced overwrite, delete, or rename is available. Read back after
-connection loss or ambiguous disk errors. Writes may create parent
-directories, and partial failures can leave empty directories or an internal
-staging file after process termination; internal staging files are hidden
-from tools. Do not remove such files while a write is active. No automated
-cleanup or total handoff-storage quota is provided.
-
-For least privilege, precreate each project's `.workspace-handoff/` with
-ownership and write permission for the dedicated service identity; give that
-identity only read access to the rest of the project. This release does not
-configure those OS permissions. Stop the local coding agent before revising
-its active plan.
+Codex and Claude Code routes may instead follow the agent's native security:
+Codex runs under its effective configuration, and Claude Code under its loaded
+settings in the plugin's `permission_mode` (for example `auto`) or the
+settings' `defaultMode`. Each native permission prompt becomes a Bridge
+interaction. Switching a route between a profile and native security needs a
+fresh conversation. Native security is unsupported for Pi and OpenCode.
 
 ## Per-workspace write permissions
 
-The general tools are `read_file`, `write_file`, and `edit_file`. Write
-scope is set only in the local Manager: Exclusions & policy, Write
-permission, Save and confirm. The default handoff mode allows notes but not
-source. `none` denies every file mutation including `prepare_handoff`;
-`workspace` allows bounded permitted source text. New mappings default to
-handoff. Scope changes take effect on subsequent calls with no tunnel,
+ChatGPT changes files only with `apply_patch` (and `undo_edit`). Write scope
+is set only in the local Manager: Settings, ChatGPT file access, save and
+confirm. `none` (read-only) is the default and denies every file change and
+ad hoc check; image uploads, saving handoffs and starting runs still work.
+`workspace` (edit) allows bounded changes to permitted text files and
+`run_checks`. Workspaces set to the earlier handoff-only scope became
+read-only. Scope changes take effect on subsequent calls with no tunnel,
 schema change, or restart. OS permissions remain an additional requirement;
 enabling scope does not grant filesystem privileges. See
 [File access](FILE_ACCESS.md) for mode and ownership limits.
+
+Current hashes are required for edits, moves and deletes. Read back after
+connection loss or ambiguous disk errors. A patch may create parent
+directories, and a process stopped mid-patch can leave empty directories or
+an internal `.wb-write-*` staging file; staging files are hidden from tools.
+Do not remove such files while a patch is active.
+
+## Checks
+
+Each workspace's checks live in the Node's state at
+`checks/<workspace-id>.toml`, outside the project, so neither ChatGPT nor a
+cloned repository can add a command. Edit it through the Manager API
+(`PUT /api/workspaces/{workspace}/checks` with `text`) or directly on the
+Node host; the same call's `after_run` names checks to run after every run.
+See [run_checks](MCP_TOOLS.md#run_checks) for the format. A check runs the
+named command with your login `PATH` under the Node's identity, so only list
+commands you would run yourself. Results are kept in the Node's
+`checks.sqlite3`, the newest 200 batches per workspace; checks still running when
+the Node stops are marked interrupted on its next start.
 
 ## Manual upgrades
 
@@ -497,42 +471,32 @@ block routes, so components can be updated one at a time. The Manager
 System / Versions view shows component versions and compatibility as
 information only; it performs no installs or restarts.
 
-**Bridge and Manager.** With Docker, rebuild and recreate the container from
-the checkout; the image builds the Manager, so it ships with the Bridge:
-
-```sh
-git pull
-docker compose up -d --build
-```
-
-Without Docker, upgrade the Python package, then restart the `serve` process.
-
-**Node, Codex adapter, and Claude Code adapter.** These share the Python
-package. Upgrade it, then restart each service with its own state directory:
+The Bridge, the Manager, the Node and the Claude Code, Codex and OpenCode
+plugins share the Python package; the Pi plugin is a separate npm package.
+Upgrade what you use, then restart the Bridge service (which restarts the
+embedded Node and its plugins):
 
 ```sh
 uv tool upgrade workspace-bridge
+npm install -g workspace-bridge-pi-host-adapter
 workspace-bridge --version
-workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-codex" service restart
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-claude" service restart
+workspace-bridge service restart
 ```
 
-A Claude Code adapter installed with its extra
-(`uv tool install 'workspace-bridge[claude]'`) keeps it on upgrade. A host that
-runs a Node or adapter from a source checkout (an editable install) needs
-only the restart after `git pull`.
-
-**Pi adapter.** It is a separate npm package:
+On a host with a paired Node, restart it the same way; it restarts its
+plugins:
 
 ```sh
-npm install -g workspace-bridge-pi-host-adapter
-workspace-bridge adapter --state "$HOME/.local/state/workspace-bridge-adapter-pi" service restart
+workspace-bridge node --state "$HOME/.local/state/workspace-bridge-node" service restart
 ```
+
+An install with the Claude extra (`uv tool install 'workspace-bridge[claude]'`)
+keeps it on upgrade. A host that runs a Node from a source checkout (an
+editable install) needs only the restart after `git pull`.
 
 These steps do not update the native Codex, Claude Code, or Pi CLIs, which you
 update with their own installers. A restart interrupts any run in flight on that
-service; Bridge never replays prompts or approvals, so check for active runs
+Node; Bridge never replays prompts or approvals, so check for active runs
 first.
 
 ## Known limitations / validation status
@@ -542,13 +506,7 @@ first.
   client passes pixels to the model must be verified per connection with a
   fresh visual marker; local tool success alone is not that proof.
 - No automatic package updater and no automatic support upload exist.
-- Deployment combinations that have not run as a live Bridge plus Node plus
-  tunnel smoke on a Docker-equipped host are unvalidated for that checkout;
-  validate them together before relying on the deployment. Older container
-  fixture scripts that still encode the pre-Node local-bind flow are not
-  evidence for the current authority boundary.
-- Root service mode is advanced only. A root-owned Node state managed as root
-  runs the Node as root with full Node filesystem authority; a root-owned
-  adapter state managed as root runs that adapter and its native agent as
-  root. Running the Node as root does not by itself make separately non-root
-  adapter services root.
+- Validate a deployment with a live Bridge, Node and tunnel smoke before
+  relying on it.
+- A `--root` service whose state folder is root-owned runs the Node and its
+  agent plugins as root with full filesystem authority.

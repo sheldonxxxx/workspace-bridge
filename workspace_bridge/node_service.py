@@ -5,7 +5,6 @@ adapter connection secrets. Bridge communicates with it through ``node_api``.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,17 +15,44 @@ import threading
 from datetime import datetime, timezone
 
 from .browse import Browser
+from .keyed_locks import KeyedLocks
+from .checkpoint_store import CheckpointStore
+from .checks import CheckRunner
+from .plan_files import PlanStore, UploadStore
+from .worktrees import WorktreeStore
+from . import edit_journal
 from .git_evidence import GitEvidence
-from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, ImageReadResult,
-                    decode_image_upload, image_capabilities, read_image,
+from .media import (DEFAULT_DIMENSION, SUPPORTED_SUFFIXES, decode_image_upload, read_image,
                     selected_read_limit, sniff_image, validate_image)
-from .security import (BridgeError, HANDOFF, MAX_FILE, MAX_OUTPUT, MAX_WRITE,
-                       SafeRoot, allowed, digest, file_text, handoff_allowed,
-                       parts, redact, require_write_path)
-from .wbrp import HttpRuntimeAdapter
-from .adapter_registry import validate_base_url
-from .schema_upgrade import widen_runtime_type_check
+from .security import (BridgeError, MAX_OUTPUT, SafeRoot, allowed, digest,
+                       redact, validate_excludes)
+from .wbrp import RuntimeClient
+from .plugin_protocol import builtin_manifests, load_manifest
+from .plugin_supervisor import PluginRegistry
 from . import __version__
+
+
+CHECKPOINT_OPERATIONS = {
+    "checkpoint_capture": frozenset({"checkpoint_id", "budget_ms", "max_files", "max_bytes", "worktree_id"}),
+    "checkpoint_changes": frozenset({"from_id", "to_id", "offset", "limit"}),
+    "checkpoint_diff": frozenset({"from_id", "to_id", "path", "offset", "max_bytes"}),
+    "checkpoint_purge": frozenset({"checkpoint_ids", "everything"}),
+    "checkpoint_stats": frozenset(),
+}
+# Reads that may look at an isolated run's worktree instead of the workspace.
+WORKTREE_READS = frozenset({"list_dir", "glob", "grep_files", "read_file"})
+WORKTREE_OPERATIONS = {
+    "worktree_create": frozenset({"worktree_id"}),
+    "worktree_commit": frozenset({"worktree_id"}),
+    "worktree_apply": frozenset({"worktree_id", "message"}),
+    "worktree_remove": frozenset({"worktree_id"}),
+}
+CHECK_OPERATIONS = {
+    "checks_config": frozenset(),
+    "set_checks_config": frozenset({"text"}),
+    "start_checks": frozenset({"names", "run_id", "worktree_id"}),
+    "read_checks": frozenset({"check_id", "wait_ms"}),
+}
 
 
 def _now() -> str:
@@ -38,11 +64,16 @@ def _inside(path: Path, parent: Path) -> bool:
 
 
 def _public_adapter(row: dict) -> dict:
-    return {"id": row["id"], "name": row["name"],
-            "runtime_type": row["runtime_type"], "base_url": row["base_url"],
+    return {"id": row["id"], "name": row["name"], "runtime_type": row["runtime_type"],
             "enabled": bool(row["enabled"]), "revision": row["revision"],
             "created": row["created"], "updated": row["updated"],
-            "has_token": bool(row["token"])}
+            "plugin": row["plugin"], "projects_root": row["projects_root"],
+            "settings": json.loads(row.get("settings") or "{}")}
+
+
+PLUGIN_SETTING_LIMIT = 4096
+PLUGIN_REQUIRED_MESSAGE = ("Add the agent as a plugin with "
+                           "`workspace-bridge node adapter add <plugin> --name <name>`")
 
 
 ADAPTER_REVISION_RE = re.compile(r"^rev_[0-9a-f]{32}$")
@@ -107,6 +138,8 @@ class NodeService:
         self.allowed_roots = [Path(root).expanduser().resolve(strict=not read_only)
                               for root in config["allowed_roots"]]
         self.lock = threading.RLock()
+        # Checked writes (expected_sha256, then write) serialize per workspace.
+        self.write_locks = KeyedLocks()
         db_path = self.state / "node.sqlite3"
         if read_only:
             # An immutable connection avoids SQLite creating a shared-memory
@@ -138,13 +171,14 @@ class NodeService:
               CREATE TABLE runtime_adapters (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 runtime_type TEXT NOT NULL CHECK(runtime_type IN ('pi','codex','claude','opencode')),
-                base_url TEXT NOT NULL, token TEXT NOT NULL,
                 enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), revision TEXT NOT NULL,
-                created TEXT NOT NULL, updated TEXT NOT NULL);
+                created TEXT NOT NULL, updated TEXT NOT NULL,
+                plugin TEXT NOT NULL, projects_root TEXT NOT NULL,
+                settings TEXT NOT NULL DEFAULT '{}');
               CREATE TABLE node_workspaces (
                 id TEXT PRIMARY KEY, root TEXT NOT NULL UNIQUE,
                 excludes TEXT NOT NULL, write_scope TEXT NOT NULL
-                  CHECK(write_scope IN ('none','handoff','workspace')),
+                  CHECK(write_scope IN ('none','workspace')),
                 created TEXT NOT NULL, updated TEXT NOT NULL);
             """)
             self.db.commit()
@@ -152,14 +186,58 @@ class NodeService:
         elif not {"runtime_adapters", "node_workspaces"}.issubset(tables):
             self.db.close()
             raise BridgeError("Node state schema is incompatible", "state_schema_incompatible")
-        elif not read_only:
-            widen_runtime_type_check(self.db, "runtime_adapters")
         self.browser = Browser(self)
+        self.plugins = PluginRegistry(self.state / "plugins", worktrees_root=self.state / "worktrees")
+        self._checkpoints = None
+        self._journal = None
+        self._checks = None
+        self.worktrees = WorktreeStore(self.state)
+        if not read_only:
+            # Plugins resolve this folder when they start, so it must exist.
+            self.worktrees.ensure_root()
+
+    @property
+    def journal(self) -> edit_journal.EditJournal:
+        if self.read_only:
+            raise BridgeError("The edit journal is unavailable in read-only mode", "journal_unavailable")
+        with self.lock:
+            if self._journal is None:
+                self._journal = edit_journal.EditJournal(self.state / "edit-journal.sqlite3")
+            return self._journal
+
+    @property
+    def checks(self) -> CheckRunner:
+        if self.read_only:
+            raise BridgeError("Checks are unavailable in read-only mode", "checks_unavailable")
+        with self.lock:
+            if self._checks is None:
+                self._checks = CheckRunner(self.state)
+            return self._checks
+
+    @property
+    def checkpoints(self) -> CheckpointStore:
+        if self.read_only:
+            raise BridgeError("Checkpoints are unavailable in read-only mode", "checkpoint_storage")
+        with self.lock:
+            if self._checkpoints is None:
+                self._checkpoints = CheckpointStore(self.state, self.db, self.lock)
+            return self._checkpoints
 
     def close(self) -> None:
+        self.plugins.close()
+        if self._journal is not None:
+            self._journal.close()
+        if self._checks is not None:
+            self._checks.close()
         self.db.close()
 
     def safe_root(self, workspace: dict) -> SafeRoot:
+        if workspace.get("worktree_id") is not None:
+            # A read of an isolated run's worktree: same exclusions, the Node's own checkout.
+            self.safe_root({key: value for key, value in workspace.items() if key != "worktree_id"}).close()
+            self.worktrees.meta(workspace["id"], WorktreeStore._id(workspace["worktree_id"]))
+            return SafeRoot(str(self.worktrees.path(workspace["id"], workspace["worktree_id"])),
+                            validate_excludes(workspace.get("excludes", [])))
         raw = workspace.get("root")
         if not isinstance(raw, str) or not Path(raw).is_absolute() or os.path.normpath(raw) != raw:
             raise BridgeError("Canonical workspace root required", "root_invalid")
@@ -180,12 +258,7 @@ class NodeService:
             raise BridgeError("Node state cannot be exposed through a workspace", "root_denied")
         if path.is_symlink() or not path.is_dir():
             raise BridgeError("Workspace root unavailable", "root_unavailable")
-        excludes = workspace.get("excludes", [])
-        if not isinstance(excludes, list) or len(excludes) > 40 or any(
-                not isinstance(value, str) or not value or len(value) > 120
-                for value in excludes):
-            raise BridgeError("Invalid workspace exclusions", "invalid_arguments")
-        return SafeRoot(raw, None, excludes)
+        return SafeRoot(raw, validate_excludes(workspace.get("excludes", [])))
 
     def validate_root(self, root: str, excludes: list[str] | None = None) -> dict:
         workspace = {"root": root, "excludes": excludes or []}
@@ -229,11 +302,9 @@ class NodeService:
             row = self.db.execute("SELECT * FROM node_workspaces WHERE id=?", (workspace_id,)).fetchone()
         if row is None:
             raise BridgeError("Workspace is not registered on this Node", "unknown_workspace")
+        validate_excludes(excludes)
         self.validate_root(row["root"], excludes)
-        if (not isinstance(excludes, list) or len(excludes) > 40
-                or any(not isinstance(item, str) or not item or len(item) > 120
-                       for item in excludes)
-                or write_scope not in {"none", "handoff", "workspace"}):
+        if write_scope not in {"none", "handoff", "workspace"}:
             raise BridgeError("Invalid workspace configuration", "invalid_arguments")
         with self.lock, self.db:
             self.db.execute("UPDATE node_workspaces SET excludes=?,write_scope=?,updated=? WHERE id=?",
@@ -253,7 +324,6 @@ class NodeService:
                 "excludes": json.loads(row["excludes"]), "write_scope": row["write_scope"]}
 
     def status(self) -> dict:
-        from .release import node_release
         roots = []
         for root in self.allowed_roots:
             roots.append({"available": root.is_dir() and not root.is_symlink(),
@@ -261,14 +331,25 @@ class NodeService:
         # ``status()`` is a plain health/identity read: platform/arch
         # only, no installer probing, no login-shell PATH resolution,
         # no package-manager commands.
-        return {"status": "ok", "protocol": 1, "node_version": __version__,
-                "release": node_release(), "capabilities": [
-            "files", "search", "git", "handoff-artifacts", "runtime-adapters"],
+        return {"status": "ok", "protocol": 1, "node_version": __version__, "capabilities": [
+            "files", "search", "git", "handoff-uploads", "runtime-adapters", "checkpoints", "checks",
+            "plan-files", "worktrees"],
             "host": _node_host_info(self.config),
             "allowed_roots": roots,
             "runtime_adapters": len(self.adapters())}
 
+    WRITE_OPERATIONS = frozenset({"upload_image", "apply_patch", "undo_edit",
+                                  "set_checks_config", "worktree_apply"})
+
     def workspace_call(self, operation: str, body: dict):
+        if operation in self.WRITE_OPERATIONS:
+            supplied = body.get("workspace")
+            key = supplied.get("id") if isinstance(supplied, dict) else None
+            with self.write_locks.hold(key):
+                return self._workspace_call(operation, body)
+        return self._workspace_call(operation, body)
+
+    def _workspace_call(self, operation: str, body: dict):
         supplied_workspace = body.get("workspace")
         if not isinstance(supplied_workspace, dict):
             raise BridgeError("Workspace authority context is required", "invalid_arguments")
@@ -277,6 +358,10 @@ class NodeService:
         root = checked.path
         checked.close()
         ws = {**workspace, "root": root}
+        if operation in WORKTREE_READS and isinstance(body.get("arguments"), dict) \
+                and body["arguments"].get("worktree_id") is not None:
+            body = {**body, "arguments": dict(body["arguments"])}
+            ws["worktree_id"] = body["arguments"].pop("worktree_id")
         if operation == "list_dir":
             return self.browser.list_dir(ws, **body["arguments"])
         if operation == "glob":
@@ -333,91 +418,142 @@ class NodeService:
             return {"path": args["path"], "sha256": sha, "lines": selected,
                     "total_lines": len(lines), "next_line": next_line,
                     "redacted": redacted, "trust": "untrusted_project_content"}
-        if operation == "write_image":
-            args = body["arguments"]
-            path = args.get("path")
-            scope = workspace.get("write_scope", "none")
-            require_write_path(path, workspace.get("excludes", []), scope=scope)
-            if not handoff_allowed(path, workspace.get("excludes", [])):
-                raise BridgeError("Image uploads require an allowed handoff path", "policy_denied")
-            if args.get("mime_type") not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"}:
+        if operation == "upload_image":
+            if self.read_only:
+                raise BridgeError("Uploads are unavailable in read-only mode", "plan_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != {"data_base64", "mime_type"}:
+                raise BridgeError("Invalid upload arguments", "invalid_arguments")
+            if args["mime_type"] not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff"}:
                 raise BridgeError("Unsupported image MIME type", "invalid_arguments")
-            data = decode_image_upload(args.get("data_base64"))
-            with self.safe_root(ws) as safe:
-                result = safe.write_image(path, data, args["mime_type"],
-                                          args.get("expected_sha256"), write_scope=scope)
-            return {**result, "absolute_path": str(Path(ws["root"]) / path), "write_scope": scope,
-                    "note": "Original image bytes were written. No command was executed or agent started."}
-        if operation == "write_file":
+            data = decode_image_upload(args["data_base64"])
+            result = UploadStore(self.state).save(workspace["id"], data, args["mime_type"])
+            return {**result, "stored": "node_state", "embedded_metadata": "preserved",
+                    "pixel_redaction": "none", "validation": "first_frame_only",
+                    "note": "Kept by the Node, not in the workspace. Name it by sha256 in save_handoff.attachments."}
+        if operation in ("apply_patch", "undo_edit"):
             args = body["arguments"]
-            scope = workspace.get("write_scope", "none")
-            require_write_path(args["path"], workspace.get("excludes", []), scope=scope)
-            try:
-                data = args["content"].encode("utf-8")
-            except (AttributeError, UnicodeEncodeError):
-                raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-            file_text(data)
+            if not isinstance(args, dict) or set(args) != (
+                    {"changes", "message"} if operation == "apply_patch" else {"edit_id"}):
+                raise BridgeError("Invalid edit arguments", "invalid_arguments")
+            if workspace.get("write_scope", "none") == "none":
+                raise BridgeError("Writes are disabled by workspace write scope", "policy_denied")
             with self.safe_root(ws) as safe:
-                result = safe.write_file(args["path"], data,
-                                         args.get("expected_sha256"), write_scope=scope)
-            return {**result, "absolute_path": str(Path(root) / args["path"]),
-                    "write_scope": scope, "note": "Only this file was written. No command was executed or agent started."}
-        if operation == "edit_file":
+                if operation == "apply_patch":
+                    result = edit_journal.apply_patch(safe, self.journal, ws, args["changes"], args["message"])
+                else:
+                    result = edit_journal.undo_edit(safe, self.journal, ws, args["edit_id"])
+            return {**result, "write_scope": workspace["write_scope"],
+                    "note": "Only these files changed. No command was executed or agent started."}
+        if operation == "list_edits":
             args = body["arguments"]
-            scope = workspace.get("write_scope", "none")
-            require_write_path(args["path"], workspace.get("excludes", []), scope=scope)
-            if not args["old_text"]:
-                raise BridgeError("old_text must be nonempty", "invalid_arguments")
-            with self.safe_root(ws) as safe:
-                raw, _ = safe.read(args["path"], limit=MAX_WRITE)
-                if digest(raw) != args["expected_sha256"]:
-                    raise BridgeError("File changed; re-read before editing", "stale_evidence")
-                text = file_text(raw)
-                first = text.find(args["old_text"])
-                if first < 0:
-                    raise BridgeError("old_text was not found; re-read and use exact text", "match_not_found")
-                if text.find(args["old_text"], first + 1) >= 0:
-                    raise BridgeError("old_text is ambiguous; include more surrounding text", "ambiguous_match")
-                updated = text[:first] + args["new_text"] + text[first + len(args["old_text"]):]
-                try:
-                    updated_data = updated.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-                file_text(updated_data)
-                result = safe.write_file(args["path"], updated_data,
-                                         args["expected_sha256"], write_scope=scope)
-            return {**result, "absolute_path": str(Path(root) / args["path"]),
-                    "replacements": 1, "write_scope": scope}
+            return self.journal.list(workspace["id"], args.get("offset", 0), args.get("limit", 50),
+                                     args.get("since"), args.get("until"))
+        if operation in CHECK_OPERATIONS:
+            args = body.get("arguments")
+            if not isinstance(args, dict) or not set(args) <= CHECK_OPERATIONS[operation]:
+                raise BridgeError("Invalid check arguments", "invalid_arguments")
+            runner = self.checks
+            if operation == "checks_config":
+                return runner.read_config(workspace)
+            if operation == "set_checks_config":
+                return runner.write_config(workspace, args.get("text"))
+            if operation == "start_checks":
+                run_id = args.get("run_id")
+                # Checks a user asked for after every run need no write scope;
+                # an ad hoc request runs commands that can change files.
+                if run_id is None and workspace["write_scope"] != "workspace":
+                    raise BridgeError("Running checks needs the edit write scope", "policy_denied")
+                if args.get("worktree_id") is not None:
+                    # An isolated run's checks run in its worktree, not the workspace.
+                    self.worktrees.meta(workspace["id"], WorktreeStore._id(args["worktree_id"]))
+                    root = str(self.worktrees.path(workspace["id"], args["worktree_id"]))
+                return runner.start(workspace, root, args.get("names"), run_id, args.get("worktree_id"))
+            wait_ms = args.get("wait_ms", 0)
+            if isinstance(wait_ms, bool) or not isinstance(wait_ms, int) or not 0 <= wait_ms <= 20000:
+                raise BridgeError("wait_ms must be 0 to 20000", "invalid_arguments")
+            runner.read(workspace, args.get("check_id"))
+            runner.wait(args["check_id"], wait_ms / 1000)
+            return runner.read(workspace, args["check_id"])
         if operation == "git_status":
             with self.safe_root(ws) as safe:
                 return GitEvidence.status(safe, ws, **body["arguments"])
         if operation == "git_diff":
             with self.safe_root(ws) as safe:
                 return GitEvidence.diff(safe, ws, **body["arguments"])
-        if operation == "read_handoff_artifact":
-            args = body["arguments"]
-            path = args["path"]
-            if not handoff_allowed(path, workspace.get("excludes", [])):
-                raise BridgeError("Artifact path outside handoff folder")
+        if operation in CHECKPOINT_OPERATIONS:
+            args = body.get("arguments")
+            if not isinstance(args, dict) or not set(args) <= CHECKPOINT_OPERATIONS[operation]:
+                raise BridgeError("Invalid checkpoint arguments", "invalid_arguments")
+            store = self.checkpoints
+            if operation == "checkpoint_capture":
+                worktree_id = args.pop("worktree_id", None)
+                if worktree_id is None:
+                    with self.safe_root(ws) as safe:
+                        return store.capture(safe, ws, **args)
+                with self.safe_root(ws) as safe:
+                    repository = self.worktrees.repository(safe, workspace["id"], worktree_id)
+                with SafeRoot(str(self.worktrees.path(workspace["id"], worktree_id)),
+                              safe.extra) as tree:
+                    return store.capture(tree, ws, repository=repository, **args)
+            if operation == "checkpoint_changes":
+                return store.changes(ws, **args)
+            if operation == "checkpoint_diff":
+                return store.diff(ws, **args)
+            if operation == "checkpoint_purge":
+                return store.purge(ws, **args)
+            return store.stats(ws)
+        if operation in WORKTREE_OPERATIONS:
+            if self.read_only:
+                raise BridgeError("Worktrees are unavailable in read-only mode", "isolation_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != WORKTREE_OPERATIONS[operation]:
+                raise BridgeError("Invalid worktree arguments", "invalid_arguments")
+            if operation == "worktree_apply":
+                if workspace.get("write_scope") != "workspace":
+                    raise BridgeError("Applying a run needs the edit write scope", "policy_denied")
+                with self.safe_root(ws) as safe:
+                    return self.worktrees.apply(safe, self.journal, ws, args["worktree_id"], args["message"])
             with self.safe_root(ws) as safe:
-                data, _ = safe.read(path, artifact=True)
-            return {"data": __import__("base64").b64encode(data).decode("ascii")}
+                if operation == "worktree_create":
+                    return self.worktrees.create(safe, ws, args["worktree_id"])
+                if operation == "worktree_remove":
+                    return self.worktrees.remove(safe, ws, args["worktree_id"])
+                return self.worktrees.commit(safe, ws, args["worktree_id"])
+        if operation == "write_plan":
+            if self.read_only:
+                raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != {"job_id", "documents", "uploads"}:
+                raise BridgeError("Invalid plan arguments", "invalid_arguments")
+            return PlanStore(self.state).write(workspace["id"], args["job_id"], args["documents"],
+                                               args["uploads"])
         if operation == "hash_files":
             paths = body["arguments"].get("paths")
             attachments = body["arguments"].get("attachments", [])
             if not isinstance(paths, list) or len(paths) > 100 or not isinstance(attachments, list) or len(attachments) > 20:
                 raise BridgeError("Invalid context file list", "invalid_arguments")
             references = {}
+            uploads, seen = {}, set()
             for attachment in attachments:
-                if (not isinstance(attachment, dict) or set(attachment) != {"path", "description", "sha256"}
-                        or not isinstance(attachment["path"], str)
+                # A path names a workspace image; without one, sha256 names an upload.
+                if (not isinstance(attachment, dict)
+                        or set(attachment) - {"path"} != {"description", "sha256"}
+                        or not isinstance(attachment.get("path", ""), str)
                         or not isinstance(attachment["description"], str)
                         or not 1 <= len(attachment["description"]) <= 2000
                         or not isinstance(attachment["sha256"], str)
                         or not re.fullmatch(r"[0-9a-f]{64}", attachment["sha256"])
-                        or attachment["path"] in references):
+                        or attachment.get("path", attachment["sha256"]) in seen):
                     raise BridgeError("Invalid handoff attachment", "invalid_arguments")
-                references[attachment["path"]] = attachment
+                seen.add(attachment.get("path", attachment["sha256"]))
+                if "path" in attachment:
+                    references[attachment["path"]] = attachment
+                else:
+                    name, data = UploadStore(self.state).find(workspace["id"], attachment["sha256"])
+                    metadata = validate_image(data, name, require_suffix=False)
+                    uploads[attachment["sha256"]] = {**attachment, **metadata, "bytes": len(data),
+                                                     "file": "attachments/" + name}
             if any(not isinstance(path, str) for path in paths):
                 raise BridgeError("Invalid context file list", "invalid_arguments")
             paths = list(dict.fromkeys([*paths, *references]))
@@ -441,34 +577,8 @@ class NodeService:
                             raise BridgeError("An attachment changed; re-read before planning", "stale_context")
                         metadata = validate_image(data, path, require_suffix=False)
                         inspected[path] = {**reference, **metadata, "bytes": len(data)}
-            return {"hashes": result, "attachments": [inspected[a["path"]] for a in attachments]}
-        if operation == "publish_handoff_artifacts":
-            args = body["arguments"]
-            files = args.get("files")
-            if not isinstance(files, dict) or len(files) != 3:
-                raise BridgeError("Invalid handoff publication", "invalid_arguments")
-            require_write_path(HANDOFF + "/jobs", workspace.get("excludes", []),
-                               scope=workspace.get("write_scope", "none"))
-            hashes = {}
-            prepared = {}
-            # Validate every document before opening SafeRoot for creation so a
-            # secret or malformed later document cannot leave a partial tree.
-            for name in ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md"):
-                content = files.get(name)
-                if not isinstance(content, str) or not handoff_allowed(
-                        args["base"] + "/" + name, workspace.get("excludes", [])):
-                    raise BridgeError("Invalid handoff publication", "invalid_arguments")
-                try:
-                    data = content.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise BridgeError("Content must be valid UTF-8 text", "invalid_arguments") from None
-                file_text(data)
-                prepared[name] = data
-            with self.safe_root(ws) as safe:
-                for name in ("TASK.md", "CONTEXT.md", "ACCEPTANCE.md"):
-                    data = prepared[name]
-                    hashes[name] = safe.create_artifact(args["base"] + "/" + name, data)
-            return {"hashes": hashes}
+            return {"hashes": result, "attachments": [
+                inspected[a["path"]] if "path" in a else uploads[a["sha256"]] for a in attachments]}
         raise BridgeError("Unknown Node workspace operation", "not_found")
 
     def adapters(self) -> list[dict]:
@@ -487,90 +597,160 @@ class NodeService:
         return result
 
     def list_adapters(self) -> dict:
-        return {"adapters": [_public_adapter(row) for row in self.adapters()]}
+        manifests = self.manifests()
+        adapters = []
+        for row in self.adapters():
+            view = _public_adapter(row)
+            manifest = manifests.get(row.get("plugin") or "")
+            if manifest is not None:
+                # What the Bridge needs to refuse a profile this plugin
+                # cannot enforce, and to offer the agent's own security.
+                view["security"] = {"enforces": manifest["enforces"],
+                                    "native": "native_security" in manifest["features"],
+                                    "worktrees": "worktrees" in manifest["features"]}
+            adapters.append(view)
+        return {"adapters": adapters}
 
-    def save_adapter(self, payload: dict, adapter_id: str | None = None) -> dict:
-        allowed_fields = {"name", "runtime_type", "base_url", "token", "enabled"}
-        if not isinstance(payload, dict) or set(payload) - allowed_fields:
-            raise BridgeError("Unexpected adapter fields", "invalid_arguments")
-        current = self.adapter(adapter_id) if adapter_id else None
+    # -- plugins -----------------------------------------------------------
+
+    def manifests(self) -> dict[str, dict]:
+        """Built-in plugin manifests plus any installed on this Node."""
+        manifests = builtin_manifests()
+        for path in sorted((self.state / "plugins" / "manifests").glob("*.toml")):
+            try:
+                manifest = load_manifest(path)
+            except BridgeError:
+                continue
+            manifests.setdefault(manifest["id"], manifest)
+        return manifests
+
+    def install_manifest(self, source: Path) -> dict:
+        """Copy one third-party manifest into this Node's plugin folder."""
+        manifest = load_manifest(source)
+        if manifest["id"] in builtin_manifests():
+            raise BridgeError("A built-in plugin already uses this id", "conflict")
+        folder = self.state / "plugins" / "manifests"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = folder / f"{manifest['id']}.toml"
+        target.write_bytes(source.read_bytes())
+        os.chmod(target, 0o600)
+        return manifest
+
+    def _manifest(self, plugin: str) -> dict:
+        manifest = self.manifests().get(plugin) if isinstance(plugin, str) else None
+        if manifest is None:
+            raise BridgeError("Unknown plugin on this Node", "unknown_plugin")
+        return manifest
+
+    def _projects_root(self, raw: object) -> str:
+        if raw in (None, ""):
+            if len(self.allowed_roots) != 1:
+                raise BridgeError("Choose a projects root inside this Node's allowed roots",
+                                  "invalid_arguments")
+            return str(self.allowed_roots[0])
+        if not isinstance(raw, str) or not os.path.isabs(raw) or len(raw) > 4096:
+            raise BridgeError("Projects root must be an absolute path", "invalid_arguments")
+        resolved = Path(raw).resolve()
+        if str(resolved) != os.path.normpath(raw) or not resolved.is_dir():
+            raise BridgeError("Projects root must be an existing canonical folder", "invalid_arguments")
+        if not any(resolved == root or root in resolved.parents for root in self.allowed_roots):
+            raise BridgeError("Projects root is outside this Node's allowed roots", "root_denied")
+        return str(resolved)
+
+    @staticmethod
+    def _plugin_settings(raw: object, manifest: dict) -> dict:
+        if raw is None:
+            return {}
+        allowed = set(manifest["settings"]) | {"log_level"}
+        if (not isinstance(raw, dict) or set(raw) - allowed
+                or any(not isinstance(value, str) or len(value) > PLUGIN_SETTING_LIMIT
+                       for value in raw.values())):
+            raise BridgeError("Plugin settings accept only: " + ", ".join(sorted(allowed)),
+                              "invalid_arguments")
+        if raw.get("log_level", "INFO") not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise BridgeError("log_level must be DEBUG, INFO, WARNING or ERROR", "invalid_arguments")
+        return {key: value for key, value in raw.items() if value}
+
+    def _save_plugin_adapter(self, payload: dict, current: dict | None) -> dict:
+        if set(payload) - {"name", "plugin", "projects_root", "settings", "enabled"}:
+            raise BridgeError("A plugin adapter has no URL or token", "invalid_arguments")
+        plugin = payload.get("plugin", current["plugin"] if current else None)
+        if current and plugin != current["plugin"]:
+            raise BridgeError("Adapter plugin is immutable", "invalid_arguments")
+        manifest = self._manifest(plugin)
         name = payload.get("name", current["name"] if current else "")
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid adapter name", "invalid_arguments")
-        runtime_type = payload.get("runtime_type", current["runtime_type"] if current else None)
-        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (current and runtime_type != current["runtime_type"]):
-            raise BridgeError("Adapter runtime type is immutable", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", current["base_url"] if current else None))
-        token = payload.get("token", "")
-        if not isinstance(token, str) or len(token) > 4096:
-            raise BridgeError("Invalid adapter token", "invalid_arguments")
-        if current and not token:
-            token = current["token"]
-        if not token:
-            raise BridgeError("Adapter token is required", "invalid_arguments")
+        projects_root = self._projects_root(
+            payload.get("projects_root", current["projects_root"] if current else None))
+        settings = self._plugin_settings(
+            payload.get("settings", json.loads(current["settings"]) if current else None), manifest)
         enabled = payload.get("enabled", bool(current["enabled"]) if current else True)
         if not isinstance(enabled, bool):
             raise BridgeError("enabled must be a boolean", "invalid_arguments")
+        encoded = json.dumps(settings, sort_keys=True)
         stamp = _now()
         ident = current["id"] if current else "adapter_" + secrets.token_hex(12)
         revision = current["revision"] if current else "rev_" + secrets.token_hex(16)
-        if current and (base_url != current["base_url"] or token != current["token"]):
+        if current and (projects_root != current["projects_root"] or encoded != current["settings"]):
             revision = "rev_" + secrets.token_hex(16)
         try:
             with self.lock, self.db:
-                self.db.execute("INSERT INTO runtime_adapters(id,name,runtime_type,base_url,token,enabled,revision,created,updated) "
-                                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
-                                "base_url=excluded.base_url,token=excluded.token,enabled=excluded.enabled,"
-                                "revision=excluded.revision,updated=excluded.updated",
-                                (ident, name.strip(), runtime_type, base_url, token, int(enabled), revision,
-                                 current["created"] if current else stamp, stamp))
+                self.db.execute(
+                    "INSERT INTO runtime_adapters(id,name,runtime_type,enabled,revision,"
+                    "created,updated,plugin,projects_root,settings) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                    "name=excluded.name,enabled=excluded.enabled,revision=excluded.revision,"
+                    "updated=excluded.updated,projects_root=excluded.projects_root,"
+                    "settings=excluded.settings",
+                    (ident, name.strip(), manifest["runtime_type"], int(enabled), revision,
+                     current["created"] if current else stamp, stamp, plugin, projects_root, encoded))
         except sqlite3.IntegrityError:
             raise BridgeError("Adapter name is already in use", "conflict") from None
-        os.chmod(self.state / "node.sqlite3", 0o600)
+        if not enabled or (current and revision != current["revision"]):
+            self.plugins.stop(ident)
         return _public_adapter(self.adapter(ident))
+
+    def plugin_client(self, row: dict, *, timeout: float = 30) -> RuntimeClient:
+        process = self.plugins.process(row, self._manifest(row["plugin"]))
+        return RuntimeClient(row["id"], row["runtime_type"], process, timeout=timeout)
+
+    def save_adapter(self, payload: dict, adapter_id: str | None = None) -> dict:
+        if not isinstance(payload, dict):
+            raise BridgeError("Adapter object required", "invalid_arguments")
+        current = self.adapter(adapter_id) if adapter_id else None
+        if current is None and "plugin" not in payload:
+            raise BridgeError(PLUGIN_REQUIRED_MESSAGE, "invalid_arguments")
+        return self._save_plugin_adapter(payload, current)
 
     def delete_adapter(self, adapter_id: str) -> dict:
         self.adapter(adapter_id)
         with self.lock, self.db:
             self.db.execute("DELETE FROM runtime_adapters WHERE id=?", (adapter_id,))
+        self.plugins.stop(adapter_id)
         return {"deleted": adapter_id}
 
     def test_adapter(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {
-                "adapter_id", "name", "runtime_type", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected adapter test fields", "invalid_arguments")
-        adapter_id = payload.get("adapter_id")
-        saved = self.adapter(adapter_id) if adapter_id else None
-        runtime_type = payload.get("runtime_type", saved["runtime_type"] if saved else None)
-        if runtime_type not in {"pi", "codex", "claude", "opencode"} or (saved and runtime_type != saved["runtime_type"]):
-            raise BridgeError("Invalid or immutable runtime type", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", saved["base_url"] if saved else None))
-        token = payload.get("token", "")
-        if saved and not token:
-            token = saved["token"]
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Adapter token is required", "invalid_arguments")
-        test_id = adapter_id or "adapter_" + secrets.token_hex(12)
+        if not isinstance(payload, dict) or not isinstance(payload.get("adapter_id"), str):
+            raise BridgeError("Save the plugin adapter, then test it by id", "invalid_arguments")
+        return self._test_plugin_adapter(self.adapter(payload["adapter_id"]))
+
+    def _test_plugin_adapter(self, row: dict) -> dict:
         try:
-            descriptor = HttpRuntimeAdapter(test_id, runtime_type, base_url, token,
-                                            timeout=5).descriptor()
+            descriptor = self.plugin_client(row, timeout=10).descriptor()
         except BridgeError as exc:
-            return {"success": False, "runtime_type": runtime_type,
-                    "code": exc.code, "message": "Connection could not be verified."}
-        result: dict = {"success": True, "adapter_id": adapter_id, "runtime_type": runtime_type,
+            log = self.state / "plugins" / row["id"] / "plugin.log"
+            return {"success": False, "runtime_type": row["runtime_type"], "code": exc.code,
+                    "message": f"{exc} (details in {log})"}
+        return {"success": True, "adapter_id": row["id"], "runtime_type": row["runtime_type"],
                 "native_runtime": descriptor.runtime_id,
                 "native_instance": descriptor.instance_id[:200],
                 "adapter_version": descriptor.adapter_version,
                 "native_version": descriptor.native_version,
-                "protocol": 1, "features": descriptor.features}
-        if descriptor.release is not None:
-            result["release"] = descriptor.release
-        return result
+                "protocol": 2, "features": descriptor.features}
 
     def runtime_call(self, adapter_id: str, operation: str, body: dict):
-        allowed_ops = {"descriptor", "models", "profile_catalog", "profiles", "save_profile",
-                       "delete_profile", "create_conversation", "conversation",
-                       "rebind_conversation", "start_run",
+        allowed_ops = {"descriptor", "models", "create_conversation", "conversation", "start_run",
                        "find_run", "run", "cancel", "steer", "queue", "interactions", "resolve",
                        "activities", "activity", "events", "usage_limits"}
         if operation not in allowed_ops or not isinstance(body, dict):
@@ -591,16 +771,18 @@ class NodeService:
             workspace = self.authoritative_workspace(workspace)
             with self.safe_root(workspace) as safe:
                 root = safe.path
-            if operation in {"models", "profile_catalog", "profiles"}:
+            if operation == "models":
                 if arguments.get("workspace_id") != workspace.get("id"):
                     raise BridgeError("Runtime workspace identity mismatch", "invalid_arguments")
                 if arguments.get("directory") not in (None, root):
                     raise BridgeError("Runtime directory must match the Node workspace root", "root_denied")
             if operation == "create_conversation":
                 payload = arguments.get("payload")
+                # A run in isolation works in a worktree this Node made for the workspace.
                 if (not isinstance(payload, dict)
                         or payload.get("workspaceId") != workspace.get("id")
-                        or payload.get("directory") != root):
+                        or (payload.get("directory") != root
+                            and not self.worktrees.owns(workspace["id"], payload.get("directory")))):
                     raise BridgeError("Runtime conversation must use the authoritative Node workspace",
                                       "root_denied")
         # Keep the authoritative revision check and native client construction
@@ -611,8 +793,7 @@ class NodeService:
             adapter_row = self.adapter(adapter_id, require_enabled=True)
             if expected_revision != adapter_row["revision"]:
                 raise BridgeError("The Node adapter configuration changed", "adapter_changed")
-            client = HttpRuntimeAdapter(adapter_row["id"], adapter_row["runtime_type"],
-                                        adapter_row["base_url"], adapter_row["token"],
+            client = self.plugin_client(adapter_row,
                                         timeout=10 if operation == "usage_limits" else 30)
         args = arguments
         if operation == "descriptor":
@@ -620,32 +801,8 @@ class NodeService:
             result: dict = {"runtime_id": value.runtime_id, "display_name": value.display_name,
                     "adapter_version": value.adapter_version, "native_version": value.native_version,
                     "instance_id": value.instance_id, "features": value.features}
-            if value.release is not None:
-                result["release"] = value.release
             return result
         if operation == "models": return client.models(args["workspace_id"])
-        if operation == "profile_catalog": return client.profile_catalog(
-            args.get("workspace_id"), args.get("directory"), fresh=bool(args.get("fresh", False)))
-        if operation == "profiles": return client.profiles(
-            args.get("workspace_id"), args.get("directory"), fresh=bool(args.get("fresh", False)))
-        if operation == "save_profile": return client.save_profile(
-            args["profile_id"], args["config"], args.get("expected_revision"))
-        if operation == "delete_profile": return client.delete_profile(args["profile_id"])
-        if operation == "rebind_conversation":
-            binding = args.get("security_binding")
-            conv = args.get("conversation_id")
-            if (not isinstance(conv, str) or not conv or len(conv) > 200
-                    or not isinstance(binding, dict) or binding.get("source") != "profile"
-                    or not isinstance(binding.get("profile"), dict)
-                    or not isinstance(binding["profile"].get("id"), str)
-                    or not binding["profile"]["id"] or len(binding["profile"]["id"]) > 100
-                    or not isinstance(binding["profile"].get("revision"), str)
-                    or not binding["profile"]["revision"]
-                    or len(binding["profile"]["revision"]) > 100
-                    or set(binding) != {"source", "profile"}
-                    or set(binding["profile"]) != {"id", "revision"}):
-                raise BridgeError("Invalid security rebind binding", "invalid_arguments")
-            return client.rebind_conversation(conv, binding)
         if operation == "create_conversation": return client.create_conversation(args["payload"])
         if operation == "conversation": return client.conversation(args["conversation_id"])
         if operation == "start_run":

@@ -3,7 +3,7 @@ import httpx
 import pytest
 from workspace_bridge.api import make_mcp, TOOLS
 from workspace_bridge.event_broker import FINISHED
-from workspace_bridge.protocol import LEGACY, MODERN, PREFIX
+from mcp_helpers import McpTransport, LEGACY, MODERN, PREFIX
 from workspace_bridge.webhook_transport import CallbackError
 from test_event_broker import broker_env, publish
 from event_fakes import TEST_SECRET, TEST_URL
@@ -25,7 +25,7 @@ async def rpc(client, env, method, params=None, *, token=None):
 
 @pytest.fixture
 async def event_client(broker_env):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(broker_env['service'])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(broker_env['service'])),
                                 base_url='http://127.0.0.1:8765') as client:
         yield client
 
@@ -69,7 +69,8 @@ async def test_legacy_does_not_advertise_or_execute_mcp2_events(broker_env, even
     env = broker_env
     headers = {'Accept': 'application/json', 'X-Bridge-Token': env['token']}
     result = await event_client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
-        'params': {'protocolVersion': LEGACY[-1], 'capabilities': {}, 'clientInfo': {}}}, headers=headers)
+        'params': {'protocolVersion': LEGACY[-1], 'capabilities': {},
+                   'clientInfo': {'name': 'test', 'version': '1'}}}, headers=headers)
     assert 'events' not in result.json()['result']['capabilities']
     result = await event_client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1, 'method': 'events/list', 'params': {}}, headers=headers)
     assert result.json()['error']['code'] == -32601
@@ -117,5 +118,7 @@ async def test_auth_workspace_admission_and_protocol_checks(broker_env, event_cl
     body.pop('id')
     result = await event_client.post('/mcp', json=body, headers={
         'Accept': 'application/json', 'X-Bridge-Token': env['token'], 'MCP-Protocol-Version': MODERN, 'Mcp-Method': 'events/subscribe'})
-    assert result.json()['error']['code'] == -32600
+    # A request without an id is a notification: accepted, never executed.
+    assert result.status_code == 202 and env['broker'].status()['subscriptions'] == {}
+    assert env['receiver'].verifications == []
     assert env['receiver'].verifications == []

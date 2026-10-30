@@ -10,7 +10,7 @@ import {
 } from "./api";
 import { appendOlder, mergeNewest, newestPageHasGap } from "./feed-state";
 import { createRefreshQueue } from "./refresh-queue";
-import { useRunEvents } from "./useRunEvents";
+import { useManagerEvents } from "./useManagerEvents";
 
 type Feed = "activity" | "executions";
 type Feeds = {
@@ -158,10 +158,10 @@ export function useRunInspector(
   const changed = useCallback(() => {
     if (!document.hidden) sessionRef.current?.queue.schedule();
   }, []);
-  useRunEvents({
+  useManagerEvents({
     enabled: Boolean(runId),
     runId,
-    onChange: changed,
+    onRun: changed,
     onReset: changed,
   });
 
@@ -235,13 +235,6 @@ export function useRunInspector(
     [feeds.runId, feeds.activityCursor, feeds.executionCursor, runId, current],
   );
 
-  const updateRun = useCallback(
-    (value: Run) => {
-      const session = sessionRef.current;
-      if (session?.id === value.run_id && current(session)) setData(value);
-    },
-    [current],
-  );
   const visibleFeeds = feeds.runId === runId ? feeds : emptyFeeds(runId);
   return {
     data: data?.run_id === runId ? data : run,
@@ -249,6 +242,5 @@ export function useRunInspector(
     loadingOlder: loadingOlderRun === runId,
     load,
     loadOlder,
-    updateRun,
   };
 }

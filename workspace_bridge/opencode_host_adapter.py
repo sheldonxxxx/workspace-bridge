@@ -18,29 +18,19 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
-import subprocess
 import threading
 import time
-import urllib.parse
-import urllib.request
 
-from .claude_host_adapter import (AdapterFailure, PROFILE_ID_RE, PROFILES,
-    _clean, _id, _now, _validate_profile_config, _MAX_CUSTOM_PROFILES)
+from . import __version__
+from . import security_profiles as profiles
+from .run_roots import run_directory
+from .claude_host_adapter import AdapterFailure, _clean, _id, _now
 from .opencode_transport import NativeTransport
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Route
-from starlette.concurrency import run_in_threadpool
 
 RUNTIME_ID = 'opencode'
 _PLUGIN_ID = 'workspace-bridge.permissions.v1'
 
 
-def _profile_revision(profile_id, config):
-    payload = {'version': 1, 'id': profile_id, 'wrapper': config,
-               'plugin': sha256((Path(__file__).with_name('opencode_permission_plugin') / 'index.mjs').read_bytes()).hexdigest()}
-    return sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 _READ = {'read', 'glob', 'grep', 'list', 'ls'}
 _EDIT = {'write', 'edit', 'multiedit', 'apply_patch', 'patch'}
 _SHELL = {'shell', 'bash'}
@@ -48,7 +38,8 @@ _WEB = {'webfetch', 'websearch', 'execute'}
 _META = {'skill', 'subagent', 'task', 'question', 'form', 'todo', 'todowrite', 'todoread'}
 
 
-def tool_decision(config, cwd, tool, args, *, registered_extension=False):
+def tool_decision(rules, cwd, tool, args, *, registered_extension=False):
+    """Decide one OpenCode tool call against a run's profile rules."""
     if not isinstance(tool, str) or not isinstance(args, dict):
         return 'deny'
     category = ('read' if tool in _READ else 'edits' if tool in _EDIT else
@@ -56,52 +47,77 @@ def tool_decision(config, cwd, tool, args, *, registered_extension=False):
                 'meta' if tool in _META else 'extensions' if registered_extension else None)
     if category is None:
         return 'deny'
-    effect = 'allow' if category in ('read', 'meta') else config[category]
-    if effect == 'deny':
-        return effect
-    if category in ('read', 'edits'):
-        paths = [args[k] for k in ('path', 'filePath', 'file_path', 'directory') if k in args]
-        patch = args.get('patchText', args.get('patch'))
-        if tool in ('apply_patch', 'patch'):
-            if not isinstance(patch, str):
-                return 'deny'
-            paths += re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
-                                patch, flags=re.M)
-        if tool in _EDIT | {'read', 'grep'} and not paths:
-            return 'deny'
-        for raw in paths:
-            if not isinstance(raw, str) or not raw or len(raw) > 4096 or '\0' in raw:
-                return 'deny'
-            resolved = Path(raw if os.path.isabs(raw) else os.path.join(cwd, raw)).resolve()
-            if not resolved.is_relative_to(Path(cwd)):
-                return 'deny'
-            # Native recursive grep includes hidden files and has no exclusion
-            # input. Limit content searches to an explicitly admitted file.
-            if tool == 'grep' and not resolved.is_file():
-                return 'deny'
-            parts = resolved.relative_to(cwd).parts
-            if '.git' in parts or any(p == '.env' or p.startswith('.env.') and not p.endswith(
-                    ('.example', '.sample', '.template')) for p in parts):
-                return 'deny'
-            if category == 'edits' and ('.opencode' in parts or '.agents' in parts or
-                    any(p in ('opencode.json', 'opencode.jsonc') for p in parts)):
-                return 'deny'
-        if tool == 'glob':
-            pattern = args.get('pattern')
-            if not isinstance(pattern, str) or '..' in pattern.split('/') or pattern.startswith(('/', '~')):
-                return 'deny'
+    if category == 'meta':
+        return 'allow'
+    if category in ('web', 'extensions'):
+        return rules[category]
     if category == 'shell':
-        command = args.get('command')
-        if not isinstance(command, str) or not command or len(command) > 16384:
+        return profiles.command_mode(rules, args.get('command'))[0]
+    write = category == 'edits'
+    paths = [args[k] for k in ('path', 'filePath', 'file_path', 'directory') if k in args]
+    patch = args.get('patchText', args.get('patch'))
+    if tool in ('apply_patch', 'patch'):
+        if not isinstance(patch, str):
             return 'deny'
+        paths += re.findall(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$',
+                            patch, flags=re.M)
+    if tool in _EDIT | {'read', 'grep'} and not paths:
+        return 'deny'
+    if tool == 'glob':
+        pattern = args.get('pattern')
+        if not isinstance(pattern, str) or not pattern or '..' in pattern.split('/'):
+            return 'deny'
+        if pattern.startswith(('/', '~')):
+            prefix = []
+            for part in pattern.split('/'):
+                if any(char in '*?[]{}' for char in part):
+                    break
+                prefix.append(part)
+            paths.append('/'.join(prefix) or '/')
+    if not paths:
+        paths.append('.')
+    effect = 'allow'
+    for raw in paths:
+        if not isinstance(raw, str) or not raw or len(raw) > 4096 or '\0' in raw:
+            return 'deny'
+        resolved = Path(raw if os.path.isabs(raw) else os.path.join(cwd, raw)).resolve()
+        # Native recursive grep includes hidden files and has no exclusion
+        # input. Limit content searches to an explicitly admitted file.
+        if tool == 'grep' and not resolved.is_file():
+            return 'deny'
+        if write and resolved.is_relative_to(Path(cwd)):
+            parts = resolved.relative_to(cwd).parts
+            if '.opencode' in parts or '.agents' in parts or any(
+                    p in ('opencode.json', 'opencode.jsonc') for p in parts):
+                return 'deny'
+        mode = profiles.path_mode(rules, cwd, raw, write=write)[0]
+        if mode == 'deny':
+            return 'deny'
+        effect = profiles.stricter(effect, mode)
     return effect
+
+
+def permission_effect(rules, action):
+    """Coarse answer for OpenCode's own permission check; ``/tool`` decides precisely."""
+    if action in ('edit', 'write'):
+        return min(rules['write_inside'], rules['write_outside'],
+                   key=('allow', 'ask', 'deny').index)
+    if action in ('shell', 'bash'):
+        modes = [rules['shell']] + [rule['mode'] for rule in rules['commands']]
+        return min(modes, key=('allow', 'ask', 'deny').index)
+    if action in _WEB:
+        return rules['web']
+    if action in ('read', 'glob', 'grep', 'skill', 'subagent', 'question', 'todo'):
+        return 'allow'
+    return rules['extensions']
 
 
 class OpenCodeHostAdapter:
     def __init__(self, state: Path, projects_root: Path, *, binary=None,
-                 transport=None, environment=None):
+                 transport=None, environment=None, worktrees_root: Path | None = None):
         self.state = Path(state).resolve()
         self.projects_root = Path(projects_root).resolve(strict=True)
+        self.worktrees_root = worktrees_root
         if not self.projects_root.is_dir() or self.state.is_relative_to(self.projects_root) or self.projects_root.is_relative_to(self.state):
             raise AdapterFailure('Keep adapter state outside the projects root')
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -120,10 +136,9 @@ class OpenCodeHostAdapter:
         self.db.executescript('''
           PRAGMA journal_mode=WAL;
           CREATE TABLE IF NOT EXISTS identity(id TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS security_profiles(id TEXT PRIMARY KEY,config TEXT,revision TEXT);
           CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,session TEXT UNIQUE,
             workspace TEXT,cwd TEXT,profile TEXT,revision TEXT,started INTEGER DEFAULT 0,
-            created TEXT,owner TEXT DEFAULT 'bridge');
+            created TEXT,owner TEXT DEFAULT 'bridge',rules TEXT NOT NULL DEFAULT '{}');
           CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,conversation TEXT,client_run TEXT,
             input_hash TEXT,security_binding TEXT,message TEXT UNIQUE,log_seq INTEGER DEFAULT 0,
             phase TEXT,active_state TEXT,outcome TEXT,result TEXT DEFAULT '',error TEXT DEFAULT '',
@@ -236,21 +251,20 @@ class OpenCodeHostAdapter:
                         self.db.execute('SELECT 1 FROM conversations WHERE session=?', (s,)).fetchone()), None)
         if row is None or row['cwd'] != cwd:
             return {'effect': 'deny'}
-        config, revision, _ = self._profile_definition(row['profile'])
-        if revision != row['revision']:
+        try:
+            # The rules of the conversation's latest run, which also govern a
+            # session handed off to a human until the Bridge reclaims it.
+            rules = profiles.validate(json.loads(row['rules']))
+        except Exception:
             return {'effect': 'deny'}
         if path == '/permission':
-            action = body.get('action', '')
-            category = ('edits' if action in ('edit', 'write') else 'shell' if action in (
-                'shell', 'bash') else 'web' if action in _WEB else 'extensions' if action not in (
-                'read', 'glob', 'grep', 'skill', 'subagent', 'question', 'todo') else None)
-            effect = config[category] if category else 'allow'
+            effect = permission_effect(rules, body.get('action', ''))
             # Bridge wrapper approvals happen at execute.before. Native project
             # rules can still ask independently; manual ownership uses native ask.
             return {'effect': 'allow' if effect == 'ask' and row['owner'] == 'bridge' else effect}
         if path != '/tool':
             return {'effect': 'deny'}
-        effect = tool_decision(config, cwd, body.get('tool'), body.get('input'), registered_extension=body.get('registeredExtension') is True)
+        effect = tool_decision(rules, cwd, body.get('tool'), body.get('input'), registered_extension=body.get('registeredExtension') is True)
         if effect != 'ask' or row['owner'] == 'human':
             return {'effect': 'allow' if effect == 'ask' else effect}
         with self.lock:
@@ -290,16 +304,15 @@ class OpenCodeHostAdapter:
                              'security_enforcement_unavailable')
 
     def descriptor(self):
-        from .release import OPENCODE_ADAPTER_VERSION, opencode_release
         alive = getattr(self.native, 'is_alive', None)
         if alive is not None and not alive():
             raise AdapterFailure('OpenCode v2 server is unavailable', 503, 'runtime_unavailable')
         return {'protocol': {'major': 1, 'minor': 0}, 'runtime': {'id': RUNTIME_ID,
-            'displayName': 'OpenCode', 'adapterVersion': OPENCODE_ADAPTER_VERSION,
+            'displayName': 'OpenCode', 'adapterVersion': __version__,
             'nativeVersion': self.native.version or 'unknown', 'instanceId': self.instance_id},
             'features': {k: 1 for k in ('models', 'conversations', 'runs', 'activities',
-                'interactions', 'events', 'securityRebind', 'steering', 'queueing',
-                'inputControls', 'imageInput')}, 'release': opencode_release()}
+                'interactions', 'events', 'steering', 'queueing',
+                'inputControls', 'imageInput')}}
 
     def models(self, workspace_id=None):
         result = self.native.request('GET', '/api/model', query={
@@ -318,112 +331,6 @@ class OpenCodeHostAdapter:
                 'defaultReasoningEffort': None,
                 'default': item['id'] == default.get('id') and item['providerID'] == default.get('providerID')})
         return {'models': models}
-
-    def _profile_definition(self, profile_id: str) -> tuple[dict, str, bool]:
-        if profile_id in PROFILES:
-            config = dict(PROFILES[profile_id])
-            return config, _profile_revision(profile_id, config), False
-        with self.lock:
-            row = self.db.execute("SELECT config,revision FROM security_profiles WHERE id=?",
-                                  (profile_id,)).fetchone()
-        if row is None:
-            raise AdapterFailure("Unknown security profile", 409, "profile_mismatch")
-        try:
-            config = _validate_profile_config(json.loads(row["config"]))
-        except (ValueError, TypeError, AdapterFailure):
-            raise AdapterFailure("Security profile is invalid", 409, "profile_mismatch") from None
-        revision = _profile_revision(profile_id, config)
-        if revision != row["revision"]:
-            raise AdapterFailure("Security profile changed", 409, "profile_mismatch")
-        return config, revision, True
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> dict:
-        if (workspace_id is None) != (directory is None):
-            raise AdapterFailure("Workspace ID and directory must be supplied together")
-        if workspace_id is not None:
-            if not isinstance(workspace_id, str) or not workspace_id or len(workspace_id) > 100:
-                raise AdapterFailure("Invalid workspace id")
-            self._cwd(directory)
-        if workspace_id is not None:
-            self._workspaces[workspace_id] = self._cwd(directory)
-        enforcement = ["tool-allowlist", "permission-hook", "interactive-approval"]
-        rows = [{"id": key, "revision": _profile_revision(key, dict(value)),
-                 "definitionRevision": _profile_revision(key, dict(value)),
-                 "config": dict(value), "mutable": False, "enforcement": enforcement}
-                for key, value in PROFILES.items()]
-        with self.lock:
-            custom = self.db.execute(
-                "SELECT id,config,revision FROM security_profiles ORDER BY id").fetchall()
-        for row in custom:
-            try:
-                config = _validate_profile_config(json.loads(row["config"]))
-            except (ValueError, TypeError, AdapterFailure):
-                continue
-            revision = _profile_revision(row["id"], config)
-            if revision != row["revision"]:
-                continue
-            rows.append({"id": row["id"], "revision": revision,
-                         "definitionRevision": revision, "config": config,
-                         "mutable": True, "enforcement": enforcement})
-        if workspace_id is not None:
-            available = True
-            try:
-                self._activate(self._workspaces[workspace_id])
-            except AdapterFailure:
-                available = False
-            for row in rows:
-                row["available"] = available
-                if not available:
-                    row["unavailableReason"] = "Trusted permission plugin is unavailable"
-        return {"profiles": rows}
-
-    def save_profile(self, body: dict) -> dict:
-        profile_id = body.get("id")
-        if (not isinstance(profile_id, str) or not PROFILE_ID_RE.fullmatch(profile_id)
-                or profile_id in PROFILES):
-            raise AdapterFailure("Choose a new profile ID using lowercase letters, numbers, _ or -")
-        config = _validate_profile_config(body.get("config"))
-        expected = body.get("expectedRevision")
-        if expected is not None and not isinstance(expected, str):
-            raise AdapterFailure("Invalid expected revision")
-        revision = _profile_revision(profile_id, config)
-        with self.lock, self.db:
-            existing = self.db.execute(
-                "SELECT revision FROM security_profiles WHERE id=?", (profile_id,)).fetchone()
-            if (existing is None and expected is not None) or (
-                    existing is not None and existing["revision"] != expected):
-                raise AdapterFailure("Security profile changed; reload it", 409,
-                                     "profile_mismatch")
-            if existing is None and self.db.execute(
-                    "SELECT COUNT(*) FROM security_profiles").fetchone()[0] >= _MAX_CUSTOM_PROFILES:
-                raise AdapterFailure("Too many security profiles")
-            if existing is not None and self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            self.db.execute("INSERT INTO security_profiles(id,config,revision) VALUES(?,?,?) "
-                            "ON CONFLICT(id) DO UPDATE SET config=excluded.config,"
-                            "revision=excluded.revision",
-                            (profile_id, json.dumps(config, sort_keys=True), revision))
-        return {"id": profile_id, "revision": revision, "definitionRevision": revision,
-                "config": config, "mutable": True}
-
-    def delete_profile(self, profile_id: str) -> dict:
-        if profile_id in PROFILES:
-            raise AdapterFailure("Built-in profiles cannot be deleted", 409, "conflict")
-        with self.lock, self.db:
-            if self.db.execute(
-                    "SELECT 1 FROM conversations c JOIN runs r ON r.conversation=c.id "
-                    "WHERE c.profile=? AND r.phase IN ('starting','active') LIMIT 1",
-                    (profile_id,)).fetchone():
-                raise AdapterFailure("Profile has an active run", 409, "conflict")
-            deleted = self.db.execute("DELETE FROM security_profiles WHERE id=?",
-                                      (profile_id,)).rowcount
-        if not deleted:
-            raise AdapterFailure("Security profile not found", 404, "not_found")
-        return {"deleted": profile_id}
 
     def activities(self, run_id: str) -> dict:
         self._run(run_id)
@@ -462,10 +369,7 @@ class OpenCodeHostAdapter:
         if not isinstance(requested, str) or not requested:
             raise AdapterFailure('Workspace directory is required')
         try:
-            cwd = Path(requested).resolve(strict=True)
-            if not cwd.is_dir() or not cwd.is_relative_to(self.projects_root):
-                raise ValueError()
-            return str(cwd)
+            return run_directory(requested, self.projects_root, self.worktrees_root)
         except (OSError, ValueError, RuntimeError):
             raise AdapterFailure('Workspace directory is outside the configured projects root') from None
 
@@ -475,6 +379,15 @@ class OpenCodeHostAdapter:
         if row is None:
             raise AdapterFailure('Conversation not found', 404, 'not_found')
         return dict(row)
+
+    @staticmethod
+    def _security(body):
+        """The profile a conversation or run carries; every run names one."""
+        try:
+            return profiles.from_wire(body.get('security'))
+        except Exception as exc:
+            raise AdapterFailure(_clean(str(exc), 200) or 'Security profile is invalid',
+                                 400, 'invalid_profile') from None
 
     @staticmethod
     def _binding(row):
@@ -512,16 +425,13 @@ class OpenCodeHostAdapter:
         if not isinstance(workspace, str) or not workspace or len(workspace) > 100:
             raise AdapterFailure('Invalid workspace id')
         cwd = self._cwd(body.get('directory'))
-        profile = body.get('securityProfile', {})
-        config, revision, _ = self._profile_definition(profile.get('id'))
-        if profile.get('revision') != revision:
-            raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
+        profile_id, revision, rules = self._security(body)
         self._workspaces[workspace] = cwd
         self._activate(cwd)
         ident, session = _id('conv_'), _id('ses_')
         with self.lock, self.db:
-            self.db.execute('INSERT INTO conversations(id,session,workspace,cwd,profile,revision,created) VALUES(?,?,?,?,?,?,?)',
-                (ident, session, workspace, cwd, profile['id'], revision, _now()))
+            self.db.execute('INSERT INTO conversations(id,session,workspace,cwd,profile,revision,rules,created) VALUES(?,?,?,?,?,?,?,?)',
+                (ident, session, workspace, cwd, profile_id, revision, profiles.canonical_json(rules), _now()))
         # Store identity before the native create. An ambiguous create is never
         # repeated and cannot accidentally attach an existing user's session.
         self.native.request('POST', '/api/session', {'id': session,
@@ -534,27 +444,9 @@ class OpenCodeHostAdapter:
         row = self._conversation(ident)
         self._verify(row)
         return {'id': ident, 'runtime': RUNTIME_ID, 'nativeId': row['session'],
-            'workspaceId': row['workspace'], 'securityProfile': self._binding(row)['profile'],
+            'workspaceId': row['workspace'],
             'securityBinding': self._binding(row), 'status': 'active' if self._is_busy(ident) else 'idle',
             'ownership': row['owner']}
-
-    def rebind_conversation(self, ident, binding):
-        if not isinstance(binding, dict) or binding.get('source') != 'profile':
-            raise AdapterFailure('Named security profile is required')
-        row = self._conversation(ident)
-        if self._is_busy(ident):
-            raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
-        self._verify(row)
-        profile = binding.get('profile', {})
-        _, revision, _ = self._profile_definition(profile.get('id'))
-        if profile.get('revision') != revision:
-            raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
-        self._activate(row['cwd'])
-        # Explicit rebind is also the idle reclaim boundary after native handoff.
-        with self.lock, self.db:
-            self.db.execute("UPDATE conversations SET profile=?,revision=?,owner='bridge' WHERE id=?",
-                            (profile['id'], revision, ident))
-        return self.conversation(ident)
 
     def _run(self, ident):
         with self.lock:
@@ -614,6 +506,13 @@ class OpenCodeHostAdapter:
         if not isinstance(client, str) or not client or len(client) > 200:
             raise AdapterFailure('Client run id is required')
         digest = sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        profile_id, revision, rules = self._security(body)
+        with self.lock:
+            replay = self.db.execute('SELECT 1 FROM runs WHERE conversation=? AND client_run=?', (ident, client)).fetchone()
+        if replay is None:
+            # The permission plugin reports ready through the policy server,
+            # which needs this lock, so activation happens before taking it.
+            self._activate(self._conversation(ident)['cwd'])
         with self.lock:
             old = self.db.execute('SELECT * FROM runs WHERE conversation=? AND client_run=?', (ident, client)).fetchone()
             if old:
@@ -622,14 +521,13 @@ class OpenCodeHostAdapter:
                 return self._run_public(dict(old))
             row = self._conversation(ident)
             if row['owner'] != 'bridge':
-                raise AdapterFailure('Native session requires explicit idle security rebind', 409, 'ownership_changed')
+                raise AdapterFailure('Native session is handed off; reclaim it when idle', 409, 'ownership_changed')
             if self._is_busy(ident):
                 raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
             self._verify(row)
-            _, revision, _ = self._profile_definition(row['profile'])
-            if revision != row['revision']:
-                raise AdapterFailure('Security profile changed', 409, 'profile_mismatch')
-            self._activate(row['cwd'])
+            # The workspace map is memory only; after a restart the catalog
+            # must still come from this conversation's activated location.
+            self._workspaces[row['workspace']] = row['cwd']
             catalog = self.models(row['workspace'])['models']
             selector = body.get('model')
             model = next((m for m in catalog if m['selector'] == selector), None) if selector else next(
@@ -652,7 +550,10 @@ class OpenCodeHostAdapter:
             log = self._log(row['session'])
             seq = max((e.get('durable', {}).get('seq', e.get('seq', 0)) for e in log), default=0)
             run_id, message, now = _id('run_'), _id('msg_'), _now()
+            row.update(profile=profile_id, revision=revision)
             with self.db:
+                self.db.execute('UPDATE conversations SET profile=?,revision=?,rules=? WHERE id=?',
+                                (profile_id, revision, profiles.canonical_json(rules), ident))
                 self.db.execute('INSERT INTO runs(id,conversation,client_run,input_hash,security_binding,message,log_seq,phase,created,updated) VALUES(?,?,?,?,?,?,?,\'starting\',?,?)',
                     (run_id, ident, client, digest, json.dumps(self._binding(row)), message, seq, now, now))
         for index, item in enumerate(body['input']):
@@ -716,7 +617,7 @@ class OpenCodeHostAdapter:
                 terminal = kind.rsplit('.', 1)[-1]
         # Require a durable execution event or a projected idle marker after
         # the exact admitted message. Inactive alone never means success.
-        observed = self._capture_messages(run, owned)
+        observed, native_error = self._capture_messages(run, owned)
         if self._run(run["id"])["phase"] == "terminal":
             return
         terminal = observed or terminal
@@ -728,7 +629,7 @@ class OpenCodeHostAdapter:
                 return
             self._discard_inbox(owned, run)
             self._finish(run['id'], 'cancelled' if run['id'] in self._cancelled else terminal,
-                         '' if terminal == 'succeeded' else 'native_execution_' + terminal)
+                         '' if terminal == 'succeeded' else native_error or 'native_execution_' + terminal)
         elif not records and run['phase'] == 'active':
             active = self.native.request('GET', '/api/session/active').get('data', {})
             inbox = self.native.request('GET', '/api/session/' + owned['session'] + '/inbox').get('data', [])
@@ -745,28 +646,33 @@ class OpenCodeHostAdapter:
         while not any(r.get('id') == run['message'] for r in rows) and response.get('cursor', {}).get('next'):
             if len(rows) >= 2000:
                 self._finish(run['id'], 'orphaned', 'native_history_limit')
-                return None
+                return None, ''
             response = self.native.request('GET', '/api/session/' + owned['session'] + '/message',
                 query={'cursor': response['cursor']['next'], 'limit': 100})
             rows.extend(response.get('data', []))
         rows = list(reversed(rows))
         start = next((i for i, row in enumerate(rows) if row['id'] == run['message']), None)
         if start is None:
-            return
+            return None, ''
         with self.lock:
             admitted = {run['message']} | {r['message'] for r in self.db.execute('SELECT message FROM input_messages WHERE run=?', (run['id'],))}
-        texts, usage, terminal = [], {}, None
+        texts, usage, terminal, error = [], {}, None, ''
         for row in rows[start + 1:]:
             if row.get('type') == 'user':
                 if row['id'] not in admitted:
                     with self.lock, self.db:
                         self.db.execute("UPDATE conversations SET owner='human' WHERE id=?", (owned['id'],))
                     self._finish(run['id'], 'orphaned', 'native_session_taken_over')
-                    return None
+                    return None, ''
                 with self.lock, self.db:
                     self.db.execute("UPDATE input_messages SET status='delivered' WHERE run=? AND message=?", (run['id'], row['id']))
             if row.get('type') == 'idle' and row.get('outcome') in ('succeeded', 'failed', 'interrupted'):
                 terminal = row['outcome']
+                # OpenCode's own explanation, such as a provider usage limit;
+                # only its message, never the provider response body.
+                native = row.get('error')
+                message = native.get('message') if isinstance(native, dict) else None
+                error = _clean(self._scrub(message), 300) if isinstance(message, str) else ''
             if row.get('type') != 'assistant':
                 continue
             for part in row.get('content', []):
@@ -795,7 +701,7 @@ class OpenCodeHostAdapter:
                 (result, serialized_usage, _now(), run['id']))
         if current['result'] != result or current['usage'] != serialized_usage:
             self._emit('run.updated', run['conversation'], run['id'])
-        return terminal
+        return terminal, error
 
     def _upsert_activity(self, run, native_id, kind, status, summary, result):
         with self.lock, self.db:
@@ -1022,10 +928,15 @@ class OpenCodeHostAdapter:
                 self._finish(run['id'], 'orphaned', 'native_recovery_unconfirmed')
 
     def reclaim(self, ident):
+        """Take a handed-off session back for Bridge runs at an idle boundary."""
         row = self._conversation(ident)
-        _, revision, _ = self._profile_definition(row['profile'])
-        return self.rebind_conversation(ident, {'source': 'profile',
-            'profile': {'id': row['profile'], 'revision': revision}})
+        if self._is_busy(ident):
+            raise AdapterFailure('Conversation is busy', 409, 'conversation_busy')
+        self._verify(row)
+        self._activate(row['cwd'])
+        with self.lock, self.db:
+            self.db.execute("UPDATE conversations SET owner='bridge' WHERE id=?", (ident,))
+        return self.conversation(ident)
 
     def handoff(self, ident):
         row = self._conversation(ident)
@@ -1053,179 +964,3 @@ class OpenCodeHostAdapter:
         self.db.close()
         fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         os.close(self._lock_fd)
-
-
-def make_app(adapter: OpenCodeHostAdapter, token: str) -> Starlette:
-    if not token:
-        raise ValueError("Runtime token is required")
-
-    async def endpoint(request: Request) -> JSONResponse:
-        provided = request.headers.get("x-runtime-token") or ""
-        if not secrets.compare_digest(token, provided):
-            return JSONResponse({"error": "Unauthorized", "code": "unauthorized"}, 401)
-        path = request.url.path
-        parts = path.split("/")[1:]
-        method = request.method
-        try:
-            body: dict = {}
-            if method == "POST":
-                limit = 12 * 1024 * 1024 if path.endswith("/runs") else 512 * 1024
-                raw = bytearray()
-                async for chunk in request.stream():
-                    if len(raw) + len(chunk) > limit:
-                        raise AdapterFailure("Request is too large", 413, "too_large")
-                    raw.extend(chunk)
-                body = json.loads(raw or b"{}")
-                if not isinstance(body, dict):
-                    raise AdapterFailure("Invalid request body")
-                if len(raw) > 512 * 1024 and not (path.endswith("/runs") and isinstance(body.get("input"), list) and any(isinstance(i, dict) and i.get("type") == "image" for i in body["input"])):
-                    raise AdapterFailure("Request is too large", 413, "too_large")
-            if path == "/v1/local/reclaim" and method == "POST":
-                result = await run_in_threadpool(adapter.reclaim, body.get("conversationId"))
-            elif path == "/v1/local/handoff" and method == "POST":
-                result = await run_in_threadpool(adapter.handoff, body.get("conversationId"))
-            elif path == "/v1/descriptor" and method == "GET":
-                result = await run_in_threadpool(adapter.descriptor)
-            elif path == "/v1/models" and method == "GET":
-                result = await run_in_threadpool(adapter.models, request.query_params.get("workspaceId"))
-            elif path == "/v1/profiles" and method == "GET":
-                fresh = request.query_params.get("fresh", "0")
-                if fresh not in ("0", "1"):
-                    raise AdapterFailure("Invalid profile freshness option")
-                result = await run_in_threadpool(
-                    adapter.profiles, request.query_params.get("workspaceId"),
-                    request.query_params.get("directory"), fresh=fresh == "1")
-            elif path == "/v1/profiles" and method == "POST":
-                result = await run_in_threadpool(adapter.save_profile, body)
-            elif len(parts) == 3 and parts[:2] == ["v1", "profiles"] and method == "DELETE":
-                result = await run_in_threadpool(adapter.delete_profile, parts[2])
-            elif path == "/v1/conversations" and method == "POST":
-                result = await run_in_threadpool(adapter.create_conversation, body)
-            elif len(parts) == 3 and parts[:2] == ["v1", "conversations"] and method == "GET":
-                result = await run_in_threadpool(adapter.conversation, parts[2])
-            elif (len(parts) == 4 and parts[:2] == ["v1", "conversations"]
-                  and parts[3] == "security" and method == "POST"):
-                binding = body.get("securityBinding")
-                if not isinstance(binding, dict):
-                    raise AdapterFailure("Invalid security rebind binding")
-                result = await run_in_threadpool(adapter.rebind_conversation, parts[2], binding)
-            elif (len(parts) == 4 and parts[:2] == ["v1", "conversations"]
-                  and parts[3] == "runs" and method == "POST"):
-                result = await run_in_threadpool(adapter.start_run, parts[2], body)
-            elif (len(parts) == 5 and parts[:2] == ["v1", "conversations"]
-                  and parts[3] == "runs" and method == "GET"):
-                result = await run_in_threadpool(adapter.find_run, parts[2], parts[4])
-            elif len(parts) == 3 and parts[:2] == ["v1", "runs"] and method == "GET":
-                result = await run_in_threadpool(adapter.run, parts[2])
-            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "cancel"
-                  and method == "POST"):
-                result = await run_in_threadpool(adapter.cancel, parts[2])
-            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "steer"
-                  and method == "POST"):
-                result = await run_in_threadpool(adapter.steer, parts[2], body)
-            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "queue"
-                  and method == "POST"):
-                result = await run_in_threadpool(adapter.queue, parts[2], body)
-            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"]
-                  and parts[3] == "interactions" and method == "GET"):
-                result = await run_in_threadpool(adapter.interactions, parts[2])
-            elif (len(parts) == 4 and parts[:2] == ["v1", "runs"]
-                  and parts[3] == "activities" and method == "GET"):
-                result = await run_in_threadpool(adapter.activities, parts[2])
-            elif (len(parts) == 4 and parts[:2] == ["v1", "interactions"]
-                  and parts[3] == "resolve" and method == "POST"):
-                result = await run_in_threadpool(adapter.resolve, parts[2], body)
-            elif len(parts) == 3 and parts[:2] == ["v1", "activities"] and method == "GET":
-                result = await run_in_threadpool(adapter.activity, parts[2])
-            elif path == "/v1/events" and method == "GET":
-                result = await run_in_threadpool(
-                    adapter.events, int(request.query_params.get("after", "0")),
-                    int(request.query_params.get("waitMs", "0")))
-            else:
-                raise AdapterFailure("Unknown route", 404, "not_found")
-            return JSONResponse(adapter._scrub(result), headers={"Cache-Control": "no-store"})
-        except AdapterFailure as exc:
-            return JSONResponse({"error": str(exc), "code": exc.code}, exc.status)
-        except (ValueError, TypeError):
-            return JSONResponse({"error": "Invalid request", "code": "invalid_arguments"}, 400)
-
-    return Starlette(routes=[Route("/{path:path}", endpoint,
-                                   methods=["GET", "POST", "DELETE"])])
-
-
-
-def reclaim_session(state: Path, conversation_id: str) -> None:
-    from .adapter_service import load_adapter_config, read_adapter_token
-    from .security import BridgeError
-    config = load_adapter_config(state)
-    if config['runtime_type'] != 'opencode':
-        raise BridgeError('reclaim-session requires an OpenCode adapter')
-    request = urllib.request.Request(f"http://127.0.0.1:{config['port']}/v1/local/reclaim",
-        data=json.dumps({'conversationId': conversation_id}).encode(),
-        headers={'X-Runtime-Token': read_adapter_token(state), 'Content-Type': 'application/json'}, method='POST')
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=15) as response:
-            response.read(8192)
-    except OSError:
-        raise BridgeError('OpenCode session is unavailable, busy or its security profile changed') from None
-    print('Idle OpenCode session reclaimed under its current security profile.')
-
-
-def open_session(state: Path, conversation_id: str) -> None:
-    """Local terminal attachment. Neither credential is printed or sent to Node."""
-    from .adapter_service import load_adapter_config, read_adapter_token, _check_private_file
-    from .security import BridgeError
-    config = load_adapter_config(state)
-    if config['runtime_type'] != 'opencode':
-        raise BridgeError('open-session requires an OpenCode adapter')
-    native_path = state / 'runtime' / 'native-connection.json'
-    _check_private_file(native_path, name='OpenCode connection')
-    try:
-        connection = json.loads(native_path.read_text())
-        runtime_token = read_adapter_token(state)
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        request = urllib.request.Request(f"http://127.0.0.1:{config['port']}/v1/local/handoff",
-            data=json.dumps({'conversationId': conversation_id}).encode(),
-            headers={'X-Runtime-Token': runtime_token, 'Content-Type': 'application/json'}, method='POST')
-        with opener.open(request, timeout=15) as response:
-            handoff = json.loads(response.read(8192))
-        url = urllib.parse.urlsplit(connection['url'])
-        if url.scheme != 'http' or url.hostname != '127.0.0.1' or not url.port:
-            raise ValueError()
-    except (OSError, ValueError, KeyError):
-        raise BridgeError('OpenCode native session is unavailable or busy') from None
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('WB_', 'WORKSPACE_BRIDGE_'))}
-    env['OPENCODE_PASSWORD'] = connection['password']
-    subprocess.run([connection['binary'], '--server', connection['url'], '--session',
-                    handoff['nativeId'], handoff['directory']], env=env, check=False)
-
-
-def main() -> None:
-    import uvicorn
-    state = os.environ.get('WB_OPENCODE_ADAPTER_STATE')
-    root = os.environ.get('WB_OPENCODE_PROJECTS_ROOT')
-    token = os.environ.pop('WB_RUNTIME_TOKEN', '')
-    if not state or not root or not token:
-        raise SystemExit('WB_OPENCODE_ADAPTER_STATE, WB_OPENCODE_PROJECTS_ROOT and WB_RUNTIME_TOKEN are required')
-    try:
-        adapter = OpenCodeHostAdapter(Path(state), Path(root), binary=os.environ.get('WB_OPENCODE_BINARY'))
-    except AdapterFailure as exc:
-        raise SystemExit(str(exc)) from None
-    try:
-        def supervise():
-            adapter.native.process.wait()
-            if not adapter._closed:
-                # Like Codex, the owned engine and adapter are one supervised
-                # unit. Journalled admissions are reconciled without replay.
-                os._exit(1)
-        threading.Thread(target=supervise, daemon=True, name='opencode-native-supervisor').start()
-        uvicorn.run(make_app(adapter, token), host='127.0.0.1',
-            port=int(os.environ.get('WB_OPENCODE_ADAPTER_PORT', '8776')), access_log=False,
-            log_level=os.environ.get('WB_LOG_LEVEL', 'info').lower())
-    finally:
-        adapter.close()
-
-
-if __name__ == '__main__':
-    main()

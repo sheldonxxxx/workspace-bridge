@@ -1,4 +1,4 @@
-"""Bounded client and validation for the private Runtime Protocol v1.
+"""Bounded client and validation for the agent resource protocol.
 
 This module knows only Bridge resource names. Native Pi/Codex wire formats stay
 inside their adapters. No adapter endpoint accepts an arbitrary command.
@@ -7,34 +7,25 @@ from __future__ import annotations
 
 import json
 import re
-import socket
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
+from .plugin_protocol import to_rpc
+from .runtime import RuntimeUnavailable, RuntimeUnsupported
 from .security import BridgeError, redact
 
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 CORE_FEATURES = frozenset({"models", "conversations", "runs", "activities", "interactions"})
-OPTIONAL_FEATURES = frozenset({"events", "steering", "queueing", "inputControls", "imageInput", "securityRebind",
+OPTIONAL_FEATURES = frozenset({"events", "steering", "queueing", "inputControls", "imageInput",
                                "usageLimits"})
 ALL_FEATURES = CORE_FEATURES | OPTIONAL_FEATURES
 RUN_PHASES = frozenset({"starting", "active", "terminal"})
 ACTIVE_STATES = frozenset({"running", "waiting_interaction"})
 OUTCOMES = frozenset({"succeeded", "failed", "cancelled", "interrupted", "orphaned"})
-SECURITY_PROVENANCE = frozenset({"named-profile", "implicit/default", "legacy-sandbox"})
+SECURITY_PROVENANCE = frozenset({"named-profile", "implicit/default"})
 SECURITY_APPROVAL_CATEGORIES = frozenset({
     "untrusted", "on-request", "never", "granular", "default", "other"})
 SECURITY_REVIEWER_CATEGORIES = frozenset({
     "user", "auto_review", "guardian_subagent", "default", "other"})
-SECURITY_REPLACEMENT_REASONS = frozenset({
-    "unresolved-permission-profile", "permission-profile-unavailable",
-    "legacy-sandbox-transition", "settings-update-already-pending",
-    "settings-update-unconfirmed", "settings-update-mismatch",
-    "settings-update-failed"})
 MAX_SAFE_INTEGER = 9007199254740991
 RUN_USAGE_FIELDS = frozenset({
     "inputTokens", "cachedInputTokens", "cacheWriteInputTokens",
@@ -266,6 +257,11 @@ def _validate_security_summary(value: Any) -> dict:
 
 
 def _validate_security_binding(value: Any) -> dict:
+    """Validate the binding a plugin echoes for a conversation or run.
+
+    ``profile`` names the Bridge profile the plugin compiled and enforces;
+    ``native`` means the agent's own configuration governs the run.
+    """
     if not isinstance(value, dict):
         raise RuntimeUnavailable("Runtime security binding is invalid")
     source = value.get("source")
@@ -278,28 +274,11 @@ def _validate_security_binding(value: Any) -> dict:
             raise RuntimeUnavailable("Runtime security binding is invalid")
         return {"source": "profile", "profile": {
             "id": profile["id"], "revision": profile["revision"]}}
-    if source != "runtime-config":
+    if source != "native":
         raise RuntimeUnavailable("Runtime security binding is invalid")
-    revision = value.get("revision")
-    permission_revision = value.get("permissionRevision", "")
-    approval_revision = value.get("approvalRevision", "")
-    if (not isinstance(revision, str) or not revision or len(revision) > 100
-            or not isinstance(permission_revision, str) or len(permission_revision) > 100
-            or not isinstance(approval_revision, str) or len(approval_revision) > 100):
-        raise RuntimeUnavailable("Runtime security binding is invalid")
-    result = {"source": "runtime-config", "revision": revision,
-              "permissionRevision": permission_revision,
-              "approvalRevision": approval_revision,
-              "resolvedSummary": _validate_security_summary(value.get("resolvedSummary"))}
-    reason = value.get("replacementReason")
-    if reason is not None:
-        if reason not in SECURITY_REPLACEMENT_REASONS:
-            raise RuntimeUnavailable("Runtime conversation replacement reason is invalid")
-        replaced = value.get("replacedConversationId")
-        if not isinstance(replaced, str) or not replaced or len(replaced) > 200:
-            raise RuntimeUnavailable("Runtime conversation replacement is invalid")
-        result["replacementReason"] = reason
-        result["replacedConversationId"] = replaced
+    result: dict = {"source": "native"}
+    if value.get("resolvedSummary") is not None:
+        result["resolvedSummary"] = _validate_security_summary(value["resolvedSummary"])
     return result
 
 
@@ -311,24 +290,6 @@ class Descriptor:
     native_version: str
     instance_id: str
     features: dict[str, int]
-    release: dict | None = None
-    release_status: str = "missing"
-
-    def __post_init__(self) -> None:
-        # Bounded release-observation state. `release` is a validated
-        # identity or None; raw validation exceptions never escape.
-        # Direct constructions without an explicit status infer it so
-        # existing call sites stay correct: present release => valid,
-        # absent release => missing.
-        allowed = {"valid", "missing", "invalid", "unsupported"}
-        status = self.release_status
-        if status not in allowed:
-            object.__setattr__(self, "release_status", "missing")
-            status = "missing"
-        if self.release is not None and status == "missing":
-            object.__setattr__(self, "release_status", "valid")
-        elif self.release is None and status == "valid":
-            object.__setattr__(self, "release_status", "missing")
 
     @classmethod
     def parse(cls, value: Any, *, expected_runtime: str) -> "Descriptor":
@@ -352,123 +313,71 @@ class Descriptor:
         instance_id = runtime.get("instanceId")
         if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 200:
             raise RuntimeUnavailable("Runtime instance identity is invalid")
-        # Runtime release metadata is optional at the generic Runtime
-        # Protocol layer and is decoupled from protocol compatibility.
-        # Protocol-major, core-feature, and runtime-identity validation stay
-        # strict, but a present malformed or unsupported `release` object
-        # never makes an otherwise valid descriptor unavailable. It is
-        # observed as degraded metadata (invalid/unsupported) while the
-        # descriptor stays usable. A missing release likewise stays
-        # protocol-usable; managed-deployment support for first-party builds
-        # is classified separately, beginning at 0.1.0. Normal runtime
-        # operations are never blocked solely by release metadata.
-        release: dict | None = None
-        release_status = "missing"
-        if "release" in value:
-            from .release import ReleaseError, validate_release
-            try:
-                release = validate_release(value.get("release"))
-                release_status = "valid"
-            except ReleaseError as exc:
-                release = None
-                if getattr(exc, "kind", "invalid") == "unsupported":
-                    release_status = "unsupported"
-                else:
-                    release_status = "invalid"
         return cls(runtime_id=expected_runtime,
                    display_name=str(runtime.get("displayName") or expected_runtime)[:120],
                    adapter_version=str(runtime.get("adapterVersion") or "")[:80],
                    native_version=str(runtime.get("nativeVersion") or "")[:80],
                    instance_id=instance_id,
                    features={name: int(version) for name, version in features.items()
-                             if name in ALL_FEATURES},
-                   release=release,
-                   release_status=release_status)
+                             if name in ALL_FEATURES})
 
     def supports(self, feature: str) -> bool:
         return self.features.get(feature) == 1
 
 
-class HttpRuntimeAdapter:
-    """One strict HTTP client for any conforming private runtime adapter."""
+class RuntimeClient:
+    """One strict client for any conforming agent plugin.
 
-    def __init__(self, adapter_id: str, runtime_type: str, base_url: str,
-                 token: str, *, timeout: float = 30):
+    Every method validates what the plugin returns. The transport carries
+    named Agent Protocol v2 requests: ``call(method, params, timeout)`` and
+    ``events(after, wait_ms)``. On a Node it is the supervised plugin
+    process; tests may use an in-process loopback.
+    """
+
+    def __init__(self, adapter_id: str, runtime_type: str, transport: Any, *,
+                 timeout: float = 30):
         if (not isinstance(adapter_id, str)
                 or not re.fullmatch(r"adapter_[0-9a-f]{24}", adapter_id)):
             raise BridgeError("Invalid adapter id", "invalid_arguments")
         if runtime_type not in {"pi", "codex", "claude", "opencode"}:
             raise BridgeError("Invalid runtime type", "invalid_arguments")
-        parsed = urllib.parse.urlparse(base_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
-            raise BridgeError("Invalid runtime adapter URL", "invalid_arguments")
-        if not isinstance(token, str) or not token:
-            raise BridgeError("Runtime adapter token is required", "invalid_arguments")
         self.adapter_id = adapter_id
         self.runtime_type = runtime_type
-        self.base_url = base_url.rstrip("/")
-        self.token = token
+        self.transport = transport
         self.timeout = min(max(float(timeout), 0.5), 60.0)
 
-    def _scrub_secret(self, value: Any) -> Any:
-        """Remove this connection's credential from every remote string value."""
+    @staticmethod
+    def _scrub_secret(value: Any) -> Any:
+        """Redact credential-shaped text from every string a plugin returns."""
         if isinstance(value, str):
-            return redact(value.replace(self.token, "[REDACTED_SECRET]"))[0]
+            return redact(value)[0]
         if isinstance(value, list):
-            return [self._scrub_secret(item) for item in value]
+            return [RuntimeClient._scrub_secret(item) for item in value]
         if isinstance(value, dict):
-            return {self._scrub_secret(key) if isinstance(key, str) else key:
-                    self._scrub_secret(item) for key, item in value.items()}
+            return {key: RuntimeClient._scrub_secret(item) for key, item in value.items()}
         return value
+
+    @staticmethod
+    def _check_request_size(method: str, path: str, body: dict | None) -> None:
+        """Bound one request body: 12 MiB for a run start with images, else 512 KiB."""
+        raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+        if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
+            raise BridgeError("Adapter request is too large", "invalid_arguments")
 
     def _request(self, method: str, path: str, *, body: dict | None = None,
                  query: dict | None = None, timeout: float | None = None) -> dict:
         if not path.startswith("/v1/"):
             raise BridgeError("Invalid adapter path", "invalid_arguments")
-        url = self.base_url + path
-        if query:
-            url += "?" + urllib.parse.urlencode({k: v for k, v in query.items()
-                                                   if v is not None})
-        raw_body = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        if raw_body is not None and len(raw_body) > (12 * 1024 * 1024 if method == "POST" and path.endswith("/runs") and isinstance(body, dict) and any(isinstance(item, dict) and item.get("type") == "image" for item in body.get("input", [])) else 512 * 1024):
-            raise BridgeError("Adapter request is too large", "invalid_arguments")
-        headers = {"Accept": "application/json", "X-Runtime-Token": self.token}
-        if raw_body is not None:
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(url, data=raw_body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_RESPONSE_BYTES:
-                    raise RuntimeUnavailable("Runtime response is too large")
-                value = json.loads(raw)
-                if not isinstance(value, dict):
-                    raise RuntimeUnavailable("Runtime response is invalid")
-                return self._scrub_secret(value)
-        except urllib.error.HTTPError as exc:
-            detail = ""
-            code = "runtime_rejected"
-            try:
-                payload = json.loads(exc.read(8192))
-                if isinstance(payload, dict):
-                    detail = str(payload.get("error") or "")[:300]
-                    code = str(payload.get("code") or code)[:80]
-            except (ValueError, UnicodeError):
-                pass
-            detail = redact(detail.replace(self.token, "[REDACTED_SECRET]"))[0]
-            code = code.replace(self.token, "redacted")
-            if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
-                code = "runtime_rejected"
-            if exc.code == 501:
-                raise RuntimeUnsupported(detail or "Runtime feature is unsupported") from None
-            if exc.code in (400, 404, 409, 412, 422):
-                raise RuntimeRejected(detail or "Runtime rejected the request",
-                                      code=code, status=exc.code) from None
-            raise RuntimeUnavailable(detail or "Runtime adapter returned an error") from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
-            raise RuntimeUnavailable("Runtime adapter is unavailable") from None
-        except (ValueError, UnicodeError):
-            raise RuntimeUnavailable("Runtime returned invalid JSON") from None
+        self._check_request_size(method, path, body)
+        name, params = to_rpc(method, path, query, body)
+        if name == "events":
+            value = self.transport.events(int(params.get("after", 0)),
+                                          int(params.get("waitMs", 0)))
+        else:
+            value = self.transport.call(name, params, timeout or self.timeout)
+        if not isinstance(value, dict):
+            raise RuntimeUnavailable("Runtime response is invalid")
+        return self._scrub_secret(value)
 
     def descriptor(self) -> Descriptor:
         return Descriptor.parse(self._request("GET", "/v1/descriptor", timeout=3),
@@ -512,104 +421,6 @@ class HttpRuntimeAdapter:
                            "default": row.get("default") is True})
         return result
 
-    def profile_catalog(self, workspace_id: str | None = None,
-                        directory: str | None = None, *,
-                        fresh: bool = False) -> dict:
-        if (workspace_id is None) != (directory is None):
-            raise BridgeError("Workspace ID and directory must be supplied together",
-                              "invalid_arguments")
-        if workspace_id is not None and (
-                not isinstance(workspace_id, str) or not workspace_id
-                or len(workspace_id) > 100):
-            raise BridgeError("Invalid workspace ID", "invalid_arguments")
-        if directory is not None and (
-                not isinstance(directory, str) or not directory or len(directory) > 4096):
-            raise BridgeError("Invalid workspace directory", "invalid_arguments")
-        query = None
-        if workspace_id is not None:
-            query = {"workspaceId": workspace_id, "directory": directory,
-                     "fresh": "1" if fresh else None}
-        value = self._request("GET", "/v1/profiles", query=query)
-        rows = value.get("profiles")
-        if not isinstance(rows, list):
-            raise RuntimeUnavailable("Runtime profile list is invalid")
-        result = []
-        for row in rows[:100]:
-            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
-                    or not isinstance(row.get("revision"), str)
-                    or len(row["id"]) > 100 or len(row["revision"]) > 100):
-                continue
-            enforcement = row.get("enforcement")
-            if not isinstance(enforcement, list):
-                enforcement = []
-            config = row.get("config")
-            if config is not None and (not isinstance(config, dict)
-                                       or len(json.dumps(config)) > 32768):
-                continue
-            item = {"id": row["id"], "revision": row["revision"],
-                           "config": config, "mutable": row.get("mutable") is True,
-                           "enforcement": [item[:80] for item in enforcement[:20]
-                                           if isinstance(item, str)]}
-            definition_revision = row.get("definitionRevision")
-            if (isinstance(definition_revision, str)
-                    and 1 <= len(definition_revision) <= 100):
-                item["definitionRevision"] = definition_revision
-            if isinstance(row.get("available"), bool):
-                item["available"] = row["available"]
-            if row.get("unavailableReason") in {
-                    "native-permission-unavailable", "managed-requirements",
-                    "legacy-sandbox-conflict"}:
-                item["unavailableReason"] = row["unavailableReason"]
-            result.append(item)
-        permission_profiles = value.get("permissionProfiles")
-        if not isinstance(permission_profiles, list):
-            permission_profiles = []
-        choices = []
-        for row in permission_profiles[:500]:
-            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
-                    or not row["id"] or len(row["id"]) > 128
-                    or not isinstance(row.get("allowed"), bool)):
-                continue
-            description = row.get("description")
-            choices.append({"id": row["id"], "allowed": row["allowed"],
-                            "description": (redact(str(description)[:240])[0]
-                                            if isinstance(description, str) else "")})
-        catalog = {"profiles": result, "permissionProfiles": choices}
-        runtime_config = value.get("runtimeConfig")
-        if runtime_config is not None:
-            if (not isinstance(runtime_config, dict)
-                    or not isinstance(runtime_config.get("supported"), bool)
-                    or not isinstance(runtime_config.get("available"), bool)
-                    or runtime_config.get("status") not in {"ready", "unavailable"}
-                    or not isinstance(runtime_config.get("revision"), str)
-                    or not runtime_config["revision"]
-                    or len(runtime_config["revision"]) > 100):
-                raise RuntimeUnavailable("Runtime config security state is invalid")
-            catalog["runtimeConfig"] = {
-                "supported": runtime_config["supported"],
-                "available": runtime_config["available"],
-                "status": runtime_config["status"],
-                "revision": runtime_config["revision"],
-                "resolvedSummary": _validate_security_summary(
-                    runtime_config.get("resolvedSummary")),
-            }
-        return catalog
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> list[dict]:
-        return self.profile_catalog(workspace_id, directory,
-                                    fresh=fresh)["profiles"]
-
-    def save_profile(self, profile_id: str, config: dict,
-                     expected_revision: str | None) -> dict:
-        return self._request("POST", "/v1/profiles", body={
-            "id": profile_id, "config": config,
-            "expectedRevision": expected_revision})
-
-    def delete_profile(self, profile_id: str) -> dict:
-        return self._request("DELETE", "/v1/profiles/" +
-                             _identifier(profile_id, "profile id"))
-
     def create_conversation(self, payload: dict) -> dict:
         value = self._request("POST", "/v1/conversations", body=payload)
         if not isinstance(value, dict):
@@ -621,37 +432,6 @@ class HttpRuntimeAdapter:
 
     def conversation(self, conversation_id: str) -> dict:
         value = self._request("GET", f"/v1/conversations/{_identifier(conversation_id, 'conversation id')}")
-        if not isinstance(value, dict):
-            raise RuntimeUnavailable("Runtime conversation binding is invalid")
-        if "securityBinding" in value:
-            value = {**value, "securityBinding": _validate_security_binding(
-                value.get("securityBinding"))}
-        return value
-
-    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
-        """Rebind an idle profile conversation to the requested named profile.
-
-        Optional Runtime Protocol v1 operation behind ``securityRebind``.
-        Only ``{source:'profile', profile:{id,revision}}`` is accepted; no
-        arbitrary payload is forwarded. The adapter must prove the same
-        runtime conversation is idle under the requested binding.
-        """
-        ident = _identifier(conversation_id, "conversation id")
-        if (not isinstance(security_binding, dict)
-                or security_binding.get("source") != "profile"
-                or not isinstance(security_binding.get("profile"), dict)
-                or not isinstance(security_binding["profile"].get("id"), str)
-                or not security_binding["profile"]["id"]
-                or len(security_binding["profile"]["id"]) > 100
-                or not isinstance(security_binding["profile"].get("revision"), str)
-                or not security_binding["profile"]["revision"]
-                or len(security_binding["profile"]["revision"]) > 100
-                or set(security_binding) != {"source", "profile"}
-                or set(security_binding["profile"]) != {"id", "revision"}):
-            raise BridgeError("Invalid security rebind binding", "invalid_arguments")
-        value = self._request(
-            "POST", f"/v1/conversations/{ident}/security",
-            body={"securityBinding": security_binding})
         if not isinstance(value, dict):
             raise RuntimeUnavailable("Runtime conversation binding is invalid")
         if "securityBinding" in value:

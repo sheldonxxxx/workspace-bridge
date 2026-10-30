@@ -48,13 +48,16 @@ def glob_matcher(pattern: str):
     return match
 
 
+def _tree(ws: dict) -> dict:
+    """Keeps listings and cursors of a run's worktree apart from the workspace's."""
+    return {"worktree_id": ws["worktree_id"]} if ws.get("worktree_id") else {}
+
+
 class Browser:
     def __init__(self, service: Service):
         self.service = service
         # Private, high-entropy key material already outside all mapped roots.
-        secret = (service.config.get("cursor_secret") or
-                  service.config.get("node_token_hash") or
-                  service.config.get("admin_token_hash"))
+        secret = service.config.get("cursor_secret")
         if not isinstance(secret, str) or len(secret) < 32:
             raise ValueError("A private cursor secret is required")
         self.cursor_key = hashlib.sha256((secret + ":browse-v1").encode()).digest()
@@ -111,7 +114,7 @@ class Browser:
         with self.service.safe_root(ws) as safe:
             entries, skipped = safe.walk(path, include_dirs=True, depth_limit=depth)
         result = self._page(entries, skipped, scope={"workspace_id": ws["id"], "path": path, "depth": depth,
-                            "policy": ws["excludes"]}, offset=offset, limit=limit,
+                            "policy": ws["excludes"], **_tree(ws)}, offset=offset, limit=limit,
                             expected_listing_sha256=expected_listing_sha256)
         return {"path": path, "depth": depth, **result,
                 "note": "Directories at the requested depth are listed but not descended. Exclusions remain enforced."}
@@ -123,7 +126,7 @@ class Browser:
             entries, skipped = safe.walk(path)
         entries = [e for e in entries if match(self._relative(e["path"], path))]
         result = self._page(entries, skipped, scope={"workspace_id": ws["id"], "path": path, "pattern": pattern,
-                            "policy": ws["excludes"]}, offset=offset, limit=limit,
+                            "policy": ws["excludes"], **_tree(ws)}, offset=offset, limit=limit,
                             expected_listing_sha256=expected_listing_sha256)
         return {"path": path, "pattern": pattern, **result}
 
@@ -138,7 +141,7 @@ class Browser:
             raise BridgeError("Invalid regular expression", "invalid_regex") from None
         total_bytes, files_read = 0, 0
         matches, skipped_files = [], []
-        scope = digest(packed({"workspace_id": ws["id"],
+        scope = digest(packed({"workspace_id": ws["id"], **_tree(ws),
                                "policy": ws["excludes"], "pattern": pattern, "path": path,
                                "include": include, "fixed_strings": fixed_strings,
                                "case_sensitive": case_sensitive, "context_lines": context_lines}))

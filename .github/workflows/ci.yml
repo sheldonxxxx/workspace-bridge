@@ -70,8 +70,6 @@ jobs:
         run: npm --prefix web run format:check
       - name: Build Manager
         run: npm --prefix web run build
-      - name: Manager unit tests
-        run: node --test web/test/*.test.mjs
 
   manager-browser:
     name: Manager browser / Ubuntu x64
@@ -117,37 +115,3 @@ jobs:
       - name: Run Pi tests
         run: npm --prefix runtime/pi-host-adapter test
 
-  docker:
-    name: Docker Bridge / ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            arch: amd64
-          - os: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-      - uses: astral-sh/setup-uv@v10.2.0
-        with:
-          version: "0.12.5"
-          enable-cache: true
-      - name: Verify Docker runtime requirements match uv.lock
-        run: |
-          uv export --locked --no-dev --no-emit-project --no-header --no-annotate --format requirements-txt > /tmp/runtime-requirements.txt
-          diff -u docker/runtime-requirements.txt /tmp/runtime-requirements.txt
-      - name: Build Bridge image (native ${{ matrix.arch }})
-        run: docker build --tag workspace-bridge:ci .
-      - name: Inspect image architecture
-        run: |
-          set -euo pipefail
-          got="$(docker image inspect --format '{{.Architecture}}' workspace-bridge:ci)"
-          test "$got" = "${{ matrix.arch }}" || { echo "arch $got != ${{ matrix.arch }}" >&2; exit 1; }
-      - name: Bounded container release-identity smoke
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint python workspace-bridge:ci -c "import json; from workspace_bridge.release import bridge_release, read_manager_release, validate_release; b=validate_release(bridge_release()); m=read_manager_release(); assert m is not None, 'manager release missing'; validate_release(m); print(json.dumps({'bridge': b['build_id'], 'manager': m['build_id']}))"

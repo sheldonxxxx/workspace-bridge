@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
+from . import __version__
 from .security import BridgeError, redact
 
 DEFAULT_TIMEOUT = 6.0
@@ -31,12 +32,14 @@ MAX_SUMMARY_EVENTS = 20
 MAX_QUOTA_FIELD = 160
 EVENT_TYPES = frozenset({"run_completed", "run_failed", "run_cancelled",
                          "run_interrupted", "run_orphaned", "run_blocked",
-                         "run_needs_attention"})
+                         "run_needs_attention", "run_action", "run_manager_action"})
 EVENT_TO_STATE = {
     "run_completed": "completed", "run_failed": "failed",
     "run_cancelled": "cancelled", "run_interrupted": "interrupted",
     "run_orphaned": "orphaned", "run_blocked": "blocked",
     "run_needs_attention": "needs_attention",
+    "run_manager_action": "manager_action",
+    "run_action": "action",
 }
 STATE_EVENTS = {
     "completed": "run_completed", "failed": "run_failed",
@@ -46,7 +49,28 @@ STATE_EVENTS = {
 }
 SAFE_KINDS = frozenset({"permission", "question", "choice", "approval",
                         "form", "interaction"})
-BRIDGE_USER_AGENT = "Workspace-Bridge/0.3.0 (+local-admin; notification channel)"
+BRIDGE_USER_AGENT = f"Workspace-Bridge/{__version__} (+local-admin; notification channel)"
+
+
+CHECKS_LABEL = re.compile(r"complete:\d{1,3}:\d{1,3}|unavailable")
+
+
+def checks_label(value: str) -> str:
+    """Human text for an event's after-run check summary."""
+    if value.startswith("complete:"):
+        _, passed, failed = value.split(":")
+        return f"{passed} passed, {failed} failed"
+    return "unavailable"
+
+
+def checks_data(value: str) -> dict | None:
+    """Structured form of an event's after-run check summary, or None."""
+    if not value or not CHECKS_LABEL.fullmatch(value):
+        return None
+    if value == "unavailable":
+        return {"state": "unavailable"}
+    _, passed, failed = value.split(":")
+    return {"state": "complete", "passed": int(passed), "failed": int(failed)}
 
 
 def _safe_label(value: object, fallback: str, limit: int) -> str:
@@ -166,6 +190,9 @@ class NotificationEvent:
     subject_id: str = ""
     request_kind: str = ""
     action: str = ""
+    # After-run check counts, '' when the workspace runs none:
+    # "complete:<passed>:<failed>" or "unavailable".
+    checks: str = ""
     # Ephemeral, delivery-time-only enrichment. Never persisted and never
     # accepted by build(); Discord renders it as one compact field and every
     # other channel ignores it.
@@ -177,7 +204,7 @@ class NotificationEvent:
               adapter_name: str, runtime_type: str,
               node_id: str = "", node_name: str = "",
               occurred_at: str | None = None, subject_id: str = "",
-              request_kind: str = "", action: str = "") -> "NotificationEvent":
+              request_kind: str = "", action: str = "", checks: str = "") -> "NotificationEvent":
         if event_type not in EVENT_TYPES:
             raise BridgeError("Unknown notification event type", "invalid_notification")
         safe_run = _safe_id(run_id)
@@ -205,7 +232,14 @@ class NotificationEvent:
                 pass
         if not stamp:
             stamp = datetime.now(timezone.utc).isoformat()
+        if checks and not CHECKS_LABEL.fullmatch(checks):
+            raise BridgeError("Invalid check summary", "invalid_notification")
+        if event_type in {"run_action", "run_manager_action"} and not (safe_subject and safe_action):
+            raise BridgeError("Run action notices require a subject id and action",
+                              "invalid_notification")
         dedupe = (f"attention:{safe_run}:{safe_subject}" if event_type == "run_needs_attention"
+                  else f"action:{safe_run}:{safe_action}:{safe_subject}" if event_type == "run_action"
+                  else f"manager:{safe_run}:{safe_action}:{safe_subject}" if event_type == "run_manager_action"
                   else f"run:{safe_run}:{event_type}")
         return cls(
             id="nev_" + secrets.token_hex(12), dedupe_key=dedupe,
@@ -216,7 +250,7 @@ class NotificationEvent:
             adapter_name=_safe_label(adapter_name, "adapter", 80),
             runtime_type=runtime_type, occurred_at=stamp, node_id=safe_node,
             node_name=_safe_label(node_name, "Node", 80), subject_id=safe_subject,
-            request_kind=kind, action=safe_action)
+            request_kind=kind, action=safe_action, checks=checks)
 
 
 @dataclass(frozen=True)
@@ -303,19 +337,27 @@ class DiscordChannel:
     def _payload(event: NotificationEvent) -> dict:
         state = EVENT_TO_STATE[event.event_type]
         attention = event.event_type == "run_needs_attention"
-        headline = "Agent run needs attention" if attention else f"Agent run {state}"
+        # Keep legacy persisted Manager events readable after an upgrade.
+        manual = event.event_type == "run_manager_action"
+        action = manual or event.event_type == "run_action"
+        headline = ("Agent run needs attention" if attention
+                    else "Agent run changed in the Manager" if manual
+                    else "Agent run action" if action else f"Agent run {state}")
         fields = [
             {"name": "Workspace", "value": event.workspace_name, "inline": True},
             {"name": "Node", "value": event.node_name or event.node_id or "Unknown", "inline": True},
             {"name": "Adapter", "value": event.adapter_name, "inline": True},
             {"name": "Handoff", "value": event.handoff_title, "inline": True},
             {"name": "Run", "value": event.run_id[:80], "inline": True},
-            {"name": "Outcome", "value": state[:40], "inline": True},
         ]
+        if not action:
+            fields.append({"name": "Outcome", "value": state[:40], "inline": True})
         if event.request_kind:
             fields.append({"name": "Request", "value": event.request_kind[:60], "inline": True})
         if event.action:
             fields.append({"name": "Action", "value": event.action[:80], "inline": True})
+        if event.checks:
+            fields.append({"name": "Checks", "value": checks_label(event.checks), "inline": True})
         if event.quota:
             # Ephemeral best-effort enrichment; omitted entirely when the
             # current account quota could not be read.
@@ -323,9 +365,14 @@ class DiscordChannel:
         colors = {"run_needs_attention": 0xE0A800, "run_completed": 0x2E9E5B,
                   "run_blocked": 0x9E6B2E, "run_failed": 0xC0392B,
                   "run_cancelled": 0x6B7280, "run_interrupted": 0x6B7280,
-                  "run_orphaned": 0x6B7280}
-        description = ("Review the pending request in ChatGPT/local manager; details are not sent to Discord."
-                       if attention else "Read the final run result in ChatGPT/local manager.")
+                  "run_orphaned": 0x6B7280, "run_action": 0x3B6FB6,
+                  "run_manager_action": 0x3B6FB6}
+        description = ("Answer it in ChatGPT; this notice cannot answer, and details are not sent to Discord."
+                       if attention else
+                       "Someone signed in to the Manager acted on this run by hand. If that was not you, change the Manager password."
+                       if manual else
+                       "A run action was accepted through the Bridge. Read the details in ChatGPT/local manager."
+                       if action else "Read the final run result in ChatGPT/local manager.")
         embed = {"title": headline, "color": colors[event.event_type],
                  "description": description, "fields": fields,
                  "timestamp": event.occurred_at}
@@ -416,7 +463,7 @@ class NotificationManager:
             node_name TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL,
             subject_id TEXT NOT NULL DEFAULT '', request_kind TEXT NOT NULL DEFAULT '',
             action TEXT NOT NULL DEFAULT '', occurred_at TEXT NOT NULL,
-            created_at TEXT NOT NULL);
+            checks TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS notification_deliveries (
             event_id TEXT NOT NULL, channel_id TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','failed','disabled')),
@@ -455,16 +502,17 @@ class NotificationManager:
             adapter_name=event.adapter_name, runtime_type=event.runtime_type,
             node_id=event.node_id, node_name=event.node_name,
             occurred_at=event.occurred_at, subject_id=event.subject_id,
-            request_kind=event.request_kind, action=event.action)
+            request_kind=event.request_kind, action=event.action, checks=event.checks)
         self.service.db.execute(
             "INSERT OR IGNORE INTO notification_events(id,dedupe_key,run_id,workspace_id,"
             "workspace_name,handoff_title,adapter_id,adapter_name,runtime_type,node_id,node_name,event_type,"
-            "subject_id,request_kind,action,occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "subject_id,request_kind,action,checks,occurred_at,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (event.id, event.dedupe_key, event.run_id, event.workspace_id,
              event.workspace_name, event.handoff_title, event.adapter_id,
              event.adapter_name, event.runtime_type, event.node_id, event.node_name,
              event.event_type, event.subject_id, event.request_kind, event.action,
-             event.occurred_at, self._now()))
+             event.checks, event.occurred_at, self._now()))
         row = self.service.db.execute(
             "SELECT id FROM notification_events WHERE dedupe_key=?", (event.dedupe_key,)).fetchone()
         event_id = row["id"]
@@ -483,7 +531,8 @@ class NotificationManager:
     def record_run_event_locked(self, *, run_id: str, workspace_id: str,
                                 job_id: str, adapter_id: str, runtime_type: str,
                                 event_type: str, subject_id: str = "", request_kind: str = "",
-                                action: str = "", occurred_at: str | None = None) -> tuple[str, bool]:
+                                action: str = "", occurred_at: str | None = None,
+                                checks: str = "") -> tuple[str, bool]:
         """Insert a run event inside the caller's state transaction."""
         row = self.service.db.execute(
             "SELECT w.name,j.title FROM workspaces w LEFT JOIN jobs j ON j.id=? "
@@ -497,25 +546,12 @@ class NotificationManager:
             adapter_name=adapter["name"], runtime_type=runtime_type,
             node_id=adapter.get("node_id", ""), node_name=adapter.get("node_name", ""),
             occurred_at=occurred_at, subject_id=subject_id,
-            request_kind=request_kind, action=action)
+            request_kind=request_kind, action=action, checks=checks)
         return self._record_event_locked(event)
 
     def publish(self, event: NotificationEvent) -> str:
         with self.service.lock, self.service.db:
             event_id, _ = self._record_event_locked(event)
-        return event_id
-
-    def publish_run_event(self, *, run_id: str, workspace_id: str, job_id: str,
-                          adapter_id: str, runtime_type: str,
-                          event_type: str, subject_id: str = "",
-                          request_kind: str = "", action: str = "",
-                          occurred_at: str | None = None) -> str:
-        with self.service.lock, self.service.db:
-            event_id, _ = self.record_run_event_locked(
-                run_id=run_id, workspace_id=workspace_id, job_id=job_id,
-                adapter_id=adapter_id, runtime_type=runtime_type,
-                event_type=event_type, subject_id=subject_id,
-                request_kind=request_kind, action=action, occurred_at=occurred_at)
         return event_id
 
     def wake(self) -> None:
@@ -562,7 +598,7 @@ class NotificationManager:
                 runtime_type=row["runtime_type"], occurred_at=row["occurred_at"],
                 node_id=row["node_id"], node_name=row["node_name"],
                 subject_id=row["subject_id"], request_kind=row["request_kind"],
-                action=row["action"])
+                action=row["action"], checks=row["checks"])
             event = self._quota_enriched(event)
             try:
                 result = channel.deliver(event)

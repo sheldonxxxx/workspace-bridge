@@ -49,26 +49,26 @@ these capabilities under `image_reading`. No persistent image cache is written.
 
 ## Upload handoff images
 
-`write_image(workspace_id, path, data_base64, mime_type, expected_sha256=null)`
-uploads original raster bytes through the Node to an allowed path inside
-`.workspace-handoff/`. It requires handoff or workspace write scope; workspace mode
-does not permit source-image uploads. Strict base64, MIME, filename extension and
-decoded format must agree. The existing bounded decoder validates the first frame
-before any new directory is created. Supported formats and 20 MiB/40MP limits match
-image reading. Uploads preserve original bytes and embedded metadata and do not
-redact pixels. Results contain original-file hashes, dimensions and format.
+`upload_image(workspace_id, data_base64, mime_type)` sends original raster bytes
+to the authoritative Node, which keeps them by hash in its own state, never in
+the workspace. It needs no write scope, so read-only workspaces take uploads too,
+and each workspace keeps up to 512 MiB of uploads. Strict base64, MIME and
+decoded format must agree. The existing bounded decoder validates the first
+frame. Supported formats and 20 MiB/40MP limits match image reading. Uploads
+preserve original bytes and embedded metadata and do not redact pixels. Results
+contain the original-file `sha256`, dimensions and format; the same bytes always
+give the same `sha256`.
 
-Creation is exclusive by default; replacement needs the current original hash and
-a validated existing image. Re-read and reconcile conflicts or ambiguous outcomes.
-Only `write_image` has a larger JSON body budget (28,027,564 bytes); other MCP
+Only `upload_image` has a larger JSON body budget (28,027,564 bytes); other MCP
 tools retain 1 MiB. `workspace_info.image_writing` exposes the upload limits.
 See [MCP tools](MCP_TOOLS.md#image-upload) for the exact schema.
 
-Upload to `.workspace-handoff/attachments/reference.png` before preparation,
-then include `path`, `description` and the returned `sha256` in
-`prepare_handoff.attachments`. Existing allowed workspace images can also be
-referenced. References are checked at publication and recorded in `CONTEXT.md`;
-they are not copies or snapshots. Verify current hashes before using them.
+Name the returned `sha256` with a `description` and no `path` in
+`save_handoff.attachments`; the plan folder gets a read-only copy at
+`attachments/<sha256>.<ext>` for the agent. Existing allowed workspace images
+can also be referenced by `path` and source hash; those are checked at
+publication and recorded in `CONTEXT.md`, not copied. Verify current hashes
+before using them.
 
 ## Native response, not base64 text
 
@@ -93,13 +93,13 @@ No OCR, model inference, remote conversion or external-resource fetch runs local
 
 The fixed decoder subprocess uses authorized bytes only. It is resource-bounded,
 not a security sandbox against a decoder exploit; it retains the service's OS
-identity. Keep Pillow patched and use OS/container isolation for hostile inputs.
-The serialized service lock remains held during decoding, so a slow image can
-briefly delay other calls. Avoid agents editing the image during review.
+identity. Keep Pillow patched and use OS isolation for hostile inputs.
+Decoding runs on the Node outside any Bridge-wide lock, so a slow image delays
+only its own call. Avoid agents editing the image during review.
 
-Image reading works with write_scope `none`, `handoff` and `workspace`; it does not
-change any of them. `write_file` and `edit_file` still operate on UTF-8 text only.
-`write_image` is limited to validated handoff rasters; no generic binary writer,
+Image reading and uploads work with write_scope `none` and `workspace`; they do
+not change either. `apply_patch` operates on UTF-8 text only. `upload_image` is
+limited to validated handoff rasters in Node state; no generic binary writer,
 PDF/Office parser or retired snapshot-review system is included.
 
 ## Validate your actual client
@@ -140,15 +140,14 @@ Protocol support is not proof of a specific client integration.
 
 ## Images in agent runs
 
-`start_agent_run` accepts up to four `images` references, each with a workspace
-`path` and optional `expected_sha256`. The Manager prepared-handoff starter
-accepts one path per line. The owning Node resolves paths under its normal
+`start_run` accepts up to four `images` references, each with a workspace
+`path` and optional `expected_sha256`. The owning Node resolves paths under its normal
 workspace policy, verifies hashes, strips metadata, and creates bounded image
 previews before sending them to the exact adapter. Both the adapter and selected
 model must advertise image input. Unsupported or uncertain support fails closed.
 OpenCode v2 accepts these previews as native prompt attachments. Run snapshots
 retain source/preview hashes and metadata, never image bytes. Pixel contents
-are not redacted. Steering and queueing remain text-only.
+are not redacted. `send_run_input` remains text-only.
 
 Only image-bearing run starts have a 12 MiB request budget. Ordinary protocol
 requests and response budgets are unchanged.

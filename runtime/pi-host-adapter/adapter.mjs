@@ -1,6 +1,6 @@
 // Pi session ownership for the native host adapter.
 //
-// Each Bridge session owns exactly one in-process AgentSession (Pi 0.87.0
+// Each Bridge session owns exactly one in-process AgentSession (Pi 1.4.0
 // direct Node SDK) created in the isolated PI_CODING_AGENT_DIR profile.
 // The map below ties each session id to its owned AgentSession, canonical
 // cwd, immutable permission/extension snapshots, preflight correlation,
@@ -27,12 +27,13 @@ import {
 import { enforcementFingerprint } from "./fingerprint.mjs";
 import { resolveSessionDir } from "./paths.mjs";
 import {
+  REVISION_RE,
   SHELL_TOOL,
-  canonicalizeExternalRoots,
   canonicalJson,
   evaluateToolCall,
   policyRevision,
   safeDefaultPolicy,
+  toolExposure,
   validatePolicy,
 } from "./policy.mjs";
 import { isManagedTool, normalizeToolEnd, normalizeToolStart, normalizeToolUpdate } from "./sdk-events.mjs";
@@ -301,10 +302,22 @@ export function aggregatePiUsage(messages) {
   return seen && Object.keys(totals).length ? totals : null;
 }
 
+// Native events that change what a run snapshot shows. Streaming deltas
+// are left out: the snapshot does not change with them.
+const SESSION_CHANGES = {
+  tool_execution_start: "activity",
+  tool_execution_end: "activity",
+  agent_end: "run",
+  agent_settled: "run",
+  auto_retry_start: "run",
+  auto_retry_end: "run",
+};
+
 export class PiAdapter {
   constructor({ projectsRoot, agentDir, piUsable = true, piVersion = "",
-                createSessionFn = null, listModelsFn = null, onLog = null }) {
+                createSessionFn = null, listModelsFn = null, onLog = null, worktreesRoot = null }) {
     this.projectsRoot = projectsRoot;
+    this.worktreesRoot = worktreesRoot;
     this.agentDir = agentDir;
     this.piUsable = piUsable;
     this.piVersion = piVersion;
@@ -319,6 +332,21 @@ export class PiAdapter {
     this.onLog = typeof onLog === "function" ? onLog : null;
     this.sessions = new Map();
     this.instance = randomUUID();
+    // Set by the protocol layer: called with (sessionId, kind) after a
+    // native session changes, so it can push a hint. Never carries content.
+    this.onSessionChange = null;
+  }
+
+  // Deferred so the SDK finishes updating its state (streaming, pending
+  // tools) before anyone reads the session in response to the hint.
+  _notifySessionChange(sessionId, kind) {
+    const listener = this.onSessionChange;
+    if (typeof listener !== "function") return;
+    setImmediate(() => {
+      try {
+        listener(String(sessionId), kind);
+      } catch { /* hints never affect sessions */ }
+    });
   }
 
   get sessionCount() {
@@ -384,7 +412,7 @@ export class PiAdapter {
 
   recoverExecutions(binding) {
     try {
-      if (!binding || resolveSessionDir(this.projectsRoot, binding.directory) !== binding.directory) {
+      if (!binding || resolveSessionDir(this.projectsRoot, binding.directory, undefined, this.worktreesRoot) !== binding.directory) {
         throw new Error("Execution audit binding changed");
       }
       return this._openExecutionJournal(binding, { requireExisting: true }).snapshot();
@@ -405,7 +433,7 @@ export class PiAdapter {
     if (!entry) return null;
     let canonical;
     try {
-      canonical = resolveSessionDir(this.projectsRoot, directory);
+      canonical = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     } catch {
       throw new AdapterError("directory does not match the session workspace", 400, "rejected");
     }
@@ -418,20 +446,13 @@ export class PiAdapter {
     return entry;
   }
 
-  // Resolve the Bridge-delivered permission policy into an immutable
-  // session snapshot (defense in depth: validated AGAIN here, and the
-  // Bridge-supplied revision must equal the recomputed canonical revision).
-  // - neither policy nor revision supplied => read-only safe default
-  //   (legacy Bridge compatibility only; no trusted extension);
-  // - exactly one of policy/revision supplied => fail closed, no session;
-  // - supplied policy invalid, v1/v2, or revision malformed => fail closed
-  //   (older versions need a coordinated Bridge+adapter upgrade; they are
-  //   never silently reinterpreted under v3 semantics);
-  // - revision mismatch against the recomputed canonical revision =>
-  //   fail closed; a different snapshot revision is never silently accepted.
-  // - configured external roots are canonicalized (realpath, existing
-  //   directory) here; canonical duplicates fail session creation.
-  // v3 has no fixed filesystem denies; ordinary configurable policy applies.
+  // Resolve a run's security profile rules into an immutable session
+  // snapshot (validated again here; the supplied revision must equal the
+  // recomputed one):
+  // - neither rules nor revision supplied => the read-only built-in,
+  //   without the trusted extension (direct adapter use only);
+  // - exactly one supplied, invalid rules, or a malformed or different
+  //   revision => fail closed, no session.
   _snapshotPolicy(options) {
     const raw = options && typeof options === "object" ? options.permission_policy : undefined;
     const suppliedRevision = options && typeof options === "object" ? options.policy_revision : undefined;
@@ -445,45 +466,25 @@ export class PiAdapter {
         writable: false,
         shellMode: "deny",
         legacy: true,
-        effectiveRoots: [],
       };
     }
     if (hasPolicy !== hasRevision) {
-      throw new AdapterError("Pi permission policy revision is missing", 400, "invalid_policy");
-    }
-    if (raw && typeof raw === "object" && (raw.version === 1 || raw.version === 2)) {
-      throw new AdapterError(
-        `Pi permission policy v${raw.version} is invalid: requires a coordinated Bridge and adapter upgrade`,
-        400, "invalid_policy");
+      throw new AdapterError("Pi security profile revision is missing", 400, "invalid_policy");
     }
     let policy;
     try {
       policy = validatePolicy(raw);
     } catch {
-      throw new AdapterError("Pi permission policy is invalid", 400, "invalid_policy");
+      throw new AdapterError("Pi security profile is invalid", 400, "invalid_policy");
     }
-    if (typeof suppliedRevision !== "string" || !/^[0-9a-fA-F]{64}$/.test(suppliedRevision)) {
-      throw new AdapterError("Pi permission policy revision is malformed", 400, "invalid_policy");
+    if (typeof suppliedRevision !== "string" || !REVISION_RE.test(suppliedRevision)) {
+      throw new AdapterError("Pi security profile revision is malformed", 400, "invalid_policy");
     }
     const computed = policyRevision(policy);
-    if (suppliedRevision.toLowerCase() !== computed) {
-      throw new AdapterError("Pi permission policy revision mismatch", 409, "conflict");
+    if (suppliedRevision !== computed) {
+      throw new AdapterError("Pi security profile revision mismatch", 409, "conflict");
     }
-    let effectiveRoots;
-    try {
-      effectiveRoots = canonicalizeExternalRoots(policy.external_access.roots);
-    } catch {
-      throw new AdapterError("Pi permission policy external roots are unavailable", 400, "invalid_policy");
-    }
-    // Store the verified (equal) revision.
-    return {
-      policy,
-      revision: computed,
-      writable: policy.write_tools_enabled === true,
-      shellMode: policy.shell_mode || "deny",
-      legacy: false,
-      effectiveRoots,
-    };
+    return { policy, revision: computed, ...toolExposure(policy), legacy: false };
   }
 
   // Resolve the Bridge-delivered extension policy into an immutable
@@ -562,7 +563,7 @@ export class PiAdapter {
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
     }
-    const cwd = resolveSessionDir(this.projectsRoot, directory);
+    const cwd = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     const snapshot = this._snapshotPolicy(options);
     // 3C2 extension snapshot: validated alongside the permission snapshot
     // (default-empty when the Bridge sends no extension policy). Enabled
@@ -659,7 +660,6 @@ export class PiAdapter {
       policyRevision: snapshot.revision,
       writable: snapshot.writable,
       shellMode: snapshot.shellMode,
-      effectiveRoots: snapshot.effectiveRoots,
       // Immutable extension snapshot (3C2). Never mutated after
       // creation; extension policy changes apply to new sessions only.
       // Active sessions never hot-reload extensions.
@@ -726,7 +726,7 @@ export class PiAdapter {
 
   // Authoritative in-process state read. The session object is owned by
   // this entry, so no drift check is needed; a disposed entry never
-  // reaches here. Includes AgentSession.isRetrying (Pi 0.87.0): logical
+  // reaches here. Includes AgentSession.isRetrying (Pi 1.4.0): logical
   // busy is isStreaming || isRetrying. Fail closed if SDK state access
   // itself throws as today.
   _sdkState(entry, ownedSessionId) {
@@ -842,7 +842,7 @@ export class PiAdapter {
     });
   }
 
-  // Pi 0.87.0 prompt() selects the active native queue at submission time;
+  // Pi 1.4.0 prompt() selects the active native queue at submission time;
   // when the session has just settled it starts the next prompt instead.
   // That decision inside Pi closes the streaming-to-idle race.
   async submitInput(directory, sessionId, text, mode, isCurrent = () => true,
@@ -1000,7 +1000,7 @@ export class PiAdapter {
   }
 
   async listModels(directory) {
-    resolveSessionDir(this.projectsRoot, directory);
+    resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     if (!this.piUsable) {
       throw new AdapterError("Pi runtime is unavailable", 502, "unavailable");
     }
@@ -1041,7 +1041,7 @@ export class PiAdapter {
   _permissionEntry(sessionId, directory) {
     let canonical;
     try {
-      canonical = resolveSessionDir(this.projectsRoot, directory);
+      canonical = resolveSessionDir(this.projectsRoot, directory, undefined, this.worktreesRoot);
     } catch {
       throw new AdapterError("directory does not match the session workspace", 400, "rejected");
     }
@@ -1077,13 +1077,11 @@ export class PiAdapter {
         code: "extension_tool",
       };
     }
-    // v3: no fixed filesystem denies; ordinary configurable policy applies.
     return evaluateToolCall({
       cwd: entry.cwd,
       policy: entry.permissionPolicy,
       toolName,
       input,
-      effectiveRoots: entry.effectiveRoots || [],
     });
   }
 
@@ -1167,6 +1165,7 @@ export class PiAdapter {
     };
     entry.pendingByToolCall.set(toolCallId, record);
     entry.pendingByPermission.set(permissionId, record);
+    this._notifySessionChange(record.sessionId, "interaction");
     return suspended;
   }
 
@@ -1174,7 +1173,9 @@ export class PiAdapter {
     if (!entry || !event || typeof event !== "object") return;
     if (entry.disposed) return;
     if (this.sessions.get(String(sessionId)) !== entry) return;
-    // Native transient retry lifecycle (Pi 0.87.0): auto_retry_start/end
+    const change = SESSION_CHANGES[event.type];
+    if (change) this._notifySessionChange(sessionId, change);
+    // Native transient retry lifecycle (Pi 1.4.0): auto_retry_start/end
     // are delivered through this same subscription. They are observed
     // here for sanitized operational logging only; the Bridge never
     // replays prompts and RunCoordinator adds no retry loop.
@@ -1243,7 +1244,7 @@ export class PiAdapter {
     }
   }
 
-  // Sanitized native retry lifecycle observer (Pi 0.87.0
+  // Sanitized native retry lifecycle observer (Pi 1.4.0
   // auto_retry_start/end). Emits a dedicated structured operational event
   // with allowlisted bounded scalar fields only: session_id, attempt,
   // max_attempts, delay_ms, success/state. Never logs errorMessage,
@@ -1429,10 +1430,8 @@ export class PiAdapter {
     return entry.journal.head;
   }
 
-  _expectedUiOptions(entry) {
-    return entry.permissionPolicy.allow_session_always
-      ? [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT]
-      : [OPTION_ONCE, OPTION_REJECT];
+  _expectedUiOptions() {
+    return [OPTION_ONCE, OPTION_ALWAYS, OPTION_REJECT];
   }
 
   _publicPending(record) {
@@ -1486,9 +1485,6 @@ export class PiAdapter {
     const record = entry.pendingByPermission.get(pid);
     if (!record || record.sessionId !== String(sessionId)) {
       throw new AdapterError("Permission not found", 404, "not_found");
-    }
-    if (response === "always" && !entry.permissionPolicy.allow_session_always) {
-      throw new AdapterError("Always-allow is disabled by policy", 400, "rejected");
     }
     // The pending record is only honored while the EXACT original
     // preflight still exists and re-evaluates identically. A missing or

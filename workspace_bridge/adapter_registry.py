@@ -4,27 +4,11 @@ from __future__ import annotations
 import re
 
 from .node_client import NodeRuntimeAdapterProxy
+from .profile_registry import adapter_security
 from .security import BridgeError
 
 ADAPTER_ID_RE = re.compile(r"^adapter_[0-9a-f]{24}$")
 RUNTIME_TYPES = frozenset({"pi", "codex", "claude", "opencode"})
-
-
-def validate_base_url(value: object) -> str:
-    import urllib.parse
-    if not isinstance(value, str) or len(value) > 2048:
-        raise BridgeError("Invalid service URL", "invalid_arguments")
-    parsed = urllib.parse.urlsplit(value.strip())
-    try:
-        _ = parsed.port
-    except ValueError:
-        raise BridgeError("Invalid service URL", "invalid_arguments") from None
-    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-            or parsed.username is not None or parsed.password is not None
-            or parsed.query or parsed.fragment):
-        raise BridgeError("Service URL must be http or https without credentials",
-                          "invalid_arguments")
-    return value.strip().rstrip("/")
 
 
 class AdapterRegistry:
@@ -64,10 +48,10 @@ class AdapterRegistry:
     def public(row: dict) -> dict:
         return {"id": row.get("id", row.get("adapter_id")), "node_id": row["node_id"],
                 "node_name": row.get("node_name", ""), "name": row["name"],
-                "runtime_type": row["runtime_type"], "base_url": row.get("base_url", ""),
+                "runtime_type": row["runtime_type"],
                 "enabled": bool(row["enabled"]),
                 "revision": row["revision"], "last_seen": row.get("last_seen"),
-                "has_token": bool(row.get("has_token"))}
+                "security": adapter_security(row)}
 
     def client(self, adapter_id: str, *, require_enabled: bool = False,
                timeout: float = 30, workspace: dict | None = None) -> NodeRuntimeAdapterProxy:

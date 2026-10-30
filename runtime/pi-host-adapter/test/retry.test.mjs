@@ -1,4 +1,4 @@
-// Native retry lifecycle and managed backoff policy (Pi 0.87.0).
+// Native retry lifecycle and managed backoff policy (Pi 1.4.0).
 //
 // - Logical busy is isStreaming || isRetrying; isStreaming=false +
 //   isRetrying=true must read busy, never idle.
@@ -28,6 +28,7 @@ import {
 } from "../sdk-transport.mjs";
 import { buildRecord } from "../logging.mjs";
 import { createFakeTransport } from "./fake-sdk.mjs";
+import { securityBlock } from "./security-block.mjs";
 
 function makeProjects() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-retry-"));
@@ -152,13 +153,13 @@ test("WBRP run stays active while native Pi retries a transient 429", async () =
   const protocol = new PiRuntimeProtocol(adapter);
   // PiRuntimeProtocol persists under the adapter agentDir; point it at an
   // isolated temp dir for this test.
-  const profile = protocol.profileList().profiles[0];
+  const security = securityBlock();
   const conversation = await protocol.createConversation({
     workspaceId: "ws-retry",
     directory: projects.app,
-    securityProfile: { id: profile.id, revision: profile.revision },
+    security,
   });
-  const run = await protocol.startRun(conversation.id, {
+  const run = await protocol.startRun(conversation.id, { security: securityBlock(),
     input: [{ type: "text", text: "Do work" }],
   });
   assert.equal(run.phase, "active");
@@ -193,13 +194,13 @@ test("WBRP run succeeds after retry backoff resolves to completion", async () =>
   const transport = createFakeTransport();
   const adapter = makeAdapter(projects, transport);
   const protocol = new PiRuntimeProtocol(adapter);
-  const profile = protocol.profileList().profiles[0];
+  const security = securityBlock();
   const conversation = await protocol.createConversation({
     workspaceId: "ws-retry-ok",
     directory: projects.app,
-    securityProfile: { id: profile.id, revision: profile.revision },
+    security,
   });
-  const run = await protocol.startRun(conversation.id, {
+  const run = await protocol.startRun(conversation.id, { security: securityBlock(),
     input: [{ type: "text", text: "Do work" }],
   });
   const sdk = transport.lastSession();

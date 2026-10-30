@@ -71,8 +71,6 @@ import {
   displayState,
   jsonText,
   runtimeName,
-  type VersionComponentState,
-  type VersionStatus,
   type DiagnosticCheck,
   type DiagnosticReport,
   type AdapterInfo,
@@ -92,8 +90,9 @@ import {
 } from "@/lib/api";
 import type { ConfirmState, TextDetail } from "@/components/manager-types";
 import { RunInspector } from "@/features/runs/RunInspector";
+import { WorkspaceCheckpoints } from "@/features/runs/WorkspaceCheckpoints";
 import { getRuns, getWorkspaceRuns } from "@/features/runs/api";
-import { useRunEvents } from "@/features/runs/useRunEvents";
+import { useManagerEvents } from "@/features/runs/useManagerEvents";
 import { createRefreshQueue } from "@/features/runs/refresh-queue";
 import {
   appendOlder,
@@ -103,164 +102,15 @@ import {
 import "./app.css";
 import { ProfileManager } from "./ProfileEditor";
 import { ProfileAssignment } from "./ProfileAssignment";
+import { ApprovalLog } from "./ApprovalLog";
+import { StartRunDialog } from "./StartRunDialog";
+import {
+  AdapterDialog,
+  NodeDialog,
+  type AdapterDialogState,
+  type NodeDialogState,
+} from "./SetupDialogs";
 import { CommandPalette, type PaletteCommand } from "./CommandPalette";
-import { describeManagerIdentity } from "@/lib/manager-identity";
-
-function compiledManagerReleaseRaw(): unknown {
-  try {
-    return typeof __MANAGER_RELEASE__ !== "undefined"
-      ? (__MANAGER_RELEASE__ as unknown)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function shortBuildId(buildId?: string | null): string {
-  if (typeof buildId === "string" && /^sha256:[0-9a-f]{64}$/.test(buildId)) {
-    return `sha256:${buildId.slice(7, 19)}…`;
-  }
-  return "unknown";
-}
-
-function versionStateLabel(state: VersionComponentState["state"]): string {
-  if (state === "current") return "Current";
-  if (state === "update_available") return "Update available · Compatible";
-  if (state === "unsupported_build") return "Unsupported development build";
-  if (state === "target_mismatch") return "Newer than target · No action";
-  if (state === "incompatible") return "Incompatible · Affected routes only";
-  return "Unavailable · Affected routes only";
-}
-
-function versionStateDetail(entry: VersionComponentState): string {
-  if (entry.state === "current") return "Matches the target. No action needed.";
-  if (entry.state === "update_available")
-    return "Existing routes stay runnable. Update manually on the host when convenient.";
-  if (entry.state === "unsupported_build") {
-    if (entry.reason === "release-invalid")
-      return "Invalid release identity. Reinstall a supported release manually; protocol-compatible routes may still run.";
-    if (entry.reason === "release-unsupported")
-      return "Unsupported release contract. Reinstall a supported release manually; protocol-compatible routes may still run.";
-    return "Release identity is missing. Reinstall a supported release manually; protocol-compatible routes may still run.";
-  }
-  if (entry.state === "target_mismatch")
-    return "Newer than the target. No downgrade is offered; compatible routes stay runnable.";
-  if (entry.state === "incompatible")
-    return "Bridge protocol mismatch. Only routes using this component are affected.";
-  return "Unavailable or disabled. Only routes using this component are affected.";
-}
-
-function VersionRow({
-  entry,
-  displayName,
-}: {
-  entry: VersionComponentState;
-  displayName?: string;
-}) {
-  const name =
-    entry.component === "bridge"
-      ? "Bridge"
-      : entry.component === "manager"
-        ? "Manager"
-        : displayName || entry.instance;
-  const packageName =
-    entry.component === "manager"
-      ? null
-      : entry.runtime_type === "pi"
-        ? "workspace-bridge-pi-host-adapter"
-        : entry.runtime_type === "claude"
-          ? "workspace-bridge[claude]"
-          : "workspace-bridge";
-  return (
-    <div className="version-row">
-      <div className="version-identity">
-        <h4>{name}</h4>
-        {entry.runtime_type && <small>{runtimeName(entry.runtime_type)}</small>}
-      </div>
-      <div className="version-value">
-        <span>Installed</span>
-        <strong>{entry.current_product_version || "Unknown"}</strong>
-      </div>
-      <div className="version-value">
-        <span>Target</span>
-        <strong>{entry.target_product_version || "Unknown"}</strong>
-      </div>
-      <div className="version-status">
-        <span className={`version-status-badge version-status-${entry.state}`}>
-          {versionStateLabel(entry.state)}
-        </span>
-        <p>{versionStateDetail(entry)}</p>
-      </div>
-      <details className="version-details">
-        <summary>Build and package details</summary>
-        <dl>
-          <div>
-            <dt>Installed build</dt>
-            <dd>
-              <code>{entry.current_build_id || "Unknown"}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>Target build</dt>
-            <dd>
-              {entry.target_precision === "product-version-only" ? (
-                "Compared by version only"
-              ) : (
-                <code>{entry.target_build_id || "Unknown"}</code>
-              )}
-            </dd>
-          </div>
-          {packageName && (
-            <div>
-              <dt>Package</dt>
-              <dd>
-                <code>{packageName}</code> (
-                {entry.runtime_type === "pi" ? "npm" : "PyPI / uv tool"})
-              </dd>
-            </div>
-          )}
-          {displayName && displayName !== entry.instance && (
-            <div>
-              <dt>Instance ID</dt>
-              <dd>{entry.instance}</dd>
-            </div>
-          )}
-        </dl>
-      </details>
-    </div>
-  );
-}
-
-function VersionGroup({
-  title,
-  entries,
-  empty,
-  names = {},
-}: {
-  title: string;
-  entries: VersionComponentState[];
-  empty: string;
-  names?: Record<string, string>;
-}) {
-  return (
-    <section className="version-group">
-      <h3>{title}</h3>
-      {entries.length ? (
-        <div className="version-list">
-          {entries.map((entry) => (
-            <VersionRow
-              key={`${entry.component}:${entry.instance}`}
-              entry={entry}
-              displayName={names[entry.instance]}
-            />
-          ))}
-        </div>
-      ) : (
-        <p className="version-empty">{empty}</p>
-      )}
-    </section>
-  );
-}
 
 type Section =
   | "overview"
@@ -269,7 +119,6 @@ type Section =
   | "adapters"
   | "handoffs"
   | "runs"
-  | "versions"
   | "audit";
 const sections: Array<{
   id: Section;
@@ -316,13 +165,6 @@ const sections: Array<{
     description: "Agent progress and live requests",
   },
   {
-    id: "versions",
-    title: "System / Versions",
-    icon: RefreshCw,
-    description:
-      "Component versions and compatibility; updates are manual and local",
-  },
-  {
     id: "audit",
     title: "Audit",
     icon: Shield,
@@ -330,10 +172,30 @@ const sections: Array<{
   },
 ];
 const pageSize = 25;
-const autoRefreshMs = 30000;
 // Codex account quota is read only while the Adapters section is visible and
 // refreshed at most once per adapter per minute; never from /api/status.
 const quotaRefreshMs = 60000;
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  node_paired: "Node paired",
+  node_pairing_created: "Node pairing created",
+  bridge_rotate_token: "Bridge token rotated",
+  bridge_enable: "Bridge access enabled",
+  bridge_disable: "Bridge access paused",
+  workspace_registered: "Workspace registered",
+  set_workspace_route: "Workspace route changed",
+  abandon_agent_run: "Agent run abandoned",
+  internal_error: "Internal error",
+  admin_internal_error: "Internal error",
+};
+
+/** Event codes are snake_case identifiers; show words, keep the code as a tooltip. */
+function auditActionLabel(action: string): string {
+  const known = AUDIT_ACTION_LABELS[action];
+  if (known) return known;
+  const words = action.replace(/[_.:]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : action;
+}
+
 function initialSection(): Section {
   const value = location.hash.slice(1);
   return sections.some((s) => s.id === value) ? (value as Section) : "overview";
@@ -410,11 +272,11 @@ function securityDetail(
   const effective = grant?.effective_security;
   if (!effective)
     return "Unavailable — route cannot run until security resolves.";
+  if (effective.error) return `Unavailable — ${effective.error}`;
   if (effective.source === "profile") {
-    return `Profile ${effective.profile_id || "unknown"} · revision ${(effective.bound_revision || "unknown").slice(0, 12)} · ${effective.freshness || "unknown"}`;
+    return `Profile ${effective.profile_id || "unknown"} · revision ${(effective.revision || "unknown").slice(0, 17)}`;
   }
-  const summary = effective.resolved_summary || {};
-  return `Codex runtime config · ${String(summary.activePermissionProfile || "permission profile unknown")} · approval ${String(summary.approvalPolicy || "unknown")} · reviewer ${String(summary.approvalsReviewer || "unknown")} · ${effective.status || "unavailable"}`;
+  return "The agent's own security; each approval it asks for becomes an interaction.";
 }
 function isDiagnosticReport(value: unknown): value is DiagnosticReport {
   if (!value || typeof value !== "object") return false;
@@ -782,12 +644,6 @@ function WorkspaceCard({
                     Workspace route: {grant.enabled ? "Enabled" : "Disabled"}
                   </span>
                 </p>
-                {grant.security_binding?.source === "runtime-config" &&
-                  grant.security_binding.status !== "ready" && (
-                    <p className="runtime-security-summary">
-                      Codex security config is currently unavailable
-                    </p>
-                  )}
                 {!diagnosticsUnavailable && route && !route.ready && (
                   <div className="runtime-route-blocker">
                     <p>{blockers[0]?.check?.summary || route.summary}</p>
@@ -834,6 +690,9 @@ function WorkspaceCard({
                   <span>Route readiness</span>
                   <StateBadge value={status} />
                 </div>
+                <span className="route-switch-label" aria-hidden="true">
+                  {grant.enabled ? "Route on" : "Route off"}
+                </span>
                 <Switch
                   aria-label={`${grant.name} route for ${ws.name}`}
                   checked={grant.enabled}
@@ -908,11 +767,7 @@ function WorkspaceCard({
         <span>
           <StateBadge value={ws.enabled ? "Bridge on" : "Bridge off"} />{" "}
           <span className="write-summary">
-            {ws.write_scope === "none"
-              ? "Read only"
-              : ws.write_scope === "handoff"
-                ? "Handoff writes"
-                : "Workspace writes"}
+            {ws.write_scope === "workspace" ? "Edits allowed" : "Read only"}
           </span>
         </span>
         <Button
@@ -928,9 +783,15 @@ function WorkspaceCard({
       {settingsOpen && (
         <div className="workspace-settings">
           <div className="settings-field">
-            <Label htmlFor={`write-${ws.id}`}>File write access</Label>
+            <Label htmlFor={`write-${ws.id}`}>ChatGPT file access</Label>
+            <p id={`write-help-${ws.id}`}>
+              {writeScope === "workspace"
+                ? "ChatGPT can edit files that are not excluded and run the workspace's checks. Agent runs are governed separately by each route's security profile."
+                : "ChatGPT can list and read files but cannot change anything. Agent runs are governed separately by each route's security profile."}
+            </p>
             <select
               id={`write-${ws.id}`}
+              aria-describedby={`write-help-${ws.id}`}
               className="native-select"
               value={writeScope}
               onChange={(e) =>
@@ -938,15 +799,18 @@ function WorkspaceCard({
               }
             >
               <option value="none">Read only</option>
-              <option value="handoff">Handoff files only</option>
               <option value="workspace">
-                Permitted files across workspace
+                Edit permitted files and run checks
               </option>
             </select>
           </div>
           <div className="settings-field">
             <Label htmlFor={`excludes-${ws.id}`}>Extra exclusions</Label>
-            <p>Built-in exclusions always apply. One pattern per line.</p>
+            <p>
+              Built-in exclusions always apply. One pattern per line. A line
+              such as <code>!build</code> or <code>!vendor</code> shows a folder
+              hidden by default; credential and Git paths stay hidden.
+            </p>
             <Textarea
               id={`excludes-${ws.id}`}
               rows={3}
@@ -977,6 +841,11 @@ function WorkspaceCard({
           >
             Save settings
           </Button>
+          <WorkspaceCheckpoints
+            workspaceId={ws.id}
+            onConfirm={onConfirm}
+            onNotice={onNotice}
+          />
         </div>
       )}
     </article>
@@ -1287,8 +1156,6 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
-  const [versions, setVersions] = useState<VersionStatus | null>(null);
-  const [versionsError, setVersionsError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -1303,17 +1170,11 @@ export default function App() {
   const [workspaceRuns, setWorkspaceRuns] = useState<Run[]>([]);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [addOpen, setAddOpen] = useState(false);
-  const [adapterDialog, setAdapterDialog] = useState<{
-    mode: "create" | "edit";
-    adapter?: AdapterInfo;
-    nodeId?: string;
-  } | null>(null);
-  const [adapterTest, setAdapterTest] = useState("");
-  const [nodeDialog, setNodeDialog] = useState<{
-    mode: "create" | "edit";
-    node?: NodeInfo;
-  } | null>(null);
-  const [nodeTest, setNodeTest] = useState("");
+  const [adapterDialog, setAdapterDialog] = useState<AdapterDialogState | null>(
+    null,
+  );
+  const [nodeDialog, setNodeDialog] = useState<NodeDialogState | null>(null);
+  const [startRun, setStartRun] = useState(false);
   const [profileFor, setProfileFor] = useState<{
     ws: Workspace;
     adapterId: string;
@@ -1326,8 +1187,6 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [runImagePaths, setRunImagePaths] = useState("");
-  const [startingHandoff, setStartingHandoff] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -1341,7 +1200,9 @@ export default function App() {
   const liveRefreshRef = useRef<ReturnType<typeof createRefreshQueue> | null>(
     null,
   );
-  const startRequestIds = useRef(new Map<string, string>());
+  const snapshotRefreshRef = useRef<ReturnType<
+    typeof createRefreshQueue
+  > | null>(null);
   const notify = useCallback((text: string) => {
     setNotice(text);
     window.setTimeout(() => setNotice(""), 6500);
@@ -1425,25 +1286,11 @@ export default function App() {
             );
           },
         );
-        const versionsResult = api<VersionStatus>("/api/system/versions").then(
-          (value) => {
-            setVersions(value);
-            setVersionsError(null);
-          },
-          (error: unknown) => {
-            setVersionsError(
-              error instanceof Error
-                ? error.message
-                : "Versions status could not be refreshed.",
-            );
-          },
-        );
         const [workspaceData, historyData, currentStatus] = await Promise.all([
           api<{ workspaces: Workspace[] }>("/api/workspaces"),
           api<{ events: Event[] }>("/api/events"),
           api<Status>("/api/status"),
           diagnosticsResult,
-          versionsResult,
         ]);
         setWorkspaces(workspaceData.workspaces || []);
         setEvents(historyData.events || []);
@@ -1505,10 +1352,17 @@ export default function App() {
   const refreshLiveRuns = useCallback(() => {
     if (!document.hidden) liveRefreshRef.current?.schedule();
   }, []);
-  useRunEvents({
+  const refreshSnapshot = useCallback(() => {
+    if (!document.hidden) snapshotRefreshRef.current?.schedule();
+  }, []);
+  useManagerEvents({
     enabled: auth === "ready" && autoRefresh,
-    onChange: refreshLiveRuns,
-    onReset: refreshLiveRuns,
+    onRun: refreshLiveRuns,
+    onState: refreshSnapshot,
+    onReset: () => {
+      refreshLiveRuns();
+      refreshSnapshot();
+    },
   });
   useEffect(() => {
     void (async () => {
@@ -1529,31 +1383,28 @@ export default function App() {
   }, [refresh]);
   useEffect(() => {
     if (auth !== "ready" || !autoRefresh) return;
-    const tick = () => {
+    // The Bridge pushes a hint when audited state moves; reread the whole
+    // snapshot once per burst, and again when the tab becomes visible.
+    const queue = createRefreshQueue(async () => {
       if (document.hidden || refreshingRef.current) return;
-      void (async () => {
-        try {
-          await refresh({ silent: true });
-          if (section === "handoffs" && selectedWorkspace) {
-            try {
-              await loadWorkspaceDetails(selectedWorkspace);
-            } catch {
-              /* keep stale handoffs until next tick */
-            }
-          }
-        } catch {
-          /* keep stale page data until next tick */
-        }
-      })();
-    };
-    const timer = window.setInterval(tick, autoRefreshMs);
+      try {
+        await refresh({ silent: true });
+        if (section === "handoffs" && selectedWorkspace)
+          await loadWorkspaceDetails(selectedWorkspace);
+      } catch {
+        /* keep stale page data until the next hint */
+      }
+    });
+    snapshotRefreshRef.current = queue;
     const onVisible = () => {
-      if (!document.hidden) tick();
+      if (!document.hidden) queue.schedule();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
+      queue.dispose();
+      if (snapshotRefreshRef.current === queue)
+        snapshotRefreshRef.current = null;
     };
   }, [
     auth,
@@ -1679,127 +1530,6 @@ export default function App() {
       notify((error as Error).message);
     }
   }
-  async function saveAdapter(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!adapterDialog) return;
-    const data = new FormData(event.currentTarget);
-    const body =
-      adapterDialog.mode === "create"
-        ? {
-            name: data.get("name"),
-            node_id: data.get("node_id") || adapterDialog.nodeId,
-            runtime_type: data.get("runtime_type"),
-            base_url: data.get("base_url"),
-            token: data.get("token"),
-            enabled: data.get("enabled") === "on",
-          }
-        : {
-            name: data.get("name"),
-            base_url: data.get("base_url"),
-            token: data.get("token"),
-            enabled: data.get("enabled") === "on",
-          };
-    try {
-      if (adapterDialog.mode === "create")
-        await api("/api/adapters", "POST", body);
-      else
-        await api(`/api/adapters/${adapterDialog.adapter?.id}`, "PATCH", body);
-      setAdapterDialog(null);
-      setAdapterTest("");
-      notify(
-        adapterDialog.mode === "create" ? "Adapter added." : "Adapter updated.",
-      );
-      await refresh();
-    } catch (error) {
-      notify((error as Error).message);
-    }
-  }
-  async function saveNode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!nodeDialog) return;
-    const data = new FormData(event.currentTarget);
-    const body = {
-      name: data.get("name"),
-      base_url: data.get("base_url"),
-      token: data.get("token"),
-      enabled: data.get("enabled") === "on",
-    };
-    try {
-      await api(
-        nodeDialog.mode === "create"
-          ? "/api/nodes"
-          : `/api/nodes/${nodeDialog.node?.id}`,
-        nodeDialog.mode === "create" ? "POST" : "PATCH",
-        body,
-      );
-      setNodeDialog(null);
-      setNodeTest("");
-      notify(nodeDialog.mode === "create" ? "Node added." : "Node updated.");
-      await refresh();
-    } catch (error) {
-      notify((error as Error).message);
-    }
-  }
-  async function testNode(form?: HTMLFormElement) {
-    if (!nodeDialog || !form) return;
-    const data = new FormData(form);
-    try {
-      const result = await api<{
-        success: boolean;
-        message?: string;
-        code?: string;
-      }>("/api/nodes/test", "POST", {
-        node_id: nodeDialog.node?.id,
-        name: data.get("name"),
-        base_url: data.get("base_url"),
-        token: data.get("token"),
-        enabled: data.get("enabled") === "on",
-      });
-      setNodeTest(
-        result.success
-          ? "Connected: Node Protocol is ready."
-          : `Connection failed: ${result.message || result.code || "Unavailable"}`,
-      );
-    } catch (error) {
-      setNodeTest(`Connection failed: ${(error as Error).message}`);
-    }
-  }
-  async function testAdapter(form?: HTMLFormElement) {
-    if (!adapterDialog) return;
-    try {
-      let result: {
-        success: boolean;
-        message?: string;
-        code?: string;
-        native_runtime?: string;
-        native_instance?: string;
-        adapter_version?: string;
-        native_version?: string;
-      };
-      const data = new FormData(form);
-      result = await api("/api/adapters/test", "POST", {
-        node_id: data.get("node_id") || adapterDialog.nodeId,
-        name: data.get("name"),
-        runtime_type:
-          adapterDialog.mode === "edit"
-            ? adapterDialog.adapter?.runtime_type
-            : data.get("runtime_type"),
-        base_url: data.get("base_url"),
-        token: data.get("token"),
-        enabled: data.get("enabled") === "on",
-        ...(adapterDialog.mode === "edit"
-          ? { adapter_id: adapterDialog.adapter?.id }
-          : {}),
-      });
-      setAdapterTest(
-        result.success
-          ? `Connected: ${result.native_runtime} · ${result.native_version || result.adapter_version || "version unavailable"}`
-          : `Connection failed: ${result.message || result.code || "Unavailable"}`,
-      );
-    } catch (error) {
-      setAdapterTest(`Connection failed: ${(error as Error).message}`);
-    }
-  }
   function ask(state: ConfirmState) {
     setConfirm(state);
   }
@@ -1822,75 +1552,6 @@ export default function App() {
       await loadWorkspaceDetails(ws.id);
     } catch (error) {
       notify((error as Error).message);
-    }
-  }
-  async function startPreparedHandoff(handoff: Handoff, route: RunnableRoute) {
-    if (startingHandoff) return;
-    const images = runImagePaths
-      .split("\n")
-      .map((path) => path.trim())
-      .filter(Boolean)
-      .map((path) => ({ path }));
-    if (images.length > 4) {
-      notify("Choose at most four images.");
-      return;
-    }
-    const key = `${selectedWorkspace}:${handoff.id}:${route.adapter_id}:${JSON.stringify(images)}`;
-    let requestId = startRequestIds.current.get(key);
-    if (!requestId) {
-      requestId = crypto.randomUUID();
-      startRequestIds.current.set(key, requestId);
-    }
-    setStartingHandoff(key);
-    try {
-      const response = await fetch(
-        `/api/workspaces/${selectedWorkspace}/jobs/${handoff.id}/runs`,
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            adapter_id: route.adapter_id,
-            request_id: requestId,
-            ...(images.length ? { images } : {}),
-          }),
-        },
-      );
-      const result = (await response.json().catch(() => ({}))) as Run & {
-        error?: string;
-      };
-      if (!response.ok) {
-        if (response.status >= 400 && response.status < 500)
-          startRequestIds.current.delete(key);
-        notify(
-          result.error ||
-            (response.status >= 500
-              ? "The start outcome is uncertain. Retry to reuse the same request ID."
-              : `Could not start the prepared handoff (HTTP ${response.status}).`),
-        );
-        return;
-      }
-      if (!result.run_id) {
-        notify(
-          "The start outcome is uncertain. Retry to reuse the same request ID.",
-        );
-        return;
-      }
-      startRequestIds.current.delete(key);
-      notify(
-        `Started ${route.adapter_name} run${result.model ? ` with ${result.model}` : ""}.`,
-      );
-      await Promise.allSettled([
-        refresh({ silent: true }),
-        loadWorkspaceDetails(selectedWorkspace || ""),
-      ]);
-      navigate("runs");
-    } catch {
-      notify(
-        "The start outcome is uncertain. Retry to reuse the same request ID.",
-      );
-    } finally {
-      setStartingHandoff(null);
     }
   }
   function openProfile(ws: Workspace, adapterId: string) {
@@ -1941,6 +1602,13 @@ export default function App() {
     }
   }
   const selected = workspaces.find((w) => w.id === selectedWorkspace) || null;
+  const onlyWorkspace = workspaces.length === 1 ? workspaces[0] : null;
+  useEffect(() => {
+    // With a single workspace there is nothing to choose: open its handoffs.
+    if (section === "handoffs" && !selectedWorkspace && onlyWorkspace)
+      void openHandoffs(onlyWorkspace);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, selectedWorkspace, onlyWorkspace?.id]);
   const filtered = workspaces.filter((w) =>
     `${w.name} ${w.root}`.toLowerCase().includes(workspaceQuery.toLowerCase()),
   );
@@ -2087,6 +1755,9 @@ export default function App() {
     ];
   }, [diagnostics, diagnosticsUnavailable, readyRoutes]);
   const page = sections.find((s) => s.id === section)!;
+  useEffect(() => {
+    document.title = `${page.title} · Workspace Bridge`;
+  }, [page.title]);
   const ready = auth === "ready" && !changingPassword;
   useEffect(() => {
     if (!lastUpdated) return;
@@ -2160,6 +1831,24 @@ export default function App() {
         },
       },
       {
+        id: "pair-node",
+        group: "Actions",
+        label: "Pair a Node",
+        run: () => {
+          navigate("nodes");
+          setNodeDialog({ mode: "pair" });
+        },
+      },
+      {
+        id: "add-adapter",
+        group: "Actions",
+        label: "Add an adapter",
+        run: () => {
+          navigate("adapters");
+          setAdapterDialog({ mode: "create" });
+        },
+      },
+      {
         id: "refresh",
         group: "Actions",
         label: "Refresh data now",
@@ -2169,9 +1858,7 @@ export default function App() {
       {
         id: "auto-refresh",
         group: "Actions",
-        label: autoRefresh
-          ? "Pause auto-refresh"
-          : "Resume auto-refresh (every 30s)",
+        label: autoRefresh ? "Pause live updates" : "Resume live updates",
         run: () => setAutoRefresh(!autoRefresh),
       },
       {
@@ -2474,6 +2161,7 @@ export default function App() {
             </Button>
             <Button
               variant="ghost"
+              className="topbar-password"
               onClick={() => {
                 setLoginError("");
                 setChangingPassword(true);
@@ -2507,7 +2195,7 @@ export default function App() {
             <div className="page-title-actions">
               <label className="auto-refresh-toggle">
                 <Switch
-                  aria-label="Auto-refresh data every 30 seconds"
+                  aria-label="Update data live"
                   checked={autoRefresh}
                   onCheckedChange={setAutoRefresh}
                 />
@@ -2591,41 +2279,6 @@ export default function App() {
                     </div>
                   </>
                 )}
-                {(() => {
-                  if (!status) return null;
-                  const compiled = compiledManagerReleaseRaw();
-                  const served = status?.manager_release ?? null;
-                  const identity = describeManagerIdentity(compiled, served);
-                  if (identity === "mismatch") {
-                    return (
-                      <div className="diagnostic-warnings" role="alert">
-                        <strong>
-                          Manager build mismatch / refresh or rebuild required
-                        </strong>
-                        <div>
-                          <span>
-                            This cached Manager build differs from the
-                            Bridge-served build. Refresh the page or rebuild the
-                            Manager; no data was changed.
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  }
-                  if (identity === "unavailable") {
-                    return (
-                      <div className="diagnostic-unavailable" role="status">
-                        <strong>Manager identity unavailable</strong>
-                        <p>
-                          The Bridge did not report a compiled Manager build.
-                          This is not a mismatch; refresh or rebuild the
-                          Manager.
-                        </p>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
                 <div className="diagnostic-observation-list">
                   <p>
                     Bridge gateway:{" "}
@@ -2634,39 +2287,7 @@ export default function App() {
                       : "not configured"}{" "}
                     · {status?.bridge.enabled ? "enabled" : "disabled"}
                   </p>
-                  <p
-                    title={status?.release?.build_id || "Bridge build unknown"}
-                  >
-                    Bridge release{" "}
-                    {status?.release?.product_version ||
-                      status?.version ||
-                      "unknown"}{" "}
-                    · {shortBuildId(status?.release?.build_id)}
-                    {versions?.target?.product_version && (
-                      <>
-                        {" "}
-                        · target {versions.target.product_version}{" "}
-                        <Button
-                          variant="link"
-                          size="sm"
-                          className="inline-action"
-                          onClick={() => navigate("versions")}
-                        >
-                          Open System / Versions
-                        </Button>
-                      </>
-                    )}
-                  </p>
-                  <p
-                    title={
-                      status?.manager_release?.build_id ||
-                      "Manager build unknown"
-                    }
-                  >
-                    Manager release{" "}
-                    {status?.manager_release?.product_version || "unknown"} ·{" "}
-                    {shortBuildId(status?.manager_release?.build_id)}
-                  </p>
+                  <p>Bridge version {status?.version || "unknown"}</p>
                   {adapters.map((info) => (
                     <p key={info.id}>
                       {info.name} · {runtimeName(info.runtime_type)}:{" "}
@@ -2771,6 +2392,14 @@ export default function App() {
                   ) : (
                     <Empty title="No runs yet">
                       Prepared handoffs will appear here when an agent starts.
+                      <br />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => navigate("handoffs")}
+                      >
+                        Open Handoffs
+                      </Button>
                     </Empty>
                   )}
                 </section>
@@ -2782,11 +2411,10 @@ export default function App() {
               <div className="list-toolbar page-toolbar">
                 <Button
                   onClick={() => {
-                    setNodeTest("");
-                    setNodeDialog({ mode: "create" });
+                    setNodeDialog({ mode: "pair" });
                   }}
                 >
-                  <Plus size={16} /> Add Node
+                  <Plus size={16} /> Pair a Node
                 </Button>
               </div>
               {nodes.length ? (
@@ -2815,22 +2443,47 @@ export default function App() {
                                   }
                                 />
                               </div>
-                              <p className="path-text">{node.base_url}</p>
+                              <p className="path-text">
+                                {node.transport === "local"
+                                  ? "Embedded in the Bridge"
+                                  : "Paired · dials the Bridge"}
+                              </p>
                             </div>
                           </div>
                           <div className="row-actions">
                             <Button
                               variant="outline"
                               onClick={() => {
-                                setNodeTest("");
                                 setNodeDialog({ mode: "edit", node });
                               }}
                             >
                               Edit
                             </Button>
+                            {node.transport !== "local" && (
+                              <Button
+                                variant="outline"
+                                onClick={() =>
+                                  ask({
+                                    title: `Delete ${node.name}?`,
+                                    description:
+                                      "Deletion is available only when no workspace or adapter history references this Node. A paired Node is disconnected and must be paired again to come back.",
+                                    destructive: true,
+                                    action: async () => {
+                                      await api(
+                                        `/api/nodes/${node.id}`,
+                                        "DELETE",
+                                      );
+                                      await refresh();
+                                      notify("Node deleted.");
+                                    },
+                                  })
+                                }
+                              >
+                                Delete
+                              </Button>
+                            )}
                             <Button
                               onClick={() => {
-                                setAdapterTest("");
                                 setAdapterDialog({
                                   mode: "create",
                                   nodeId: node.id,
@@ -2844,8 +2497,14 @@ export default function App() {
                         <div className="node-card-body">
                           <dl className="node-spec">
                             <div>
-                              <dt>Endpoint</dt>
-                              <dd>{node.base_url}</dd>
+                              <dt>Connection</dt>
+                              <dd>
+                                {node.transport === "local"
+                                  ? "In process"
+                                  : node.connection?.connected_at
+                                    ? `Last connected ${dateTime(node.connection.connected_at)}`
+                                    : "Never connected"}
+                              </dd>
                             </div>
                             <div>
                               <dt>Node Protocol</dt>
@@ -2858,18 +2517,6 @@ export default function App() {
                             <div>
                               <dt>Node version</dt>
                               <dd>{node.node_version || "Not observed"}</dd>
-                            </div>
-                            <div>
-                              <dt>Release</dt>
-                              <dd
-                                title={
-                                  node.release?.build_id || "Node build unknown"
-                                }
-                              >
-                                {node.release
-                                  ? `${node.release.product_version} · ${shortBuildId(node.release.build_id)}`
-                                  : "Not observed"}
-                              </dd>
                             </div>
                             <div>
                               <dt>Allowed roots</dt>
@@ -2896,11 +2543,6 @@ export default function App() {
                                     {adapter.name} ·{" "}
                                     {runtimeName(adapter.runtime_type)}
                                   </strong>
-                                  <span className="node-adapter-fact">
-                                    {adapter.has_token
-                                      ? "Token saved"
-                                      : "Token required"}
-                                  </span>
                                   <StateBadge
                                     value={
                                       adapter.enabled ? "Enabled" : "Disabled"
@@ -2931,9 +2573,6 @@ export default function App() {
                         </div>
                         <div className="node-card-foot">
                           <small>Node ID: {node.id}</small>
-                          <small>
-                            Node token {node.has_token ? "saved" : "required"}
-                          </small>
                         </div>
                       </section>
                     );
@@ -3009,6 +2648,7 @@ export default function App() {
                 <select
                   id="handoff-workspace"
                   className="native-select"
+                  title={selected?.name}
                   value={selectedWorkspace || ""}
                   onChange={(e) => {
                     const ws = workspaces.find((w) => w.id === e.target.value);
@@ -3087,27 +2727,11 @@ export default function App() {
                       ) : (
                         <p className="diagnostic-unavailable">
                           {diagnosticsUnavailable
-                            ? "Route readiness is unavailable. Start is disabled until diagnostics refresh."
+                            ? "Route readiness is unavailable until diagnostics refresh."
                             : "No diagnostic route is available for this workspace."}
                         </p>
                       )}
                     </div>
-                    <label className="field">
-                      <span>Run images (optional)</span>
-                      <textarea
-                        aria-label="Run image paths"
-                        value={runImagePaths}
-                        onChange={(event) =>
-                          setRunImagePaths(event.target.value)
-                        }
-                        placeholder="One workspace image path per line, up to four"
-                        rows={3}
-                      />
-                      <small>
-                        The owning Node reads previews. The selected adapter and
-                        model must support images.
-                      </small>
-                    </label>
                     {handoffs.length ? (
                       handoffs.map((h) => (
                         <div className="handoff-row" key={h.id}>
@@ -3121,28 +2745,6 @@ export default function App() {
                             <p className="path-text">{h.path}</p>
                           </div>
                           <div className="row-actions">
-                            {h.state === "prepared" && (
-                              <Button
-                                size="sm"
-                                disabled={
-                                  !selectedRoute ||
-                                  diagnosticsUnavailable ||
-                                  selectedRoute.ready !== true ||
-                                  Boolean(startingHandoff)
-                                }
-                                onClick={() =>
-                                  selectedRoute &&
-                                  void startPreparedHandoff(h, selectedRoute)
-                                }
-                              >
-                                <Play size={14} />
-                                {startingHandoff?.startsWith(
-                                  `${selectedWorkspace}:${h.id}:${selectedRoute?.adapter_id}:`,
-                                )
-                                  ? "Starting…"
-                                  : "Start run"}
-                              </Button>
-                            )}
                             <Button
                               variant="outline"
                               size="sm"
@@ -3231,7 +2833,16 @@ export default function App() {
                 title="Agent runs"
                 description="Open a run to inspect activity or answer a request"
                 action={
-                  <span className="subtle-count">{runs.length} shown</span>
+                  <>
+                    <span className="subtle-count">{runs.length} shown</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setStartRun(true)}
+                    >
+                      Start run by hand
+                    </Button>
+                  </>
                 }
               />
               {runs.length ? (
@@ -3241,7 +2852,15 @@ export default function App() {
               ) : (
                 <Empty title="No runs yet">
                   Start an agent from a prepared handoff to see its progress
-                  here.
+                  here. A workspace needs an enabled execution target first.
+                  <br />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => navigate("handoffs")}
+                  >
+                    Open Handoffs
+                  </Button>
                 </Empty>
               )}
               {runsNext !== null && (
@@ -3265,12 +2884,30 @@ export default function App() {
               <div className="list-toolbar page-toolbar">
                 <Button
                   onClick={() => {
-                    setAdapterTest("");
                     setAdapterDialog({ mode: "create" });
                   }}
                 >
                   <Plus size={16} /> Add adapter
                 </Button>
+                <nav className="page-jumps" aria-label="On this page">
+                  {[
+                    ["adapter-profiles", "Security profiles"],
+                    ["adapter-connection", "Bridge connection"],
+                  ].map(([id, label]) => (
+                    <Button
+                      key={id}
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        document
+                          .getElementById(id)
+                          ?.scrollIntoView({ behavior: "smooth" })
+                      }
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </nav>
               </div>
               <div className="adapter-list">
                 {adapters.map((info) => {
@@ -3295,13 +2932,15 @@ export default function App() {
                           <div className="node-title">
                             <div className="adapter-heading">
                               <h3>
-                                {info.name} · {runtimeName(info.runtime_type)}
+                                {info.name.trim().toLowerCase() ===
+                                runtimeName(info.runtime_type).toLowerCase()
+                                  ? `${info.name} on ${info.node_name || "an unknown Node"}`
+                                  : `${info.name} · ${runtimeName(info.runtime_type)}`}
                               </h3>
                               <StateBadge value={health} />
                             </div>
                             <p className="path-text">
-                              {info.base_url ||
-                                "Endpoint is private to the Node"}
+                              Runs on {info.node_name || "an unknown Node"}
                             </p>
                           </div>
                         </div>
@@ -3309,7 +2948,6 @@ export default function App() {
                           <Button
                             variant="outline"
                             onClick={() => {
-                              setAdapterTest("");
                               setAdapterDialog({ mode: "edit", adapter: info });
                             }}
                           >
@@ -3345,37 +2983,12 @@ export default function App() {
                             <dd>{info.node_name || "Unknown Node"}</dd>
                           </div>
                           <div>
-                            <dt>Endpoint</dt>
-                            <dd>{info.base_url || "Private to the Node"}</dd>
-                          </div>
-                          <div>
                             <dt>Adapter version</dt>
                             <dd>{info.adapter_version || "Unknown"}</dd>
                           </div>
                           <div>
                             <dt>Native version</dt>
                             <dd>{info.native_version || "Not observed"}</dd>
-                          </div>
-                          <div>
-                            <dt>Release</dt>
-                            <dd
-                              title={
-                                info.release?.build_id ||
-                                "Adapter build unknown"
-                              }
-                            >
-                              {info.release
-                                ? `${info.release.product_version} · ${shortBuildId(info.release.build_id)}`
-                                : "Not observed"}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt>Node token</dt>
-                            <dd>
-                              {info.has_token
-                                ? "Token saved"
-                                : "Token required"}
-                            </dd>
                           </div>
                         </dl>
                         <div className="adapter-policy-block">
@@ -3563,21 +3176,17 @@ export default function App() {
                   </Empty>
                 )}
               </div>
-              {adapters.length > 0 && (
-                <section className="surface-panel adapter-detail-panel">
-                  <SectionHeading
-                    title="Adapter security profiles"
-                    description="Native profiles are discovered separately for each adapter and workspace."
-                  />
-                  <ProfileManager
-                    adapters={adapters}
-                    workspaces={workspaces}
-                    onChanged={refresh}
-                    notify={notify}
-                  />
-                </section>
-              )}
-              <div className="connection-panel">
+              <section
+                id="adapter-profiles"
+                className="surface-panel adapter-detail-panel"
+              >
+                <SectionHeading
+                  title="Security profiles"
+                  description="One format for every agent, assigned per workspace route."
+                />
+                <ProfileManager onChanged={refresh} notify={notify} />
+              </section>
+              <div id="adapter-connection" className="connection-panel">
                 <div className="connection-head">
                   <div className="connection-symbol">
                     <Workflow size={21} />
@@ -3663,136 +3272,6 @@ export default function App() {
               </div>
             </div>
           )}
-          {section === "versions" && (
-            <div className="surface-panel updates-page">
-              <SectionHeading
-                title="Installed components"
-                description="See what is installed and whether each component can work with this Bridge."
-              />
-              {versionsError ? (
-                <div className="diagnostic-unavailable" role="status">
-                  <strong>Versions status is unavailable.</strong>
-                  <p>{versionsError}</p>
-                </div>
-              ) : !versions ? (
-                <p className="version-loading" role="status">
-                  Loading versions status…
-                </p>
-              ) : versions.status === "failed" ? (
-                <div className="diagnostic-unavailable" role="status">
-                  <strong>Versions status is unavailable.</strong>
-                  <p>
-                    {versions.error?.summary ||
-                      "Topology could not be observed. Existing routes stay usable where their Node and adapter remain reachable."}
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="version-target">
-                    <div>
-                      <span>Target Bridge version</span>
-                      <strong>
-                        {versions.target.product_version || "Unknown"}
-                      </strong>
-                    </div>
-                    <p>
-                      Compatible older Nodes and adapters can keep running.
-                      Version differences alone do not block routes.
-                    </p>
-                  </div>
-                  <div className="version-groups">
-                    <VersionGroup
-                      title="Bridge and Manager"
-                      entries={[versions.bridge, versions.manager].filter(
-                        (entry): entry is VersionComponentState =>
-                          Boolean(entry),
-                      )}
-                      empty="Bridge and Manager versions are unavailable."
-                    />
-                    <VersionGroup
-                      title="Nodes"
-                      entries={versions.nodes || []}
-                      empty="No Nodes configured."
-                      names={Object.fromEntries(
-                        nodes.map((node) => [node.id, node.name]),
-                      )}
-                    />
-                    <VersionGroup
-                      title="Adapters"
-                      entries={versions.adapters || []}
-                      empty="No adapters configured."
-                      names={Object.fromEntries(
-                        adapters.map((adapter) => [adapter.id, adapter.name]),
-                      )}
-                    />
-                  </div>
-                  <section className="version-guidance">
-                    <h3>Updating components</h3>
-                    <p>
-                      Informational only. This view never installs, restarts, or
-                      rolls back anything, and there is no automatic updater.
-                      Update each component locally on its own host, then
-                      restart its service explicitly: an upgrade never restarts
-                      anything by itself. Differences between compatible
-                      versions do not block routes, so components can be updated
-                      one at a time.
-                    </p>
-                    <div className="version-guidance-grid">
-                      <div>
-                        <strong>Bridge and Manager</strong>
-                        <p>
-                          Docker: from the checkout, run{" "}
-                          <code>docker compose up -d --build</code>; this
-                          recreates the container and ships the Manager with it.
-                          Without Docker: run{" "}
-                          <code>uv tool upgrade workspace-bridge</code>, then
-                          restart the <code>serve</code> process.
-                        </p>
-                      </div>
-                      <div>
-                        <strong>Node</strong>
-                        <p>
-                          On the Node host, run{" "}
-                          <code>uv tool upgrade workspace-bridge</code>, then{" "}
-                          <code>
-                            workspace-bridge node --state &lt;node-state&gt;
-                            service restart
-                          </code>
-                          .
-                        </p>
-                      </div>
-                      <div>
-                        <strong>Codex and Claude Code adapters</strong>
-                        <p>
-                          Same Python package as the Node. Install the Claude
-                          Code adapter with its extra (
-                          <code>workspace-bridge[claude]</code>). Then run{" "}
-                          <code>
-                            workspace-bridge adapter --state
-                            &lt;adapter-state&gt; service restart
-                          </code>{" "}
-                          for each adapter instance. This does not update the
-                          Codex or Claude Code CLI itself.
-                        </p>
-                      </div>
-                      <div>
-                        <strong>Pi adapter</strong>
-                        <p>
-                          On its host, update the npm package with{" "}
-                          <code>
-                            npm install -g workspace-bridge-pi-host-adapter
-                          </code>
-                          , then restart it with the same{" "}
-                          <code>adapter ... service restart</code> command. This
-                          does not update the Pi CLI itself.
-                        </p>
-                      </div>
-                    </div>
-                  </section>
-                </>
-              )}
-            </div>
-          )}
           {section === "audit" && (
             <div className="surface-panel audit-page">
               <SectionHeading
@@ -3805,10 +3284,14 @@ export default function App() {
                     <div className="audit-row" key={`${event.at}-${index}`}>
                       <span className="audit-timeline" />
                       <div>
-                        <strong>{event.action}</strong>
+                        <strong title={event.action}>
+                          {auditActionLabel(event.action)}
+                        </strong>
                         <p>
-                          {workspaces.find((w) => w.id === event.workspace)
-                            ?.name || "Admin"}{" "}
+                          {event.workspace
+                            ? workspaces.find((w) => w.id === event.workspace)
+                                ?.name || "Removed workspace"
+                            : "Bridge"}{" "}
                           <span aria-hidden="true">/</span> {event.outcome}
                         </p>
                         {(event.node_name ||
@@ -3832,6 +3315,7 @@ export default function App() {
                   Access and configuration changes will appear here.
                 </Empty>
               )}
+              <ApprovalLog refreshKey={lastUpdated} />
             </div>
           )}
         </main>
@@ -3860,7 +3344,7 @@ export default function App() {
             </span>
           )}
           <span className="statusline-spacer" />
-          <span>auto {autoRefresh ? "30s" : "off"}</span>
+          <span>live {autoRefresh ? "on" : "off"}</span>
           {lastUpdated && <span>sync {relativeTime(lastUpdated, now)}</span>}
           <span className="statusline-hint">
             <kbd>ctrl k</kbd> commands
@@ -3890,6 +3374,18 @@ export default function App() {
                 {s.title}
               </button>
             ))}
+            <button
+              type="button"
+              className="nav-item"
+              onClick={() => {
+                setMobileNav(false);
+                setLoginError("");
+                setChangingPassword(true);
+              }}
+            >
+              <LockKeyhole size={17} />
+              Change password
+            </button>
           </nav>
         </SheetContent>
       </Sheet>
@@ -3969,244 +3465,40 @@ export default function App() {
           </form>
         </DialogContent>
       </Dialog>
+      {startRun && (
+        <StartRunDialog
+          workspaces={workspaces}
+          onClose={() => setStartRun(false)}
+          onStarted={(run) => {
+            setStartRun(false);
+            notify("Run started.");
+            void refresh({ silent: true });
+            setRunInspect(run);
+          }}
+        />
+      )}
       {nodeDialog && (
-        <Dialog open onOpenChange={(open) => !open && setNodeDialog(null)}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>
-                {nodeDialog.mode === "create"
-                  ? "Add Node"
-                  : `Edit ${nodeDialog.node?.name}`}
-              </DialogTitle>
-              <DialogDescription>
-                Node credentials stay in the private Bridge state and are never
-                returned after save. Allowed roots are configured on the Node
-                host.
-              </DialogDescription>
-            </DialogHeader>
-            <form className="dialog-form" onSubmit={saveNode}>
-              <div className="form-field">
-                <Label htmlFor="node-name">Name</Label>
-                <Input
-                  id="node-name"
-                  name="name"
-                  defaultValue={nodeDialog.node?.name || ""}
-                  required
-                  maxLength={80}
-                  placeholder="Local Mac"
-                />
-              </div>
-              <div className="form-field">
-                <Label htmlFor="node-url">Node URL</Label>
-                <Input
-                  id="node-url"
-                  name="base_url"
-                  defaultValue={nodeDialog.node?.base_url || ""}
-                  required
-                  maxLength={2048}
-                  placeholder="http://127.0.0.1:8770"
-                />
-              </div>
-              <div className="form-field">
-                <Label htmlFor="node-token">Node token</Label>
-                <Input
-                  id="node-token"
-                  name="token"
-                  type="password"
-                  autoComplete="new-password"
-                  defaultValue=""
-                  placeholder={
-                    nodeDialog.mode === "create"
-                      ? "Required"
-                      : "Blank keeps the saved token"
-                  }
-                  required={nodeDialog.mode === "create"}
-                  maxLength={4096}
-                />
-                <small>
-                  Leave blank while editing to preserve the saved token.
-                </small>
-              </div>
-              <label className="adapter-enabled-field">
-                <input
-                  name="enabled"
-                  type="checkbox"
-                  defaultChecked={nodeDialog.node?.enabled ?? true}
-                />{" "}
-                Node enabled
-              </label>
-              {nodeTest && (
-                <p className="adapter-test-result" role="status">
-                  {nodeTest}
-                </p>
-              )}
-              <DialogFooter>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={(event) =>
-                    void testNode(event.currentTarget.form || undefined)
-                  }
-                >
-                  Test connection
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setNodeDialog(null)}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit">
-                  {nodeDialog.mode === "create" ? "Add Node" : "Save Node"}
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <NodeDialog
+          dialog={nodeDialog}
+          onClose={() => setNodeDialog(null)}
+          onDone={(message) => {
+            setNodeDialog(null);
+            notify(message);
+            void refresh();
+          }}
+        />
       )}
       {adapterDialog && (
-        <Dialog open onOpenChange={(open) => !open && setAdapterDialog(null)}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>
-                {adapterDialog.mode === "create"
-                  ? "Add adapter"
-                  : `Edit ${adapterDialog.adapter?.name}`}
-              </DialogTitle>
-              <DialogDescription>
-                The selected Node stores and tests this runtime adapter. The
-                adapter token is write-only and is never read back.
-              </DialogDescription>
-            </DialogHeader>
-            <form className="dialog-form" onSubmit={saveAdapter}>
-              <div className="form-field">
-                <Label htmlFor="adapter-node">Authoritative Node</Label>
-                {adapterDialog.mode === "create" ? (
-                  <select
-                    id="adapter-node"
-                    className="native-select"
-                    name="node_id"
-                    defaultValue={adapterDialog.nodeId || nodes[0]?.id || ""}
-                    required
-                  >
-                    <option value="">Choose a Node</option>
-                    {nodes.map((node) => (
-                      <option key={node.id} value={node.id}>
-                        {node.name} · {node.health || "unobserved"}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <p className="form-readonly">
-                    {adapterDialog.adapter?.node_name || "Node unknown"} · fixed
-                    for this adapter
-                  </p>
-                )}
-              </div>
-              <div className="form-field">
-                <Label htmlFor="adapter-name">Name</Label>
-                <Input
-                  id="adapter-name"
-                  name="name"
-                  defaultValue={adapterDialog.adapter?.name || ""}
-                  maxLength={80}
-                  required
-                />
-              </div>
-              <div className="form-field">
-                <Label htmlFor="adapter-type">Runtime type</Label>
-                {adapterDialog.mode === "create" ? (
-                  <select
-                    id="adapter-type"
-                    className="native-select"
-                    name="runtime_type"
-                    defaultValue="pi"
-                  >
-                    <option value="pi">Pi</option>
-                    <option value="codex">Codex</option>
-                    <option value="claude">Claude Code</option>
-                    <option value="opencode">OpenCode</option>
-                  </select>
-                ) : (
-                  <p className="form-readonly">
-                    {runtimeName(adapterDialog.adapter?.runtime_type || "pi")} ·
-                    fixed for this adapter
-                  </p>
-                )}
-              </div>
-              <div className="form-field">
-                <Label htmlFor="adapter-url">Base URL</Label>
-                <Input
-                  id="adapter-url"
-                  name="base_url"
-                  defaultValue={adapterDialog.adapter?.base_url || ""}
-                  placeholder="http://127.0.0.1:8767"
-                  maxLength={2048}
-                  required
-                />
-              </div>
-              <div className="form-field">
-                <Label htmlFor="adapter-token">Adapter token</Label>
-                <Input
-                  id="adapter-token"
-                  name="token"
-                  type="password"
-                  autoComplete="new-password"
-                  defaultValue=""
-                  placeholder={
-                    adapterDialog.mode === "create"
-                      ? "Required"
-                      : "Blank keeps the saved token"
-                  }
-                  required={adapterDialog.mode === "create"}
-                  maxLength={4096}
-                />
-                <small>
-                  {adapterDialog.mode === "create"
-                    ? "Stored plaintext in the owning Node's private SQLite state (0600); Manager never reads it back."
-                    : "Leave blank to preserve the saved token. Enter a new value to replace it."}
-                </small>
-              </div>
-              <label className="adapter-enabled-field">
-                <input
-                  name="enabled"
-                  type="checkbox"
-                  defaultChecked={adapterDialog.adapter?.enabled ?? true}
-                />{" "}
-                Adapter enabled
-              </label>
-              {adapterTest && (
-                <p className="adapter-test-result" role="status">
-                  {adapterTest}
-                </p>
-              )}
-              <DialogFooter>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={(event) =>
-                    void testAdapter(event.currentTarget.form || undefined)
-                  }
-                >
-                  Test connection
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setAdapterDialog(null)}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit">
-                  {adapterDialog.mode === "create"
-                    ? "Add adapter"
-                    : "Save adapter"}
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <AdapterDialog
+          dialog={adapterDialog}
+          nodes={nodes}
+          onClose={() => setAdapterDialog(null)}
+          onDone={(message) => {
+            setAdapterDialog(null);
+            notify(message);
+            void refresh();
+          }}
+        />
       )}
       {profileFor && (
         <ProfileAssignment
@@ -4243,6 +3535,7 @@ export default function App() {
           onRefresh={refresh}
           onDetail={setTextDetail}
           onConfirm={ask}
+          lastMcpCall={status?.bridge.last_mcp_call}
         />
       )}
       <Sheet
@@ -4257,6 +3550,25 @@ export default function App() {
                 "Content shown as text from your local Bridge."}
             </SheetDescription>
           </SheetHeader>
+          <div className="detail-actions">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!textDetail}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    textDetail ? jsonText(textDetail.content) : "",
+                  );
+                  notify("Copied.");
+                } catch {
+                  notify("Copy is unavailable here; select the text instead.");
+                }
+              }}
+            >
+              <Clipboard size={14} /> Copy
+            </Button>
+          </div>
           <pre className="detail-pre">
             {textDetail ? jsonText(textDetail.content) : ""}
           </pre>

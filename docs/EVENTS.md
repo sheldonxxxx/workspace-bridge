@@ -31,7 +31,7 @@ update does not replace the MCP server or rescan its event catalog.
 
 | Event | Data beyond common identifiers |
 |---|---|
-| `workspace_bridge.run.finished` | `outcome`: `succeeded`, `failed`, `cancelled`, `interrupted`, `orphaned` or `blocked` |
+| `workspace_bridge.run.finished` | `outcome`: `succeeded`, `failed`, `cancelled`, `interrupted`, `orphaned` or `blocked`; optional `checks`: `state` (`complete` or `unavailable`) with `passed` and `failed` counts |
 | `workspace_bridge.run.needs_attention` | Optional Bridge-issued `interaction_id` and allowlisted `request_kind` |
 
 Every subscription requires `arguments.workspace_id`, an exact enabled mapping
@@ -48,9 +48,11 @@ labels, quota information, callback destinations or approval responses.
 Events use the canonical `notification_events` IDs and journal, independently
 of Discord. `run.finished` projects recorded notification outcomes; it does not
 invent a new runtime outcome or a blocked event that the coordinator never
-recorded. An event is a signal to read `read_agent_run` and, when relevant,
-`read_agent_interaction` for authoritative current state. Acceptance checks and
-agent claims still need review. A pending interaction may already be stale.
+recorded. An event is a signal to read `read_run`, which includes every
+interaction, for authoritative current state. When the workspace
+runs checks after each run, a succeeded or failed run's `run.finished` waits
+for them and carries their counts; the Discord notice shows the same counts.
+Check results and agent claims still need review. A pending interaction may already be stale.
 The Bridge never starts a run or approves an interaction from an event.
 
 ## Subscription lifecycle
@@ -142,8 +144,9 @@ completion/error codes, without subscription arguments, destinations or secrets.
    subsequent matching runs do not trigger this subscription.
 
 For interaction testing, monitor `workspace_bridge.run.needs_attention` and
-ask ChatGPT to describe the current request and wait for your decision. It must
-not approve automatically. Test refresh, restart recovery and access revocation
+start a run whose request falls in the skill's ask-the-user list. ChatGPT must
+describe the request and wait for your decision, then answer with
+`decided_by: "owner"`; check the decision with `read_agent_interaction`. Test refresh, restart recovery and access revocation
 in an isolated test state before changing a live route or credential.
 
 The focused checks are `tests/test_event_broker.py`, `tests/test_event_protocol.py`,

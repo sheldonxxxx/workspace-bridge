@@ -3,10 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import socket
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from .media import ImageReadResult
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
@@ -22,10 +18,8 @@ def validate_node_status(value: object) -> dict:
     """Require a bounded valid Node status object for healthy Bridge use.
 
     A healthy Node must return a dict with ``status == \"ok\"`` and Node
-    Protocol exactly v1 (``protocol == 1``). Product/build/release metadata
-    skew never affects reachability: malformed or missing optional release
-    metadata is ignored here (diagnostics/staged rollout observe it
-    separately). A protocol mismatch raises ``node_protocol_error`` so
+    Protocol exactly v1 (``protocol == 1``). Version skew never affects
+    reachability; diagnostics report it. A protocol mismatch raises ``node_protocol_error`` so
     affected routes become unavailable/incompatible without masking skew
     as a generic outage.
     """
@@ -39,7 +33,7 @@ def validate_node_status(value: object) -> dict:
     return value
 
 
-def _node_http_error(status: int, raw: bytes, node_token: str) -> BridgeError:
+def _node_error(status: int, raw: bytes) -> BridgeError:
     try:
         detail = json.loads(raw[:16384])
         code = detail.get("code", "node_unavailable") if isinstance(detail, dict) else "node_unavailable"
@@ -47,15 +41,11 @@ def _node_http_error(status: int, raw: bytes, node_token: str) -> BridgeError:
     except (ValueError, UnicodeError):
         code = "node_unavailable"
         message = "Node is unavailable or rejected the request"
-    if status == 401:
-        return BridgeError("Node credential was rejected", "node_auth_failed")
     if not isinstance(code, str) or not code.replace("_", "").isalnum() or len(code) > 64:
         code = "node_unavailable"
     if not isinstance(message, str):
         message = "Node rejected the operation"
     message, _ = redact(message[:1000])
-    if node_token:
-        message = message.replace(node_token, "[REDACTED_SECRET]")
     return BridgeError(message[:500] or "Node rejected the operation", code)
 
 
@@ -63,14 +53,14 @@ class NodeClient:
     def __init__(self, node: dict, *, timeout: float = 30, transport=None):
         self.node_id = node["id"]
         self.name = node["name"]
-        self.base_url = node["base_url"].rstrip("/")
-        self.token = node["token"]
         self.revision = node["revision"]
         self.enabled = bool(node["enabled"])
         self.timeout = min(max(float(timeout), 0.5), 60)
         self.transport = transport
         if not self.enabled:
             raise BridgeError("Node is disabled", "node_disabled")
+        if transport is None:
+            raise BridgeError("Node is unavailable", "node_unavailable")
 
     def _request(self, method: str, path: str, body: dict | None = None,
                  *, timeout: float | None = None):
@@ -82,36 +72,24 @@ class NodeClient:
         raw_body = None if body is None else json.dumps(
             body, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         from .media import MAX_IMAGE_REQUEST_BYTES
-        request_limit = MAX_IMAGE_REQUEST_BYTES if path == "/v1/workspaces/write_image" else 2 * 1024 * 1024
+        from .node_api import MAX_PATCH_REQUEST
+        request_limit = {"/v1/workspaces/upload_image": MAX_IMAGE_REQUEST_BYTES,
+                         "/v1/workspaces/apply_patch": MAX_PATCH_REQUEST}.get(path, 2 * 1024 * 1024)
         if raw_body is not None and len(raw_body) > request_limit:
             raise BridgeError("Node request exceeds the payload limit", "too_large")
-        request = urllib.request.Request(self.base_url + path, data=raw_body,
-            headers={"Accept": "application/json", "X-Node-Token": self.token,
-                     **({"Content-Type": "application/json"} if raw_body is not None else {})},
-            method=method)
         try:
-            if self.transport is not None:
-                response = self.transport.request(method, path, content=raw_body,
-                    headers={"Accept": "application/json", "X-Node-Token": self.token,
-                             **({"Content-Type": "application/json"} if raw_body is not None else {})})
-                raw = response.content
-                if len(raw) > MAX_RESPONSE:
-                    raise BridgeError("Node response exceeds the payload limit", "output_limit")
-                if response.status_code >= 400:
-                    raise _node_http_error(response.status_code, raw, self.token)
-            else:
-                with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                    raw = response.read(MAX_RESPONSE + 1)
-                    if len(raw) > MAX_RESPONSE:
-                        raise BridgeError("Node response exceeds the payload limit", "output_limit")
-        except urllib.error.HTTPError as exc:
-            raise _node_http_error(exc.code, exc.read(16384), self.token) from None
+            response = self.transport.request(method, path, content=raw_body, headers={
+                "Accept": "application/json",
+                **({"Content-Type": "application/json"} if raw_body is not None else {})})
         except BridgeError:
             raise
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
+        except (TimeoutError, OSError):
             raise BridgeError("Node is unavailable", "node_unavailable") from None
-        except (ValueError, UnicodeError):
-            raise BridgeError("Node returned invalid JSON", "node_protocol_error") from None
+        raw = response.content
+        if len(raw) > MAX_RESPONSE:
+            raise BridgeError("Node response exceeds the payload limit", "output_limit")
+        if response.status_code >= 400:
+            raise _node_error(response.status_code, raw)
         try:
             value = json.loads(raw)
         except (ValueError, UnicodeError):
@@ -121,7 +99,6 @@ class NodeClient:
     def status(self) -> dict:
         # Central Node Protocol gate: status==ok and protocol==1 are
         # required for Bridge operations that treat the Node as healthy.
-        # Release/product/build skew never affects reachability here.
         return validate_node_status(
             self._request("GET", "/v1/status", timeout=min(self.timeout, 5)))
 
@@ -138,9 +115,12 @@ class NodeClient:
                              {"excludes": excludes, "write_scope": write_scope})
 
     def workspace(self, operation: str, workspace: dict, arguments: dict):
-        allowed = {"list_dir", "read_file", "glob", "grep_files", "write_file", "write_image",
-                   "edit_file", "git_status", "git_diff", "read_handoff_artifact",
-                   "hash_files", "publish_handoff_artifacts"}
+        allowed = {"list_dir", "read_file", "glob", "grep_files", "upload_image",
+                   "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff",
+                   "hash_files", "checkpoint_capture",
+                   "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats",
+                   "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan",
+                   "worktree_create", "worktree_commit", "worktree_apply", "worktree_remove"}
         if operation not in allowed:
             raise BridgeError("Unknown Node workspace operation", "invalid_arguments")
         result = self._request("POST", "/v1/workspaces/" + operation,
@@ -151,13 +131,13 @@ class NodeClient:
             import base64
             return ImageReadResult(result["metadata"], base64.b64decode(result["data"], validate=True),
                                    result["mime_type"])
-        if operation == "read_handoff_artifact" and isinstance(result, dict):
-            import base64
-            return base64.b64decode(result["data"], validate=True)
         return result
 
     def list_adapters(self) -> dict:
         return self._request("GET", "/v1/adapters")
+
+    def plugins(self) -> dict:
+        return self._request("GET", "/v1/plugins")
 
     def create_adapter(self, payload: dict) -> dict:
         return self._request("POST", "/v1/adapters", payload)
@@ -174,7 +154,7 @@ class NodeClient:
     def test_adapter(self, adapter_id: str, config: dict | None = None) -> dict:
         body: dict = {"adapter_id": adapter_id}
         if isinstance(config, dict):
-            for key in ("name", "runtime_type", "base_url", "token", "enabled"):
+            for key in ("name", "runtime_type", "enabled"):
                 if key in config:
                     body[key] = config[key]
         return self._request("POST", "/v1/adapters/" + adapter_id + "/test", body)
@@ -227,64 +207,24 @@ class NodeRuntimeAdapterProxy:
                 raise RuntimeRejected("Runtime rejected the request") from None
             if exc.code in {"not_found", "binding_mismatch", "conversation_busy",
                             "interaction_stale", "model_unavailable", "model_not_enabled",
-                            "security_rebind_unavailable", "profile_mismatch",
-                            "profile_unavailable", "continuation_security_source_changed",
-                            "continuation_security_rebind_unsupported"}:
+                            "invalid_profile", "security_unavailable"}:
                 raise RuntimeRejected("Runtime rejected the request", code=exc.code) from None
             raise
 
     def descriptor(self) -> Descriptor:
-        from .release import ReleaseError, validate_release
         value = self._call("descriptor")
-        # Staged rollout: release metadata is decoupled from Runtime
-        # Protocol compatibility. A present malformed/unsupported release
-        # degrades update metadata only; the descriptor stays usable.
-        release = None
-        release_status = "missing"
-        if isinstance(value, dict) and "release" in value:
-            try:
-                release = validate_release(value.get("release"))
-                release_status = "valid"
-            except ReleaseError as exc:
-                release = None
-                if getattr(exc, "kind", "invalid") == "unsupported":
-                    release_status = "unsupported"
-                else:
-                    release_status = "invalid"
         return Descriptor(value["runtime_id"], value["display_name"],
                           value["adapter_version"], value["native_version"],
-                          value["instance_id"], value["features"],
-                          release=release, release_status=release_status)
+                          value["instance_id"], value["features"])
 
     def models(self, workspace_id: str) -> list[dict]:
         return self._call("models", workspace_id=workspace_id)
-
-    def profile_catalog(self, workspace_id: str | None = None,
-                        directory: str | None = None, *, fresh: bool = False) -> dict:
-        return self._call("profile_catalog", workspace_id=workspace_id,
-                          directory=directory, fresh=fresh)
-
-    def profiles(self, workspace_id: str | None = None,
-                 directory: str | None = None, *, fresh: bool = False) -> list[dict]:
-        return self._call("profiles", workspace_id=workspace_id,
-                          directory=directory, fresh=fresh)
-
-    def save_profile(self, profile_id: str, config: dict, expected_revision: str | None) -> dict:
-        return self._call("save_profile", profile_id=profile_id, config=config,
-                          expected_revision=expected_revision)
-
-    def delete_profile(self, profile_id: str) -> dict:
-        return self._call("delete_profile", profile_id=profile_id)
 
     def create_conversation(self, payload: dict) -> dict:
         return self._call("create_conversation", payload=payload)
 
     def conversation(self, conversation_id: str) -> dict:
         return self._call("conversation", conversation_id=conversation_id)
-
-    def rebind_conversation(self, conversation_id: str, security_binding: dict) -> dict:
-        return self._call("rebind_conversation", conversation_id=conversation_id,
-                          security_binding=security_binding)
 
     def start_run(self, conversation_id: str, payload: dict) -> dict:
         return self._call("start_run", conversation_id=conversation_id, payload=payload)

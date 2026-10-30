@@ -2,9 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, CircleHelp, Command, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
 import {
   Sheet,
   SheetContent,
@@ -15,10 +12,10 @@ import {
 import {
   api,
   dateTime,
+  decidedByLabel,
   displayState,
   jsonText,
   runtimeName,
-  type Json,
   type Run,
 } from "@/lib/api";
 import type { ConfirmState, TextDetail } from "@/components/manager-types";
@@ -29,7 +26,9 @@ import {
   executionOutputPreview,
 } from "./feed-preview";
 import { ExecutionStatus } from "./ExecutionStatus";
+import { RunChanges } from "./RunChanges";
 import { useRunInspector } from "./useRunInspector";
+import { ManualAnswer, ManualInput } from "./ManualControl";
 
 function StateBadge({ value }: { value: string }) {
   const lower = value.toLowerCase();
@@ -90,8 +89,10 @@ export function RunInspector({
   onRefresh,
   onDetail,
   onConfirm,
+  lastMcpCall,
 }: {
   run: Run | null;
+  lastMcpCall?: string | null;
   onClose: () => void;
   onNotice: (message: string) => void;
   onRefresh: () => Promise<void>;
@@ -107,20 +108,10 @@ export function RunInspector({
     loadingOlder,
     load,
     loadOlder,
-    updateRun,
   } = useRunInspector(run, onNotice);
   const [tab, setTab] = useState<"summary" | "activity" | "executions">(
     "summary",
   );
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [inputText, setInputText] = useState("");
-  const [sendingInput, setSendingInput] = useState(false);
-  const inputAttemptRef = useRef<{
-    mode: "steer" | "queue";
-    instruction: string;
-    request_id: string;
-  } | null>(null);
-  const sendingInputRef = useRef(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const loadOlderRef = useRef<HTMLDivElement | null>(null);
   const pullStartY = useRef<number | null>(null);
@@ -223,69 +214,12 @@ export function RunInspector({
       panel.removeEventListener("touchcancel", resetPull);
     };
   }, [load, onNotice, onRefresh, run]);
-  async function replyInteraction(interactionId: string, body: Json) {
-    if (!run) return;
-    try {
-      await api(
-        `/api/runs/${run.run_id}/interactions/${interactionId}`,
-        "POST",
-        body,
-      );
-      onNotice("Request answered.");
-      await load(run.run_id);
-      await onRefresh();
-    } catch (error) {
-      onNotice((error as Error).message);
-    }
-  }
-  async function sendInput(mode: "steer" | "queue") {
-    if (!run || !inputText.trim() || sendingInputRef.current) return;
-    const previous = inputAttemptRef.current;
-    const attempt =
-      previous?.mode === mode && previous.instruction === inputText
-        ? previous
-        : { mode, instruction: inputText, request_id: crypto.randomUUID() };
-    inputAttemptRef.current = attempt;
-    sendingInputRef.current = true;
-    setSendingInput(true);
-    try {
-      const result = await api<Run>(`/api/runs/${run.run_id}/${mode}`, "POST", {
-        instruction: attempt.instruction,
-        request_id: attempt.request_id,
-      });
-      updateRun(result);
-      const status = result.input_message?.status;
-      if (status === "queued" || status === "delivered") {
-        setInputText("");
-        inputAttemptRef.current = null;
-        onNotice(
-          status === "queued"
-            ? mode === "steer"
-              ? "Correction queued."
-              : "Follow-up queued."
-            : "Message sent.",
-        );
-      } else {
-        onNotice(
-          status === "discarded"
-            ? "Message discarded because the run stopped."
-            : "Delivery is unconfirmed. This message will not be resent.",
-        );
-      }
-    } catch (error) {
-      onNotice((error as Error).message);
-      // Keep the request ID: a manual retry checks the same receipt and
-      // cannot submit an already accepted instruction a second time.
-    } finally {
-      sendingInputRef.current = false;
-      setSendingInput(false);
-    }
-  }
   if (!run) return null;
   const current = data || run;
   const pending = (current.interactions || []).filter(
     (i) => i.state === "pending",
   );
+  const answered = (current.interactions || []).filter((i) => i.decision);
   return (
     <Sheet open={Boolean(run)} onOpenChange={(value) => !value && onClose()}>
       <SheetContent ref={panelRef} side="right" className="run-sheet">
@@ -403,10 +337,10 @@ export function RunInspector({
               <section className="request-panel effective-security-panel">
                 <StateBadge
                   value={
-                    current.effective_security?.source === "runtime-config"
-                      ? "Codex runtime config"
-                      : current.effective_security?.source === "profile"
-                        ? "Bridge profile"
+                    current.effective_security?.source === "profile"
+                      ? "Bridge profile"
+                      : current.effective_security?.source === "native"
+                        ? "Agent's own security"
                         : "Security unavailable"
                   }
                 />
@@ -414,38 +348,14 @@ export function RunInspector({
                 {current.effective_security?.source === "profile" ? (
                   <p>
                     Profile {current.effective_security.profile_id || "unknown"}{" "}
-                    · bound revision{" "}
-                    {current.effective_security.bound_revision || "unknown"} ·
-                    effective revision{" "}
-                    {current.effective_security.effective_revision || "unknown"}
+                    · revision{" "}
+                    {current.effective_security.revision || "unknown"}
                   </p>
-                ) : current.effective_security?.source === "runtime-config" ? (
-                  <>
-                    <p>
-                      Bound revision{" "}
-                      {current.effective_security.bound_revision || "unknown"} ·
-                      effective revision{" "}
-                      {current.effective_security.effective_revision ||
-                        "unknown"}
-                    </p>
-                    <p>
-                      Active permission profile:{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.activePermissionProfile || "unknown",
-                      )}{" "}
-                      · approval{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalPolicy || "unknown",
-                      )}{" "}
-                      · reviewer{" "}
-                      {String(
-                        current.effective_security.resolved_summary
-                          ?.approvalsReviewer || "unknown",
-                      )}
-                    </p>
-                  </>
+                ) : current.effective_security?.source === "native" ? (
+                  <p>
+                    The agent's own configuration decided; each approval it
+                    asked for became an interaction.
+                  </p>
                 ) : (
                   <p>The immutable security snapshot was not available.</p>
                 )}
@@ -498,6 +408,13 @@ export function RunInspector({
                   <p>Not reported</p>
                 )}
               </section>
+              {current.checkpoint && (
+                <RunChanges
+                  key={current.run_id}
+                  runId={current.run_id}
+                  checkpoint={current.checkpoint}
+                />
+              )}
               {pending.map((item) => (
                 <section className="request-panel" key={item.id}>
                   <StateBadge value="Needs review" />
@@ -506,147 +423,37 @@ export function RunInspector({
                   {item.details?.requested && (
                     <pre>{jsonText(item.details.requested)}</pre>
                   )}
-                  {(item.details?.choices || []).map((choice) => (
-                    <Button
-                      key={choice.id}
-                      variant={
-                        choice.semantic === "approve" ? "default" : "outline"
-                      }
-                      size="sm"
-                      onClick={() =>
-                        onConfirm({
-                          title: `Submit ${choice.label}?`,
-                          description:
-                            "This answers the live agent request and lets the same run continue.",
-                          action: () =>
-                            replyInteraction(item.id, { choiceId: choice.id }),
-                        })
-                      }
-                    >
-                      {choice.label}
-                    </Button>
-                  ))}
-                  {item.kind === "form" && (
-                    <>
-                      <div className="form-answers">
-                        {(item.details?.fields || [])
-                          .filter((f) => f.id)
-                          .map((field) => (
-                            <div className="form-field" key={field.id}>
-                              <Label htmlFor={`answer-${field.id}`}>
-                                {field.question || field.header || field.id}
-                              </Label>
-                              <Input
-                                id={`answer-${field.id}`}
-                                value={answers[field.id] || ""}
-                                onChange={(e) =>
-                                  setAnswers((old) => ({
-                                    ...old,
-                                    [field.id]: e.target.value,
-                                  }))
-                                }
-                              />
-                              {field.options?.length ? (
-                                <small>
-                                  Options:{" "}
-                                  {field.options.map((o) => o.label).join(", ")}
-                                </small>
-                              ) : null}
-                            </div>
-                          ))}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          const fields = (item.details?.fields || []).filter(
-                            (f) => f.id,
-                          );
-                          if (
-                            fields.some(
-                              (f) =>
-                                f.required !== false && !answers[f.id]?.trim(),
-                            )
-                          ) {
-                            onNotice(
-                              "Answer every question before submitting.",
-                            );
-                            return;
-                          }
-                          void replyInteraction(item.id, {
-                            answers: Object.fromEntries(
-                              fields.map((f) => [
-                                f.id,
-                                {
-                                  answers: answers[f.id]?.trim()
-                                    ? [answers[f.id].trim()]
-                                    : [],
-                                },
-                              ]),
-                            ),
-                          });
-                        }}
-                      >
-                        Submit answers
-                      </Button>
-                    </>
-                  )}
+                  {item.details?.choices?.length ? (
+                    <small>
+                      Options:{" "}
+                      {item.details.choices.map((c) => c.label).join(", ")}
+                    </small>
+                  ) : null}
+                  <p className="muted-note">
+                    ChatGPT normally answers this in its chat.
+                  </p>
+                  <ManualAnswer
+                    runId={current.run_id}
+                    item={item}
+                    onConfirm={onConfirm}
+                    onNotice={onNotice}
+                    onChanged={() => load(current.run_id)}
+                  />
                 </section>
               ))}
               {!pending.length && (
                 <p className="muted-note">No live requests are waiting.</p>
               )}
-              {current.phase === "active" && (
-                <section className="request-panel run-input-panel">
-                  <h3>Send a message</h3>
-                  <p>
-                    Steer corrects the current work. Queue adds a follow-up
-                    after this response finishes. Claude pauses the response
-                    before applying a correction.
-                  </p>
-                  <Label htmlFor="run-input">Correction or follow-up</Label>
-                  <Textarea
-                    id="run-input"
-                    value={inputText}
-                    maxLength={8000}
-                    rows={4}
-                    disabled={sendingInput}
-                    onChange={(event) => {
-                      setInputText(event.target.value);
-                      inputAttemptRef.current = null;
-                    }}
-                  />
-                  <div className="inspector-actions">
-                    <Button
-                      size="sm"
-                      disabled={
-                        sendingInput ||
-                        !inputText.trim() ||
-                        !current.input_capabilities?.steer
-                      }
-                      onClick={() => void sendInput("steer")}
-                    >
-                      Steer
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        sendingInput ||
-                        !inputText.trim() ||
-                        !current.input_capabilities?.queue
-                      }
-                      onClick={() => void sendInput("queue")}
-                    >
-                      Queue
-                    </Button>
-                    <small>{inputText.length.toLocaleString()} / 8,000</small>
-                  </div>
-                  {!current.input_capabilities?.steer &&
-                    !current.input_capabilities?.queue && (
-                      <p>Message controls are unavailable for this run.</p>
-                    )}
-                </section>
-              )}
+              {answered.map((item) => (
+                <p className="muted-note" key={item.id}>
+                  {item.details?.title || item.kind}:{" "}
+                  {item.details?.choices?.find(
+                    (c) => c.id === item.decision?.choice_id,
+                  )?.label || "answered"}
+                  , decided by {decidedByLabel(item.decision?.decided_by)}{" "}
+                  {dateTime(item.decision?.decided)}. {item.decision?.reason}
+                </p>
+              ))}
               {Boolean(current.input_messages?.length) && (
                 <section className="request-panel" aria-live="polite">
                   <h3>Recent messages</h3>
@@ -657,6 +464,7 @@ export function RunInspector({
                           {message.mode === "steer"
                             ? "Correction"
                             : "Follow-up"}
+                          {message.origin === "manager" ? " (from you)" : ""}
                         </span>
                         <StateBadge
                           value={
@@ -672,6 +480,14 @@ export function RunInspector({
                     Pending messages are discarded if the run stops or restarts.
                   </p>
                 </section>
+              )}
+              {current.phase === "active" && (
+                <ManualInput
+                  run={current}
+                  lastCall={lastMcpCall}
+                  onNotice={onNotice}
+                  onChanged={() => load(current.run_id)}
+                />
               )}
               <div className="inspector-actions">
                 <Button
@@ -707,6 +523,27 @@ export function RunInspector({
                     }
                   >
                     Stop run
+                  </Button>
+                )}
+                {current.phase !== "terminal" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      onConfirm({
+                        title: "Abandon this run?",
+                        description:
+                          "Use this when the Node or agent is gone. The run is marked orphaned and its conversation is freed. Nothing is sent to the agent.",
+                        destructive: true,
+                        action: async () => {
+                          await api(`/api/runs/${run.run_id}/abandon`, "POST");
+                          onNotice("Run abandoned.");
+                          onClose();
+                        },
+                      })
+                    }
+                  >
+                    Abandon run
                   </Button>
                 )}
               </div>

@@ -11,7 +11,7 @@ from workspace_bridge.api import make_admin
 from workspace_bridge.node_service import NodeService
 from workspace_bridge.security import BridgeError, digest
 
-from conftest import create_test_adapter, start_test_node
+from conftest import create_test_adapter, register_test_node, start_test_node, patch_node_runtime
 
 
 
@@ -20,12 +20,11 @@ def test_read_only_node_service_does_not_create_or_mutate_state(tmp_path):
     parent.mkdir()
     state = tmp_path / "node-state"
     config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+              "cursor_secret": "c" * 64}
 
     writable = NodeService(state, config)
     writable.save_adapter({
-        "name": "Local adapter", "runtime_type": "pi",
-        "base_url": "http://127.0.0.1:8780", "token": "adapter-secret",
+        "name": "Local adapter", "plugin": "pi",
     })
     live_readonly = NodeService(state, config, read_only=True)
     try:
@@ -43,8 +42,7 @@ def test_read_only_node_service_does_not_create_or_mutate_state(tmp_path):
         assert readonly.status()["runtime_adapters"] == 1
         with pytest.raises(sqlite3.OperationalError):
             readonly.save_adapter({
-                "name": "Should fail", "runtime_type": "pi",
-                "base_url": "http://127.0.0.1:8781", "token": "secret",
+                "name": "Should fail", "plugin": "pi",
             })
         with pytest.raises(sqlite3.OperationalError):
             readonly.db.execute("CREATE TABLE should_not_exist(value TEXT)")
@@ -65,21 +63,16 @@ def test_refresh_adapters_rejects_cross_node_identity_and_surfaces_failure(env):
     node_a_id = env["node_id"]
     collision_id = "adapter_444444444444444444444444"
     create_test_adapter(service, node_a_id, {
-        "name": "Node A adapter", "runtime_type": "pi",
-        "base_url": "http://127.0.0.1:8780", "token": "node-a-secret",
+        "name": "Node A adapter", "plugin": "pi",
     }, collision_id)
 
     node_b = start_test_node(env["tmp"] / "node-b-state", env["parent"])
     try:
-        record_b = service.node_registry.create({
-            "name": "Node B", "base_url": node_b["url"],
-            "token": node_b["token"], "enabled": False,
-        })
+        record_b = register_test_node(service, "Node B", enabled=False)
         service._node_transport[record_b["id"]] = node_b["transport"]
         service._node_transport_services[record_b["id"]] = node_b["service"]
         created = node_b["service"].save_adapter({
-            "name": "Node B conflicting adapter", "runtime_type": "pi",
-            "base_url": "http://127.0.0.1:8782", "token": "node-b-secret",
+            "name": "Node B conflicting adapter", "plugin": "pi",
         })
         with node_b["service"].lock, node_b["service"].db:
             node_b["service"].db.execute(
@@ -92,82 +85,10 @@ def test_refresh_adapters_rejects_cross_node_identity_and_surfaces_failure(env):
 
         cached = service.adapter_registry.get(collision_id)
         assert cached["node_id"] == node_a_id
-        public = next(item for item in service.node_registry.list_public(probe=True)
+        public = next(item for item in service.node_registry.list_public()
                       if item["id"] == record_b["id"])
         assert public["health"] == "failed"
         assert public["error_code"] == "adapter_identity_conflict"
-    finally:
-        node_b["stop"]()
-
-
-@pytest.mark.asyncio
-async def test_profile_catalog_keeps_workspace_on_adapter_node(env, monkeypatch):
-    service = env["service"]
-    node_b = start_test_node(env["tmp"] / "node-b-state", env["parent"])
-    try:
-        record_b = service.node_registry.create({
-            "name": "Node B", "base_url": node_b["url"],
-            "token": node_b["token"], "enabled": False,
-        })
-        service._node_transport[record_b["id"]] = node_b["transport"]
-        service._node_transport_services[record_b["id"]] = node_b["service"]
-        service.node_registry.update(record_b["id"], {"enabled": True})
-        adapter_b = create_test_adapter(service, record_b["id"], {
-            "name": "Node B Codex", "runtime_type": "codex",
-            "base_url": "http://127.0.0.1:8772", "token": "adapter-test-token",
-        })
-        root_b = env["parent"] / "beta"
-        root_b.mkdir()
-        workspace_b = service.add_workspace(
-            "Beta", str(root_b), [], record_b["id"])["workspace"]
-        assert workspace_b["enabled"] == 0
-
-        native_calls = []
-
-        class CatalogAdapter:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def profile_catalog(self, workspace_id=None, directory=None, *, fresh=False):
-                native_calls.append((workspace_id, directory, fresh))
-                return {"profiles": [{"id": "read-only"}], "permissionProfiles": []}
-
-        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", CatalogAdapter)
-        node_calls = []
-        original_client = service.node_registry.client
-
-        def node_client(node_id, **kwargs):
-            node_calls.append(node_id)
-            return original_client(node_id, **kwargs)
-
-        monkeypatch.setattr(service.node_registry, "client", node_client)
-        app = make_admin(service)
-        headers = {"Cookie": admin_cookie(app)}
-        url = f"/api/adapters/{adapter_b['id']}/profiles"
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                     base_url="http://127.0.0.1:8766") as client:
-            contextual = await client.get(url, params={
-                "workspace_id": workspace_b["id"], "fresh": "1"}, headers=headers)
-            assert contextual.status_code == 200, contextual.text
-            assert native_calls == [(workspace_b["id"], str(root_b), True)]
-            assert node_calls == [record_b["id"]]
-
-            context_free = await client.get(url, headers=headers)
-            assert context_free.status_code == 200, context_free.text
-            assert native_calls[-1] == (None, None, False)
-
-            node_calls.clear()
-            native_calls.clear()
-            cross_node = await client.get(url, params={
-                "workspace_id": env["id"], "fresh": "1"}, headers=headers)
-            assert cross_node.status_code == 400, cross_node.text
-            assert cross_node.json()["error"] == "Adapter belongs to another Node"
-            with pytest.raises(BridgeError) as mismatch:
-                service.adapter_registry.client(
-                    adapter_b["id"], workspace=service.workspace(env["id"]))
-            assert mismatch.value.code == "adapter_node_mismatch"
-            assert node_calls == []
-            assert native_calls == []
     finally:
         node_b["stop"]()
 
@@ -178,18 +99,14 @@ def test_runtime_call_rejects_stale_adapter_revision_before_native_construction(
     parent.mkdir()
     state = tmp_path / "node-state"
     config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
+              "cursor_secret": "c" * 64}
     node = NodeService(state, config)
     try:
         created = node.save_adapter({
-            "name": "Revision test", "runtime_type": "pi",
-            "base_url": "http://127.0.0.1:8780", "token": "old-secret",
+            "name": "Revision test", "plugin": "pi",
         })
         old_revision = created["revision"]
-        updated = node.save_adapter({
-            "name": "Revision test", "runtime_type": "pi",
-            "base_url": "http://127.0.0.1:8781", "token": "new-secret",
-        }, created["id"])
+        updated = node.save_adapter({"settings": {"log_level": "DEBUG"}}, created["id"])
         assert updated["revision"] != old_revision
 
         constructed = []
@@ -198,8 +115,7 @@ def test_runtime_call_rejects_stale_adapter_revision_before_native_construction(
             constructed.append((args, kwargs))
             raise AssertionError("stale runtime call constructed a native client")
 
-        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter",
-                            unexpected_native)
+        patch_node_runtime(monkeypatch, unexpected_native)
         with pytest.raises(BridgeError) as exc:
             node.runtime_call(created["id"], "descriptor", {
                 "arguments": {}, "expected_adapter_revision": old_revision})
@@ -213,73 +129,6 @@ def test_runtime_call_rejects_stale_adapter_revision_before_native_construction(
         node.close()
 
 
-def test_runtime_rebind_conversation_validates_and_forwards(tmp_path, monkeypatch):
-    from workspace_bridge.node_service import NodeService
-    from workspace_bridge.security import BridgeError, digest
-    parent = tmp_path / "projects"
-    parent.mkdir()
-    state = tmp_path / "node-state"
-    config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(b"node-token"), "host": "127.0.0.1"}
-    node = NodeService(state, config)
-    try:
-        created = node.save_adapter({
-            "name": "Rebind test", "runtime_type": "codex",
-            "base_url": "http://127.0.0.1:8780", "token": "secret",
-        })
-        # Invalid bindings fail before any native rebind call (no arbitrary payload).
-        rebound_calls = []
-        class _GuardedNative:
-            def __init__(self, *args, **kwargs):
-                pass
-            def rebind_conversation(self, conversation_id, binding):
-                rebound_calls.append((conversation_id, binding))
-                raise AssertionError("invalid rebind reached the native client")
-        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", _GuardedNative)
-        with __import__("pytest").raises(BridgeError) as exc:
-            node.runtime_call(created["id"], "rebind_conversation", {
-                "arguments": {"conversation_id": "conv_1",
-                              "security_binding": {"source": "profile",
-                                                   "profile": {"id": "a"}}},
-                "expected_adapter_revision": created["revision"]})
-        assert exc.value.code == "invalid_arguments"
-        assert rebound_calls == []
-        with __import__("pytest").raises(BridgeError) as exc2:
-            node.runtime_call(created["id"], "rebind_conversation", {
-                "arguments": {"conversation_id": "",
-                              "security_binding": {"source": "profile",
-                                                   "profile": {"id": "a", "revision": "r"}}},
-                "expected_adapter_revision": created["revision"]})
-        assert exc2.value.code == "invalid_arguments"
-        assert rebound_calls == []
-        # Unknown operation remains unknown.
-        with __import__("pytest").raises(BridgeError) as exc3:
-            node.runtime_call(created["id"], "unknown_op", {
-                "arguments": {}, "expected_adapter_revision": created["revision"]})
-        assert exc3.value.code == "not_found"
-        # Valid binding forwards to the native client with no extra payload.
-        forwarded = {}
-        class _FakeNative:
-            def __init__(self, *args, **kwargs):
-                pass
-            def rebind_conversation(self, conversation_id, binding):
-                forwarded["conversation_id"] = conversation_id
-                forwarded["binding"] = binding
-                return {"id": conversation_id, "status": "idle",
-                        "securityBinding": binding}
-        monkeypatch.setattr("workspace_bridge.node_service.HttpRuntimeAdapter", _FakeNative)
-        result = node.runtime_call(created["id"], "rebind_conversation", {
-            "arguments": {"conversation_id": "conv_123",
-                          "security_binding": {"source": "profile",
-                                               "profile": {"id": "read-only",
-                                                           "revision": "rev-1"}}},
-            "expected_adapter_revision": created["revision"]})
-        assert result["id"] == "conv_123"
-        assert forwarded["binding"] == {"source": "profile",
-                                        "profile": {"id": "read-only",
-                                                    "revision": "rev-1"}}
-    finally:
-        node.close()
 def test_status_carries_no_update_or_installer_surface(tmp_path):
     """Node status is health/identity only: no updater affordance."""
     parent = tmp_path / "projects"
@@ -293,8 +142,7 @@ def test_status_carries_no_update_or_installer_surface(tmp_path):
         assert "deployment-v1" not in status["capabilities"]
         assert set(status["host"]) == {"platform", "arch"}
         assert "node_major" not in status["host"]
-        live = node["transport"].get("/v1/status",
-            headers={"X-Node-Token": node["token"]}).json()
+        live = json.loads(node["transport"].request("GET", "/v1/status").content)
         assert live["status"] == "ok"
         assert "installers" not in live
         assert "deployment-v1" not in live["capabilities"]
@@ -302,3 +150,23 @@ def test_status_carries_no_update_or_installer_surface(tmp_path):
         assert "token" not in text.lower()
     finally:
         node["stop"]()
+
+
+def test_runtime_call_refuses_unknown_operations(tmp_path):
+    from workspace_bridge.node_service import NodeService
+    from workspace_bridge.security import BridgeError, digest
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    config = {"allowed_roots": [str(parent)],
+              "cursor_secret": "c" * 64}
+    node = NodeService(tmp_path / "node-state", config)
+    try:
+        created = node.save_adapter({"name": "Codex", "plugin": "codex"})
+        # Security travels with each run, so no rebind operation exists.
+        for operation in ("rebind_conversation", "profile_catalog", "unknown_op"):
+            with pytest.raises(BridgeError) as exc:
+                node.runtime_call(created["id"], operation, {
+                    "arguments": {}, "expected_adapter_revision": created["revision"]})
+            assert exc.value.code == "not_found"
+    finally:
+        node.close()

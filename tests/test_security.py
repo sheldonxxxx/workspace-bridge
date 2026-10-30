@@ -63,21 +63,6 @@ def test_root_symlink_replaced(env):
     with pytest.raises(BridgeError) as exc: s.info(ws)
     assert exc.value.code != "root_changed"
 
-def test_handoff_symlink_never_writes_outside(env):
-    external = env["tmp"] / "outside"; external.mkdir()
-    (env["root"] / ".workspace-handoff").symlink_to(external, target_is_directory=True)
-    with SafeRoot(str(env["root"])) as safe:
-        with pytest.raises(BridgeError): safe.create_artifact(".workspace-handoff/jobs/a/TASK.md", b"x")
-    assert list(external.iterdir()) == []
-
-def test_artifacts_are_create_only(env):
-    with SafeRoot(str(env["root"])) as safe:
-        p = ".workspace-handoff/jobs/a/TASK.md"
-        safe.create_artifact(p, b"original")
-        with pytest.raises(BridgeError): safe.create_artifact(p, b"replacement")
-        assert safe.read(p, artifact=True)[0] == b"original"
-        with pytest.raises(BridgeError): safe.create_artifact("src/main.py", b"bad")
-
 def test_redaction():
     text = 'key=sk-proj-' + 'a' * 40 + '\npassword = "verysecret123"\nAKIAABCDEFGHIJKLMNOP'
     safe, changed = redact(text)

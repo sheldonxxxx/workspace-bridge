@@ -121,9 +121,8 @@ assets, hooks, or supporting resources from an arbitrary existing package.
 ## Configuration and precedence
 
 The default file is always `.env.skill-plugin` at this repository's root, even
-when the process CWD is elsewhere. It is separate from the Docker Compose
-`.env`; the builder never auto-loads Docker `.env`, and never needs shell
-`source`. A missing default file is harmless. Use `--env-file /path/to/private-config.env`
+when the process CWD is elsewhere. The builder never auto-loads any other `.env` file
+and never needs shell `source`. A missing default file is harmless. Use `--env-file /path/to/private-config.env`
 to select another file; a missing or unreadable explicit file fails.
 
 Settings resolve as **CLI > process environment > env file > built-in/default**.
@@ -345,7 +344,7 @@ See [Plugin submission errors](https://developers.openai.com/plugins/deploy/subm
 2. Read the chosen skill and repository-owned template. Preserve unrelated
    work and use a private state directory. With authorization, prepare the
    dedicated `.env.skill-plugin` from the synthetic example, or select an
-   alternate private file with `--env-file`. Do not read Docker `.env` or
+   alternate private file with `--env-file`. Do not read other `.env` or
    credential files. Confirm effective CLI/process/file precedence without
    printing private IDs or raw config. Bootstrap only once with explicit
    `--init`, verified identity/version, alias, and canonical skill source.

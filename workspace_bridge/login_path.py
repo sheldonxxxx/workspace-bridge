@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 from typing import Any, Callable, Mapping
 
 MAX_LOGIN_PATH_CHARS = 8192
@@ -482,7 +481,3 @@ def runtime_env_with_login_path(
     env["PATH"] = candidate
     return env, result
 
-
-def login_shell_basename(shell: str | None = None) -> str:
-    """Safe shell basename token for observability (never a PATH value)."""
-    return _shell_basename(shell or get_login_shell())

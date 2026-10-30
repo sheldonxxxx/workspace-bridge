@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from .notifications import SAFE_KINDS
+from .notifications import SAFE_KINDS, checks_data
 from .security import BridgeError
 from .webhook_transport import CallbackError, WebhookTransport, callback_url, signed_headers, signing_key
 
@@ -49,10 +49,6 @@ class EventSubscriptionStore:
 
     def __init__(self, service):
         self.service = service
-        columns = {row["name"] for row in service.db.execute("PRAGMA table_info(mcp_event_subscriptions)")}
-        if "cursor_key" in columns:
-            # Remove the unreleased polling prototype and its obsolete keys.
-            service.db.execute("DROP TABLE mcp_event_subscriptions")
         service.db.executescript("""
           CREATE TABLE IF NOT EXISTS mcp_event_subscriptions (
             id TEXT PRIMARY KEY, principal TEXT NOT NULL, event_name TEXT NOT NULL,
@@ -130,11 +126,16 @@ class EventBroker:
         base = {"workspace_id": {"type": "string"}, "run_id": {"type": "string"},
                 "adapter_id": {"type": "string"}, "runtime_type": {"enum": ["pi", "codex", "claude", "opencode"]}}
         return {"events": [
-            {"name": FINISHED, "description": "A run finished in the selected workspace. Read read_agent_run for its authoritative result and audit evidence.",
+            {"name": FINISHED, "description": "A run finished in the selected workspace. Read read_run for its authoritative result and audit evidence.",
              "delivery": ["webhook"], "inputSchema": filters,
              "payloadSchema": {"type": "object", "additionalProperties": False,
                                "required": [*base, "outcome"],
-                               "properties": {**base, "outcome": {"enum": list(OUTCOMES.values())}}}},
+                               "properties": {**base, "outcome": {"enum": list(OUTCOMES.values())},
+                                              "checks": {"type": "object", "additionalProperties": False,
+                                                         "required": ["state"], "properties": {
+                                                             "state": {"enum": ["complete", "unavailable"]},
+                                                             "passed": {"type": "integer"},
+                                                             "failed": {"type": "integer"}}}}}},
             {"name": NEEDS_ATTENTION, "description": "A run in the selected workspace has an interaction to review. Read the current interaction before responding; events never approve it.",
              "delivery": ["webhook"], "inputSchema": filters,
              "payloadSchema": {"type": "object", "additionalProperties": False, "required": list(base),
@@ -242,6 +243,9 @@ class EventBroker:
             if row["event_type"] not in OUTCOMES:
                 return None
             data["outcome"] = OUTCOMES[row["event_type"]]
+            checks = checks_data(row["checks"]) if "checks" in row.keys() else None
+            if checks is not None:
+                data["checks"] = checks
         else:
             if _identity(row["subject_id"], "int"):
                 data["interaction_id"] = row["subject_id"]

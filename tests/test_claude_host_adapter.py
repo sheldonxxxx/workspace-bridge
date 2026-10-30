@@ -12,16 +12,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
-from workspace_bridge import wbrp
+from workspace_bridge import security_profiles as sp
+from workspace_bridge import __version__, wbrp
 from workspace_bridge.claude_host_adapter import (
-    AdapterFailure, ClaudeHostAdapter, PROFILES, _normalize_claude_usage,
-    allowed_tools, decide_tool_use, make_app, parse_setting_sources)
+    AdapterFailure, ClaudeHostAdapter, _normalize_claude_usage,
+    allowed_tools, decide_tool_use, parse_permission_mode, parse_setting_sources)
+from workspace_bridge.plugin_host import invoke
 
-READ_ONLY = dict(PROFILES["read-only"])
-REVIEWED = dict(PROFILES["workspace-write-reviewed"])
-YOLO_SHELL = {"edits": "allow", "shell": "allow", "web": "allow", "extensions": "allow"}
+READ_ONLY = sp.BUILTINS["read-only"]
+REVIEWED = sp.BUILTINS["reviewed"]
+TRUSTED = sp.BUILTINS["trusted"]
+# Edits inside the workspace need approval.
+ASK_EDITS = {**REVIEWED, "write_inside": "ask"}
 
 
 # -- scripted SDK ----------------------------------------------------------
@@ -198,15 +200,17 @@ def claude(tmp_path):
     adapter.close()
 
 
-def _revision(adapter, profile_id):
-    return next(row["revision"] for row in adapter.profiles()["profiles"]
-                if row["id"] == profile_id)
+# The security block each conversation was created with; its runs carry it.
+_SECURITY: dict[str, dict] = {}
 
 
-def _conversation(adapter, workspace, profile="read-only"):
-    return adapter.create_conversation({
-        "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": profile, "revision": _revision(adapter, profile)}})
+def _conversation(adapter, workspace, profile="read-only", rules=None):
+    block = ({"source": "native"} if profile == "native" else
+             sp.wire(profile, rules if rules is not None else sp.BUILTINS[profile]))
+    created = adapter.create_conversation({
+        "workspaceId": "ws_test", "directory": str(workspace), "security": block})
+    _SECURITY[created["id"]] = block
+    return created
 
 
 def _wait(predicate, timeout=10.0):
@@ -269,31 +273,35 @@ def test_profile_modes_for_edits_shell_and_web(tmp_path):
     edit = {"file_path": "new.txt"}
     assert decide_tool_use(READ_ONLY, str(cwd), "Edit", edit)[0] == "deny"
     assert decide_tool_use(READ_ONLY, str(cwd), "Bash", {"command": "ls"})[0] == "deny"
-    assert decide_tool_use(REVIEWED, str(cwd), "Edit", edit)[0] == "ask"
-    assert decide_tool_use(REVIEWED, str(cwd), "Write", edit)[0] == "ask"
+    assert decide_tool_use(READ_ONLY, str(cwd), "WebFetch", {"url": "https://x.test"})[0] == "deny"
+    assert decide_tool_use(REVIEWED, str(cwd), "Edit", edit)[0] == "allow"
+    assert decide_tool_use(ASK_EDITS, str(cwd), "Write", edit)[0] == "ask"
     assert decide_tool_use(REVIEWED, str(cwd), "Bash", {"command": "ls"})[0] == "ask"
-    assert decide_tool_use(REVIEWED, str(cwd), "WebFetch", {"url": "https://x.test"})[0] == "deny"
-    assert decide_tool_use(YOLO_SHELL, str(cwd), "Bash", {"command": "ls"})[0] == "allow"
-    assert decide_tool_use(YOLO_SHELL, str(cwd), "WebFetch", {"url": "https://x.test"})[0] == "allow"
-    assert decide_tool_use(YOLO_SHELL, str(cwd), "Edit", {"file_path": "../x"})[0] == "deny"
+    assert decide_tool_use(REVIEWED, str(cwd), "WebFetch", {"url": "https://x.test"})[0] == "ask"
+    assert decide_tool_use(REVIEWED, str(cwd), "Edit", {"file_path": "../x"})[0] == "deny"
+    assert decide_tool_use(TRUSTED, str(cwd), "Bash", {"command": "ls"})[0] == "allow"
+    assert decide_tool_use(TRUSTED, str(cwd), "WebFetch", {"url": "https://x.test"})[0] == "allow"
+    assert decide_tool_use(TRUSTED, str(cwd), "Edit", {"file_path": "../x"})[0] == "ask"
+    commands = sp.validate({**TRUSTED, "commands": [{"prefix": "git push", "mode": "deny"}]})
+    assert decide_tool_use(commands, str(cwd), "Bash", {"command": "git push -f"})[0] == "deny"
 
 
 def test_unknown_tools_and_bad_inputs_fail_closed(tmp_path):
     for name in ("EnterWorktree", "AskUserQuestion", "ExitPlanMode", "mcp__", "mcp__bad name",
                  "mcp__" + "x" * 300, "", None, 3):
-        assert decide_tool_use(YOLO_SHELL, str(tmp_path), name, {})[0] == "deny"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Agent", "x")[0] == "deny"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Bash", {"command": ""})[0] == "deny"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Bash",
+        assert decide_tool_use(TRUSTED, str(tmp_path), name, {})[0] == "deny"
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Agent", "x")[0] == "deny"
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Bash", {"command": ""})[0] == "deny"
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Bash",
                            {"command": "x" * 20000})[0] == "deny"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Bash", "ls")[0] == "deny"
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Bash", "ls")[0] == "deny"
 
 
 def test_extensions_follow_the_profile_and_meta_tools_are_allowed(tmp_path):
     call = {"x": 1}
     assert decide_tool_use(READ_ONLY, str(tmp_path), "mcp__demo__ping", call)[0] == "deny"
     assert decide_tool_use(REVIEWED, str(tmp_path), "mcp__demo__ping", call)[0] == "ask"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "mcp__demo__ping", call)[0] == "allow"
+    assert decide_tool_use(TRUSTED, str(tmp_path), "mcp__demo__ping", call)[0] == "allow"
     for name in ("Agent", "Task", "Skill", "TodoWrite", "ToolSearch"):
         assert decide_tool_use(READ_ONLY, str(tmp_path), name, {})[0] == "allow", name
     assert decide_tool_use(REVIEWED, str(tmp_path), "Monitor", {"command": "tail x"})[0] == "ask"
@@ -303,13 +311,13 @@ def test_extensions_follow_the_profile_and_meta_tools_are_allowed(tmp_path):
 def test_edits_never_reach_claude_configuration(tmp_path):
     for name in (".claude/settings.json", ".claude/hooks/x.sh", "pkg/.claude/skills/a.md",
                  ".mcp.json", "sub/.mcp.json"):
-        assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Write", {"file_path": name})[0] == "deny", name
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "NotebookEdit",
+        assert decide_tool_use(TRUSTED, str(tmp_path), "Write", {"file_path": name})[0] == "deny", name
+    assert decide_tool_use(TRUSTED, str(tmp_path), "NotebookEdit",
                            {"notebook_path": ".claude/n.ipynb"})[0] == "deny"
     # Reading configuration, and editing project instructions, stays possible.
     assert decide_tool_use(READ_ONLY, str(tmp_path), "Read",
                            {"file_path": ".claude/settings.json"})[0] == "allow"
-    assert decide_tool_use(YOLO_SHELL, str(tmp_path), "Write",
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Write",
                            {"file_path": "CLAUDE.md"})[0] == "allow"
 
 
@@ -322,12 +330,21 @@ def test_setting_sources_parsing():
             parse_setting_sources(bad)
 
 
+def test_permission_mode_parsing():
+    assert parse_permission_mode(None) is None
+    assert parse_permission_mode("auto") == "auto"
+    for bad in ("", "bypassPermissions", "Auto", 3):
+        with pytest.raises(AdapterFailure):
+            parse_permission_mode(bad)
+
+
 def test_allowed_tools_follow_profile():
     meta = ["Agent", "Task", "Skill", "TodoWrite", "ToolSearch"]
     assert allowed_tools(READ_ONLY) == ["Read", "Glob", "Grep"] + meta
     assert "Bash" in allowed_tools(REVIEWED) and "Edit" in allowed_tools(REVIEWED)
-    assert "WebFetch" not in allowed_tools(REVIEWED)
-    assert "WebFetch" in allowed_tools(YOLO_SHELL)
+    assert "WebFetch" in allowed_tools(REVIEWED)
+    assert "Bash" in allowed_tools(sp.validate(
+        {**READ_ONLY, "commands": [{"prefix": "ls", "mode": "allow"}]}))
 
 
 # -- usage -----------------------------------------------------------------
@@ -351,9 +368,8 @@ def test_descriptor_is_accepted_by_the_bridge_client(claude):
     adapter, _, _ = claude
     descriptor = adapter.descriptor()
     parsed = wbrp.Descriptor.parse(descriptor, expected_runtime="claude")
-    assert parsed.release_status == "valid"
-    assert parsed.release["component"] == "claude-host-adapter"
-    assert descriptor["features"]["securityRebind"] == 1
+    assert descriptor["runtime"]["adapterVersion"] == __version__
+    assert "release" not in descriptor
     assert descriptor["features"]["steering"] == 1
     assert descriptor["features"]["queueing"] == 1
     assert descriptor["features"]["usageLimits"] == 1
@@ -366,40 +382,11 @@ def test_models_and_reasoning_validation(claude):
     assert models[0]["default"] is True and models[0]["reasoningOptions"] == ["low", "high"]
     conversation = _conversation(adapter, workspace)
     with pytest.raises(AdapterFailure) as raised:
-        adapter.start_run(conversation["id"], {"input": _text(), "model": "haiku",
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text(), "model": "haiku",
                                                "reasoning": "high"})
     assert raised.value.code == "unsupported_reasoning"
     with pytest.raises(AdapterFailure):
-        adapter.start_run(conversation["id"], {"input": _text(), "reasoning": "bogus"})
-
-
-def test_builtin_and_custom_profiles(claude):
-    adapter, workspace, _ = claude
-    rows = {row["id"]: row for row in adapter.profiles()["profiles"]}
-    assert set(rows) == {"read-only", "workspace-write-reviewed"}
-    assert all(not row["mutable"] for row in rows.values())
-    saved = adapter.save_profile({"id": "shell-ok", "config": YOLO_SHELL})
-    assert saved["mutable"] is True
-    with pytest.raises(AdapterFailure) as raised:
-        adapter.save_profile({"id": "shell-ok", "config": READ_ONLY})
-    assert raised.value.code == "profile_mismatch"
-    updated = adapter.save_profile({"id": "shell-ok", "config": READ_ONLY,
-                                    "expectedRevision": saved["revision"]})
-    assert updated["revision"] != saved["revision"]
-    for bad in ({"id": "read-only", "config": READ_ONLY},
-                {"id": "Bad Id", "config": READ_ONLY},
-                {"id": "x", "config": {"edits": "deny"}},
-                {"id": "x", "config": {**READ_ONLY, "shell": "maybe"}}):
-        with pytest.raises(AdapterFailure):
-            adapter.save_profile(bad)
-    scoped = adapter.profiles("ws_test", str(workspace))["profiles"]
-    assert all(row["available"] for row in scoped)
-    with pytest.raises(AdapterFailure):
-        adapter.delete_profile("read-only")
-    assert adapter.delete_profile("shell-ok") == {"deleted": "shell-ok"}
-    with pytest.raises(AdapterFailure) as raised:
-        adapter.delete_profile("shell-ok")
-    assert raised.value.status == 404
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text(), "reasoning": "bogus"})
 
 
 # -- conversations ---------------------------------------------------------
@@ -411,19 +398,18 @@ def test_conversation_creation_rules(claude, tmp_path):
     assert created["securityBinding"]["source"] == "profile"
     assert adapter.conversation(created["id"])["workspaceId"] == "ws_test"
     base = {"workspaceId": "ws_test", "directory": str(workspace)}
-    with pytest.raises(AdapterFailure) as raised:
-        adapter.create_conversation({**base, "securityProfile": {
-            "id": "read-only", "revision": "stale"}})
-    assert raised.value.code == "profile_mismatch"
-    with pytest.raises(AdapterFailure) as raised:
-        adapter.create_conversation({**base, "securityBinding": {"source": "runtime-config"}})
-    assert raised.value.code == "runtime_config_unavailable"
+    tampered = sp.wire("read-only", READ_ONLY)
+    tampered["profile"]["rules"] = {**READ_ONLY, "shell": "allow"}
+    for security in (tampered, {"source": "native", "extra": 1}, None):
+        with pytest.raises(AdapterFailure) as raised:
+            adapter.create_conversation({**base, "security": security})
+        assert raised.value.code == "invalid_profile"
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     with pytest.raises(AdapterFailure):
         adapter.create_conversation({
             "workspaceId": "ws_test", "directory": str(outside),
-            "securityProfile": {"id": "read-only", "revision": _revision(adapter, "read-only")}})
+            "security": sp.wire("read-only", READ_ONLY)})
     with pytest.raises(AdapterFailure) as raised:
         adapter.conversation("conv_missing")
     assert raised.value.status == 404
@@ -434,7 +420,7 @@ def test_conversation_creation_rules(claude, tmp_path):
 def test_run_lifecycle_activities_and_usage(claude):
     adapter, workspace, sdk = claude
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("hi"),
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("hi"),
                                                      "clientRunId": "c1"})
     wbrp.validate_run_state(started)
     done = _terminal(adapter, started["id"])
@@ -459,7 +445,7 @@ def test_run_lifecycle_activities_and_usage(claude):
     assert sdk.clients[-1].prompt == "hi"
     assert sdk.clients[-1].disconnected is True
     # Continuation resumes the session proven to exist in Claude's own store.
-    second = adapter.start_run(conversation["id"], {"input": _text("again")})
+    second = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("again")})
     _terminal(adapter, second["id"])
     resumed = sdk.clients[-1].options
     assert resumed.resume == conversation["nativeId"] and resumed.session_id is None
@@ -471,14 +457,14 @@ def test_run_lifecycle_activities_and_usage(claude):
 def test_continuation_resumes_even_before_the_started_flag_is_recorded(claude):
     adapter, workspace, sdk = claude
     conversation = _conversation(adapter, workspace)
-    first = adapter.start_run(conversation["id"], {"input": _text()})
+    first = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     _terminal(adapter, first["id"])
     # A run turns terminal slightly before its owner records the flag, so an
     # immediate continuation must decide from the live session lookup.
     with adapter.lock, adapter.db:
         adapter.db.execute("UPDATE conversations SET started=0 WHERE id=?",
                            (conversation["id"],))
-    second = adapter.start_run(conversation["id"], {"input": _text("again")})
+    second = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("again")})
     _terminal(adapter, second["id"])
     options = sdk.clients[-1].options
     assert options.resume == conversation["nativeId"] and options.session_id is None
@@ -487,13 +473,13 @@ def test_continuation_resumes_even_before_the_started_flag_is_recorded(claude):
 def test_client_run_id_is_idempotent(claude):
     adapter, workspace, _ = claude
     conversation = _conversation(adapter, workspace)
-    first = adapter.start_run(conversation["id"], {"input": _text("x"), "clientRunId": "same"})
+    first = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("x"), "clientRunId": "same"})
     _terminal(adapter, first["id"])
-    again = adapter.start_run(conversation["id"], {"input": _text("x"), "clientRunId": "same"})
+    again = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("x"), "clientRunId": "same"})
     assert again["id"] == first["id"]
     assert adapter.find_run(conversation["id"], "same")["id"] == first["id"]
     with pytest.raises(AdapterFailure) as raised:
-        adapter.start_run(conversation["id"], {"input": _text("different"),
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("different"),
                                                "clientRunId": "same"})
     assert raised.value.code == "idempotency_conflict"
     with pytest.raises(AdapterFailure) as raised:
@@ -505,10 +491,10 @@ def test_only_text_input_is_accepted(claude):
     adapter, workspace, _ = claude
     conversation = _conversation(adapter, workspace)
     with pytest.raises(AdapterFailure) as raised:
-        adapter.start_run(conversation["id"], {"input": [{"type": "image", "url": "x"}]})
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": [{"type": "image", "url": "x"}]})
     assert raised.value.code == "unsupported_input"
     with pytest.raises(AdapterFailure):
-        adapter.start_run(conversation["id"], {"input": []})
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": []})
 
 
 def test_busy_conversation_and_cancel(claude):
@@ -526,16 +512,10 @@ def test_busy_conversation_and_cancel(claude):
 
     sdk.scenario = blocking
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text()})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     assert adapter.conversation(conversation["id"])["status"] == "active"
     with pytest.raises(AdapterFailure) as raised:
-        adapter.start_run(conversation["id"], {"input": _text("other")})
-    assert raised.value.code == "conversation_busy"
-    with pytest.raises(AdapterFailure) as raised:
-        adapter.rebind_conversation(conversation["id"], {
-            "source": "profile", "profile": {
-                "id": "workspace-write-reviewed",
-                "revision": _revision(adapter, "workspace-write-reviewed")}})
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("other")})
     assert raised.value.code == "conversation_busy"
     adapter.cancel(started["id"])
     assert release.wait(5)
@@ -556,7 +536,7 @@ def test_native_failure_is_reported_with_bounded_error(claude):
 
     sdk.scenario = failing
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text()})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     done = _terminal(adapter, started["id"])
     assert done["outcome"] == "failed" and "quota exhausted" in done["error"]
 
@@ -566,7 +546,7 @@ def test_unconfirmed_session_binding_fails_the_start(claude):
     sdk.init_session_override = "someone-elses-session"
     conversation = _conversation(adapter, workspace)
     with pytest.raises(AdapterFailure) as raised:
-        adapter.start_run(conversation["id"], {"input": _text()})
+        adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     assert raised.value.code == "runtime_unavailable"
     assert adapter.conversation(conversation["id"])["status"] == "idle"
 
@@ -582,7 +562,7 @@ def test_sdk_connect_failure_fails_closed(claude):
     try:
         conversation = _conversation(adapter, workspace)
         with pytest.raises(AdapterFailure) as raised:
-            adapter.start_run(conversation["id"], {"input": _text()})
+            adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     finally:
         sdk.ClaudeSDKClient.connect = original
     assert "secret-token" not in str(raised.value)
@@ -622,16 +602,17 @@ def test_hook_enforces_profile_before_any_native_permission(claude):
         yield ResultMessage(result="ok")
 
     sdk.scenario = capture
-    for profile, expected in (("read-only", "deny"), ("workspace-write-reviewed", "ask")):
+    for profile, expected in (("read-only", "deny"), ("reviewed", "ask")):
         conversation = _conversation(adapter, workspace, profile)
-        started = adapter.start_run(conversation["id"], {"input": _text()})
+        started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
         _terminal(adapter, started["id"])
         options = holder["options"][-1]
         output = _hook_decision(options, "Bash", {"command": "rm -rf /"})
         assert output["hookEventName"] == "PreToolUse"
         assert output["permissionDecision"] == expected
         assert _hook_decision(options, "Read", {"file_path": "a.txt"})["permissionDecision"] == "allow"
-        assert _hook_decision(options, "Read", {"file_path": "../x"})["permissionDecision"] == "deny"
+        assert _hook_decision(options, "Read", {"file_path": "../x"})["permissionDecision"] == expected
+        assert _hook_decision(options, "Read", {"file_path": ".env"})["permissionDecision"] == "deny"
         assert _hook_decision(options, "EnterWorktree", {})["permissionDecision"] == "deny"
         assert _hook_decision(options, "Agent", {})["permissionDecision"] == "allow"
         assert _hook_decision(options, "mcp__demo__ping", {})["permissionDecision"] == expected
@@ -653,8 +634,8 @@ def test_interaction_is_resolved_through_the_bridge(claude, choice, expected):
         yield ResultMessage(result="ok")
 
     sdk.scenario = asking
-    conversation = _conversation(adapter, workspace, "workspace-write-reviewed")
-    started = adapter.start_run(conversation["id"], {"input": _text()})
+    conversation = _conversation(adapter, workspace, "reviewed")
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     pending = _wait(lambda: adapter.interactions(started["id"])["interactions"])[0]
     assert pending["resource"] == "make test" and pending["state"] == "pending"
     assert adapter.run(started["id"])["activeState"] == "waiting_interaction"
@@ -684,8 +665,8 @@ def test_cancel_denies_pending_interaction(claude):
                             terminal_reason="aborted_tools")
 
     sdk.scenario = asking
-    conversation = _conversation(adapter, workspace, "workspace-write-reviewed")
-    started = adapter.start_run(conversation["id"], {"input": _text()})
+    conversation = _conversation(adapter, workspace, "ask-edits", ASK_EDITS)
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     _wait(lambda: adapter.interactions(started["id"])["interactions"])
     adapter.cancel(started["id"])
     done = _terminal(adapter, started["id"])
@@ -707,32 +688,34 @@ def test_can_use_tool_rechecks_policy(claude):
         yield ResultMessage(result="ok")
 
     sdk.scenario = asking
-    conversation = _conversation(adapter, workspace, "workspace-write-reviewed")
-    started = adapter.start_run(conversation["id"], {"input": _text()})
+    conversation = _conversation(adapter, workspace, "reviewed")
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     _terminal(adapter, started["id"])
     assert outcome["result"].behavior == "deny"
     assert adapter.interactions(started["id"])["interactions"] == []
 
 
-# -- rebind and restart ----------------------------------------------------
+# -- profiles and restart ----------------------------------------------------
 
-def test_rebind_changes_the_profile_for_the_next_run(claude):
+def test_each_run_applies_the_profile_it_carries(claude):
     adapter, workspace, sdk = claude
     conversation = _conversation(adapter, workspace)
-    target = {"source": "profile", "profile": {
-        "id": "workspace-write-reviewed",
-        "revision": _revision(adapter, "workspace-write-reviewed")}}
-    rebound = adapter.rebind_conversation(conversation["id"], target)
-    assert rebound["securityBinding"] == target and rebound["status"] == "idle"
-    started = adapter.start_run(conversation["id"], {"input": _text()})
-    _terminal(adapter, started["id"])
+    first = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]],
+                                                   "input": _text()})
+    _terminal(adapter, first["id"])
+    assert "Bash" not in sdk.clients[-1].options.tools
+    reviewed = sp.wire("reviewed", REVIEWED)
+    second = adapter.start_run(conversation["id"], {"security": reviewed, "input": _text()})
+    _terminal(adapter, second["id"])
     assert "Bash" in sdk.clients[-1].options.tools
+    assert sdk.clients[-1].options.resume == conversation["nativeId"]
+    assert adapter.run(first["id"])["securityBinding"]["profile"]["id"] == "read-only"
+    assert adapter.run(second["id"])["securityBinding"]["profile"]["id"] == "reviewed"
+    assert adapter.conversation(conversation["id"])["securityBinding"]["profile"][
+        "revision"] == reviewed["profile"]["revision"]
     with pytest.raises(AdapterFailure) as raised:
-        adapter.rebind_conversation(conversation["id"], {"source": "profile", "profile": {
-            "id": "read-only", "revision": "stale"}})
-    assert raised.value.code == "profile_mismatch"
-    with pytest.raises(AdapterFailure):
-        adapter.rebind_conversation(conversation["id"], {"source": "runtime-config"})
+        adapter.start_run(conversation["id"], {"input": _text()})
+    assert raised.value.code == "invalid_profile"
 
 
 def test_restart_interrupts_active_runs_and_keeps_sessions(tmp_path):
@@ -742,7 +725,7 @@ def test_restart_interrupts_active_runs_and_keeps_sessions(tmp_path):
     sdk = make_sdk()
     first = ClaudeHostAdapter(tmp_path / "state", root, sdk=sdk, _runtime_env={})
     conversation = _conversation(first, workspace)
-    done = first.start_run(conversation["id"], {"input": _text()})
+    done = first.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})
     _terminal(first, done["id"])
     first.close()
     database = sqlite3.connect(tmp_path / "state" / "claude-adapter.sqlite3")
@@ -764,7 +747,7 @@ def test_restart_interrupts_active_runs_and_keeps_sessions(tmp_path):
         assert [row["status"] for row in orphan["inputMessages"]] == [
             "discarded", "unknown"]
         assert second.conversation(conversation["id"])["status"] == "idle"
-        again = second.start_run(conversation["id"], {"input": _text("later")})
+        again = second.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("later")})
         _terminal(second, again["id"])
         assert sdk.clients[-1].options.resume == conversation["nativeId"]
     finally:
@@ -812,7 +795,7 @@ def test_queue_drains_fifo_on_same_client_without_polling(claude):
 
     sdk.scenario = scenario
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("first")})
     run_id = started["id"]
     queued = adapter.queue(run_id, _control(run_id, "q1", "second"))
     assert queued["inputMessages"] == [{"requestId": "q1", "mode": "queue",
@@ -848,7 +831,7 @@ def test_steer_interrupts_current_response_then_queries_correction(claude):
 
     sdk.scenario = scenario
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("first")})
     run_id = started["id"]
     adapter.steer(run_id, _control(run_id, "s1", "correction"))
     done = _terminal(adapter, run_id)
@@ -874,7 +857,7 @@ def test_control_idempotence_conflict_and_pending_bound(claude):
 
     sdk.scenario = blocked
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("first")})
     run_id = started["id"]
     for number in range(20):
         adapter.queue(run_id, _control(run_id, f"q{number}", f"text {number}"))
@@ -911,7 +894,7 @@ def test_failed_response_drops_queue_without_delivery(claude):
 
     sdk.scenario = failing
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("first")})
     run_id = started["id"]
     adapter.queue(run_id, _control(run_id, "q1", "never send"))
     release.set()
@@ -943,7 +926,7 @@ def test_ambiguous_control_delivery_is_unknown_and_never_retried(claude):
 
     sdk.scenario = scenario
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("initial")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("initial")})
     run_id = started["id"]
     adapter.queue(run_id, _control(run_id, "q1", "private correction"))
     release.set()
@@ -976,8 +959,8 @@ def test_steer_stales_native_permission_before_correction(claude):
             yield ResultMessage(result="corrected")
 
     sdk.scenario = scenario
-    conversation = _conversation(adapter, workspace, "workspace-write-reviewed")
-    started = adapter.start_run(conversation["id"], {"input": _text("initial")})
+    conversation = _conversation(adapter, workspace, "reviewed")
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("initial")})
     run_id = started["id"]
     pending = _wait(lambda: adapter.interactions(run_id)["interactions"])[0]
     adapter.steer(run_id, _control(run_id, "s1", "correct"))
@@ -1016,7 +999,7 @@ def test_usage_limits_report_the_last_observed_windows(claude):
 
     sdk.scenario = limited
     conversation = _conversation(adapter, workspace)
-    _terminal(adapter, adapter.start_run(conversation["id"], {"input": _text()})["id"])
+    _terminal(adapter, adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})["id"])
     limits = wbrp.validate_usage_limits(adapter.usage_limits())
     assert limits["available"] is True and limits["ordinaryUsageAllowed"] is None
     (bucket,) = limits["buckets"]
@@ -1045,7 +1028,7 @@ def test_usage_limits_drop_reset_windows_and_ignore_bad_events(claude):
 
     sdk.scenario = mixed
     conversation = _conversation(adapter, workspace)
-    done = _terminal(adapter, adapter.start_run(conversation["id"], {"input": _text()})["id"])
+    done = _terminal(adapter, adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})["id"])
     assert done["outcome"] == "succeeded"
     (bucket,) = adapter.usage_limits()["buckets"]
     assert [w["windowDurationMins"] for w in bucket["windows"]] == [10080]
@@ -1066,7 +1049,7 @@ def test_rejected_window_marks_ordinary_usage_blocked(claude):
 
     sdk.scenario = rejected
     conversation = _conversation(adapter, workspace)
-    _terminal(adapter, adapter.start_run(conversation["id"], {"input": _text()})["id"])
+    _terminal(adapter, adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text()})["id"])
     limits = adapter.usage_limits()
     assert limits["ordinaryUsageAllowed"] is False
     assert limits["buckets"][0]["rateLimitReachedType"] == "five_hour"
@@ -1093,34 +1076,24 @@ def test_catalog_probe_never_loads_workspace_configuration(tmp_path):
         adapter.close()
 
 
-# -- HTTP surface ----------------------------------------------------------
+# -- plugin surface --------------------------------------------------------
 
-async def test_private_http_surface_requires_token(claude):
+def test_plugin_surface_serves_the_resource_methods(claude):
     adapter, workspace, _ = claude
-    app = make_app(adapter, "private-token")
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="http://127.0.0.1:8774") as client:
-        assert (await client.get("/v1/descriptor")).status_code == 401
-        wrong = await client.get("/v1/descriptor", headers={"X-Runtime-Token": "nope"})
-        assert wrong.status_code == 401
-        headers = {"X-Runtime-Token": "private-token"}
-        allowed = await client.get("/v1/descriptor", headers=headers)
-        assert allowed.status_code == 200 and allowed.json()["runtime"]["id"] == "claude"
-        profiles = (await client.get("/v1/profiles", headers=headers)).json()["profiles"]
-        revision = next(row["revision"] for row in profiles if row["id"] == "read-only")
-        created = await client.post("/v1/conversations", headers=headers, json={
-            "workspaceId": "ws_test", "directory": str(workspace),
-            "securityProfile": {"id": "read-only", "revision": revision}})
-        assert created.status_code == 200
-        missing = await client.get("/v1/conversations/conv_missing", headers=headers)
-        assert missing.status_code == 404 and missing.json()["code"] == "not_found"
-        limits = await client.get("/v1/usage-limits", headers=headers)
-        assert limits.status_code == 200 and limits.json()["available"] is False
-        unknown = await client.get("/v1/nope", headers=headers)
-        assert unknown.status_code == 404
+    kind, descriptor = invoke(adapter, "descriptor", {})
+    assert kind == "result" and descriptor["runtime"]["id"] == "claude"
+    kind, _ = invoke(adapter, "conversations.create", {"body": {
+        "workspaceId": "ws_test", "directory": str(workspace),
+        "security": sp.wire("read-only", READ_ONLY)}})
+    assert kind == "result"
+    assert invoke(adapter, "profiles.list", {})[1]["data"]["code"] == "not_found"
+    kind, missing = invoke(adapter, "conversations.get", {"conversationId": "conv_missing"})
+    assert kind == "error" and missing["data"] == {"status": 404, "code": "not_found"}
+    assert invoke(adapter, "usageLimits", {})[1]["available"] is False
+    assert invoke(adapter, "nope", {})[1]["data"]["code"] == "not_found"
 
 
-async def test_http_queue_and_steer_routes_return_receipts(claude):
+def test_plugin_queue_and_steer_return_receipts(claude):
     adapter, workspace, sdk = claude
 
     async def scenario(client):
@@ -1136,29 +1109,93 @@ async def test_http_queue_and_steer_routes_return_receipts(claude):
 
     sdk.scenario = scenario
     conversation = _conversation(adapter, workspace)
-    started = adapter.start_run(conversation["id"], {"input": _text("first")})
+    started = adapter.start_run(conversation["id"], {"security": _SECURITY[conversation["id"]], "input": _text("first")})
     run_id = started["id"]
-    app = make_app(adapter, "private-token")
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="http://127.0.0.1:8774") as client:
-        headers = {"X-Runtime-Token": "private-token"}
-        queued = await client.post(f"/v1/runs/{run_id}/queue", headers=headers,
-                                   json=_control(run_id, "q1", "queued"))
-        assert queued.status_code == 200
-        assert queued.json()["inputMessages"][0] == {
-            "requestId": "q1", "mode": "queue", "status": "queued"}
-        mismatch = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
-                                     json=_control("wrong", "s1", "correct"))
-        assert mismatch.status_code == 409 and mismatch.json()["code"] == "run_mismatch"
-        steered = await client.post(f"/v1/runs/{run_id}/steer", headers=headers,
-                                    json=_control(run_id, "s1", "correct"))
-        assert steered.status_code == 200
+    kind, queued = invoke(adapter, "runs.queue", {"runId": run_id,
+                                                  "body": _control(run_id, "q1", "queued")})
+    assert kind == "result"
+    assert queued["inputMessages"][0] == {"requestId": "q1", "mode": "queue", "status": "queued"}
+    kind, mismatch = invoke(adapter, "runs.steer", {"runId": run_id,
+                                                    "body": _control("wrong", "s1", "correct")})
+    assert kind == "error" and mismatch["data"] == {"status": 409, "code": "run_mismatch"}
+    kind, _ = invoke(adapter, "runs.steer", {"runId": run_id,
+                                             "body": _control(run_id, "s1", "correct")})
+    assert kind == "result"
     done = _terminal(adapter, run_id)
     assert done["outcome"] == "succeeded"
     assert sdk.clients[0].prompts == ["first", "correct", "queued"]
 
 
-def test_make_app_requires_a_token(claude):
-    adapter, _, _ = claude
-    with pytest.raises(ValueError):
-        make_app(adapter, "")
+
+
+# -- native security -------------------------------------------------------
+
+def test_native_runs_follow_claude_codes_own_permission_settings(claude):
+    adapter, workspace, sdk = claude
+    outcome = {}
+
+    async def asking(client):
+        session = client.options.session_id or client.options.resume
+        sdk.sessions.add(session)
+        yield SystemMessage("init", {"session_id": session})
+        context = types.SimpleNamespace(tool_use_id="tu-n", title=None)
+        # Claude Code asks only what its own settings leave open; any tool
+        # it asks about, even one a profile would allow, reaches the Bridge.
+        outcome["result"] = await client.options.can_use_tool(
+            "Read", {"file_path": "notes.txt"}, context)
+        yield ResultMessage(result="ok")
+
+    sdk.scenario = asking
+    conversation = _conversation(adapter, workspace, "native")
+    assert conversation["securityBinding"] == {"source": "native"}
+    started = adapter.start_run(conversation["id"], {
+        "security": {"source": "native"}, "input": _text()})
+    assert started["securityBinding"] == {"source": "native"}
+    options = sdk.clients[-1].options
+    # No permission mode, tool list, MCP restriction or profile hook: the
+    # settings' defaultMode (acceptEdits, for example) and Claude's tools apply.
+    assert options.permission_mode is None
+    assert not hasattr(options, "tools") and not hasattr(options, "hooks")
+    assert not hasattr(options, "strict_mcp_config")
+    assert json.loads(options.settings) == {"permissions": {
+        "disableBypassPermissionsMode": "disable"}}
+    pending = _wait(lambda: adapter.interactions(started["id"])["interactions"])[0]
+    assert pending["resource"] == "notes.txt"
+    approve = next(item["id"] for item in pending["choices"] if item["semantic"] == "approve")
+    adapter.resolve(pending["id"], {"choiceId": approve})
+    assert _terminal(adapter, started["id"])["outcome"] == "succeeded"
+    assert outcome["result"].behavior == "allow"
+    assert adapter.conversation(conversation["id"])["securityBinding"] == {"source": "native"}
+
+
+def test_a_configured_permission_mode_applies_to_native_runs_only(tmp_path):
+    root = tmp_path / "projects"
+    workspace = root / "app"
+    workspace.mkdir(parents=True)
+    sdk = make_sdk()
+    adapter = ClaudeHostAdapter(tmp_path / "state", root, sdk=sdk, _runtime_env={},
+                                permission_mode="auto")
+    try:
+        native = _conversation(adapter, workspace, "native")
+        run = adapter.start_run(native["id"], {"security": {"source": "native"},
+                                               "input": _text()})
+        # Claude Code ignores defaultMode auto from settings under the SDK.
+        assert sdk.clients[-1].options.permission_mode == "auto"
+        _terminal(adapter, run["id"])
+        profiled = _conversation(adapter, workspace)
+        adapter.start_run(profiled["id"], {"security": _SECURITY[profiled["id"]],
+                                           "input": _text()})
+        assert sdk.clients[-1].options.permission_mode == "default"
+    finally:
+        adapter.close()
+
+
+def test_a_conversation_keeps_the_security_source_it_started_with(claude):
+    adapter, workspace, _ = claude
+    native = _conversation(adapter, workspace, "native")
+    profiled = _conversation(adapter, workspace, "trusted")
+    for conversation, security in ((native, sp.wire("trusted", TRUSTED)),
+                                   (profiled, {"source": "native"})):
+        with pytest.raises(AdapterFailure) as raised:
+            adapter.start_run(conversation["id"], {"security": security, "input": _text()})
+        assert raised.value.code == "security_source_changed"

@@ -1,4 +1,4 @@
-"""M4.2C1.1 CI/release distribution contracts (no live publish)."""
+"""CI and release distribution contracts (no live publish)."""
 from __future__ import annotations
 
 import json
@@ -17,8 +17,8 @@ PI_LOCK = REPO / "runtime" / "pi-host-adapter" / "package-lock.json"
 EXPECTED_MJS = [
     "adapter.mjs", "config.mjs", "execution-store.mjs", "executions.mjs", "extensions.mjs",
     "fingerprint.mjs", "logging.mjs", "login-path.mjs", "main.mjs",
-    "paths.mjs", "pi-adapter.mjs", "policy.mjs", "release.mjs",
-    "sdk-events.mjs", "sdk-transport.mjs", "server.mjs",
+    "paths.mjs", "pi-adapter.mjs", "policy.mjs",
+    "sdk-events.mjs", "sdk-transport.mjs", "stdio.mjs",
     "trusted-permission-extension.mjs", "wbrp.mjs",
 ]
 
@@ -65,14 +65,13 @@ def test_ci_baseline_current_and_least_privilege():
     jobs = data.get("jobs", {})
     assert "python" in jobs and "manager" in jobs
     assert "manager-browser" in jobs
-    assert "pi" in jobs and "docker" in jobs
+    assert "pi" in jobs and "docker" not in jobs
     pi_text = yaml.safe_dump(jobs["pi"])
     assert "ubuntu-24.04" in pi_text
     assert "ubuntu-24.04-arm" in pi_text
     assert "macos-14" in pi_text
     assert "--omit=dev" in text
-    assert "node --test web/test/*.test.mjs" in text
-    assert "uv export --locked --no-dev --no-emit-project" in text
+    assert "docker" not in text.lower()
 
 
 def test_ci_artifact_action_majors():
@@ -83,32 +82,6 @@ def test_ci_artifact_action_majors():
     assert "actions/download-artifact@v4" not in text
 
 
-def test_ci_docker_native_matrix():
-    data = _load_yml(CI_YML)
-    text = CI_YML.read_text()
-    jobs = data.get("jobs", {})
-    assert "docker" in jobs
-    docker = jobs["docker"]
-    dumped = yaml.safe_dump(docker)
-    # Native matrix: ubuntu-24.04 for amd64, ubuntu-24.04-arm for arm64.
-    assert "ubuntu-24.04" in dumped
-    assert "ubuntu-24.04-arm" in dumped
-    assert "amd64" in dumped
-    assert "arm64" in dumped
-    # Exact arch/os pairing.
-    includes = docker.get("strategy", {}).get("matrix", {}).get(
-        "include", [])
-    pairing = {(row.get("os"), row.get("arch")) for row in includes}
-    assert ("ubuntu-24.04", "amd64") in pairing
-    assert ("ubuntu-24.04-arm", "arm64") in pairing
-    # Same Dockerfile on both, arch inspected, bounded smoke, no push.
-    assert "docker build" in dumped
-    assert "Dockerfile" in text or "docker build" in text
-    assert ".Architecture" in text
-    assert "release" in dumped.lower() or "bridge_release" in text or \
-        "read_manager_release" in text or "release-identity" in dumped
-    assert "GHCR" not in text and "ghcr.io" not in text.lower()
-    assert "packages: write" not in text
 
 
 def test_release_artifact_action_majors_exact():
@@ -139,21 +112,20 @@ def test_release_triggers_and_permissions():
     for bad in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
         assert bad not in text
     jobs = data.get("jobs", {})
-    for required in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets",
-                     "release-ready", "prepare-pypi-dist", "build-docker"):
+    for required in ("pypi-publish", "npm-publish", "release-assets",
+                     "release-ready", "prepare-pypi-dist"):
         assert required in jobs, required
+    for removed in ("ghcr-publish", "build-docker", "build-source-bundle", "build-pi-runtime"):
+        assert removed not in jobs, removed
     pypi = jobs["pypi-publish"]
     npm_pub = jobs["npm-publish"]
-    ghcr = jobs["ghcr-publish"]
     assets = jobs["release-assets"]
     ready = jobs["release-ready"]
     prep = jobs["prepare-pypi-dist"]
     assert pypi.get("environment") == "pypi"
     assert npm_pub.get("environment") == "npm"
-    assert ghcr.get("environment") == "ghcr"
     assert pypi.get("permissions", {}).get("id-token") == "write"
     assert npm_pub.get("permissions", {}).get("id-token") == "write"
-    assert ghcr.get("permissions") == {"contents": "read", "packages": "write"}
     assert assets.get("permissions", {}).get("contents") == "write"
     # Barrier and preparer never hold publishing identity.
     assert ready.get("permissions", {}).get("id-token") != "write"
@@ -161,7 +133,7 @@ def test_release_triggers_and_permissions():
     assert prep.get("permissions", {}).get("id-token") != "write"
     assert prep.get("permissions", {}).get("contents", "read") != "write"
     for name, job in jobs.items():
-        if name in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets"):
+        if name in ("pypi-publish", "npm-publish", "release-assets"):
             continue
         perms = job.get("permissions", {})
         assert perms.get("id-token") != "write", name
@@ -171,19 +143,18 @@ def test_release_triggers_and_permissions():
         for step in job.get("steps", []):
             uses = step.get("uses", "")
             assert "workflow_call" not in uses
-    assert "ghcr.io" in text.lower()
+    assert "ghcr.io" not in text.lower() and "docker" not in text.lower()
 
 
 def test_release_tag_consistency_gating():
     text = RELEASE_YML.read_text()
     assert "github.event.release.tag_name" in text
     assert "pyproject.toml" in text
-    assert "workspaceBridgeRelease" in text
+    assert "workspaceBridgeRelease" not in text
     assert "package.json" in text
     jobs = _load_yml(RELEASE_YML).get("jobs", {})
     assert "validate-release" in jobs
-    for dep in ("build-source-bundle", "build-pi-runtime", "npm-pack",
-                "build-docker", "prepare-pypi-dist"):
+    for dep in ("npm-pack", "prepare-pypi-dist"):
         needs = jobs[dep].get("needs", [])
         if isinstance(needs, str):
             needs = [needs]
@@ -209,9 +180,7 @@ def test_release_ready_barrier():
     needs = ready.get("needs", [])
     if isinstance(needs, str):
         needs = [needs]
-    for required in ("validate-release", "quality", "build-source-bundle",
-                     "build-pi-runtime", "npm-pack", "build-docker",
-                     "prepare-pypi-dist"):
+    for required in ("validate-release", "quality", "npm-pack", "prepare-pypi-dist"):
         assert required in needs, required
     # Least privileges: read only, no OIDC/write.
     perms = ready.get("permissions", {})
@@ -219,57 +188,13 @@ def test_release_ready_barrier():
     assert perms.get("id-token") != "write"
     assert perms.get("contents") != "write"
     # All publishers and assets gate on release-ready.
-    for name in ("pypi-publish", "npm-publish", "ghcr-publish", "release-assets"):
+    for name in ("pypi-publish", "npm-publish", "release-assets"):
         needs = jobs[name].get("needs", [])
         if isinstance(needs, str):
             needs = [needs]
         assert "release-ready" in needs, name
 
 
-def test_release_docker_native_matrix_and_identity():
-    data = _load_yml(RELEASE_YML)
-    jobs = data.get("jobs", {})
-    assert "build-docker" in jobs
-    docker = jobs["build-docker"]
-    dumped = yaml.safe_dump(docker)
-    assert "ubuntu-24.04" in dumped
-    assert "ubuntu-24.04-arm" in dumped
-    assert "amd64" in dumped
-    assert "arm64" in dumped
-    includes = docker.get("strategy", {}).get("matrix", {}).get(
-        "include", [])
-    pairing = {(row.get("os"), row.get("arch")) for row in includes}
-    assert ("ubuntu-24.04", "amd64") in pairing
-    assert ("ubuntu-24.04-arm", "arm64") in pairing
-    # Depends on validate + source bundle, validates bundle before build.
-    needs = docker.get("needs", [])
-    if isinstance(needs, str):
-        needs = [needs]
-    assert "validate-release" in needs
-    assert "build-source-bundle" in needs
-    assert "release validate" in dumped
-    # Builds same Dockerfile, checks arch, verifies embedded identities
-    # against the C1 target manifest, then transfers exact image bytes.
-    assert "docker build" in dumped
-    assert ".Architecture" in dumped
-    assert "target-manifest" in dumped
-    assert "container" in dumped.lower() or "Bridge" in dumped
-    assert "docker save" in dumped
-    assert "docker-image-${{ matrix.arch }}" in dumped
-    full = RELEASE_YML.read_text()
-    docker_section = full.split("build-docker", 1)[1].split(
-        "npm-pack", 1)[0]
-    assert "ghcr" not in docker_section.lower()
-    assert "docker push" not in docker_section.lower()
-    ghcr = jobs["ghcr-publish"]
-    assert set(ghcr["needs"]) == {"release-ready", "build-docker"}
-    published = yaml.safe_dump(ghcr)
-    for needle in ("docker-image-amd64", "docker-image-arm64", "sha256sum --check",
-                   "docker load", "docker push", "imagetools create", "imagetools inspect",
-                   "linux", "amd64", "arm64"):
-        assert needle in published, needle
-    assert "ghcr.io/${{ github.repository }}" in published
-    assert "org.opencontainers.image.source" in (REPO / "Dockerfile").read_text()
 
 
 def test_pypi_oidc_isolation():
@@ -294,8 +219,7 @@ def test_pypi_oidc_isolation():
     assert "setup-uv" not in pub_dump
     assert "uv sync" not in pub_dump
     assert "uv run" not in pub_dump
-    assert "validate-bundle" not in pub_dump
-    assert "release validate" not in pub_dump
+    assert "uv build" not in pub_dump
     assert "python3" not in pub_dump.lower() or "publish" in pub_dump.lower()
     # Publisher depends on barrier + prepared dist.
     needs = pub.get("needs", [])
@@ -303,18 +227,18 @@ def test_pypi_oidc_isolation():
         needs = [needs]
     assert "release-ready" in needs
     assert "prepare-pypi-dist" in needs
-    # Preparer does validation + wheel SHA staging, uploads pypi-dist.
+    # Preparer builds the wheel once, records its digest, uploads pypi-dist.
     prep_dump = yaml.safe_dump(prep)
-    assert "release validate" in prep_dump
-    assert "sha256" in RELEASE_YML.read_text().lower()
+    assert "uv build --wheel" in prep_dump
+    assert "sha256sum" in prep_dump
     assert "pypi-dist" in prep_dump
     assert "upload-artifact" in prep_dump
 
 
 def test_pypi_uses_exact_build_artifact():
     text = RELEASE_YML.read_text()
-    assert "release validate" in text
-    assert "sha256" in text.lower() or "SHA" in text
+    assert "release validate" not in text and "source-bundle" not in text
+    assert "sha256" in text.lower()
     assert "pypa/gh-action-pypi-publish" in text
     # Publish job itself never rebuilds.
     jobs = _load_yml(RELEASE_YML).get("jobs", {})
@@ -368,32 +292,8 @@ def test_npm_oidc_isolation_and_version_gate():
     assert pack.get("permissions", {}).get("id-token") != "write"
 
 
-def test_pi_validates_before_extraction():
-    text = RELEASE_YML.read_text()
-    jobs = _load_yml(RELEASE_YML).get("jobs", {})
-    pi = jobs["build-pi-runtime"]
-    steps = pi.get("steps", [])
-    runs = [str(s.get("run", "")) + str(s.get("uses", "")) for s in steps]
-    validate_idx = next(
-        i for i, r in enumerate(runs) if "release validate" in r)
-    extract_idx = next(i for i, r in enumerate(runs) if "tar -xzf" in r)
-    assert validate_idx < extract_idx
-    assert "download-artifact" in yaml.safe_dump(pi)
-    assert "source-bundle" in yaml.safe_dump(pi)
 
 
-def test_runner_matrix_covers_three_platforms():
-    data = _load_yml(RELEASE_YML)
-    jobs = data.get("jobs", {})
-    assert "build-pi-runtime" in jobs
-    dumped = yaml.safe_dump(jobs["build-pi-runtime"])
-    assert "ubuntu-24.04" in dumped
-    assert "ubuntu-24.04-arm" in dumped
-    assert "macos-14" in dumped
-    assert "linux" in dumped and "darwin" in dumped
-    assert "x64" in dumped and "arm64" in dumped
-    source = jobs["build-source-bundle"]
-    assert source.get("runs-on") == "ubuntu-24.04"
 
 
 def test_release_cannot_run_on_pr():
@@ -463,18 +363,14 @@ def test_release_assets_use_gh_upload_no_new_tag():
     assert "GITHUB_TOKEN" in text or "github.token" in text
     assert "gh release create" not in text
     assert "--clobber" in text or "clobber" in text
-    for needle in ("bundle.json", "target-manifest", "python-wheel",
-                   "pi-host-adapter", "pi-runtime"):
-        assert needle in text
+    for needle in ("bundle.json", "target-manifest", "python-wheel", "pi-runtime"):
+        assert needle not in text
     assert "${VERSION}" in text or "$VERSION" in text or "VERSION" in text
     needs = assets.get("needs", [])
     if isinstance(needs, str):
         needs = [needs]
-    assert "release-ready" in needs
-    assert "build-source-bundle" in needs
-    assert "build-pi-runtime" in needs
+    assert set(needs) == {"release-ready", "npm-pack", "prepare-pypi-dist"}
     assert assets.get("permissions", {}).get("id-token") != "write"
-    assert ".tar\"" not in text or "pi-runtime" in text
 
 
 def test_pi_bin_is_packaged():
@@ -490,23 +386,13 @@ def test_pi_bin_is_packaged():
     assert "package.json" in paths
 
 
-def test_python_wheel_exposes_adapter_commands():
-    import configparser
-    import zipfile
-    from workspace_bridge.adapter_cli import main as adapter_main
-    from workspace_bridge.adapter_service import adapter_label, adapter_unit
-    # The top-level CLI exposes the runtime-neutral adapter namespace.
-    assert callable(adapter_main)
-    assert adapter_label("pi", "0123456789ab") == \
-        "com.workspace-bridge.adapter.pi.0123456789ab"
-    assert adapter_unit("codex", "0123456789ab") == \
-        "workspace-bridge-adapter-codex-0123456789ab.service"
-    # Codex keeps its packaged console script alongside Bridge/Node.
+def test_python_package_ships_plugins_not_adapter_commands():
+    from workspace_bridge.plugin_protocol import builtin_manifests
+    assert set(builtin_manifests()) == {"claude", "codex", "opencode", "pi"}
     text = (REPO / "pyproject.toml").read_text()
-    assert "workspace-bridge-codex-adapter" in text
-    assert "workspace_bridge.codex_host_adapter:main" in text
-    assert "workspace-bridge-opencode-adapter" in text
-    assert "workspace_bridge.opencode_host_adapter:main" in text
+    # Agents run as Node-supervised plugins; no adapter console scripts.
+    assert "-adapter = " not in text
+    assert '"plugins/*.toml"' in text
     assert '"opencode_permission_plugin/*.mjs"' in text
     assert '"opencode_permission_plugin/package.json"' in text
 
@@ -518,25 +404,24 @@ def test_release_workflow_uses_release_cli_and_packaging_smoke():
     assert "deploy select-plan" not in text
     assert "deploy backup" not in text
     assert "deploy plan" not in text
-    # Release-engineering names are used for bundle build/validation.
-    assert "workspace-bridge release build" in text
-    assert "workspace-bridge release validate" in text
+    # The wheel is built once by uv; no release bundle CLI remains.
+    assert "workspace-bridge release" not in text
+    assert "uv build --wheel" in text
     # Packaging smoke checks the exact staged wheel in a clean environment.
     assert "entry_points.txt" in text
     assert "workspace_bridge.cli:main" in text
     assert "workspace_bridge.node_cli:main" in text
-    assert "workspace_bridge.opencode_host_adapter:main" in text
+    assert "workspace_bridge/plugins/" in text
     assert "workspace_bridge/opencode_permission_plugin/index.mjs" in text
     assert "workspace_bridge/opencode_permission_plugin/package.json" in text
-    assert "workspace_bridge.codex_host_adapter:main" in text
     assert "uv pip install --python" in text
-    assert '"$VENV/bin/workspace-bridge" --version' in text
+    assert '"$VENV/bin/workspace-bridge" --version)" = "${RELEASE_TAG#v}"' in text
     assert '"$VENV/bin/workspace-bridge" node --help' in text
-    assert '"$VENV/bin/workspace-bridge" adapter --help' in text
     assert '"$VENV/bin/workspace-bridge-node" --help' in text
-    # The Codex executable needs runtime settings even for --help; import
-    # its packaged entry point without starting a live adapter.
-    assert 'from workspace_bridge.codex_host_adapter import main; assert callable(main)' in text
+    assert '"$VENV/bin/workspace-bridge-node" plugin --help' in text
+    assert "builtin_manifests" in text
+    # Agent adapters are plugins now, never console scripts or a CLI namespace.
+    assert "adapter --help" not in text and "_host_adapter:main" not in text
 
 
 def test_setup_uv_pinned_exact_in_ci_and_release():
@@ -577,7 +462,7 @@ def test_release_manual_recovery_has_required_tag_and_pinned_checkout():
                 checkouts += 1
                 ref = str(step.get("with", {}).get("ref", ""))
                 assert "github.event.release.tag_name || inputs.tag" in ref, (name, step)
-    assert checkouts >= 7, f"expected tag-pinned checkouts, found {checkouts}"
+    assert checkouts >= 4, f"expected tag-pinned checkouts, found {checkouts}"
     # No run: block may embed the effective tag/input expression directly;
     # shell steps must use the quoted safe env expansion instead.
     for name, job in jobs.items():
@@ -589,7 +474,7 @@ def test_release_manual_recovery_has_required_tag_and_pinned_checkout():
     # Tag/version validation, manual check, asset staging, and release upload
     # all use the safe env value.
     assert 'TAG="$RELEASE_TAG"' in text
-    assert text.count('TAG="$RELEASE_TAG"') >= 4
+    assert text.count('TAG="$RELEASE_TAG"') >= 3
     assert '"$RELEASE_TAG"' in text
     # Manual dispatch fails closed for missing/draft releases without
     # creating, moving, or deleting tags or releases.
@@ -607,17 +492,6 @@ def test_release_manual_recovery_has_required_tag_and_pinned_checkout():
     assert on["release"].get("types") == ["published"]
 
 
-def test_docker_smoke_uses_explicit_python_entrypoint():
-    for path in (CI_YML, RELEASE_YML):
-        text = path.read_text()
-        assert "--entrypoint python" in text, path
-        # The smoke must bypass the production Bridge entrypoint.
-        assert "docker run --rm --entrypoint python" in text, path
-    ci_text = CI_YML.read_text()
-    assert "docker run --rm workspace-bridge:ci python -c" not in ci_text
-    release_text = RELEASE_YML.read_text()
-    assert "release-${{ matrix.arch }} python -c" not in release_text
-    assert "release-${{ matrix.arch }} -c" in release_text
 
 
 def test_pi_test_command_enumerates_test_files():

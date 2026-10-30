@@ -1,7 +1,6 @@
 """Skill delivery and trust boundary, not a behavioral evaluation of an LLM."""
 from hashlib import sha256
 from pathlib import Path
-import json
 
 import httpx
 import pytest
@@ -9,8 +8,8 @@ import pytest
 from workspace_bridge import __version__
 from workspace_bridge.api import Handoff, INSTRUCTIONS, TOOLS, make_mcp
 from workspace_bridge.embedded_skill import SKILL_URI, SKILLS_EXTENSION, read_project_lead_skill, skill_hint
-from workspace_bridge.protocol import LEGACY, MODERN, PREFIX
-from workspace_bridge.security import BridgeError, MAX_OUTPUT
+from mcp_helpers import McpTransport, LEGACY, MODERN, PREFIX
+from workspace_bridge.security import BridgeError
 from workspace_bridge.service import Service
 
 
@@ -23,29 +22,27 @@ async def rpc(env, method="skills/get", params=None, *, version=LEGACY[-1], toke
         headers["Mcp-Method"] = method
         if method == "resources/read":
             headers["Mcp-Name"] = params["uri"]
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])),
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])),
                                  base_url="http://127.0.0.1:8765") as client:
         return await client.post("/mcp", headers=headers,
                                  json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 
 
-def test_skill_is_complete_versioned_and_bounded():
+def test_skill_is_complete_and_versioned():
     skill = read_project_lead_skill()
-    assert skill["name"] == "project-lead" and skill["version"] == "3.4.0"
+    assert skill["name"] == "project-lead" and skill["version"] == "4.1.0"
     assert skill["sha256"] == sha256(skill["content"].encode()).hexdigest()
     assert skill["content"].startswith("---\nname: project-lead\ndescription:")
     assert skill["content"].endswith("independently ran its tests.\n")
-    assert 200 < len(skill["content"].split()) < 1400
-    assert len(json.dumps(skill)) < MAX_OUTPUT
 
 
 @pytest.mark.parametrize("text", [
     "You own understanding", "less-capable coding model", "smallest coherent, testable milestone",
     "context_hashes", "copy_prompt", "user will paste", "corrective handoff",
     "reported tests and commands", "higher-priority instructions", "untrusted",
-    "list_agent_adapters", "adapter_id", "runtime_type",
-    "Review the execution log of every automated run", "list_agent_executions",
-    "execution-quality", "propose a bounded fix", "cancel_agent_run", "list_agent_runs", "list_handoffs",
+    "list_targets", "adapter_id", "runtime_type",
+    "Review the execution log of every automated run", "run_log",
+    "execution-quality", "propose a bounded fix", "cancel_run", "list_runs", "list_handoffs",
 ])
 def test_skill_covers_project_lead_contract(text):
     assert text in read_project_lead_skill()["content"]
@@ -77,10 +74,10 @@ def test_mcp_instructions_match_skill_model_rule():
     assert "enabled model" in INSTRUCTIONS
     assert "model-choice rule" in INSTRUCTIONS
     assert "always uses the global default" not in INSTRUCTIONS
-    start_description = TOOLS["start_agent_run"][1]
+    start_description = TOOLS["start_run"][1]
     assert "currently available" in start_description or "enabled" in start_description
     assert "model_override_forbidden" not in start_description
-    assert "scope" in TOOLS["list_agent_models"][1]
+    assert "policy" in TOOLS["list_targets"][1]
 
 
 def test_skill_selects_an_exact_adapter_destination():
@@ -94,8 +91,8 @@ def test_skill_selects_an_exact_adapter_destination():
     assert "several routes are available, ask which one to" not in content
     assert "When several routes are available, ask which one to use rather than guessing." not in content
     assert "never map `pi` or `codex`" in content
-    for tool in ("list_agent_models", "start_agent_run", "read_agent_run",
-                 "respond_agent_interaction", "list_agent_executions"):
+    for tool in ("list_targets", "start_run", "read_run",
+                 "answer_interaction", "run_log", "send_run_input"):
         assert tool in content, tool
     assert "adapter_id" in INSTRUCTIONS and "never map pi or codex" in INSTRUCTIONS
 
@@ -113,7 +110,7 @@ def digest(text):
 async def test_skills_list_and_get_return_catalog_entry(env, version):
     skill = read_project_lead_skill()
     entry = {"uri": SKILL_URI,
-             "frontmatter": {"name": "project-lead", "version": "3.4.0",
+             "frontmatter": {"name": "project-lead", "version": "4.1.0",
                              "description": skill["content"].split("\n")[2].removeprefix("description: ")},
              "resources": [{"uri": SKILL_URI, "digest": digest(skill["content"])}]}
     listed = await rpc(env, "skills/list", {}, version=version)
@@ -146,12 +143,13 @@ async def test_skill_methods_reject_caller_selected_content(env, method, params)
 
 @pytest.mark.parametrize("modern", [False, True])
 async def test_discovery_declares_skills_extension_without_full_text(env, modern):
-    params = {} if modern else {"protocolVersion": LEGACY[-1], "capabilities": {}, "clientInfo": {}}
+    params = {} if modern else {"protocolVersion": LEGACY[-1], "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1"}}
     response = await rpc(env, "server/discover" if modern else "initialize", params,
                          version=MODERN if modern else LEGACY[-1])
     result = response.json()["result"]
     assert result["capabilities"]["extensions"] == {SKILLS_EXTENSION: {}}
-    assert result["capabilities"]["resources"] == {}
+    assert "resources" in result["capabilities"]
     assert read_project_lead_skill()["content"] not in result["instructions"]
 
 

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { canonicalizeProjectsDir, resolveSessionDir, PathError } from "../paths.mjs";
+import { canonicalizeProjectsDir, canonicalizeWorktreesDir, resolveSessionDir, PathError } from "../paths.mjs";
 
 function makeTree() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-paths-"));
@@ -52,6 +52,22 @@ test("resolveSessionDir rejects root, home, outside, missing, and files", () => 
   const file = path.join(app, "f.txt");
   fs.writeFileSync(file, "x");
   assert.throws(() => resolveSessionDir(root, file), PathError);
+});
+
+test("resolveSessionDir accepts a run worktree only directly under a workspace folder", () => {
+  const { root, projects } = makeTree();
+  const projectsRoot = canonicalizeProjectsDir(projects);
+  const worktrees = path.join(root, "node-state", "worktrees");
+  const tree = path.join(worktrees, "ws_1", "wt_1");
+  fs.mkdirSync(path.join(tree, "src"), { recursive: true });
+  const worktreesRoot = canonicalizeWorktreesDir(worktrees);
+  const home = os.homedir();
+  assert.equal(resolveSessionDir(projectsRoot, tree, home, worktreesRoot), fs.realpathSync(tree));
+  for (const bad of [worktrees, path.join(worktrees, "ws_1"), path.join(tree, "src")]) {
+    assert.throws(() => resolveSessionDir(projectsRoot, bad, home, worktreesRoot), PathError);
+  }
+  assert.throws(() => resolveSessionDir(projectsRoot, tree, home), PathError);
+  assert.equal(canonicalizeWorktreesDir(""), null);
 });
 
 test("resolveSessionDir rejects symlink escapes", () => {

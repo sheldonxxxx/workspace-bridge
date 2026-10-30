@@ -27,6 +27,7 @@ REMOVED_DOCS = (
     "HANDOFF_WRITES.md",
     "TUNNEL_SETUP.md",
     "CODEX_ADAPTER.md",
+    "DOCKER.md",
 )
 
 # Internal working markers that must not appear in tracked public docs.
@@ -99,19 +100,31 @@ def test_no_false_journal_absolute():
 
 def test_mcp_tools_matches_run_contract():
     text = (REPO / "docs" / "MCP_TOOLS.md").read_text(encoding="utf-8")
-    assert "instruction" in text, "start_agent_run must document direct instruction"
-    assert "exactly one of" in text, "start_agent_run must state the job_id/instruction choice"
+    assert "instruction" in text, "start_run must document direct instruction"
+    assert "exactly one of" in text, "start_run must state the job_id/instruction choice"
     assert "per-route" in text, "execution semantics must be per-route, not workspace-wide"
 
 
 def test_agent_setup_covers_both_runtimes():
     text = (REPO / "docs" / "AGENT_SETUP.md").read_text(encoding="utf-8")
-    assert "--runtime pi" in text
-    assert "--runtime codex" in text
-    assert "workspace-bridge-adapter-pi" in text and "service install" in text
-    assert "workspace-bridge-adapter-codex" in text
-    codex_block = text[text.find("--runtime codex"):]
-    assert "service install" in codex_block and "service status" in codex_block
+    assert "adapter add pi" in text
+    assert "adapter add codex" in text
+    assert "adapter test" in text and "service install" in text
+    # Agents are plugins of the Node: no adapter state, token or service.
+    assert "adapter --state" not in text and "runtime-token" not in text
+
+
+def test_public_docs_never_reference_removed_adapter_services():
+    removed = ("workspace-bridge adapter --state", "workspace-bridge-codex-adapter",
+               "workspace-bridge-claude-adapter", "workspace-bridge-opencode-adapter",
+               "support bundle --output", "reclaim-session", "X-Runtime-Token",
+               "show-token", "docker compose", "write_image", "grep_files",
+               "prepare_handoff", "read_handoff", "start_agent_run", "write_file",
+               "edit_file", "list_agent_adapters")
+    failures = [f"{path}: {phrase}" for path, text in _public_texts().items()
+                if "CHANGELOG" not in str(path)
+                for phrase in removed if phrase in text]
+    assert failures == []
 
 
 def test_no_apt_installs_uv():
@@ -130,10 +143,10 @@ def test_no_apt_installs_uv():
 def test_readme_quick_start_registers_node_first():
     text = (REPO / "README.md").read_text(encoding="utf-8")
     section = text[text.find("## Quick start"):]
-    assert "show-token" in section, "quick start must show Node token retrieval"
+    assert "local-node enable" in section, "quick start must enable the local Node"
     assert "register" in section.lower(), "quick start must cover Node registration"
-    assert section.find("show-token") < section.find("mapping"), \
-        "Node token/registration must precede workspace mapping"
+    assert section.find("local-node enable") < section.find("mapping"), \
+        "Node registration must precede workspace mapping"
 
 
 def test_deleted_docs_stay_deleted():

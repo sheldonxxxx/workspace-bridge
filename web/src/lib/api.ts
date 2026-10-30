@@ -13,32 +13,15 @@ export interface WorkspaceRoute {
   ready?: boolean;
   default_model?: string | null;
   security_binding?: {
-    source: "profile" | "runtime-config";
+    source: "profile" | "native";
     profile?: { id: string; revision?: string };
-    revision?: string;
-    status?: string;
-    observed_revision?: string | null;
-    resolved_summary?: {
-      activePermissionProfile?: string | null;
-      approvalPolicy?: string;
-      approvalsReviewer?: string;
-      provenance?: string;
-    } | null;
   } | null;
   profile?: { id: string; revision?: string } | null;
   effective_security?: {
     source?: string;
     profile_id?: string | null;
-    bound_revision?: string | null;
-    observed_revision?: string | null;
-    freshness?: string;
-    status?: string;
-    resolved_summary?: {
-      activePermissionProfile?: string | null;
-      approvalPolicy?: string;
-      approvalsReviewer?: string;
-      provenance?: string;
-    } | null;
+    revision?: string | null;
+    error?: string;
   } | null;
 }
 export interface AvailableAdapter {
@@ -55,8 +38,7 @@ export interface Workspace {
   name: string;
   root: string;
   enabled: boolean;
-  agent_enabled?: boolean;
-  write_scope: "none" | "handoff" | "workspace";
+  write_scope: "none" | "workspace";
   excludes: string;
   node_id: string;
   node_name: string;
@@ -66,27 +48,38 @@ export interface Workspace {
   available_adapters?: AvailableAdapter[];
   node_adapter_count?: number;
 }
-export interface ReleaseIdentity {
-  contract: number;
-  product: string;
-  product_version: string;
-  component: string;
-  component_version: string;
-  build_id: string;
-}
 export interface NodeInfo {
   id: string;
   name: string;
-  base_url: string;
   enabled: boolean;
   revision: string;
-  has_token: boolean;
+  transport?: "paired" | "local";
+  connection?: {
+    connected_at: string | null;
+    last_seen: string | null;
+    disconnected_at: string | null;
+  } | null;
   health?: string;
+  error?: string;
   protocol?: number;
   node_version?: string;
   capabilities?: string[];
   allowed_root_count?: number;
-  release?: ReleaseIdentity | null;
+}
+export interface PluginInfo {
+  id: string;
+  runtime_type: AdapterInfo["runtime_type"];
+  version: string;
+  description: string;
+  settings: string[];
+  features: string[];
+}
+/** The Node's saved configuration of an adapter. */
+export interface NodeAdapterConfig {
+  id: string;
+  plugin: string;
+  projects_root: string;
+  settings: Record<string, string>;
 }
 export interface AdapterInfo {
   id: string;
@@ -94,10 +87,8 @@ export interface AdapterInfo {
   node_name?: string;
   name: string;
   runtime_type: "pi" | "codex" | "claude" | "opencode";
-  base_url: string;
   enabled: boolean;
   revision: string;
-  has_token: boolean;
   configured?: boolean;
   healthy?: boolean;
   locked?: boolean;
@@ -106,7 +97,6 @@ export interface AdapterInfo {
   native_version?: string;
   adapter_version?: string;
   detail?: string;
-  release?: ReleaseIdentity | null;
   model_policy?: ModelPolicy;
   features?: Record<string, number>;
 }
@@ -174,11 +164,13 @@ export function quotaResetText(resetsAt?: number | null): string {
 }
 export interface Status {
   version: string;
-  release?: ReleaseIdentity | null;
-  manager_release?: ReleaseIdentity | null;
   listen_mode: string;
   mcp_port: number;
-  bridge: { configured: boolean; enabled: boolean };
+  bridge: {
+    configured: boolean;
+    enabled: boolean;
+    last_mcp_call?: string | null;
+  };
   adapters?: { adapters: AdapterInfo[] };
   nodes?: NodeInfo[];
 }
@@ -234,6 +226,25 @@ export interface TokenUsage {
   reasoning_output_tokens?: number;
   total_tokens?: number;
 }
+export interface RunCheckpointChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  not_captured?: string;
+}
+export interface RunCheckpointPhase {
+  status: string;
+  captured_at?: string | null;
+  error?: string;
+}
+export interface RunCheckpoint {
+  status: "pending" | "complete" | "partial" | "unavailable" | "expired";
+  pre: RunCheckpointPhase;
+  post: RunCheckpointPhase;
+  late: boolean;
+  changed_paths?: number;
+  changes?: RunCheckpointChange[];
+  overlapping_runs: string[];
+}
 export interface Run {
   run_id: string;
   adapter_id?: string;
@@ -255,6 +266,7 @@ export interface Run {
   model?: string;
   reasoning?: string | null;
   token_usage?: TokenUsage | null;
+  checkpoint?: RunCheckpoint;
   input_capabilities?: { steer: boolean; queue: boolean };
   input_messages?: RunInputReceipt[];
   input_message?: RunInputReceipt;
@@ -272,20 +284,25 @@ export interface Run {
   effective_security?: {
     source?: string;
     profile_id?: string | null;
-    bound_revision?: string | null;
-    effective_revision?: string | null;
-    resolved_summary?: Record<string, unknown>;
+    revision?: string | null;
   };
 }
 export interface RunInputReceipt {
   requestId: string;
   mode: "steer" | "queue";
   status: "queued" | "delivered" | "discarded" | "unknown";
+  origin?: "chatgpt" | "manager";
 }
 export interface Interaction {
   id: string;
   kind: string;
   state: string;
+  decision?: {
+    decided_by: "chatgpt" | "owner" | "manager";
+    reason: string;
+    decided: string;
+    choice_id?: string | null;
+  };
   details?: {
     title?: string;
     resource?: string;
@@ -327,42 +344,6 @@ export interface Model {
   defaultReasoningEffort?: string | null;
 }
 
-export interface VersionComponentState {
-  component: string;
-  instance: string;
-  runtime_type?: string | null;
-  instance_id?: string | null;
-  state:
-    | "current"
-    | "update_available"
-    | "unsupported_build"
-    | "target_mismatch"
-    | "incompatible"
-    | "unavailable";
-  execution_compatible: boolean;
-  reason: string;
-  current_product_version?: string | null;
-  current_build_id?: string | null;
-  target_product_version?: string | null;
-  target_build_id?: string | null;
-  target_precision: "exact" | "product-version-only";
-  current?: ReleaseIdentity | null;
-}
-export interface VersionStatus {
-  schema_version: number;
-  status: "ok" | "failed";
-  target: {
-    product_version?: string | null;
-    build_id?: string | null;
-    manager?: ReleaseIdentity | null;
-    note?: string;
-  };
-  bridge?: VersionComponentState | null;
-  manager?: VersionComponentState | null;
-  nodes?: VersionComponentState[];
-  adapters?: VersionComponentState[];
-  error?: { code: string; summary: string };
-}
 export async function api<T>(
   path: string,
   method = "GET",
@@ -388,6 +369,11 @@ export function displayState(run: Run): string {
       ? run.outcome
       : run.active_state || run.phase || run.state;
   return (value || "Unknown").replaceAll("_", " ");
+}
+export function decidedByLabel(value?: string): string {
+  if (value === "manager") return "you in the Manager";
+  if (value === "owner") return "you (as ChatGPT reported)";
+  return "ChatGPT";
 }
 export function dateTime(value?: string): string {
   return value ? new Date(value).toLocaleString() : "—";

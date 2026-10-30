@@ -1,20 +1,20 @@
 """Canonical diagnostics keyed by exact workspace and AdapterInstance routes."""
 from __future__ import annotations
 
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import __version__
 from .runtime import RuntimeUnsupported
 from .security import BridgeError, redact
-from .wbrp import CORE_FEATURES, Descriptor, HttpRuntimeAdapter
+from .wbrp import Descriptor
 
 STATUSES = frozenset({"pass", "warning", "unknown", "action_required", "failed"})
 SECTIONS = frozenset({"core", "nodes", "workspaces", "adapters", "runnable_routes",
-                      "models_profiles", "git_evidence", "release"})
+                      "models_profiles", "git_evidence", "version"})
 STATUS_ORDER = ("pass", "warning", "unknown", "action_required", "failed")
 MAX_WORKSPACES = 100
 MAX_ADAPTERS = 100
@@ -111,7 +111,7 @@ class DiagnosticReport:
     counts: dict[str, int]
     checks: list[DiagnosticCheck]
     runnable_routes: list[RunnableRoute]
-    release: dict[str, Any] = field(default_factory=dict)
+    versions: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {"generated_at": self.generated_at, "mode": self.mode,
@@ -120,7 +120,7 @@ class DiagnosticReport:
                             "counts": dict(self.counts)},
                 "checks": [item.to_dict() for item in self.checks],
                 "runnable_routes": [item.to_dict() for item in self.runnable_routes],
-                "release": dict(self.release)}
+                "versions": dict(self.versions)}
 
 
 def failure_report(*, mode: str = "offline", code: str = "core.config_state_readable",
@@ -128,24 +128,16 @@ def failure_report(*, mode: str = "offline", code: str = "core.config_state_read
                    section: str = "core") -> dict:
     check = DiagnosticCheck("doctor.initialization", code, section, "failed", summary,
                             remediation="Check the local configuration and private state files.")
-    try:
-        from .release import bridge_release
-        bridge = bridge_release()
-    except Exception:
-        bridge = None
-    release_data: dict[str, Any] = {"bridge": bridge, "manager": None,
-                                     "nodes": {}, "adapters": {}}
     return DiagnosticReport(_stamp(), mode, "failed", summary,
                             {status: int(status == "failed") for status in STATUS_ORDER},
-                            [check], [], release_data).to_dict()
+                            [check], [], {"bridge": __version__, "nodes": {}}).to_dict()
 
 
 class _Builder:
     def __init__(self):
         self.checks: list[DiagnosticCheck] = []
         self.routes: list[RunnableRoute] = []
-        self.release_data: dict[str, Any] = {"bridge": None, "manager": None,
-                                              "nodes": {}, "adapters": {}}
+        self.versions: dict[str, Any] = {"bridge": __version__, "nodes": {}}
 
     def add(self, code: str, section: str, status: str, summary: str, *,
             detail: str | None = None, remediation: str | None = None,
@@ -166,7 +158,7 @@ class _Builder:
                    "failed": "One or more required diagnostic checks failed."}[overall]
         return DiagnosticReport(_stamp(), mode, overall, summary, counts,
                                 self.checks[:5000], self.routes[:MAX_ROUTES],
-                                dict(self.release_data)).to_dict()
+                                dict(self.versions)).to_dict()
 
 
 def _adapter_probe(service, row: dict) -> tuple[Descriptor | None, dict | None]:
@@ -180,19 +172,35 @@ def _adapter_probe(service, row: dict) -> tuple[Descriptor | None, dict | None]:
         return None, {"kind": "unavailable"}
 
 
-def _profile_catalog(service, ws: dict, adapter_id: str) -> dict | None:
-    try:
-        return service.run_coordinator.profile_catalog(adapter_id, ws, fresh=True)
-    except Exception:
-        return None
-
-
 def _models(service, ws: dict, adapter_id: str) -> list[dict] | None:
     try:
         rows = service.adapter_registry.client(adapter_id, timeout=3, workspace=ws).models(ws["id"])
         return rows if isinstance(rows, list) else None
     except Exception:
         return None
+
+
+PAIRED_REPORT_FRESH_SECONDS = 90
+
+
+def paired_connection_state(node: dict, now: datetime | None = None) -> tuple[str, str, str | None]:
+    """Doctor's view of a paired Node, from state the running Bridge records."""
+    connected, seen = node.get("connected_at") or "", node.get("last_seen") or ""
+    disconnected = node.get("disconnected_at") or ""
+    if not connected:
+        return ("action_required", "Paired Node has never connected.",
+                "Start the Node service on that machine and check it can reach the Node gateway.")
+    if disconnected and disconnected >= connected:
+        return ("failed", f"Paired Node disconnected at {disconnected[:19]} UTC.",
+                "Start the Node service on that machine and check it can reach the Node gateway.")
+    try:
+        age = ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(seen)).total_seconds()
+    except ValueError:
+        age = None
+    if age is None or age > PAIRED_REPORT_FRESH_SECONDS:
+        return ("unknown", "The running Bridge has not reported this paired Node recently; "
+                           "the Bridge may be stopped.", None)
+    return ("pass", f"Paired Node is connected (reported by the running Bridge {int(age)} s ago).", None)
 
 
 def evaluate(service, *, offline: bool = False, listener: dict | None = None,
@@ -209,7 +217,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         adapters = service.adapter_registry.rows()[:MAX_ADAPTERS + 1]
         routes = [dict(row) for row in service.db.execute(
             "SELECT r.*,w.name AS workspace_name,w.root,w.node_id,w.enabled AS workspace_enabled,"
-            "w.write_scope,w.agent_enabled,a.name AS adapter_name,a.runtime_type,"
+            "w.write_scope,a.name AS adapter_name,a.runtime_type,"
             "a.enabled AS adapter_enabled,a.revision AS adapter_revision,a.node_id AS adapter_node_id,"
             "n.name AS node_name,n.enabled AS node_enabled,n.revision AS node_revision "
             "FROM workspace_routes r JOIN workspaces w ON w.id=r.workspace "
@@ -252,104 +260,43 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
     channels = service.notification_manager.status()
     out.add("core.notifications", "core", "pass",
             f"{channels['channel_count']} notification channel(s) configured; informational only.")
-    # M4.1 release identity: Bridge core is always observed locally.
-    # Product vs component versions stay distinct; build IDs are
-    # content-addressed source/package identities, not image digests.
-    try:
-        from .release import (ReleaseError, bridge_release, read_manager_release,
-                              short_build_id, validate_release)
-        _bridge_release = bridge_release()
-    except Exception:
-        _bridge_release = None
-    try:
-        _manager_release = read_manager_release()
-    except Exception:
-        _manager_release = None
-    out.release_data["bridge"] = _bridge_release
-    out.release_data["manager"] = _manager_release
-    if _bridge_release is not None:
-        out.add("release.bridge_identity", "release", "pass",
-                f"Bridge release {_bridge_release['product_version']} "
-                f"build {short_build_id(_bridge_release['build_id'])}.")
-    else:
-        out.add("release.bridge_identity", "release", "failed",
-                "Bridge release identity is unavailable.")
-    if _manager_release is not None:
-        out.add("release.manager_identity", "release", "pass",
-                f"Manager release {_manager_release['product_version']} "
-                f"build {short_build_id(_manager_release['build_id'])}.")
-    else:
-        out.add("release.manager_identity", "release", "unknown",
-                "Manager build identity was not observed.")
-    _bridge_product = (_bridge_release["product_version"]
-                       if isinstance(_bridge_release, dict) else None)
-    _bridge_build = (_bridge_release["build_id"]
-                     if isinstance(_bridge_release, dict) else None)
     nodes = service.node_registry.rows()
     node_health: dict[str, bool] = {}
-    node_releases: dict[str, dict | None] = {}
+    unobserved_nodes: set[str] = set()
     for node in nodes:
         healthy = False
-        observed: dict | None = None
-        release_error: str | None = None
-        if node["enabled"] and not offline:
+        observed: str | None = None
+        # A paired Node's connection lives in the running Bridge process; a
+        # separate Doctor process cannot observe it.
+        unobservable = bool(getattr(service, "read_only", False)) and node.get("transport") == "paired"
+        if node["enabled"] and not offline and not unobservable:
             try:
                 state = service.node_registry.client(node["id"], timeout=3).status()
                 healthy = True
-                raw = state.get("release") if isinstance(state, dict) else None
-                if raw is None:
-                    release_error = "missing"
-                else:
-                    try:
-                        observed = validate_release(raw)
-                    except ReleaseError as exc:
-                        release_error = getattr(exc, "kind", "invalid")
+                version = state.get("node_version") if isinstance(state, dict) else None
+                observed = version if isinstance(version, str) else None
             except Exception:
                 healthy = False
         node_health[node["id"]] = healthy
-        node_releases[node["id"]] = observed
-        out.release_data["nodes"][node["id"]] = observed
-        out.add("node.reachable", "nodes",
-                "pass" if healthy else ("unknown" if offline and node["enabled"] else
-                                         "action_required" if not node["enabled"] else "failed"),
-                "Authoritative Node is reachable." if healthy else
-                ("Node reachability was not checked offline." if offline and node["enabled"] else
-                 "Authoritative Node is disabled or unavailable."),
-                remediation=None if healthy else "Check the Node endpoint, credential and Node service.")
-        # Release compatibility never blocks routes; protocol/security/model
-        # readiness remains the execution authority.
-        if offline and node["enabled"]:
-            out.add("release.node_identity", "release", "unknown",
-                    "Node release identity was not checked offline.")
-        elif not node["enabled"]:
-            out.add("release.node_identity", "release", "unknown",
-                    "Node release identity is unobserved while disabled.")
-        elif not healthy:
-            out.add("release.node_identity", "release", "unknown",
-                    "Node release identity is unobserved while unreachable.")
-        elif release_error == "missing":
-            out.add("release.node_identity", "release", "warning",
-                    "Node release identity is missing; unsupported development build.",
-                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
-        elif release_error == "unsupported":
-            out.add("release.node_identity", "release", "warning",
-                    "Node release contract is unsupported; unsupported development build.",
-                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
-        elif release_error is not None:
-            out.add("release.node_identity", "release", "warning",
-                    "Node release identity is invalid; unsupported development build.",
-                    remediation="Install the Node onto a supported 0.1.0+ release manually (uv tool).")
-        elif observed is not None and _bridge_product is not None and observed.get("product_version") != _bridge_product:
-            out.add("release.node_product_skew", "release", "warning",
-                    "Node product version differs from the Bridge.",
-                    remediation="Align Node and Bridge product versions.")
-        elif observed is not None and _bridge_build is not None and observed.get("build_id") != _bridge_build:
-            out.add("release.node_build_skew", "release", "warning",
-                    "Node Python-core build differs from the Bridge.",
-                    remediation="Deploy the same Workspace Bridge package to Node and Bridge.")
+        out.versions["nodes"][node["id"]] = observed
+        if unobservable and node["enabled"] and not offline:
+            unobserved_nodes.add(node["id"])
+            status, summary, remediation = paired_connection_state(node)
+            out.add("node.reachable", "nodes", status, summary, remediation=remediation)
         else:
-            out.add("release.node_identity", "release", "pass",
-                    "Node release identity matches the Bridge Python core.")
+            out.add("node.reachable", "nodes",
+                    "pass" if healthy else ("unknown" if offline and node["enabled"] else
+                                             "action_required" if not node["enabled"] else "failed"),
+                    "Authoritative Node is reachable." if healthy else
+                    ("Node reachability was not checked offline." if offline and node["enabled"] else
+                     "Authoritative Node is disabled or unavailable."),
+                    remediation=None if healthy else "Check the Node endpoint, credential and Node service.")
+        # Version skew never blocks routes; protocol, security and model
+        # readiness decide what runs.
+        if healthy and observed is not None and observed != __version__:
+            out.add("version.node_skew", "version", "warning",
+                    f"Node runs {observed[:32]}; the Bridge runs {__version__}.",
+                    remediation="Install the same Workspace Bridge version on the Node and the Bridge.")
 
     root_access: dict[str, bool] = {}
     for ws in workspaces:
@@ -363,24 +310,25 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             except Exception:
                 root_ok = False
         root_access[wid] = root_ok
-        out.add("workspace.root_accessible", "workspaces",
-                "pass" if root_ok else "action_required",
-                f"Workspace root is authorized by Node {ws['node_id']}." if root_ok else
-                "Workspace root is unavailable or outside its Node allowed roots.",
-                workspace_id=wid)
+        if ws["node_id"] in unobserved_nodes:
+            # Only the running Bridge can reach a paired Node.
+            out.add("workspace.root_accessible", "workspaces", "unknown",
+                    "Workspace root on a paired Node is checked only by the running Bridge.",
+                    workspace_id=wid)
+        else:
+            out.add("workspace.root_accessible", "workspaces",
+                    "pass" if root_ok else "action_required",
+                    f"Workspace root is authorized by Node {ws['node_id']}." if root_ok else
+                    "Workspace root is unavailable or outside its Node allowed roots.",
+                    workspace_id=wid)
         out.add("workspace.enabled", "workspaces",
                 "pass" if ws["enabled"] else "action_required",
                 "Workspace mapping is enabled." if ws["enabled"] else "Workspace mapping is disabled.",
                 workspace_id=wid)
-        out.add("workspace.agent_execution", "workspaces", "pass",
-                "Agent execution is governed by the exact enabled workspace route; "
-                "the legacy workspace-wide agent switch is no longer a run gate.",
-                workspace_id=wid)
-        write_ok = ws["write_scope"] in {"handoff", "workspace"}
-        out.add("workspace.write_scope", "workspaces",
-                "pass" if write_ok else "action_required",
-                "Workspace permits handoff writes." if write_ok else
-                "Workspace write scope blocks prepared handoffs.", workspace_id=wid)
+        # Handoffs live in Bridge state, so either scope can plan and run.
+        out.add("workspace.write_scope", "workspaces", "pass",
+                "ChatGPT can edit allowed files and run checks." if ws["write_scope"] == "workspace" else
+                "Workspace is read-only for ChatGPT; handoffs and runs still work.", workspace_id=wid)
         if ws["enabled"]:
             git_status, git_summary = "pass", "Read-only Git evidence is available."
             if root_ok:
@@ -432,64 +380,11 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                         "Adapter protocol descriptor is incompatible or unavailable.",
                         adapter_id=aid, runtime_type=row["runtime_type"])
 
-    for row in adapters:
-        aid = row["id"]
-        runtime_type = row["runtime_type"]
-        descriptor, error = adapter_health.get(aid, (None, None))
-        observed = descriptor.release if descriptor is not None else None
-        out.release_data["adapters"][aid] = observed
-        if offline or (error and error.get("kind") in {"offline", "disabled"}):
-            out.add("release.adapter_identity", "release", "unknown",
-                    "Adapter release identity was not checked offline." if offline else
-                    "Adapter release identity is unobserved while disabled.",
-                    adapter_id=aid, runtime_type=runtime_type)
-        elif descriptor is None:
-            out.add("release.adapter_identity", "release", "unknown",
-                    "Adapter release identity is unobserved while unreachable.",
-                    adapter_id=aid, runtime_type=runtime_type)
-        elif observed is None:
-            # Release metadata is optional for generic protocol execution.
-            # A missing/invalid/unsupported first-party identity means an
-            # unsupported development build, while compatible routes stay
-            # runnable. This never blocks execution.
-            release_status = getattr(descriptor, "release_status", "missing")
-            if release_status == "unsupported":
-                out.add("release.adapter_identity", "release", "warning",
-                        "Adapter release contract is unsupported; unsupported development build. Compatible routes remain usable.",
-                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
-                        adapter_id=aid, runtime_type=runtime_type)
-            elif release_status == "invalid":
-                out.add("release.adapter_identity", "release", "warning",
-                        "Adapter release identity is invalid; unsupported development build. Compatible routes remain usable.",
-                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
-                        adapter_id=aid, runtime_type=runtime_type)
-            else:
-                out.add("release.adapter_identity", "release", "warning",
-                        "Adapter release identity is missing; unsupported development build.",
-                        remediation="Install the adapter onto a supported 0.1.0+ release manually.",
-                        adapter_id=aid, runtime_type=runtime_type)
-        elif _bridge_product is not None and observed.get("product_version") != _bridge_product:
-            out.add("release.adapter_product_skew", "release", "warning",
-                    "Adapter product version differs from the Bridge.",
-                    remediation="Align adapter and Bridge product versions.",
-                    adapter_id=aid, runtime_type=runtime_type)
-        elif (runtime_type in ("codex", "claude", "opencode") and _bridge_build is not None
-                and observed.get("build_id") != _bridge_build):
-            label = "Codex" if runtime_type == "codex" else "Claude"
-            out.add("release.adapter_build_skew", "release", "warning",
-                    f"{label} Python-core build differs from the Bridge.",
-                    remediation=f"Deploy the same Workspace Bridge package to {label} and Bridge.",
-                    adapter_id=aid, runtime_type=runtime_type)
-        else:
-            out.add("release.adapter_identity", "release", "pass",
-                    "Adapter release identity is present.",
-                    adapter_id=aid, runtime_type=runtime_type)
     health_by_id = {row["id"]: adapter_health.get(row["id"], (None, None))
                     for row in adapters}
     # write_scope is deliberately absent from run prerequisites: run
     # admission does not check it. A read-only workspace may still have an
-    # existing prepared handoff/conversation that is runnable. Handoff
-    # publication capability stays its own separate diagnostic below.
+    # existing prepared handoff/conversation that is runnable.
     prerequisites = {ws["id"]: [
         code for code, okay in (("workspace.root_accessible", bool(ws.get("enabled") and ws["root"])),
                                 ("workspace.enabled", bool(ws["enabled"])))
@@ -508,9 +403,6 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             futures = {}
             for route in route_probes:
                 key = (route["workspace"], route["adapter_id"])
-                futures[pool.submit(_profile_catalog, service,
-                                    service.workspace(route["workspace"], False),
-                                    route["adapter_id"])] = ("profile", key)
                 futures[pool.submit(_models, service,
                                     service.workspace(route["workspace"], False),
                                     route["adapter_id"])] = ("models", key)
@@ -543,7 +435,9 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             blockers.append("adapter_node_mismatch")
         if not route["node_enabled"]:
             blockers.append("node.disabled")
-        if not node_health.get(route["node_id"], False):
+        if route["node_id"] in unobserved_nodes:
+            blockers.append("node.unobserved_by_doctor")
+        elif not node_health.get(route["node_id"], False):
             blockers.append("node.unavailable")
         if route["adapter_enabled"] and not descriptor:
             blockers.append("adapter.reachable")
@@ -560,48 +454,28 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
 
         source = route["security_source"]
         profile_id = route["profile_id"] if source == "profile" else None
-        profile_revision = route["profile_revision"] if source == "profile" else None
+        profile_revision = None
         if not source:
             out.add("route.security_binding", "models_profiles", "action_required",
-                    "Workspace route has no security binding.", workspace_id=wid,
+                    "Workspace route has no security profile.", workspace_id=wid,
                     adapter_id=aid, runtime_type=runtime_type)
             blockers.append("route.security_binding")
-        elif source == "runtime-config" and runtime_type != "codex":
-            out.add("route.security_binding", "models_profiles", "action_required",
-                    "Runtime config security requires a Codex adapter.", workspace_id=wid,
-                    adapter_id=aid, runtime_type=runtime_type)
-            blockers.append("route.security_binding")
-        elif offline:
-            out.add("route.security_freshness", "models_profiles", "unknown",
-                    "Route security discovery was not checked offline.", workspace_id=wid,
-                    adapter_id=aid, runtime_type=runtime_type)
-            blockers.append("route.security_freshness")
-        elif source == "runtime-config":
-            native = catalog.get("runtimeConfig") if isinstance(catalog, dict) else None
-            ok = bool(isinstance(native, dict) and native.get("supported") is True
-                      and native.get("available") is True
-                      and isinstance(native.get("revision"), str)
-                      and bool(native.get("revision")))
-            out.add("route.security_freshness", "models_profiles",
-                    "pass" if ok else "action_required",
-                    "Selected Codex adapter security config resolves." if ok else
-                    "Selected Codex adapter security config is unavailable.",
-                    workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
-            if not ok:
-                blockers.append("route.security_freshness")
         else:
-            # Revision drift never blocks: adapter redeploys rotate opaque
-            # revisions, so only a missing or unavailable profile does.
-            rows = catalog.get("profiles", []) if isinstance(catalog, dict) else []
-            current = next((row for row in rows if row.get("id") == profile_id), None)
-            ok = bool(current and current.get("available") is not False)
-            out.add("route.security_freshness", "models_profiles",
-                    "pass" if ok else "action_required",
-                    "Selected adapter profile is assigned and available." if ok else
-                    "Selected adapter profile is missing or unavailable.",
-                    workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
-            if not ok:
-                blockers.append("route.security_freshness")
+            # The Bridge owns profiles, so this needs no agent round trip:
+            # the profile must exist and the agent must enforce its rules.
+            try:
+                wire = service.profiles.binding(
+                    service.adapter_registry.get(aid), source, profile_id)
+                profile_revision = wire.get("profile", {}).get("revision")
+                out.add("route.security_binding", "models_profiles", "pass",
+                        "Route security profile is enforceable by this agent." if source == "profile"
+                        else "Route runs under the agent's native configuration.",
+                        workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
+            except BridgeError as exc:
+                out.add("route.security_binding", "models_profiles", "action_required",
+                        _safe(str(exc), 240, "Route security profile is unusable."),
+                        workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
+                blockers.append("route.security_binding")
 
         if offline:
             out.add("model.default_freshness", "models_profiles", "unknown",

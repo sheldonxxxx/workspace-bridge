@@ -2,7 +2,9 @@
 
 Durable REST projections remain authoritative. Every connection starts with a
 reset, so neither reconnects nor slow clients depend on replaying event bodies.
-This transport is independent of the MCP webhook journal and contains only IDs.
+This transport is independent of the MCP webhook journal and contains only
+run IDs: `run.changed` names a run, `state.changed` says some audited Bridge
+state moved and the Manager should reread its snapshot.
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ RUN_ID = re.compile(r"run_[0-9a-f]{24}\Z")
 @dataclass(eq=False)
 class RunEventSubscription:
     loop: asyncio.AbstractEventLoop
-    run_id: str | None
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=64))
     active: bool = True
     _pending: deque = field(default_factory=deque)
@@ -35,6 +36,8 @@ class RunEventSubscription:
             if event[0] == "closed":
                 self._pending.clear()
                 self._pending.append(event)
+            elif event in self._pending and event[0] == "state.changed":
+                return
             elif len(self._pending) >= 64:
                 self._pending.clear()
                 self._pending.append(("reset", None))
@@ -77,10 +80,8 @@ class RunEventHub:
         self._subscribers: set[RunEventSubscription] = set()
         self._closed = False
 
-    def subscribe(self, run_id: str | None = None) -> RunEventSubscription:
-        if run_id is not None and RUN_ID.fullmatch(run_id) is None:
-            raise ValueError("Invalid run ID")
-        subscriber = RunEventSubscription(asyncio.get_running_loop(), run_id)
+    def subscribe(self) -> RunEventSubscription:
+        subscriber = RunEventSubscription(asyncio.get_running_loop())
         with self._lock:
             if self._closed or len(self._subscribers) >= self.MAX_SUBSCRIBERS:
                 raise RuntimeError("Run event stream unavailable")
@@ -97,14 +98,19 @@ class RunEventHub:
         # The publisher cannot place arbitrary runtime content on the stream.
         if not isinstance(run_id, str) or RUN_ID.fullmatch(run_id) is None:
             return
+        self._send(("run.changed", run_id))
+
+    def publish_state(self) -> None:
+        self._send(("state.changed", None))
+
+    def _send(self, event: tuple[str, str | None]) -> None:
         with self._lock:
-            targets = [item for item in self._subscribers
-                       if item.run_id is None or item.run_id == run_id]
             if self._closed:
                 return
+            targets = tuple(self._subscribers)
         for subscriber in targets:
             try:
-                subscriber.enqueue(("run.changed", run_id))
+                subscriber.enqueue(event)
             except RuntimeError:
                 self.unsubscribe(subscriber)
 

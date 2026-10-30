@@ -3,7 +3,7 @@
 // forms, bounds, manifest/conventional extensions, missing/symlink/
 // malformed cases, no path leaks, and the absence of a public inventory route,
 // explicit extension-root loading with auto-discovery off against
-// installed Pi 0.87.0, excludeTools loadout, permission pass-through, and
+// installed Pi 1.4.0, excludeTools loadout, permission pass-through, and
 // generic audit bounds.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -32,7 +32,7 @@ import {
   summarizeExtensionResult,
 } from "../executions.mjs";
 import { MANAGED_TOOLS } from "../trusted-permission-extension.mjs";
-import { createPiAdapterServer } from "../server.mjs";
+import { HANDLERS } from "../stdio.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
 import { createFakeTransport } from "./fake-sdk.mjs";
 
@@ -720,15 +720,9 @@ async function managedCreate(agentDir, extensionPolicy) {
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const { validatePolicy } = await import("../policy.mjs");
+  const { validatePolicy, safeDefaultPolicy } = await import("../policy.mjs");
   const { policyRevision, canonicalJson } = await import("../policy.mjs");
-  const permission = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  };
+  const permission = safeDefaultPolicy();
   validatePolicy(permission);
   const session = await adapter.createSession(projects.app, "t", {
     permission_policy: permission, policy_revision: policyRevision(permission),
@@ -783,14 +777,8 @@ test("extension tools pass preflight without permission ask when enabled", async
     listModelsFn: transport.listModelsFn,
     piUsable: true, piVersion: "0.87.0",
   });
-  const { validatePolicy, policyRevision } = await import("../policy.mjs");
-  const permission = {
-    version: 3, write_tools_enabled: false,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [], protected_template_exceptions: [],
-    allow_session_always: true, external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  };
+  const { safeDefaultPolicy, policyRevision } = await import("../policy.mjs");
+  const permission = safeDefaultPolicy();
   const session = await adapter.createSession(projects.app, "t", {
     permission_policy: permission, policy_revision: policyRevision(permission),
     extension_policy: { version: 1, enabled: ["npm:alpha"] },
@@ -903,29 +891,10 @@ test("generic extension audit bounds input/result without secrets", () => {
   assert.equal(big.truncated, true);
 });
 
-// ------------------------------------------------------------ server
-test("third-party extension inventory is not exposed through the runtime API", async () => {
-  const agentDir = makeAgentDir(["npm:alpha"]);
-  writePackage(agentDir, "alpha", { manifest: ["./ext.js"] });
-  const fake = {
-    projectsRoot: "/tmp", sessionCount: 0,
-    listExtensions: () => readExtensionInventory(agentDir),
-  };
-  const server = createPiAdapterServer({
-    adapter: fake, token: "tok", adapterVersion: "0.3.0", instance: "i",
-    piUsable: true, piVersion: "0.87.0",
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const res = await fetch(`${base}/extensions`, { headers: { "X-Runtime-Token": "tok" } });
-    assert.equal(res.status, 404);
-    const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.capabilities, undefined);
-    assert.ok(!JSON.stringify(health).includes("alpha"));
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
+// ------------------------------------------------------------ protocol
+test("third-party extension inventory is not exposed through the plugin protocol", () => {
+  // The plugin protocol has no extensions or health method; inventory stays local.
+  assert.equal(Object.keys(HANDLERS).some((name) => /extension|health/.test(name)), false);
 });
 
 // ------------------------------------------------------------ SDK fixture

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from workspace_bridge import security_profiles as sp
 from workspace_bridge.api import Handoff, make_admin
 from workspace_bridge.cli import initialize
 from workspace_bridge.codex_host_adapter import (
@@ -21,6 +22,8 @@ from workspace_bridge.wbrp import validate_run_state
 from test_codex_host_adapter import FakeCodexRpc
 from test_run_coordinator import DirectAdapter, modern_env, ADAPTER_ID  # noqa: F401
 from conftest import attach_test_node, create_test_adapter
+
+SECURITY = sp.wire("trusted", sp.BUILTINS["trusted"])
 
 
 # ------------------------------------------------ WBRP trust boundary
@@ -85,15 +88,12 @@ def _codex_conversation_run(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     run = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "Check the project"}]})
     return adapter, rpc, conversation, run
 
@@ -146,6 +146,7 @@ def test_codex_continuation_starts_fresh_boundary(tmp_path):
             "turn": {"id": first["nativeId"], "status": "completed"}})
         rpc.status = "idle"
         second = adapter.start_run(conversation["id"], {
+            "security": SECURITY,
             "input": [{"type": "text", "text": "follow-up"}]})
         assert "usage" not in adapter.run(second["id"])
         adapter._notification("thread/tokenUsage/updated", {
@@ -234,15 +235,12 @@ def test_codex_usage_survives_terminal_failure_and_restart(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     run = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "Failing task"}]})
     adapter._notification("thread/tokenUsage/updated", {
         "threadId": conversation["nativeId"], "turnId": run["nativeId"],
@@ -291,19 +289,16 @@ def test_codex_usage_survives_all_terminal_outcomes(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     try:
         for status, outcome in (("completed", "succeeded"),
                                 ("interrupted", "interrupted"),
                                 ("failed", "failed")):
             conversation = adapter.create_conversation({
                 "workspaceId": "ws_test", "directory": str(workspace),
-                "securityProfile": {"id": "workspace-write-reviewed",
-                                    "revision": profile["revision"]},
+                "security": SECURITY,
             })
             run = adapter.start_run(conversation["id"], {
+                "security": SECURITY,
                 "input": [{"type": "text", "text": f"task {outcome}"}]})
             adapter._notification("thread/tokenUsage/updated", {
                 "threadId": conversation["nativeId"], "turnId": run["nativeId"],
@@ -400,15 +395,12 @@ def test_codex_restart_keeps_continuation_boundary(tmp_path):
     workspace.mkdir(exist_ok=True)
     rpc = FakeCodexRpc()
     adapter = CodexHostAdapter(tmp_path / "adapter-state", projects, rpc=rpc)
-    profile = next(row for row in adapter.profiles(
-        "ws_test", str(workspace))["profiles"]
-        if row["id"] == "workspace-write-reviewed")
     conversation = adapter.create_conversation({
         "workspaceId": "ws_test", "directory": str(workspace),
-        "securityProfile": {"id": "workspace-write-reviewed",
-                            "revision": profile["revision"]},
+        "security": SECURITY,
     })
     first = adapter.start_run(conversation["id"], {
+        "security": SECURITY,
         "input": [{"type": "text", "text": "first"}]})
     adapter._notification("thread/tokenUsage/updated", {
         "threadId": conversation["nativeId"], "turnId": first["nativeId"],
@@ -433,6 +425,7 @@ def test_codex_restart_keeps_continuation_boundary(tmp_path):
         assert restarted.run(first["id"])["usage"] == {
             "inputTokens": 150, "totalTokens": 150}
         second = restarted.start_run(conversation["id"], {
+            "security": SECURITY,
             "input": [{"type": "text", "text": "second"}]})
         restarted._notification("thread/tokenUsage/updated", {
             "threadId": conversation["nativeId"], "turnId": second["nativeId"],
@@ -529,7 +522,7 @@ def test_bridge_normalize_usage_maps_camel_to_snake():
 def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-persist-1"})
     run = service.run_coordinator._run_row(ws, started["run_id"])
@@ -554,12 +547,12 @@ def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
                         "outputTokens": 35, "totalTokens": 195},
         }})
     # Reconcile through the durable snapshot path.
-    read = service.call(ws_id, token, "read_agent_run",
+    read = service.call(ws_id, token, "read_run",
                         {"run_id": started["run_id"]})
     assert read["token_usage"] == {"input_tokens": 150,
                                    "cached_input_tokens": 30,
                                    "output_tokens": 35, "total_tokens": 195}
-    listed = service.call(ws_id, token, "list_agent_runs", {})["runs"]
+    listed = service.call(ws_id, token, "list_runs", {})["runs"]
     assert next(item for item in listed
                 if item["run_id"] == started["run_id"])["token_usage"] == {
         "input_tokens": 150, "cached_input_tokens": 30,
@@ -575,10 +568,10 @@ def test_bridge_persists_and_returns_usage_through_list_and_read(modern_env):
 def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
     service, ws_id, token, job, native, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-absent-1"})
-    assert service.call(ws_id, token, "read_agent_run",
+    assert service.call(ws_id, token, "read_run",
                         {"run_id": started["run_id"]})["token_usage"] is None
     run = service.run_coordinator._run_row(ws, started["run_id"])
     snapshot = service.run_coordinator.adapter(ADAPTER_ID).run(run["native_id"])
@@ -586,7 +579,7 @@ def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
                 "outcome": "failed", "result": "",
                 "usage": {"inputTokens": 9, "totalTokens": 9}}
     service.run_coordinator._persist_snapshot(run, terminal, [], [])
-    failed = service.call(ws_id, token, "read_agent_run",
+    failed = service.call(ws_id, token, "read_run",
                           {"run_id": started["run_id"]})
     assert failed["outcome"] == "failed"
     assert failed["token_usage"] == {"input_tokens": 9, "total_tokens": 9}
@@ -595,7 +588,7 @@ def test_bridge_absent_usage_is_null_and_partial_survives_terminal(modern_env):
 def test_bridge_rejects_malformed_native_usage(modern_env):
     service, ws_id, token, job, _, _ = modern_env
     ws = service.workspace(ws_id)
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-malformed-1"})
     run = service.run_coordinator._run_row(ws, started["run_id"])
@@ -605,7 +598,7 @@ def test_bridge_rejects_malformed_native_usage(modern_env):
         service.run_coordinator._persist_snapshot(run, bad, [], [])
 
 
-def test_bridge_schema_v4_fail_fast(tmp_path, payload):
+def test_bridge_schema_v5_fail_fast(tmp_path, payload):
     parent = tmp_path / "projects"
     parent.mkdir()
     root = parent / "alpha"
@@ -615,7 +608,7 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
     service = Service(state, cfg, run_coordinator_background=False)
     try:
         assert service.db.execute(
-            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "4"
+            "SELECT value FROM bridge_meta WHERE key='schema_version'").fetchone()[0] == "5"
         columns = {row["name"] for row in service.db.execute(
             "PRAGMA table_info(agent_runs)")}
         assert "token_usage" in columns
@@ -633,20 +626,20 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
     with pytest.raises(BridgeError) as exc:
         Service(legacy, cfg, run_coordinator_background=False)
     assert exc.value.code == "state_schema_incompatible"
-    # A v4 database that is structurally incomplete (agent_runs without
+    # A v5 database that is structurally incomplete (agent_runs without
     # token_usage) fails closed instead of being silently migrated.
     import sqlite3
     incomplete = tmp_path / "incomplete-state"
     incomplete.mkdir()
     conn = sqlite3.connect(incomplete / "bridge.sqlite3")
     conn.execute("CREATE TABLE bridge_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.execute("INSERT INTO bridge_meta VALUES('schema_version','4')")
+    conn.execute("INSERT INTO bridge_meta VALUES('schema_version','5')")
     conn.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL, token TEXT NOT NULL, enabled INTEGER NOT NULL, revision TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL)")
     conn.execute("CREATE TABLE node_adapters (adapter_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, name TEXT NOT NULL, runtime_type TEXT NOT NULL, base_url TEXT NOT NULL DEFAULT '', revision TEXT NOT NULL, enabled INTEGER NOT NULL, has_token INTEGER NOT NULL, last_seen TEXT NOT NULL)")
     conn.execute("CREATE TABLE workspace_routes (workspace TEXT NOT NULL, adapter_id TEXT NOT NULL, enabled INTEGER NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, security_source TEXT, profile_id TEXT, profile_revision TEXT, updated TEXT NOT NULL, PRIMARY KEY(workspace, adapter_id))")
     conn.execute("CREATE TABLE adapter_model_policies (adapter_id TEXT PRIMARY KEY, enabled_models_json TEXT NOT NULL, default_model TEXT NOT NULL, reasoning_defaults_json TEXT NOT NULL, updated TEXT NOT NULL)")
     conn.execute("CREATE TABLE agent_conversations (id TEXT PRIMARY KEY, workspace TEXT NOT NULL, node_id TEXT NOT NULL, node_revision TEXT NOT NULL, adapter_id TEXT NOT NULL, runtime_type TEXT NOT NULL, adapter_revision TEXT NOT NULL, native_id TEXT NOT NULL, profile TEXT NOT NULL, revision TEXT NOT NULL, instance_id TEXT NOT NULL, created TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'profile', security_snapshot TEXT, permission_revision TEXT NOT NULL DEFAULT '', approval_revision TEXT NOT NULL DEFAULT '', replacement_reason TEXT, UNIQUE(adapter_id,native_id))")
-    # agent_runs without the v4 token_usage column.
+    # agent_runs without the token_usage column.
     conn.execute("CREATE TABLE agent_runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, workspace TEXT NOT NULL, node_id TEXT NOT NULL, node_revision TEXT NOT NULL, adapter_id TEXT NOT NULL, runtime_type TEXT NOT NULL, adapter_revision TEXT NOT NULL, handoff TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL, continue_from TEXT, parent_run TEXT, native_id TEXT, model TEXT NOT NULL, reasoning TEXT, phase TEXT NOT NULL, active_state TEXT, outcome TEXT, result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', effective_security TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, UNIQUE(workspace,adapter_id,request_id))")
     conn.commit()
     conn.close()
@@ -657,7 +650,7 @@ def test_bridge_schema_v4_fail_fast(tmp_path, payload):
 
 def test_bridge_admin_and_mcp_share_canonical_run_shape(modern_env):
     service, ws_id, token, job, _, _ = modern_env
-    started = service.call(ws_id, token, "start_agent_run", {
+    started = service.call(ws_id, token, "start_run", {
         "adapter_id": ADAPTER_ID, "job_id": job["id"],
         "request_id": "usage-canonical-1"})
     admin = service.admin_read_agent_run(started["run_id"])

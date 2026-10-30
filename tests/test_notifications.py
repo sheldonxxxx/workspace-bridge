@@ -70,10 +70,35 @@ def test_discord_formats_only_safe_metadata_and_suppresses_mentions(monkeypatch)
     assert '"allowed_mentions": {"parse": []' in body
     assert "secret-token" not in body
     assert "permission.updated" not in body
-    assert records[0]["body"]["embeds"][0]["description"].startswith("Review the pending request")
+    assert records[0]["body"]["embeds"][0]["description"].startswith("Answer it in ChatGPT")
     assert records[1]["body"]["embeds"][0]["description"].startswith("Read the final run result")
     assert records[0]["headers"].get("user-agent") == BRIDGE_USER_AGENT
     assert "secret-token" not in BRIDGE_USER_AGENT
+
+
+@pytest.mark.parametrize("event_type", ["run_action", "run_manager_action"])
+def test_an_action_notice_names_the_action_and_dedupes_per_subject(event_type):
+    def action(subject, name="answered"):
+        return NotificationEvent.build(
+            event_type=event_type, run_id="run_abc", workspace_id="ws_alpha",
+            workspace_name="Alpha", handoff_title="Improve add",
+            adapter_id="adapter_000000000000000000000001", adapter_name="Local Codex",
+            runtime_type="codex", subject_id=subject, action=name)
+    payload = DiscordChannel._payload(action("int_1"))["embeds"][0]
+    assert payload["title"] == ("Agent run changed in the Manager"
+                                if event_type == "run_manager_action" else "Agent run action")
+    if event_type == "run_action":
+        assert "Someone signed in" not in payload["description"]
+    assert {"name": "Action", "value": "answered", "inline": True} in payload["fields"]
+    assert not any(field["name"] == "Outcome" for field in payload["fields"])
+    assert action("int_1").dedupe_key != action("int_2").dedupe_key
+    assert action("int_1").dedupe_key != action("int_1", "steered").dedupe_key
+    with pytest.raises(BridgeError):
+        NotificationEvent.build(
+            event_type=event_type, run_id="run_abc", workspace_id="ws_alpha",
+            workspace_name="Alpha", handoff_title="x",
+            adapter_id="adapter_000000000000000000000001", adapter_name="A",
+            runtime_type="codex")
 
 
 def test_discord_retries_are_bounded_and_diagnostics_are_safe(monkeypatch):

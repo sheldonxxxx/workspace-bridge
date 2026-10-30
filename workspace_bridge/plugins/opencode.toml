@@ -1,0 +1,12 @@
+id = "opencode"
+version = "1.0.0"
+protocol = 2
+runtime_type = "opencode"
+python_module = "opencode"
+description = "OpenCode through opencode serve"
+# Every security profile rule is enforced by the plugin on each tool call.
+enforces = ["read_inside", "read_outside", "write_inside", "write_outside", "shell",
+            "web", "extensions", "protected", "external_roots", "commands"]
+features = ["steer", "queue", "events", "images", "worktrees"]
+# binary: path to the opencode CLI.
+settings = ["binary"]

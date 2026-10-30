@@ -68,6 +68,42 @@ def _metadata_error() -> BridgeError:
     return BridgeError("Git metadata is unavailable or unsupported", "unsupported_repository_layout")
 
 
+_FILTER_SECTION = re.compile(r'(?im)^[ \t]*\[[ \t]*filter(?=[\s".\]])')
+_FILTER_HEADER = re.compile(
+    r'(?im)^[ \t]*\[[ \t]*filter(?:[ \t]+"([^"\\\n]*)"|\.([^\]\s"]*))[ \t]*\]')
+_FILTER_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}")
+MAX_FILTER_DRIVERS = 32
+
+
+def _filter_overrides(config: str) -> tuple[str, ...]:
+    """Neutralize every filter driver the repository config defines.
+
+    Clean, smudge and process filters run arbitrary commands during status
+    and diff; ``--no-ext-diff`` and ``--no-textconv`` do not cover them. Git
+    treats an empty filter command as no filter, so each named driver is
+    overridden on the command line. A filter section that cannot be parsed
+    exactly fails closed instead of risking an unneutralized driver.
+    """
+    names: list[str] = []
+    for match in _FILTER_HEADER.finditer(config):
+        quoted, legacy = match.group(1), match.group(2)
+        # Legacy [filter.name] subsections are case-insensitive in Git.
+        name = quoted if quoted is not None else legacy.lower()
+        if not _FILTER_NAME.fullmatch(name):
+            raise _metadata_error()
+        if name not in names:
+            names.append(name)
+    if (len(_FILTER_SECTION.findall(config)) != len(_FILTER_HEADER.findall(config))
+            or len(names) > MAX_FILTER_DRIVERS):
+        raise _metadata_error()
+    overrides: list[str] = []
+    for name in names:
+        for key in ("clean", "smudge", "process"):
+            overrides += ["-c", f"filter.{name}.{key}="]
+        overrides += ["-c", f"filter.{name}.required=false"]
+    return tuple(overrides)
+
+
 def _metadata_stat(parent_fd: int, name: str, device: int, *,
                    kind: str, optional: bool = False) -> os.stat_result | None:
     """Inspect one named metadata node without following links."""
@@ -134,7 +170,7 @@ def _reject_metadata_marker(parent_fd: int, name: str) -> None:
     raise _metadata_error()
 
 
-def _safe_metadata(safe: SafeRoot) -> tuple[bool, int | None]:
+def _safe_metadata(safe: SafeRoot) -> tuple[bool, int | None, tuple[str, ...]]:
     """Validate a direct .git directory without following metadata symlinks.
 
     A missing entry is an ordinary non-Git workspace. Unsupported layouts and
@@ -144,7 +180,7 @@ def _safe_metadata(safe: SafeRoot) -> tuple[bool, int | None]:
     try:
         root_stat = os.stat(".git", dir_fd=safe.fd, follow_symlinks=False)
     except FileNotFoundError:
-        return False, None
+        return False, None, ()
     except OSError:
         raise BridgeError("Git metadata is unavailable or unsupported", "unsupported_repository_layout") from None
     if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_dev != safe.identity[0]:
@@ -215,6 +251,7 @@ def _safe_metadata(safe: SafeRoot) -> tuple[bool, int | None]:
             os.close(config_fd)
         if re.search(r"(?im)^\s*\[\s*include(?:if)?(?:\s|\])", config):
             raise _metadata_error()
+        overrides = _filter_overrides(config)
 
         # HEAD, index and packed refs are direct metadata inputs to status and
         # diff. The index and packed-refs file may not exist in new repositories.
@@ -225,7 +262,7 @@ def _safe_metadata(safe: SafeRoot) -> tuple[bool, int | None]:
             optional_file = _open_metadata_file(git_fd, name, safe.identity[0], optional=True)
             if optional_file is not None:
                 os.close(optional_file[0])
-        return True, os.dup(git_fd)
+        return True, os.dup(git_fd), overrides
     finally:
         os.close(git_fd)
 
@@ -242,12 +279,17 @@ def _git_binary() -> str | None:
     return resolved if stat.S_ISREG(st.st_mode) and os.access(resolved, os.X_OK) else None
 
 
-def _run(binary: str, safe: SafeRoot, git_dir: str, command: list[str], *,
-         timeout: float, output_limit: int) -> bytes:
-    """Run one fixed Git subcommand with bounded pipes and a minimal environment."""
+def _run(binary: str, safe: SafeRoot | None, git_dir: str, command: list[str], *,
+         timeout: float, output_limit: int, overrides: tuple[str, ...] = (),
+         cwd: str | None = None, env_extra: dict[str, str] | None = None) -> bytes:
+    """Run one fixed Git subcommand with bounded pipes and a minimal environment.
+
+    The work tree is the current directory: ``safe.path`` unless ``cwd`` names
+    another Node-owned folder, such as a run's worktree.
+    """
     argv = [binary, "--no-pager", "--git-dir", git_dir, "--work-tree", ".",
             "-c", "core.fsmonitor=false", "-c", "core.quotepath=false",
-            "-c", "core.pager=cat", *command]
+            "-c", "core.pager=cat", *overrides, *command]
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
         "LC_ALL": "C",
@@ -262,9 +304,10 @@ def _run(binary: str, safe: SafeRoot, git_dir: str, command: list[str], *,
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_ALLOW_PROTOCOL": "",
+        **(env_extra or {}),
     }
     try:
-        process = subprocess.Popen(argv, cwd=safe.path, env=env, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(argv, cwd=cwd or safe.path, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    close_fds=True, start_new_session=True)
     except (OSError, ValueError):
@@ -435,8 +478,8 @@ class GitEvidence:
     """Fixed-function read-only evidence collector tied to a Service lifetime."""
 
     @staticmethod
-    def _repository(safe: SafeRoot) -> tuple[str, str] | None:
-        exists, git_fd = _safe_metadata(safe)
+    def _repository(safe: SafeRoot) -> tuple[str, str, tuple[str, ...]] | None:
+        exists, git_fd, overrides = _safe_metadata(safe)
         if not exists:
             return None
         assert git_fd is not None
@@ -466,7 +509,7 @@ class GitEvidence:
             raise BridgeError("Git worktree metadata is unsupported", "unsupported_repository_layout") from None
         if resolved != os.path.realpath(safe.path):
             raise BridgeError("Git worktree metadata is unsupported", "unsupported_repository_layout")
-        return binary, git_dir
+        return binary, git_dir, overrides
 
     @staticmethod
     def _status_state(safe: SafeRoot, ws: dict) -> dict:
@@ -478,10 +521,10 @@ class GitEvidence:
             return {"available": False, "reason": "not_a_repository", "entries": [],
                     "hidden_count": 0,
                     "status_sha256": _state_sha256(material)}
-        binary, git_dir = repository
+        binary, git_dir, overrides = repository
         raw = _run(binary, safe, git_dir,
                     ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "--ignore-submodules=all", "-z"],
-                    timeout=STATUS_TIMEOUT, output_limit=MAX_STATUS_OUTPUT)
+                    timeout=STATUS_TIMEOUT, output_limit=MAX_STATUS_OUTPUT, overrides=overrides)
         headers, changes = _split_status(raw)
         if len(changes) > MAX_STATUS_ENTRIES:
             raise BridgeError("Git status exceeds its entry bound", "output_limit")
@@ -562,6 +605,7 @@ class GitEvidence:
             "status_sha256": status_hash,
             "_binary": binary,
             "_git_dir": git_dir,
+            "_overrides": overrides,
             "_changes": [pair[0] for pair in visible],
         }
 
@@ -669,35 +713,38 @@ class GitEvidence:
                 args = [*base, "--cached", *( ["HEAD"] if state["head"] is not None else ["--root"] ), "--", *literal_paths]
             else:
                 args = [*base, "--", *literal_paths]
-            raw = _run(binary, safe, git_dir, args, timeout=DIFF_TIMEOUT, output_limit=MAX_DIFF_OUTPUT)
+            raw = _run(binary, safe, git_dir, args, timeout=DIFF_TIMEOUT, output_limit=MAX_DIFF_OUTPUT,
+                       overrides=state["_overrides"])
         else:
             raw = b""
         after = GitEvidence._status_state(safe, ws)
         if after["status_sha256"] != observed:
             raise BridgeError("Git status changed while collecting the diff; request a fresh status page",
                               "stale_evidence")
-        text, redacted = redact(raw.decode("utf-8", errors="replace"))
-        patch = text.encode("utf-8")
-        start = min(offset, len(patch))
-        while start < len(patch) and start > 0 and patch[start] & 0xC0 == 0x80:
-            start += 1
-        end = start
-        while end < len(patch):
-            byte = patch[end]
-            width = 1 if byte < 0x80 else 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
-            if end + width > len(patch) or end + width - start > max_bytes:
-                break
-            end += width
-        if end == start and start < len(patch):
-            raise BridgeError("Requested diff page limit cannot fit one character", "output_limit")
-        page = patch[start:end].decode("utf-8", errors="strict")
-        return {
-            "available": True,
-            "mode": mode,
-            "patch": page,
-            "offset": start,
-            "next_offset": end if end < len(patch) else None,
-            "total_bytes": len(patch),
-            "redacted": redacted,
-            "status_sha256": observed,
-        }
+        return {"available": True, "mode": mode, **page_patch(raw, offset, max_bytes),
+                "status_sha256": observed}
+
+
+def page_patch(raw: bytes, offset: int, max_bytes: int) -> dict:
+    """Redact a bounded patch, then return one UTF-8-safe byte page of it."""
+    text, redacted = redact(raw.decode("utf-8", errors="replace"))
+    patch = text.encode("utf-8")
+    start = min(offset, len(patch))
+    while start < len(patch) and start > 0 and patch[start] & 0xC0 == 0x80:
+        start += 1
+    end = start
+    while end < len(patch):
+        byte = patch[end]
+        width = 1 if byte < 0x80 else 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+        if end + width > len(patch) or end + width - start > max_bytes:
+            break
+        end += width
+    if end == start and start < len(patch):
+        raise BridgeError("Requested diff page limit cannot fit one character", "output_limit")
+    return {
+        "patch": patch[start:end].decode("utf-8", errors="strict"),
+        "offset": start,
+        "next_offset": end if end < len(patch) else None,
+        "total_bytes": len(patch),
+        "redacted": redacted,
+    }

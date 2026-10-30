@@ -1,7 +1,7 @@
 // In-process AgentSession transport for the Pi host adapter.
 //
 // Replaces the removed `pi --mode rpc` subprocess owner (rpc.mjs). Each
-// Bridge session owns exactly one AgentSession created with Pi 0.87.0's
+// Bridge session owns exactly one AgentSession created with Pi 1.4.0's
 // direct Node SDK inside this process -- no child process, no stdio, no
 // JSONL framing, and therefore no frame-size ceiling that can kill a
 // session.
@@ -53,11 +53,11 @@ import { createTrustedPermissionExtension } from "./trusted-permission-extension
 // adapter package.json pins the same version exactly; the smoke test
 // asserts they agree so a drifted install fails loudly instead of
 // running against an unverified API surface.
-export const SDK_VERSION = "0.87.0";
+export const SDK_VERSION = "1.4.0";
 const SDK_EVENT_STALL_WARN_MS = 10_000;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-// Bridge-managed native auto-retry policy (Pi 0.87.0 SettingsManager).
+// Bridge-managed native auto-retry policy (Pi 1.4.0 SettingsManager).
 // Native AgentSession owns transient retry because it can safely omit
 // failed assistant attempts and retry only the LLM turn; the Bridge never
 // replays prompts. Target: 5 attempts at 2s exponential backoff capped at
@@ -94,7 +94,7 @@ export function managedRetryOverride() {
 }
 
 // Apply the Bridge-managed retry policy non-persistently. Uses only the
-// pinned Pi 0.87.0 SettingsManager.applyOverrides deep merge, which
+// pinned Pi 1.4.0 SettingsManager.applyOverrides deep merge, which
 // mutates the in-memory merged view without marking modified fields and
 // without enqueueing a settings.json write. Returns the settingsManager
 // for chaining. Throws fail-closed when the pinned API is unavailable.
@@ -179,7 +179,7 @@ export async function createSdkSession({
   }
   // Bridge-managed native retry budget (non-persistent override, never
   // saved to settings.json). Applied AFTER loader.reload() because the
-  // pinned Pi 0.87.0 DefaultResourceLoader.reload() calls
+  // pinned Pi 1.4.0 DefaultResourceLoader.reload() calls
   // SettingsManager.reload(), which recomputes the merged view from
   // files and would wipe an earlier applyOverrides. Native AgentSession
   // owns transient retry; provider/SDK retries stay disabled.
@@ -231,7 +231,7 @@ export async function createSdkSession({
   }
   // TEMPORARY ISSUE DIAGNOSTIC: remove this private-method wrapper after
   // the missing tool-completion issue is identified and fixed.
-  // AgentSession 0.87.0 awaits extension event handlers before notifying
+  // AgentSession 1.4.0 awaits extension event handlers before notifying
   // session.subscribe() listeners. Observe the boundary around that await
   // so a tool that has returned but is stuck in an extension event hook is
   // distinguishable from a tool whose execution is still pending. This is

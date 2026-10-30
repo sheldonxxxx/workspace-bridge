@@ -18,7 +18,7 @@ import path from "node:path";
 
 import { PiAdapter } from "../adapter.mjs";
 import { canonicalizeProjectsDir } from "../paths.mjs";
-import { policyRevision, validatePolicy } from "../policy.mjs";
+import { policyRevision, safeDefaultPolicy, validatePolicy } from "../policy.mjs";
 import { OPTION_ALWAYS, OPTION_ONCE, OPTION_REJECT } from "../trusted-permission-extension.mjs";
 import { askPermission, createFakeTransport } from "./fake-sdk.mjs";
 
@@ -32,16 +32,7 @@ function makeProjects() {
 }
 
 function writablePolicy() {
-  return validatePolicy({
-    version: 3,
-    write_tools_enabled: true,
-    tools: { read: "allow", grep: "allow", find: "allow", ls: "allow", edit: "ask", write: "ask" },
-    protected_patterns: [".git/**"],
-    protected_template_exceptions: [],
-    allow_session_always: true,
-    external_access: { default_mode: "deny", roots: [] },
-    shell_mode: "deny",
-  });
+  return validatePolicy({ ...safeDefaultPolicy(), write_inside: "ask" });
 }
 
 function makeAdapter(projects, transport, opts = {}) {

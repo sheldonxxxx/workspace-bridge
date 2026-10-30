@@ -1,11 +1,9 @@
 from pathlib import Path
 import os
 import pytest
-from starlette.testclient import TestClient
 from workspace_bridge.cli import initialize
-from workspace_bridge.node_api import make_node_api
+from workspace_bridge.node_api import InProcessTransport
 from workspace_bridge.node_service import NodeService
-from workspace_bridge.security import digest
 from workspace_bridge.service import Service
 
 
@@ -24,36 +22,53 @@ def _isolated_bridge_environment(monkeypatch):
 
 
 def start_test_node(state: Path, parent: Path):
-    """Build the real private Node API with an in-process HTTP transport."""
-    token = "node-test-token"
-    config = {"allowed_roots": [str(parent)],
-              "node_token_hash": digest(token.encode()), "host": "127.0.0.1"}
+    """Build a real Node service that the Bridge calls in process."""
+    config = {"allowed_roots": [str(parent)], "cursor_secret": "c" * 64}
     node_service = NodeService(state, config)
-    transport = TestClient(make_node_api(node_service, config["node_token_hash"]))
+    return {"service": node_service, "transport": InProcessTransport(node_service),
+            "stop": node_service.close}
 
-    def stop():
-        transport.close()
-        node_service.close()
 
-    return {"url": "http://node-test.invalid", "token": token,
-            "service": node_service, "transport": transport, "stop": stop}
+def register_test_node(service: Service, name: str, *, enabled: bool = True) -> dict:
+    """A paired Node row; tests supply its transport through ``_node_transport``."""
+    import secrets
+    from datetime import datetime, timezone
+    node_id, now = "node_" + secrets.token_hex(12), datetime.now(timezone.utc).isoformat()
+    with service.lock, service.db:
+        service.db.execute(
+            "INSERT INTO nodes(id,name,enabled,revision,created,updated,transport) "
+            "VALUES(?,?,?,?,?,?,'paired')",
+            (node_id, name, int(enabled), "rev_" + secrets.token_hex(16), now, now))
+    return service.node_registry.public(service.node_registry.get(node_id))
 
 
 def attach_test_node(service: Service, state: Path, parent: Path,
                      name: str = "Local Node"):
     node = start_test_node(state, parent)
     service._node_transport = {}
-    record = service.node_registry.create({"name": name, "base_url": node["url"],
-                                           "token": node["token"]})
+    record = register_test_node(service, name)
     service._node_transport[record["id"]] = node["transport"]
     service._node_transport_services = {record["id"]: node["service"]}
     service.node_registry.refresh_adapters(record["id"])
     return node, record
 
 
+def plugin_payload(payload: dict) -> dict:
+    """Map a test adapter description onto the built-in plugin of its runtime type.
+
+    Tests intercept the Bridge's adapter client, so the plugin process is
+    only started by tests that exercise the Node plugin path itself.
+    """
+    if "plugin" in payload:
+        return payload
+    return {key: value for key, value in {
+        "name": payload.get("name"), "plugin": payload.get("runtime_type", "pi"),
+        "enabled": payload.get("enabled")}.items() if value is not None}
+
+
 def create_test_adapter(service: Service, node_id: str, payload: dict,
                         adapter_id: str | None = None):
-    row = service.adapter_registry.create({**payload, "node_id": node_id})
+    row = service.adapter_registry.create({**plugin_payload(payload), "node_id": node_id})
     if adapter_id is None:
         return row
     node_service = service._node_transport_services[node_id]
@@ -91,3 +106,17 @@ def payload():
         "plan": "Inspect src/main.py; make the smallest necessary change and update tests.",
         "acceptance": "Run the unit tests. Preserve pre-existing user edits.",
         "constraints": "Do not commit or push.", "context": "Small Python module.", "context_hashes": {}}
+
+
+def patch_node_runtime(monkeypatch, factory):
+    """Make every NodeService answer plugin adapters with ``factory``'s client.
+
+    ``factory`` receives ``(adapter_id, runtime_type, timeout=..., row=...)``;
+    the Node still checks the adapter row and revision before constructing it.
+    """
+    from workspace_bridge.node_service import NodeService
+
+    def plugin_client(self, row, *, timeout=30):
+        return factory(row["id"], row["runtime_type"], timeout=timeout, row=row)
+
+    monkeypatch.setattr(NodeService, "plugin_client", plugin_client)

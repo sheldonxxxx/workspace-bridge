@@ -1,0 +1,14 @@
+id = "pi"
+version = "1.0.0"
+protocol = 2
+runtime_type = "pi"
+# Installed with: npm install -g workspace-bridge-pi-host-adapter
+command = ["workspace-bridge-pi-adapter", "--stdio"]
+description = "Pi through the Pi coding agent SDK"
+# The trusted permission extension checks every built-in tool call against
+# these rules. Pi has no web tool and loads no third-party extensions.
+enforces = ["read_inside", "read_outside", "write_inside", "write_outside", "shell",
+            "web", "extensions", "protected", "external_roots", "commands"]
+features = ["steer", "queue", "events", "worktrees"]
+# pi_binary: path to the pi CLI; agent_dir: Pi agent directory.
+settings = ["pi_binary", "agent_dir"]

@@ -1,14 +1,13 @@
-"""Bridge-side Node authority inventory with write-only credentials."""
+"""Bridge-side inventory of paired and embedded Nodes."""
 from __future__ import annotations
 
-import secrets
+import json
 import re
 import sqlite3
 from datetime import datetime, timezone
 
 from .node_client import NodeClient
 from .security import BridgeError
-from .adapter_registry import validate_base_url
 
 
 def _now() -> str:
@@ -18,6 +17,7 @@ def _now() -> str:
 class NodeRegistry:
     def __init__(self, service):
         self.service = service
+        self._seen: dict[str, dict] = {}
 
     def rows(self) -> list[dict]:
         with self.service.lock:
@@ -35,155 +35,130 @@ class NodeRegistry:
 
     @staticmethod
     def public(row: dict) -> dict:
-        view: dict = {"id": row["id"], "name": row["name"], "base_url": row["base_url"],
+        view: dict = {"id": row["id"], "name": row["name"],
                 "enabled": bool(row["enabled"]), "revision": row["revision"],
                 "created": row["created"], "updated": row["updated"],
-                "has_token": bool(row["token"]), "health": row.get("health", "unknown"),
+                "health": row.get("health", "unknown"), "transport": row["transport"],
+                "connection": ({"connected_at": row.get("connected_at") or None,
+                                "last_seen": row.get("last_seen") or None,
+                                "disconnected_at": row.get("disconnected_at") or None}
+                               if row.get("transport") == "paired" else None),
                 "protocol": row.get("protocol"), "capabilities": row.get("capabilities", [])}
-        release = row.get("release")
-        if isinstance(release, dict):
-            try:
-                from .release import validate_release
-                view["release"] = validate_release(release)
-            except Exception:
-                pass
         return view
 
     def client(self, node_id: str, *, timeout: float = 30) -> NodeClient:
         row = self.get(node_id)
+        # Tests attach in-process Nodes by ID.
         transport = getattr(self.service, "_node_transport", {}).get(node_id)
+        if transport is not None:
+            pass
+        elif row["transport"] == "paired":
+            transport = self.service.node_gateway.transport(node_id, timeout=timeout)
+        elif row["transport"] == "local":
+            transport = self.service.local_node_transport(node_id)
         return NodeClient(row, timeout=timeout, transport=transport)
 
-    def list_public(self, *, probe: bool = False) -> list[dict]:
+    def list_public(self) -> list[dict]:
+        """Nodes as the Manager shows them, from state cached at connect time.
+
+        Nothing here talks to a Node: a paired Node is healthy while its
+        socket is up, and the gateway pushes a change when that flips.
+        """
         result = []
         for row in self.rows():
             view = self.public(row)
-            if probe and row["enabled"]:
-                try:
-                    state = self.client(row["id"], timeout=3).status()
-                    self.refresh_adapters(row["id"])
-                    view.update(health="healthy", protocol=state.get("protocol"),
-                                node_version=state.get("node_version"),
-                                capabilities=state.get("capabilities", []),
-                                allowed_root_count=len(state.get("allowed_roots", [])))
-                    release = state.get("release") if isinstance(state, dict) else None
-                    if isinstance(release, dict):
-                        try:
-                            from .release import validate_release
-                            view["release"] = validate_release(release)
-                        except Exception:
-                            pass
-                except BridgeError as exc:
-                    if exc.code == "adapter_identity_conflict":
-                        view.update(health="failed", error_code=exc.code,
-                                    error="Adapter identity conflict detected.")
-                    else:
-                        view.update(health="unavailable")
-            elif not row["enabled"]:
+            seen = self._seen.get(row["id"], {})
+            if not row["enabled"]:
                 view["health"] = "disabled"
+            elif seen.get("health") == "failed":
+                view.update(seen)
+            elif self.is_connected(row):
+                view.update(health="healthy", **seen)
+            else:
+                view["health"] = "unavailable"
             result.append(view)
         return result
 
-    def create(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"name", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected Node fields", "invalid_arguments")
-        name = payload.get("name")
-        token = payload.get("token")
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
-            raise BridgeError("Node name must contain 1 to 80 characters", "invalid_arguments")
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Node token is required", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url"))
-        enabled = payload.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        node_id = "node_" + secrets.token_hex(12)
-        now = _now()
-        revision = "rev_" + secrets.token_hex(16)
+    def is_connected(self, row: dict) -> bool:
+        if row["id"] in getattr(self.service, "_node_transport", {}):
+            return True
+        if row["transport"] == "local":
+            return True
+        gateway = getattr(self.service, "node_gateway", None)
+        return row["transport"] == "paired" and gateway is not None and gateway.connected(row["id"])
+
+    def observe(self, node_id: str) -> None:
+        """Read a connected Node's status and adapters once and keep them for the Manager."""
         try:
-            with self.service.lock, self.service.db:
-                self.service.db.execute(
-                    "INSERT INTO nodes(id,name,base_url,token,enabled,revision,created,updated) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (node_id, name.strip(), base_url, token, int(enabled), revision, now, now))
-        except sqlite3.IntegrityError:
-            raise BridgeError("Node name is already in use", "conflict") from None
-        row = self.get(node_id)
-        if enabled:
+            state = self.client(node_id, timeout=5).status()
             self.refresh_adapters(node_id)
-        return self.public(row)
+        except BridgeError as exc:
+            # refresh_adapters has already recorded an identity conflict.
+            if exc.code != "adapter_identity_conflict":
+                self._seen.pop(node_id, None)
+        else:
+            self._seen[node_id] = {"protocol": state.get("protocol"),
+                                   "node_version": state.get("node_version"),
+                                   "capabilities": state.get("capabilities", []),
+                                   "allowed_root_count": len(state.get("allowed_roots", []))}
+        self.service.push_state()
 
     def update(self, node_id: str, payload: dict) -> dict:
-        if not isinstance(payload, dict) or not payload or set(payload) - {
-                "name", "base_url", "token", "enabled"}:
+        if not isinstance(payload, dict) or not payload or set(payload) - {"name", "enabled"}:
             raise BridgeError("Unexpected Node fields", "invalid_arguments")
         row = self.get(node_id)
         name = payload.get("name", row["name"])
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             raise BridgeError("Invalid Node name", "invalid_arguments")
-        base_url = validate_base_url(payload.get("base_url", row["base_url"]))
-        token = payload.get("token", "")
-        if not isinstance(token, str) or len(token) > 4096:
-            raise BridgeError("Invalid Node token", "invalid_arguments")
-        if not token:
-            token = row["token"]
         enabled = payload.get("enabled", bool(row["enabled"]))
         if not isinstance(enabled, bool):
             raise BridgeError("enabled must be a boolean", "invalid_arguments")
-        connection_changed = (base_url != row["base_url"] or token != row["token"])
-        revision = "rev_" + secrets.token_hex(16) if connection_changed else row["revision"]
         try:
             with self.service.lock, self.service.db:
-                self.service.db.execute(
-                    "UPDATE nodes SET name=?,base_url=?,token=?,enabled=?,revision=?,updated=? WHERE id=?",
-                    (name.strip(), base_url, token, int(enabled), revision, _now(), node_id))
+                self.service.db.execute("UPDATE nodes SET name=?,enabled=?,updated=? WHERE id=?",
+                                        (name.strip(), int(enabled), _now(), node_id))
         except sqlite3.IntegrityError:
             raise BridgeError("Node name is already in use", "conflict") from None
         if enabled:
             self.refresh_adapters(node_id)
+        else:
+            self._disconnect(row)
         return self.public(self.get(node_id))
 
+    def _disconnect(self, row: dict) -> None:
+        gateway = getattr(self.service, "node_gateway", None)
+        if row.get("transport") == "paired" and gateway is not None:
+            gateway.disconnect(row["id"])
+
+    def _wake_runs(self) -> None:
+        # Runs started under the previous connection are interrupted by the sweep.
+        coordinator = getattr(self.service, "run_coordinator", None)
+        if coordinator is not None:
+            coordinator.wake()
+
     def delete(self, node_id: str) -> dict:
-        self.get(node_id)
+        row = self.get(node_id)
+        if row.get("transport") == "local":
+            raise BridgeError("The Bridge's embedded Node cannot be deleted", "conflict")
         with self.service.lock, self.service.db:
             if self.service.db.execute("SELECT 1 FROM workspaces WHERE node_id=? LIMIT 1", (node_id,)).fetchone():
                 raise BridgeError("Node is referenced by workspaces", "conflict")
             if self.service.db.execute("SELECT 1 FROM node_adapters WHERE node_id=? LIMIT 1", (node_id,)).fetchone():
                 raise BridgeError("Node is referenced by adapter history", "conflict")
             self.service.db.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+        self._disconnect(row)
         return {"deleted": node_id}
 
-    def test_connection(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {
-                "node_id", "name", "base_url", "token", "enabled"}:
-            raise BridgeError("Unexpected Node test fields", "invalid_arguments")
-        if payload.get("node_id"):
-            row = self.get(payload["node_id"])
-            token = payload.get("token") or row["token"]
-            base_url = validate_base_url(payload.get("base_url", row["base_url"]))
-            name = payload.get("name", row["name"])
-            revision = row["revision"]
-            enabled = payload.get("enabled", bool(row["enabled"]))
-        else:
-            token = payload.get("token")
-            base_url = validate_base_url(payload.get("base_url"))
-            name = payload.get("name", "New Node")
-            revision = "test"
-            enabled = True
-        if not isinstance(token, str) or not token or len(token) > 4096:
-            raise BridgeError("Node token is required", "invalid_arguments")
+    def test_connection(self, node_id: str) -> dict:
         try:
-            node_id = payload.get("node_id", "node_" + "0" * 24)
-            transport = getattr(self.service, "_node_transport", {}).get(node_id)
-            status = NodeClient({"id": node_id, "name": name, "base_url": base_url,
-                "token": token, "revision": revision, "enabled": enabled},
-                timeout=5, transport=transport).status()
-            return {"success": True, "protocol": status.get("protocol"),
-                    "capabilities": status.get("capabilities", []),
-                    "allowed_root_count": len(status.get("allowed_roots", []))}
+            status = self.client(node_id, timeout=5).status()
         except BridgeError as exc:
             return {"success": False, "code": exc.code,
                     "message": "Node connection could not be verified."}
+        self.observe(node_id)
+        return {"success": True, "protocol": status.get("protocol"),
+                "capabilities": status.get("capabilities", []),
+                "allowed_root_count": len(status.get("allowed_roots", []))}
 
     def refresh_adapters(self, node_id: str) -> list[dict]:
         client = self.client(node_id, timeout=5)
@@ -196,35 +171,49 @@ class NodeRegistry:
             adapter_id = adapter.get("id")
             if not isinstance(adapter_id, str) or not adapter_id.startswith("adapter_"):
                 continue
+            security = adapter.get("security") if isinstance(adapter.get("security"), dict) else {}
+            enforces = security.get("enforces")
+            adapter = {**adapter, "security": json.dumps({
+                "enforces": sorted({key for key in enforces if isinstance(key, str)})
+                if isinstance(enforces, list) else [],
+                "native": security.get("native") is True,
+                "worktrees": security.get("worktrees") is True}, sort_keys=True)}
             adapters.append((adapter_id, adapter))
         now = _now()
+        revision_changed = False
         with self.service.lock, self.service.db:
             # Adapter IDs are global identities.  Refuse a cross-Node claim
             # before changing any cache row, so a stale or malicious catalog
             # cannot silently re-home an existing runtime destination.
-            for adapter_id, _ in adapters:
+            for adapter_id, adapter in adapters:
                 existing = self.service.db.execute(
-                    "SELECT node_id FROM node_adapters WHERE adapter_id=?",
+                    "SELECT node_id,revision FROM node_adapters WHERE adapter_id=?",
                     (adapter_id,)).fetchone()
                 if existing is not None and existing["node_id"] != node_id:
+                    self._seen[node_id] = {"health": "failed", "error_code": "adapter_identity_conflict",
+                                           "error": "Adapter identity conflict detected."}
                     raise BridgeError(
                         "Adapter identity is already owned by another Node",
                         "adapter_identity_conflict")
+                if existing is not None and existing["revision"] != adapter.get("revision", ""):
+                    revision_changed = True
             for adapter_id, adapter in adapters:
                 self.service.db.execute(
-                    "INSERT INTO node_adapters(adapter_id,node_id,name,runtime_type,base_url,revision,enabled,has_token,last_seen) "
-                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(adapter_id) DO UPDATE SET "
-                    "name=excluded.name,runtime_type=excluded.runtime_type,base_url=excluded.base_url,"
-                    "revision=excluded.revision,enabled=excluded.enabled,has_token=excluded.has_token,"
-                    "last_seen=excluded.last_seen",
+                    "INSERT INTO node_adapters(adapter_id,node_id,name,runtime_type,revision,enabled,last_seen,security) "
+                    "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(adapter_id) DO UPDATE SET "
+                    "name=excluded.name,runtime_type=excluded.runtime_type,"
+                    "revision=excluded.revision,enabled=excluded.enabled,"
+                    "last_seen=excluded.last_seen,security=excluded.security",
                     (adapter_id, node_id, adapter.get("name", "Adapter"),
-                     adapter.get("runtime_type", "pi"), adapter.get("base_url", ""), adapter.get("revision", ""),
-                     int(bool(adapter.get("enabled"))), int(bool(adapter.get("has_token"))), now))
+                     adapter.get("runtime_type", "pi"), adapter.get("revision", ""),
+                     int(bool(adapter.get("enabled"))), now, adapter["security"]))
             self.service.db.execute("UPDATE node_adapters SET enabled=0 WHERE node_id=? AND last_seen<>?",
                                     (node_id, now))
+        if revision_changed:
+            self._wake_runs()
         return catalog
 
     def sync_all(self) -> None:
         for node in self.rows():
             if node["enabled"]:
-                self.refresh_adapters(node["id"])
+                self.observe(node["id"])

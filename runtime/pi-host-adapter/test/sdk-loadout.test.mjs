@@ -1,7 +1,7 @@
 // 3C1 SDK tool loadout: read-only AND writable managed sessions carry
 // the exact built-in allowlist plus the package-owned trusted permission
 // extension (read policy is enforced in both modes;
-// write_tools_enabled exposes edit/write; shell_mode exposes bash only
+// writable exposes edit/write; a shell mode other than deny exposes bash only
 // when != deny, no powershell, no command rules). With enabled
 // third-party extensions no allowlist is passed (it would hide extension
 // tools) and built-in exposure uses excludeTools instead.
@@ -42,7 +42,7 @@ test("writable loadout adds edit/write, still no bash", () => {
   assert.equal(loadout.excludeTools, null);
 });
 
-test("shell loadout adds bash only when shell_mode != deny (no powershell)", () => {
+test("shell loadout adds bash only when the shell mode is not deny (no powershell)", () => {
   const deny = sdkToolLoadout({ writable: true, shellMode: "deny" });
   assert.ok(!deny.tools.includes("bash"));
   for (const mode of ["ask", "allow"]) {

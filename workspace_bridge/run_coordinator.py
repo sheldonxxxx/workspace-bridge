@@ -15,11 +15,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .runtime import RuntimeRejected, RuntimeUnavailable, RuntimeUnsupported
-from .security import BridgeError, HANDOFF, digest, redact
+from .security import BridgeError, digest, redact
 from .notifications import codex_quota_summary
 from .wbrp import validate_run_state
 from .adapter_events import AdapterEventReader
 from .manager_events import RunEventHub
+from .keyed_locks import KeyedLocks
+from .run_checkpoints import RunCheckpoints
+from .run_checks import RunChecks
+from .run_worktrees import RunWorktrees
+from . import handoffs
 
 _DESCRIPTOR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,79}")
 
@@ -28,6 +33,14 @@ def _sanitized_descriptor_code(code: Any, fallback: str = "descriptor_error") ->
     if isinstance(code, str) and _DESCRIPTOR_CODE_RE.fullmatch(code):
         return code
     return fallback
+
+
+# Who answered an interaction. ``owner`` is reported by ChatGPT when it relays
+# the user's own answer; the Bridge cannot verify it.
+# "manager" is set only by the signed-in Manager session, never taken from a
+# tool argument, so it is the one decider the Bridge can verify.
+DECIDERS = ("chatgpt", "owner", "manager")
+MAX_DECISION_REASON = 500
 
 
 def _now() -> str:
@@ -71,27 +84,32 @@ def _safe_payload(value: dict, limit: int = 16000) -> str:
 
 def _effective_security(binding: dict, *, node_id: str, node_revision: str,
                         adapter_id: str, adapter_revision: str) -> dict:
-    source = binding.get("source")
-    if source == "profile":
-        profile = binding.get("profile", {})
-        result = {"source": "profile", "profile_id": profile.get("id"),
-                  "bound_revision": profile.get("revision"),
-                  "effective_revision": profile.get("revision")}
+    """The security a run started with, recorded on the run for good."""
+    if binding.get("source") == "profile":
+        profile = binding["profile"]
+        result = {"source": "profile", "profile_id": profile["id"],
+                  "revision": profile["revision"], "rules": profile["rules"]}
     else:
-        summary = binding.get("resolvedSummary")
-        safe_summary = {}
-        if isinstance(summary, dict):
-            for key in ("activePermissionProfile", "approvalPolicy", "approvalsReviewer", "provenance"):
-                value = summary.get(key)
-                if value is None or (isinstance(value, str) and len(value) <= 128
-                                     and all(ord(c) >= 32 for c in value)):
-                    safe_summary[key] = value
-        result = {"source": "runtime-config", "profile_id": None,
-                  "bound_revision": binding.get("revision"),
-                  "effective_revision": binding.get("revision"),
-                  "resolved_summary": safe_summary}
+        result = {"source": "native", "profile_id": None, "revision": None}
     return {**result, "node_id": node_id, "node_revision": node_revision,
             "adapter_id": adapter_id, "adapter_revision": adapter_revision}
+
+
+def _binding_echo(binding: dict) -> dict:
+    """What the plugin must echo back to prove it compiled this binding."""
+    if binding["source"] == "profile":
+        return {"source": "profile", "profile": {
+            "id": binding["profile"]["id"], "revision": binding["profile"]["revision"]}}
+    return {"source": "native"}
+
+
+def _echo_matches(binding: dict, echoed: object) -> bool:
+    if not isinstance(echoed, dict):
+        return False
+    expected = _binding_echo(binding)
+    if expected["source"] == "native":
+        return echoed.get("source") == "native"
+    return echoed.get("source") == "profile" and echoed.get("profile") == expected["profile"]
 
 
 EXECUTION_ACTIVITY_KINDS = frozenset({
@@ -163,15 +181,17 @@ class RunCoordinator:
     def __init__(self, service, *, background: bool = True, read_only: bool = False):
         self.service = service
         self.background = background
+        self.read_only = read_only
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._sweep_failures: set[str] = set()
         self.run_events = RunEventHub()
-        # Striped reentrant locks serialize snapshots without retaining one
-        # lock for every historical run. The Service lock is never held over
-        # network I/O.
-        self._run_locks = tuple(threading.RLock() for _ in range(64))
-        self._start_lock = threading.RLock()
+        # Snapshots serialize per run, admission per route and run input per
+        # run, so a slow adapter only delays work on the same key. Cancel
+        # takes none of them. The Service lock is never held over network I/O.
+        self._run_locks = KeyedLocks(inner=service.lock)
+        self._start_locks = KeyedLocks(inner=service.lock)
+        self._input_locks = KeyedLocks(inner=service.lock)
         self._event_readers: dict[tuple[str, str, str, str], AdapterEventReader] = {}
         self._retired_readers: list[AdapterEventReader] = []
         self._reader_lock = threading.Lock()
@@ -212,6 +232,7 @@ class RunCoordinator:
             native_id TEXT NOT NULL, kind TEXT NOT NULL,
             state TEXT NOT NULL, payload TEXT NOT NULL,
             response TEXT, created TEXT NOT NULL, updated TEXT NOT NULL,
+            decided_by TEXT, reason TEXT, decided TEXT,
             UNIQUE(run,native_id));
           CREATE TABLE IF NOT EXISTS agent_run_images (
             run TEXT PRIMARY KEY REFERENCES agent_runs(id), refs TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '[]');
@@ -222,17 +243,17 @@ class RunCoordinator:
             created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(run,native_id));
         """)
-            # Bridge schema v4 has no migration framework. Fresh state already
-            # includes agent_runs.token_usage above; a v3 database is rejected
-            # by Service before this point. A v4 database that is
-            # structurally incomplete fails closed here instead of being
-            # silently migrated.
+            # There is no migration framework: a state whose tables predate
+            # this schema fails closed instead of being migrated.
             columns = {row["name"] for row in service.db.execute(
                 "PRAGMA table_info(agent_runs)")}
             if "token_usage" not in columns:
                 raise BridgeError(
-                    "Bridge state is incomplete for schema v4; use a fresh state path",
+                    "Bridge state is incomplete for schema v5; use a fresh state path",
                     "state_schema_incompatible")
+        self.worktrees = RunWorktrees(self, read_only=read_only)
+        self.checkpoints = RunCheckpoints(self, read_only=read_only)
+        self.run_checks = RunChecks(self, read_only=read_only)
 
     @staticmethod
     def _outcome_event_type(outcome: str | None) -> str | None:
@@ -241,13 +262,18 @@ class RunCoordinator:
                 "orphaned": "run_orphaned"}.get(outcome or "")
 
     def _record_outcome_event_locked(self, run: dict, outcome: str | None) -> None:
+        # Every terminal transition passes here inside its own transaction.
+        self.checkpoints.enqueue_post_locked(run["id"])
         event_type = self._outcome_event_type(outcome)
         if event_type is None:
             return
-        self.service.notification_manager.record_run_event_locked(
-            run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
-            adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
-            event_type=event_type, occurred_at=_now())
+        event = {"run_id": run["id"], "workspace_id": run["workspace"], "job_id": run["handoff"],
+                 "adapter_id": run["adapter_id"], "runtime_type": run["runtime_type"],
+                 "event_type": event_type, "occurred_at": _now()}
+        # With after-run checks, the notice waits for their result.
+        if self.run_checks.defer_locked(run, event_type, event):
+            return
+        self.service.notification_manager.record_run_event_locked(**event)
 
     def configured(self, adapter_id: str) -> bool:
         try:
@@ -360,6 +386,78 @@ class RunCoordinator:
         return self.service.adapter_registry.client(
             run["adapter_id"], require_enabled=True, workspace=ws, timeout=timeout)
 
+    # A run whose Node or adapter connection identity changed can never be
+    # controlled again: every later call refuses the new endpoint. Disabled
+    # Nodes or adapters keep their identity and stay recoverable.
+    _STRANDED_RUNS_SQL = (
+        "SELECT r.* FROM agent_runs r "
+        "LEFT JOIN nodes n ON n.id=r.node_id "
+        "LEFT JOIN node_adapters a ON a.adapter_id=r.adapter_id "
+        "WHERE r.phase IN ('starting','active') AND (n.id IS NULL OR a.adapter_id IS NULL "
+        "OR n.revision<>r.node_revision OR a.revision<>r.adapter_revision "
+        "OR a.node_id<>r.node_id)")
+
+    def _terminate_locked(self, run: dict, outcome: str, error: str) -> None:
+        """Mark one non-terminal run terminal without contacting its runtime."""
+        stamp = _now()
+        changed = self.service.db.execute(
+            "UPDATE agent_runs SET phase='terminal',active_state=NULL,outcome=?,error=?,updated=? "
+            "WHERE id=? AND phase<>'terminal'", (outcome, error, stamp, run["id"])).rowcount
+        if not changed:
+            return
+        self.service.db.execute(
+            "UPDATE agent_interactions SET state='stale',updated=? WHERE run=? AND state='pending'",
+            (stamp, run["id"]))
+        self._record_outcome_event_locked(run, outcome)
+
+    def interrupt_stranded_runs(self, run_id: str | None = None) -> list[str]:
+        """Interrupt active runs whose Node or adapter connection identity changed.
+
+        The Bridge never sends control traffic to a replacement endpoint, so the
+        native agent may still be running at the previous one. Nothing is
+        replayed; the run only stops occupying its conversation and the sweep.
+        """
+        if self.read_only:
+            return []
+        with self.service.lock:
+            if self._stop.is_set():
+                return []
+            sql, params = self._STRANDED_RUNS_SQL, ()
+            if run_id is not None:
+                sql, params = sql + " AND r.id=?", (run_id,)
+            candidates = [row["id"] for row in self.service.db.execute(sql, params)]
+        interrupted = []
+        for candidate in candidates:
+            with self._run_locks.hold(candidate):
+                with self.service.lock, self.service.db:
+                    if self._stop.is_set():
+                        return interrupted
+                    row = self.service.db.execute(
+                        self._STRANDED_RUNS_SQL + " AND r.id=?", (candidate,)).fetchone()
+                    if row is None:
+                        continue
+                    self._terminate_locked(dict(row), "interrupted", "runtime_authority_changed")
+            self.run_events.publish(candidate)
+            interrupted.append(candidate)
+        return interrupted
+
+    def wake(self) -> None:
+        """Ask the background sweep to run now, e.g. after a connection change."""
+        self._wake.set()
+
+    def abandon(self, ws: dict, run_id: str) -> dict:
+        """Local-admin escape hatch: stop tracking a run without contacting its runtime."""
+        with self._run_locks.hold(run_id):
+            run = self._run_row(ws, run_id)
+            if run["phase"] != "terminal":
+                with self.service.lock, self.service.db:
+                    if self._stop.is_set():
+                        raise RuntimeUnavailable("Runtime coordination stopped")
+                    self._terminate_locked(run, "orphaned", "abandoned_by_admin")
+                    self._record_action_event_locked(run, "abandoned", "abandon")
+                self.run_events.publish(run_id)
+        return self.read(ws, run_id, sync=False)
+
     def diagnostics(self) -> dict:
         rows = {}
         for instance in self.service.adapter_registry.rows():
@@ -377,24 +475,12 @@ class RunCoordinator:
                                     "instance": descriptor.instance_id,
                                     "adapter_version": descriptor.adapter_version,
                                     "native_version": descriptor.native_version}
-                if descriptor.release is not None:
-                    entry["release"] = descriptor.release
                 rows[adapter_id] = entry
             except BridgeError as exc:
                 rows[adapter_id] = {"configured": True, "enabled": True, "healthy": False,
                                     "runtime_type": instance["runtime_type"],
                                     "detail": _safe(str(exc), 200)}
         return rows
-
-    def profile_catalog(self, adapter_id: str, ws: dict | None = None, *,
-                        fresh: bool = False) -> dict:
-        adapter = self.adapter(adapter_id, ws=ws)
-        return (adapter.profile_catalog(ws["id"], ws["root"], fresh=fresh)
-                if ws is not None else adapter.profile_catalog())
-
-    def profiles(self, adapter_id: str, ws: dict | None = None, *,
-                 fresh: bool = False) -> list[dict]:
-        return self.profile_catalog(adapter_id, ws, fresh=fresh)["profiles"]
 
     def usage_limits(self, adapter_id: str) -> dict:
         """Read the optional account usage-limits snapshot for one adapter.
@@ -419,161 +505,17 @@ class RunCoordinator:
             return ""
         return codex_quota_summary(limits)
 
-    def set_profile(self, ws: dict, adapter_id: str, profile_id: str) -> dict:
-        profiles = self.profiles(adapter_id, ws, fresh=True)
-        profile = next((item for item in profiles if item.get("id") == profile_id), None)
-        if (profile is None or profile.get("available") is False
-                or not isinstance(profile.get("revision"), str)):
-            raise BridgeError("Security profile is unavailable", "profile_unavailable")
-        with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "INSERT INTO workspace_routes(workspace,adapter_id,enabled,security_source,profile_id,profile_revision,updated) "
-                "VALUES(?,?,0,'profile',?,?,?) ON CONFLICT(workspace,adapter_id) DO UPDATE SET "
-                "security_source='profile',profile_id=excluded.profile_id,"
-                "profile_revision=excluded.profile_revision,updated=excluded.updated",
-                (ws["id"], adapter_id, profile_id, profile["revision"], _now()))
-        return {"adapter_id": adapter_id, "profile": profile_id,
-                "revision": profile["revision"]}
-
-    def set_runtime_config(self, ws: dict, adapter_id: str) -> dict:
-        if self.service.adapter_registry.get(adapter_id)["runtime_type"] != "codex":
-            raise BridgeError("Runtime config security is supported only by Codex adapters",
-                              "runtime_config_unavailable")
-        catalog = self.profile_catalog(adapter_id, ws, fresh=True)
-        native = catalog.get("runtimeConfig")
-        if (not isinstance(native, dict) or native.get("supported") is not True
-                or native.get("available") is not True
-                or not isinstance(native.get("revision"), str)
-                or not native["revision"] or len(native["revision"]) > 100):
-            raise BridgeError("Runtime config security is unavailable",
-                              "runtime_config_unavailable")
-        with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "INSERT INTO workspace_routes(workspace,adapter_id,enabled,security_source,profile_id,profile_revision,updated) "
-                "VALUES(?,?,0,'runtime-config','',?,?) ON CONFLICT(workspace,adapter_id) DO UPDATE SET "
-                "security_source='runtime-config',profile_id='',profile_revision=excluded.profile_revision,"
-                "updated=excluded.updated",
-                (ws["id"], adapter_id, native["revision"], _now()))
-        return {"adapter_id": adapter_id, "security_binding": {
-            "source": "runtime-config", "revision": native["revision"],
-            "resolved_summary": native.get("resolvedSummary")}}
-
-    def set_security_binding(self, ws: dict, adapter_id: str, source: str,
-                             profile_id: str | None = None) -> dict:
-        if source == "profile" and isinstance(profile_id, str) and profile_id:
-            return self.set_profile(ws, adapter_id, profile_id)
-        if source == "runtime-config" and profile_id is None:
-            return self.set_runtime_config(ws, adapter_id)
-        raise BridgeError("Invalid runtime security binding", "invalid_arguments")
-
-    def save_profile(self, adapter_id: str, profile_id: str, config: dict,
-                     expected_revision: str | None) -> dict:
-        if (not isinstance(profile_id, str)
-                or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", profile_id)
-                or not isinstance(config, dict)
-                or len(json.dumps(config)) > 32768
-                or (expected_revision is not None
-                    and (not isinstance(expected_revision, str)
-                         or len(expected_revision) > 100))):
-            raise BridgeError("Invalid security profile", "invalid_arguments")
-        adapter = self.adapter(adapter_id)
-        saved = adapter.save_profile(
-            profile_id, config, expected_revision)
-        if saved.get("id") != profile_id or not isinstance(saved.get("revision"), str):
-            raise BridgeError("Runtime returned an invalid security profile",
-                              "binding_mismatch")
-        # A deliberate profile edit refreshes assignments to the new opaque
-        # revision so the recorded binding stays tidy. Stored revisions are
-        # informational only; drift never blocks routes or runs.
-        with self.service.lock:
-            assigned = [row["workspace"] for row in self.service.db.execute(
-                "SELECT workspace FROM workspace_routes WHERE adapter_id=? AND security_source='profile' AND profile_id=? "
-                "ORDER BY workspace", (adapter_id, profile_id))]
-        for workspace_id in assigned[:100]:
-            try:
-                ws = self.service.workspace(workspace_id)
-                current = next((item for item in self.profiles(
-                    adapter_id, ws, fresh=True)
-                    if item.get("id") == profile_id
-                    and item.get("available") is not False), None)
-            except Exception:  # noqa: BLE001 - a failed refresh keeps the old recorded revision
-                current = None
-            if current and isinstance(current.get("revision"), str):
-                with self.service.lock, self.service.db:
-                    self.service.db.execute(
-                        "UPDATE workspace_routes SET profile_revision=?,updated=? "
-                        "WHERE workspace=? AND adapter_id=? AND profile_id=?",
-                        (current["revision"], _now(), workspace_id, adapter_id, profile_id))
-        self.service.event(None, "save_adapter_profile", "saved")
-        return saved
-
-    def delete_profile(self, adapter_id: str, profile_id: str) -> dict:
-        if (not isinstance(profile_id, str)
-                or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", profile_id)):
-            raise BridgeError("Invalid security profile ID", "invalid_arguments")
-        with self.service.lock:
-            assigned = self.service.db.execute(
-                "SELECT 1 FROM workspace_routes WHERE adapter_id=? AND security_source='profile' AND profile_id=? LIMIT 1",
-                (adapter_id, profile_id)).fetchone()
-        if assigned:
-            raise BridgeError("Assign another profile before deleting this one", "conflict")
-        result = self.adapter(adapter_id).delete_profile(profile_id)
-        self.service.event(None, "delete_adapter_profile", "deleted")
-        return result
-
     def security_binding(self, ws: dict, adapter_id: str) -> dict:
+        """The security block a new run on this route carries to its plugin."""
         with self.service.lock:
             row = self.service.db.execute(
-                "SELECT profile_id,profile_revision,security_source FROM workspace_routes WHERE workspace=? AND adapter_id=?",
+                "SELECT profile_id,security_source FROM workspace_routes WHERE workspace=? AND adapter_id=?",
                 (ws["id"], adapter_id)).fetchone()
         if row is None:
             raise BridgeError("Workspace route security binding is not configured",
                               "profile_unconfigured")
-        source = row["security_source"]
-        if source == "runtime-config":
-            native = self.profile_catalog(adapter_id, ws, fresh=True).get("runtimeConfig")
-            if (not isinstance(native, dict) or native.get("supported") is not True
-                    or native.get("available") is not True):
-                raise BridgeError("Runtime config security is unavailable",
-                                  "runtime_config_unavailable")
-            revision = native.get("revision")
-            if not isinstance(revision, str) or not revision or len(revision) > 100:
-                raise BridgeError("Runtime config security is unavailable",
-                                  "runtime_config_unavailable")
-            return {"source": "runtime-config", "revision": revision,
-                    "resolvedSummary": native.get("resolvedSummary"),
-                    "status": native.get("status", "ready")}
-        if source != "profile":
-            raise BridgeError("Workspace runtime security binding is invalid",
-                              "profile_unconfigured")
-        available = self.profiles(adapter_id, ws, fresh=True)
-        # Revision drift never blocks: adapter redeploys rotate opaque
-        # profile revisions, so only a missing or unavailable profile fails.
-        # Fresh runs must use the LIVE observed revision, not the stale
-        # stored workspace_routes.profile_revision. The stored value is kept
-        # as last-bound evidence (bound_revision) while the live catalog
-        # revision is authoritative (observed_revision).
-        live = next((item for item in available
-                     if item.get("id") == row["profile_id"]
-                     and item.get("available") is not False
-                     and isinstance(item.get("revision"), str)
-                     and item.get("revision")), None)
-        if live is None:
-            raise BridgeError("Workspace runtime security profile is unavailable",
-                              "profile_unavailable")
-        stored_revision = row["profile_revision"]
-        observed_revision = live["revision"]
-        return {"source": "profile", "profile": {
-            "id": row["profile_id"], "revision": observed_revision},
-            "bound_revision": stored_revision,
-            "observed_revision": observed_revision}
-
-    def profile(self, ws: dict, adapter_id: str) -> dict:
-        binding = self.security_binding(ws, adapter_id)
-        if binding["source"] != "profile":
-            raise BridgeError("Workspace runtime uses native runtime config security",
-                              "profile_unconfigured")
-        return binding["profile"]
+        return self.service.profiles.binding(
+            self.service.adapter_registry.get(adapter_id), row["security_source"], row["profile_id"])
 
     def model_policy(self, adapter_id: str) -> dict:
         self.adapter(adapter_id)
@@ -708,21 +650,8 @@ class RunCoordinator:
                               "reasoning_unavailable")
         return effort
 
-    def _prompt(self, ws: dict, job: dict) -> str:
-        directory = str(ws["root"])
-        folder = f"{directory}/{HANDOFF}/jobs/{job['id']}"
-        return (
-            f"Work only in this project: {json.dumps(directory)}. "
-            f"Read {json.dumps(folder + '/TASK.md')}, CONTEXT.md and ACCEPTANCE.md "
-            "in the same folder. Preserve pre-existing edits and unrelated work. "
-            "Follow the plan and satisfy every acceptance criterion. Run the agreed checks. "
-            "Do not access secrets unless the handoff explicitly requires and authorizes it. "
-            "Do not make unrelated destructive actions, expand scope, or edit the handoff "
-            "documents unless the handoff explicitly permits them. "
-            "Stop and report a blocker when assumptions fail or the work exceeds "
-            "scope. Report changed files, exact checks "
-            "and outcomes, and remaining risks."
-        )
+    def _prompt(self, ws: dict, job: dict, worktree: dict | None = None) -> str:
+        return handoffs.agent_prompt(str(ws["root"]), job, worktree)
 
     def _run_row(self, ws: dict, run_id: str) -> dict:
         with self.service.lock:
@@ -735,11 +664,6 @@ class RunCoordinator:
             raise BridgeError("Run not found in this workspace", "not_found")
         return dict(row)
 
-    def has_run(self, run_id: str) -> bool:
-        with self.service.lock:
-            return self.service.db.execute(
-                "SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone() is not None
-
     def _conversation(self, run: dict) -> dict:
         with self.service.lock:
             if self._stop.is_set():
@@ -751,20 +675,33 @@ class RunCoordinator:
             raise BridgeError("Conversation record is missing", "internal_error")
         return dict(row)
 
+    def admission_lock(self, workspace_id: str, adapter_id: str):
+        """Queue for run admission on one workspace route."""
+        return self._start_locks.hold((workspace_id, adapter_id))
+
+    def input_lock(self, run_id: str):
+        """Queue for interaction answers and steer/queue input on one run."""
+        return self._input_locks.hold(run_id)
+
     def start(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
               model: str | None = None, parent_run_id: str | None = None,
-              continue_from_run_id: str | None = None, images: list[dict] | None = None) -> dict:
+              continue_from_run_id: str | None = None, images: list[dict] | None = None,
+              isolation: str | None = None) -> dict:
         # Both Manager and MCP admission must observe the same idempotency
         # and idle-conversation selection before submitting a native run.
-        with self._start_lock:
+        # Both are scoped to one workspace route.
+        with self.admission_lock(ws["id"], adapter_id):
             return self._start_locked(ws, adapter_id, job_id, request_id,
-                                      model, parent_run_id, continue_from_run_id, images)
+                                      model, parent_run_id, continue_from_run_id, images, isolation)
 
     def _start_locked(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
                       model: str | None, parent_run_id: str | None,
-                      continue_from_run_id: str | None, images: list[dict] | None = None) -> dict:
+                      continue_from_run_id: str | None, images: list[dict] | None = None,
+                      isolation: str | None = None) -> dict:
         from .run_images import validate_images
         images = validate_images(images)
+        if isolation not in (None, "none", "worktree"):
+            raise BridgeError("isolation must be none or worktree", "invalid_arguments")
         # Refresh the authoritative Node inventory and prove the Node is
         # reachable before resolving an adapter or making any native runtime
         # call.  A stale Bridge cache must never turn a Node outage into a
@@ -793,12 +730,17 @@ class RunCoordinator:
             if (existing["adapter_id"] != adapter_id or existing["handoff"] != job_id
                     or existing["continue_from"] != continue_from_run_id
                     or existing["parent_run"] != parent_run_id
-                    or (model is not None and existing["model"] != model)):
+                    or (model is not None and existing["model"] != model)
+                    or (isolation is not None
+                        and (isolation == "worktree") != (self.worktrees.for_run(existing["id"]) is not None))):
                 raise BridgeError("request_id has different content", "conflict")
             return {**self._public(dict(existing)), "idempotent": True}
         adapter_info = self.service.adapter_registry.get(adapter_id, require_enabled=True)
         if adapter_info["node_id"] != ws["node_id"]:
             raise BridgeError("Adapter belongs to another Node", "adapter_node_mismatch")
+        if isolation == "worktree" and continue_from_run_id is None and not self.worktrees.supported(adapter_info):
+            raise BridgeError("This agent's plugin cannot work in a worktree; update the Node or start "
+                              "without isolation", "isolation_unavailable")
         node_info = self.service.node_registry.get(ws["node_id"])
         authority = {"node_id": node_info["id"], "node_revision": node_info["revision"],
                      "adapter_id": adapter_id, "adapter_revision": adapter_info["revision"]}
@@ -808,22 +750,32 @@ class RunCoordinator:
         selector = self._select_model(ws, adapter_id, model)
         reasoning = self._select_reasoning(ws, adapter_id, selector)
         binding = self.security_binding(ws, adapter_id)
+        # The Node keeps a read-only copy of the plan that this run, and only
+        # this handoff's folder, may read after the agent loses context.
+        plan_folder = self.service.write_plan(ws, job, required=True)
+        job = {**job, "plan_folder": plan_folder}
+        run_binding = self.service.profiles.run_binding(adapter_info, binding, plan_folder)
         request_hash = digest(json.dumps({"job": job_id, "adapter_id": adapter_id,
                                           "model": selector,
                                           "parent": parent_run_id or "",
                                           "continue": continue_from_run_id or "", "images": images},
                                          sort_keys=True).encode())
         conversation = None
-        prior_conversation_id = None
-        replacement_reason = None
-        rebind_old = None
-        rebind_new = None
-        rebind_conversation_id = None
+        worktree = None
         if continue_from_run_id:
             source = self._run_row(ws, continue_from_run_id)
             if source["adapter_id"] != adapter_id or source["phase"] != "terminal":
                 raise BridgeError("Continuation source is unavailable",
                                   "continuation_unavailable")
+            # A conversation keeps the folder it started in: an isolated
+            # one continues in its worktree, an ordinary one in the workspace.
+            worktree = self.worktrees.for_run(continue_from_run_id)
+            if (isolation == "worktree") if worktree is None else (isolation == "none"):
+                raise BridgeError("A continuation keeps its source run's isolation; omit isolation "
+                                  "or start a fresh run", "isolation_mismatch")
+            if worktree is not None and worktree["state"] != "active":
+                raise BridgeError(f"The source run's worktree was {worktree['state']}; start a fresh run",
+                                  "worktree_unavailable")
             # Any terminal outcome may continue (succeeded, failed,
             # cancelled, interrupted): ownership is proven below against the
             # live adapter, not by the historical outcome, model, or
@@ -836,201 +788,87 @@ class RunCoordinator:
                     or conversation["runtime_type"] != adapter_info["runtime_type"]):
                 raise BridgeError("Adapter connection changed since this conversation was created",
                                   "adapter_changed")
-            stored_source = conversation.get("source", "profile")
-            if binding["source"] != stored_source:
-                raise BridgeError("Workspace security source changed; a fresh conversation is required",
-                                  "continuation_security_source_changed")
-            # Bounded security-rebind transition. When a named-profile ID
-            # or revision changes, the existing conversation is rebound at an
-            # idle boundary before the new prompt is sent. The activity below
-            # records only identifiers and revisions.
-            if binding["source"] == "profile":
-                desired_id = binding["profile"]["id"]
-                desired_revision = binding["profile"]["revision"]
-                stored_id = conversation.get("profile", "")
-                stored_revision = conversation.get("revision", "")
-                if stored_id != desired_id or stored_revision != desired_revision:
-                    probe = self.probe_descriptor(adapter)
-                    if probe.get("status") == "ok":
-                        if probe.get("features", {}).get("securityRebind") != 1:
-                            raise BridgeError("Workspace security profile changed and the adapter does not support idle security rebind",
-                                              "continuation_security_rebind_unsupported")
-                    else:
-                        # Descriptor transport/validation failure is distinct
-                        # from a genuine missing capability. Fail closed before
-                        # any prompt or rebind with a sanitized generic message.
-                        raise BridgeError("Workspace security profile changed and the adapter descriptor is currently unavailable",
-                                          "continuation_descriptor_unavailable")
-                    # The owned revision may already be stale, so a direct
-                    # conversation read would fail closed with profile_mismatch.
-                    # The rebind operation itself proves idle (busy, pending,
-                    # or unconfirmed states fail before any prompt) and only
-                    # then is the Bridge record updated.
-                    desired_binding = {"source": "profile", "profile": {
-                        "id": desired_id, "revision": desired_revision}}
-                    try:
-                        self._validate_submission_authority(ws, authority, binding)
-                        rebound = adapter.rebind_conversation(
-                            conversation["native_id"], desired_binding)
-                    except BridgeError as exc:
-                        # Strict client-side validation already fails closed;
-                        # preserve its code without sending any prompt.
-                        raise
-                    except Exception as exc:
-                        code = getattr(exc, "code", "")
-                        if code in {"conversation_busy", "binding_mismatch",
-                                    "security_rebind_unavailable", "profile_mismatch",
-                                    "profile_unavailable", "not_found"}:
-                            raise BridgeError(str(exc) or "Security rebind was rejected",
-                                              code or "binding_mismatch") from None
-                        raise
-                    # Narrow success: same runtime conversation, idle, and the
-                    # exact requested profile binding. Never fall back to a
-                    # blank conversation.
-                    rebound_binding = rebound.get("securityBinding")
-                    if rebound_binding is None and isinstance(rebound.get("securityProfile"), dict):
-                        rebound_binding = {"source": "profile",
-                                           "profile": rebound.get("securityProfile")}
-                    if (rebound.get("id") != conversation["native_id"]
-                            or rebound.get("status") != "idle"
-                            or not isinstance(rebound_binding, dict)
-                            or rebound_binding.get("source") != "profile"
-                            or rebound_binding.get("profile") != {
-                                "id": desired_id, "revision": desired_revision}):
-                        raise BridgeError("Runtime security rebind did not prove the requested binding",
-                                          "binding_mismatch")
-                    rebind_old = {"source": "profile", "profile_id": stored_id,
-                                  "revision": stored_revision}
-                    rebind_new = {"source": "profile", "profile_id": desired_id,
-                                  "revision": desired_revision}
-                    rebind_conversation_id = conversation["id"]
-                    with self.service.lock, self.service.db:
-                        self.service.db.execute(
-                            "UPDATE agent_conversations SET profile=?,revision=? WHERE id=?",
-                            (desired_id, desired_revision, conversation["id"]))
-                    conversation = self._conversation(source)
-                    # Validated `rebound` already proves same conversation ID,
-                    # idle status, and exact requested binding. Do not issue a
-                    # redundant post-rebind read that would widen an unaudited
-                    # successful-transition window. The rebind itself proves
-                    # current runtime ownership, so only the conversation's
-                    # current Node/adapter metadata is refreshed; historical
-                    # run evidence stays immutable.
-                    _refresh_metadata = {}
-                    if conversation["node_revision"] != node_info["revision"]:
-                        _refresh_metadata["node_revision"] = node_info["revision"]
-                    if conversation["adapter_revision"] != adapter_info["revision"]:
-                        _refresh_metadata["adapter_revision"] = adapter_info["revision"]
-                    try:
-                        _instance_id = adapter.descriptor().instance_id
-                    except Exception:
-                        _instance_id = None
-                    if _instance_id and conversation["instance_id"] != _instance_id:
-                        _refresh_metadata["instance_id"] = _instance_id
-                    if _refresh_metadata:
-                        assignments = ",".join(
-                            f"{key}=?" for key in _refresh_metadata)
-                        with self.service.lock, self.service.db:
-                            self.service.db.execute(
-                                f"UPDATE agent_conversations SET {assignments} WHERE id=?",
-                                (*_refresh_metadata.values(), conversation["id"]))
-                        conversation = {**conversation, **_refresh_metadata}
-            # Both runtime-config here: opaque native revision drift is
-            # resolved by the adapter below (thread refresh or explicit
-            # runtime-owned replacement), not by a Bridge revision check.
-            if rebind_old is None:
-                # Current-runtime ownership proof: the stored native
-                # conversation must exist on the live same-Node adapter,
-                # belong to this workspace, and be idle before any prompt.
-                # Missing, foreign, mismatched, or busy conversations fail
-                # closed here and no prompt is sent.
-                try:
-                    native_conversation = adapter.conversation(
-                        conversation["native_id"])
-                except Exception as exc:
-                    code = getattr(exc, "code", "")
-                    if code in {"not_found", "binding_mismatch", "profile_mismatch",
-                                "profile_unavailable", "conversation_unavailable"}:
-                        raise BridgeError(
-                            "The runtime conversation is no longer owned by this adapter",
-                            "conversation_unavailable") from None
-                    raise
-                if native_conversation.get("workspaceId") != ws["id"]:
+            # Security is per run: a continuation simply carries the
+            # route's current profile, so no rebind step exists. Only a
+            # switch between a Bridge profile and native security needs a
+            # fresh conversation.
+            if conversation["source"] != binding["source"]:
+                raise BridgeError(
+                    "The route's security source changed since this conversation "
+                    "started; start a fresh run", "security_source_changed")
+            # Current-runtime ownership proof: the stored native
+            # conversation must exist on the live same-Node adapter,
+            # belong to this workspace, and be idle before any prompt.
+            # Missing, foreign, mismatched, or busy conversations fail
+            # closed here and no prompt is sent.
+            try:
+                native_conversation = adapter.conversation(
+                    conversation["native_id"])
+            except Exception as exc:
+                code = getattr(exc, "code", "")
+                if code in {"not_found", "binding_mismatch", "profile_mismatch",
+                            "profile_unavailable", "conversation_unavailable"}:
                     raise BridgeError(
-                        "The runtime conversation is not owned by this workspace",
-                        "conversation_unavailable")
-                if native_conversation.get("status") != "idle":
-                    raise BridgeError("Conversation is not idle", "conversation_busy")
-                # Benign Node/adapter revision drift is proven safe: the live
-                # adapter still owns the idle conversation. Refresh only the
-                # conversation's current Node/adapter metadata; historical run
-                # effective_security and revision evidence stay immutable.
-                metadata: dict[str, str] = {}
-                if conversation["node_revision"] != node_info["revision"]:
-                    metadata["node_revision"] = node_info["revision"]
-                if conversation["adapter_revision"] != adapter_info["revision"]:
-                    metadata["adapter_revision"] = adapter_info["revision"]
-                continuation_descriptor = adapter.descriptor()
-                if conversation["instance_id"] != continuation_descriptor.instance_id:
-                    metadata["instance_id"] = continuation_descriptor.instance_id
-                if metadata:
-                    assignments = ",".join(f"{key}=?" for key in metadata)
-                    with self.service.lock, self.service.db:
-                        self.service.db.execute(
-                            f"UPDATE agent_conversations SET {assignments} WHERE id=?",
-                            (*metadata.values(), conversation["id"]))
-                    conversation = {**conversation, **metadata}
+                        "The runtime conversation is no longer owned by this adapter",
+                        "conversation_unavailable") from None
+                raise
+            if native_conversation.get("workspaceId") != ws["id"]:
+                raise BridgeError(
+                    "The runtime conversation is not owned by this workspace",
+                    "conversation_unavailable")
+            if native_conversation.get("status") != "idle":
+                raise BridgeError("Conversation is not idle", "conversation_busy")
+            # Benign Node/adapter revision drift is proven safe: the live
+            # adapter still owns the idle conversation. Refresh only the
+            # conversation's current Node/adapter metadata; historical run
+            # effective_security and revision evidence stay immutable.
+            metadata: dict[str, str] = {}
+            if conversation["node_revision"] != node_info["revision"]:
+                metadata["node_revision"] = node_info["revision"]
+            if conversation["adapter_revision"] != adapter_info["revision"]:
+                metadata["adapter_revision"] = adapter_info["revision"]
+            continuation_descriptor = adapter.descriptor()
+            if conversation["instance_id"] != continuation_descriptor.instance_id:
+                metadata["instance_id"] = continuation_descriptor.instance_id
+            if metadata:
+                assignments = ",".join(f"{key}=?" for key in metadata)
+                with self.service.lock, self.service.db:
+                    self.service.db.execute(
+                        f"UPDATE agent_conversations SET {assignments} WHERE id=?",
+                        (*metadata.values(), conversation["id"]))
+                conversation = {**conversation, **metadata}
         if conversation is None:
             descriptor = adapter.descriptor()
             self._validate_submission_authority(ws, authority, binding)
-            native_conversation = adapter.create_conversation({
-                "workspaceId": ws["id"], "directory": str(ws["root"]),
-                "securityBinding": binding,
-                **({"securityProfile": binding["profile"]}
-                   if binding["source"] == "profile" else {}),
-            })
-            native_binding = native_conversation.get("securityBinding")
-            if binding["source"] == "profile" and not isinstance(native_binding, dict):
-                legacy = native_conversation.get("securityProfile")
-                if isinstance(legacy, dict):
-                    native_binding = {"source": "profile", "profile": legacy}
-            binding_matches = (isinstance(native_binding, dict)
-                               and native_binding.get("source") == binding["source"])
-            if binding["source"] == "profile":
-                binding_matches = (binding_matches
-                                   and native_binding.get("profile") == binding["profile"])
-            else:
-                binding_matches = (binding_matches
-                                   and isinstance(native_binding.get("revision"), str)
-                                   and bool(native_binding.get("revision"))
-                                   and isinstance(native_binding.get("resolvedSummary"), dict))
-            if (native_conversation.get("workspaceId") != ws["id"]
-                    or not binding_matches
-                    or not isinstance(native_conversation.get("id"), str)
-                    or not native_conversation["id"]):
-                raise BridgeError("Runtime conversation binding is invalid",
-                                  "binding_mismatch")
-            summary = (native_binding.get("resolvedSummary")
-                       if binding["source"] == "runtime-config" else None)
-            bound_revision = (binding["profile"]["revision"]
-                              if binding["source"] == "profile"
-                              else native_binding["revision"])
+            if isolation == "worktree":
+                worktree = self.worktrees.create(ws)
+            try:
+                native_conversation = adapter.create_conversation({
+                    "workspaceId": ws["id"],
+                    "directory": worktree["path"] if worktree is not None else str(ws["root"]),
+                    "security": binding,
+                })
+                if (native_conversation.get("workspaceId") != ws["id"]
+                        or not _echo_matches(binding, native_conversation.get("securityBinding"))
+                        or not isinstance(native_conversation.get("id"), str)
+                        or not native_conversation["id"]):
+                    raise BridgeError("Runtime conversation binding is invalid",
+                                      "binding_mismatch")
+            except BaseException:
+                if worktree is not None:
+                    self.worktrees.abandon(worktree, ws)
+                raise
             conversation = {"id": _id("conv_"), "workspace": ws["id"],
                             "node_id": node_info["id"], "node_revision": node_info["revision"],
                             "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"],
                             "adapter_revision": adapter_info["revision"],
                             "native_id": native_conversation["id"],
                             "profile": binding.get("profile", {}).get("id", ""),
-                            "revision": bound_revision,
+                            "revision": binding.get("profile", {}).get("revision", ""),
                             "instance_id": descriptor.instance_id, "created": _now(),
-                            "source": binding["source"],
-                            "security_snapshot": (json.dumps(summary, sort_keys=True)
-                                                  if isinstance(summary, dict) else None),
-                            "permission_revision": (native_binding.get("permissionRevision", "")
-                                                    if isinstance(native_binding, dict) else ""),
-                            "approval_revision": (native_binding.get("approvalRevision", "")
-                                                  if isinstance(native_binding, dict) else ""),
-                            "replacement_reason": replacement_reason}
+                            "source": binding["source"], "security_snapshot": None,
+                            "permission_revision": "", "approval_revision": "",
+                            "replacement_reason": None}
             with self.service.lock, self.service.db:
                 self.service.db.execute(
                     "INSERT INTO agent_conversations"
@@ -1048,11 +886,16 @@ class RunCoordinator:
         # Reserve the run lock before publishing its starting row. Reads
         # can recover an admitted submission only after its native start and
         # initial snapshot are complete; the Service lock stays off the wire.
-        with self._run_locks[hash(bridge_run_id) % len(self._run_locks)]:
+        with self._run_locks.hold(bridge_run_id):
             timestamp = _now()
-            effective_security = _effective_security(binding, node_id=node_info["id"],
+            effective_security = _effective_security(run_binding, node_id=node_info["id"],
                 node_revision=node_info["revision"], adapter_id=adapter_id,
                 adapter_revision=adapter_info["revision"])
+            if run_binding is not binding:
+                # The run's rules add its plan folder, so its revision differs
+                # from the saved profile's; keep both for the audit trail.
+                effective_security.update(profile_revision=binding["profile"]["revision"],
+                                          plan_folder=plan_folder)
             with self.service.lock, self.service.db:
                 if self._stop.is_set():
                     raise RuntimeUnavailable("Runtime coordination stopped")
@@ -1068,34 +911,18 @@ class RunCoordinator:
                      None, "", "", None, json.dumps(effective_security, sort_keys=True), timestamp, timestamp))
                 if images:
                     self.service.db.execute("INSERT INTO agent_run_images(run,refs) VALUES(?,?)", (bridge_run_id, json.dumps(images, sort_keys=True)))
+                self.checkpoints.begin_locked(bridge_run_id, ws["id"], node_info["id"])
+                if worktree is not None:
+                    self.worktrees.link_locked(bridge_run_id, worktree["id"])
             self.run_events.publish(bridge_run_id)
-            if rebind_old is not None and rebind_new is not None:
-                # The runtime security transition is a real state mutation
-                # independent of whether the next prompt succeeds. Persist it
-                # BEFORE calling start_run so a rejected/failed start still
-                # leaves the failed Bridge run auditable. Bounded identifiers
-                # and revisions only; no config, prompt, paths, or secrets.
-                rebind_payload = _safe_payload({
-                    "old_source": rebind_old.get("source"),
-                    "old_profile_id": rebind_old.get("profile_id"),
-                    "old_revision": rebind_old.get("revision"),
-                    "new_source": rebind_new.get("source"),
-                    "new_profile_id": rebind_new.get("profile_id"),
-                    "new_revision": rebind_new.get("revision"),
-                    "conversation_id": rebind_conversation_id or conversation["id"],
-                }, 2000)
-                with self.service.lock, self.service.db:
-                    if self._stop.is_set():
-                        raise RuntimeUnavailable("Runtime coordination stopped")
-                    self.service.db.execute(
-                        "INSERT INTO agent_activities(id,run,native_id,kind,status,payload,created,updated) "
-                        "VALUES(?,?,?,?,?,?,?,?)",
-                        (_id("act_"), bridge_run_id, "security-rebind:" + bridge_run_id,
-                         "security_binding_rebound", "completed", rebind_payload, _now(), _now()))
+            # Bounded and best effort: a capture failure is recorded on the
+            # run's checkpoint and never prevents the native start.
+            self.checkpoints.capture_pre(ws, bridge_run_id)
             try:
                 run_payload = {
-                    "input": [{"type": "text", "text": self._prompt(ws, job)}],
+                    "input": [{"type": "text", "text": self._prompt(ws, job, worktree)}],
                     "clientRunId": bridge_run_id,
+                    "security": run_binding,
                 }
                 # An empty selector means no Bridge model policy and no explicit
                 # request: send no selector so the adapter/native runtime chooses
@@ -1112,100 +939,10 @@ class RunCoordinator:
                 if images:
                     with self.service.lock, self.service.db:
                         self.service.db.execute("UPDATE agent_run_images SET metadata=? WHERE run=?", (json.dumps(native_run.get("inputImages", [])), bridge_run_id))
-                native_security = native_run.get("securityBinding")
-                runtime_replacement = (native_security.get("replacementReason")
-                                       if isinstance(native_security, dict) else None)
-                replacement_native_id = native_run.get("conversationId")
                 if (native_run.get("clientRunId") != bridge_run_id
-                        or (replacement_native_id != conversation["native_id"]
-                            and (binding["source"] != "runtime-config"
-                                 or not isinstance(runtime_replacement, str)
-                                 or not runtime_replacement
-                                 or not isinstance(native_security.get(
-                                     "replacedConversationId"), str)))):
+                        or native_run.get("conversationId") != conversation["native_id"]
+                        or not _echo_matches(run_binding, native_run.get("securityBinding"))):
                     raise BridgeError("Runtime run binding is invalid", "binding_mismatch")
-                if binding["source"] == "runtime-config":
-                    if (not isinstance(native_security, dict)
-                            or native_security.get("source") != "runtime-config"
-                            or not isinstance(native_security.get("revision"), str)
-                            or not isinstance(native_security.get("resolvedSummary"), dict)):
-                        raise BridgeError("Runtime run security state is invalid", "binding_mismatch")
-                    new_summary = native_security["resolvedSummary"]
-                    new_revision = native_security["revision"]
-                    new_permission_revision = native_security.get("permissionRevision", "")
-                    new_approval_revision = native_security.get("approvalRevision", "")
-                    if replacement_native_id != conversation["native_id"]:
-                        if native_security.get("replacedConversationId") != conversation["native_id"]:
-                            raise BridgeError("Runtime conversation replacement is invalid",
-                                              "binding_mismatch")
-                        current_native = adapter.conversation(replacement_native_id)
-                        if (current_native.get("workspaceId") != ws["id"]
-                                or current_native.get("status") not in {"idle", "active", "notLoaded"}):
-                            raise BridgeError("Replacement conversation binding is invalid",
-                                              "binding_mismatch")
-                        prior_conversation_id = conversation["id"]
-                        descriptor = adapter.descriptor()
-                        conversation = {
-                            "id": _id("conv_"), "workspace": ws["id"],
-                            "node_id": node_info["id"], "node_revision": node_info["revision"],
-                            "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"],
-                            "adapter_revision": adapter_info["revision"],
-                            "native_id": replacement_native_id,
-                            "profile": "", "revision": new_revision,
-                            "instance_id": descriptor.instance_id, "created": _now(),
-                            "source": "runtime-config",
-                            "security_snapshot": json.dumps(new_summary, sort_keys=True),
-                            "permission_revision": new_permission_revision,
-                            "approval_revision": new_approval_revision,
-                            "replacement_reason": runtime_replacement,
-                        }
-                        replacement_reason = runtime_replacement
-                        with self.service.lock, self.service.db:
-                            if self._stop.is_set():
-                                raise RuntimeUnavailable("Runtime coordination stopped")
-                            self.service.db.execute(
-                                "INSERT INTO agent_conversations"
-                                "(id,workspace,node_id,node_revision,adapter_id,runtime_type,adapter_revision,native_id,profile,revision,instance_id,created,source,"
-                                "security_snapshot,permission_revision,approval_revision,replacement_reason) "
-                                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                (conversation["id"], conversation["workspace"], conversation["node_id"],
-                                 conversation["node_revision"], conversation["adapter_id"],
-                                 conversation["runtime_type"], conversation["adapter_revision"],
-                                 conversation["native_id"], conversation["profile"], conversation["revision"],
-                                 conversation["instance_id"], conversation["created"], conversation["source"],
-                                 conversation["security_snapshot"], conversation["permission_revision"],
-                                 conversation["approval_revision"], conversation["replacement_reason"]))
-                            self.service.db.execute(
-                                "UPDATE agent_runs SET conversation=? WHERE id=?",
-                                (conversation["id"], bridge_run_id))
-                    else:
-                        conversation["revision"] = new_revision
-                        conversation["security_snapshot"] = json.dumps(new_summary, sort_keys=True)
-                        conversation["permission_revision"] = new_permission_revision
-                        conversation["approval_revision"] = new_approval_revision
-                        with self.service.lock, self.service.db:
-                            if self._stop.is_set():
-                                raise RuntimeUnavailable("Runtime coordination stopped")
-                            self.service.db.execute(
-                                "UPDATE agent_conversations SET revision=?,security_snapshot=?,"
-                                "permission_revision=?,approval_revision=? WHERE id=?",
-                                (new_revision, conversation["security_snapshot"],
-                                 new_permission_revision, new_approval_revision, conversation["id"]))
-                    # The native adapter's confirmed binding is the security that
-                    # this run actually used.  Persist that bounded observation on
-                    # the run itself; later runtime-config drift must not rewrite
-                    # historical evidence.
-                    effective_security = _effective_security(
-                        {"source": "runtime-config", "revision": new_revision,
-                         "resolvedSummary": new_summary},
-                        node_id=node_info["id"], node_revision=node_info["revision"],
-                        adapter_id=adapter_id, adapter_revision=adapter_info["revision"])
-                    with self.service.lock, self.service.db:
-                        if self._stop.is_set():
-                            raise RuntimeUnavailable("Runtime coordination stopped")
-                        self.service.db.execute(
-                            "UPDATE agent_runs SET effective_security=?,updated=? WHERE id=?",
-                            (json.dumps(effective_security, sort_keys=True), _now(), bridge_run_id))
             except RuntimeRejected as exc:
                 with self.service.lock, self.service.db:
                     if self._stop.is_set():
@@ -1218,21 +955,6 @@ class RunCoordinator:
                         "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"]}, "failed")
                 self.run_events.publish(bridge_run_id)
                 raise
-            if replacement_reason is not None:
-                activity_id = _id("act_")
-                payload = _safe_payload({
-                    "reason": replacement_reason,
-                    "previous_conversation_id": prior_conversation_id,
-                    "conversation_id": conversation["id"],
-                }, 2000)
-                with self.service.lock, self.service.db:
-                    if self._stop.is_set():
-                        raise RuntimeUnavailable("Runtime coordination stopped")
-                    self.service.db.execute(
-                        "INSERT INTO agent_activities(id,run,native_id,kind,status,payload,created,updated) "
-                        "VALUES(?,?,?,?,?,?,?,?)",
-                        (activity_id, bridge_run_id, "security-replacement:" + bridge_run_id,
-                         "security_conversation_replaced", "completed", payload, _now(), _now()))
             initial_usage = _normalize_bridge_usage(native_run.get("usage"))
             initial_usage_json = (json.dumps(initial_usage, sort_keys=True)
                                   if initial_usage is not None else None)
@@ -1246,6 +968,10 @@ class RunCoordinator:
                      native_run.get("outcome"), _safe(native_run.get("result")),
                      _safe(native_run.get("error"), 300), initial_usage_json,
                      _now(), bridge_run_id))
+                self._record_action_event_locked({
+                    "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
+                    "adapter_id": adapter_id, "runtime_type": adapter_info["runtime_type"]},
+                    "started", "start")
                 if native_run["phase"] == "terminal":
                     self._record_outcome_event_locked({
                         "id": bridge_run_id, "workspace": ws["id"], "handoff": job_id,
@@ -1259,8 +985,8 @@ class RunCoordinator:
                                        binding: dict) -> None:
         """Recheck captured admission after native discovery I/O.
 
-        This is a local check: native profile revision validation remains
-        adapter-owned, including intentional opaque revision drift.
+        The route must still name the same profile at the same revision the
+        run is about to carry.
         """
         with self.service.lock:
             if self._stop.is_set():
@@ -1278,6 +1004,13 @@ class RunCoordinator:
                     or (route["security_source"] == "profile"
                         and route["profile_id"] != binding.get("profile", {}).get("id"))):
                 raise BridgeError("Workspace security binding changed", "binding_mismatch")
+            # Input to a running run stays under the profile it pinned, so
+            # only a new run (which names the revision) checks for an edit.
+            if binding.get("source") == "profile" and "revision" in binding["profile"]:
+                profile = self.service.profiles.get(binding["profile"]["id"])
+                if profile["revision"] != binding["profile"]["revision"]:
+                    raise BridgeError("Security profile changed while the run was starting",
+                                      "binding_mismatch")
 
     def _public(self, run: dict) -> dict:
         with self.service.lock:
@@ -1304,10 +1037,14 @@ class RunCoordinator:
                 "SELECT payload FROM agent_activities WHERE run=? AND kind='run_input' "
                 "AND native_id LIKE 'bridge-input:%' ORDER BY created,id LIMIT 50",
                 (run["id"],)).fetchall()
-        input_messages = [json.loads(row["payload"])["receipt"] for row in receipts]
+        input_messages = []
+        for row in receipts:
+            stored = json.loads(row["payload"])
+            input_messages.append({**stored["receipt"], "origin": stored.get("origin", "chatgpt")})
         with self.service.lock:
             image_row = self.service.db.execute("SELECT refs,metadata FROM agent_run_images WHERE run=?", (run["id"],)).fetchone()
             native_conversation = self.service.db.execute("SELECT native_id FROM agent_conversations WHERE id=?", (run["conversation"],)).fetchone()
+            worktree = self.worktrees.for_run_locked(run["id"])
         return {"run_id": run["id"], "conversation_id": run["conversation"],
                 "node_id": run["node_id"], "node_name": node_name[:80],
                 "node_revision": run["node_revision"],
@@ -1327,12 +1064,13 @@ class RunCoordinator:
                 "images": json.loads(image_row["metadata"] or image_row["refs"]) if image_row else [],
                 "runtime_conversation_id": native_conversation["native_id"] if native_conversation else None,
                 "effective_security": effective_security,
+                "isolation": self.worktrees.view(worktree) if worktree else {"mode": "none"},
                 "error": run["error"], "created": run["created"],
                 "updated": run["updated"]}
 
     def _persist_snapshot(self, run: dict, native: dict,
                           interactions: list[dict], activities: list[dict]) -> None:
-        with self._run_locks[hash(run["id"]) % len(self._run_locks)]:
+        with self._run_locks.hold(run["id"]):
             self._persist_snapshot_locked(run, native, interactions, activities)
 
     def _snapshot_signature_locked(self, run_id: str) -> tuple:
@@ -1402,7 +1140,8 @@ class RunCoordinator:
                     "SELECT state FROM agent_interactions WHERE run=? AND native_id=?",
                     (run["id"], native_id)).fetchone()
                 self.service.db.execute(
-                    "INSERT OR IGNORE INTO agent_interactions VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO agent_interactions(id,run,native_id,kind,state,"
+                    "payload,response,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
                     (bridge_id, run["id"], native_id, str(item.get("kind"))[:40],
                      "pending", payload, None, _now(), _now()))
                 if existing is None:
@@ -1450,8 +1189,12 @@ class RunCoordinator:
                 existing = self.service.db.execute(
                     "SELECT payload FROM agent_activities WHERE run=? AND native_id=?",
                     (run["id"], native_id)).fetchone()
+                origin = {}
                 if existing:
-                    prior = json.loads(existing["payload"])["receipt"]
+                    stored = json.loads(existing["payload"])
+                    if "origin" in stored:
+                        origin = {"origin": stored["origin"]}
+                    prior = stored["receipt"]
                     if prior["mode"] != receipt["mode"]:
                         raise RuntimeUnavailable("Runtime input receipt changed mode")
                     # Concurrent reads can return an older snapshot. Positive
@@ -1460,7 +1203,7 @@ class RunCoordinator:
                     if (prior["status"] in {"delivered", "discarded"}
                             or prior["status"] == "unknown" and receipt["status"] == "queued"):
                         continue
-                payload = _safe_payload({"receipt": receipt,
+                payload = _safe_payload({"receipt": receipt, **origin,
                     "title": f"{receipt['mode'].capitalize()} input: {receipt['status']}"})
                 self.service.db.execute(
                     "INSERT INTO agent_activities VALUES(?,?,?,?,?,?,?,?) "
@@ -1478,7 +1221,7 @@ class RunCoordinator:
             self.run_events.publish(run["id"])
 
     def reconcile(self, ws: dict, run_id: str) -> dict:
-        with self._run_locks[hash(run_id) % len(self._run_locks)]:
+        with self._run_locks.hold(run_id):
             return self._reconcile_locked(ws, run_id)
 
     def _reconcile_locked(self, ws: dict, run_id: str) -> dict:
@@ -1560,19 +1303,27 @@ class RunCoordinator:
                         "message": "Live run sync was skipped because runtime authority changed; "
                                    "showing the durable snapshot.",
                     }
+                    if self.interrupt_stranded_runs(run_id):
+                        sync_warning["message"] = (
+                            "The run's Node or adapter connection changed, so the run was marked "
+                            "interrupted. The agent may still be running at the previous endpoint.")
                 elif exc.code != "unknown_adapter":
                     raise
         run = self._run_row(ws, run_id)
         with self.service.lock:
             interactions = self.service.db.execute(
-                "SELECT id,kind,state,payload FROM agent_interactions WHERE run=? "
+                "SELECT * FROM agent_interactions WHERE run=? "
                 "ORDER BY created", (run_id,)).fetchall()
         result = {**self._public(run), "notifications": self.service.notification_manager.summary(run_id),
-                "interactions": [
-            {"id": item["id"], "kind": item["kind"], "state": item["state"],
-             "details": json.loads(item["payload"])} for item in interactions]}
+                  "interactions": [self._interaction_view(item) for item in interactions]}
         if sync_warning is not None:
             result["sync_warning"] = sync_warning
+        checkpoint = self.checkpoints.view(ws, run_id)
+        if checkpoint is not None:
+            result["checkpoint"] = checkpoint
+        checks = self.run_checks.view(run_id)
+        if checks is not None:
+            result["checks"] = checks
         result["input_capabilities"] = {"steer": False, "queue": False}
         if sync and sync_warning is None and run["phase"] == "active":
             try:
@@ -1592,7 +1343,9 @@ class RunCoordinator:
         if adapter_id:
             sql += " AND adapter_id=?"
             args.append(adapter_id)
-        sql += " ORDER BY created DESC LIMIT ? OFFSET ?"
+        # Runs waiting on an answer come first, so they are not paged away.
+        sql += (" ORDER BY (phase='active' AND active_state='waiting_interaction') DESC,"
+                " created DESC LIMIT ? OFFSET ?")
         args.extend([limit + 1, offset])
         with self.service.lock:
             rows = self.service.db.execute(sql, args).fetchall()
@@ -1605,6 +1358,17 @@ class RunCoordinator:
         return {"workspace_id": ws["id"], "runs": runs,
                 "next_offset": offset + limit if len(rows) > limit else None}
 
+    @staticmethod
+    def _interaction_view(row) -> dict:
+        view = {"id": row["id"], "kind": row["kind"], "state": row["state"],
+                "details": json.loads(row["payload"])}
+        if row["decided_by"]:
+            response = json.loads(row["response"] or "{}")
+            view["decision"] = {"decided_by": row["decided_by"], "reason": row["reason"] or "",
+                                "decided": row["decided"],
+                                "choice_id": response.get("choiceId")}
+        return view
+
     def interaction(self, ws: dict, run_id: str, interaction_id: str) -> dict:
         self._run_row(ws, run_id)
         with self.service.lock:
@@ -1613,13 +1377,29 @@ class RunCoordinator:
                 (interaction_id, run_id)).fetchone()
         if row is None:
             raise BridgeError("Interaction not found in this run", "not_found")
-        return {"id": row["id"], "run_id": run_id, "kind": row["kind"],
-                "state": row["state"], "details": json.loads(row["payload"])}
+        return {**self._interaction_view(row), "run_id": run_id}
 
     def resolve(self, ws: dict, run_id: str, interaction_id: str,
-                response: dict) -> dict:
+                response: dict, decided_by: str, reason: str) -> dict:
+        if decided_by not in DECIDERS:
+            raise BridgeError("decided_by must be chatgpt, owner or manager", "invalid_arguments")
+        if (not isinstance(reason, str) or not reason.strip()
+                or len(reason) > MAX_DECISION_REASON):
+            raise BridgeError("A reason of at most 500 characters is required",
+                              "invalid_arguments")
+        if not isinstance(response, dict):
+            raise BridgeError("Invalid interaction response", "invalid_arguments")
+        with self.input_lock(run_id):
+            self._resolve_locked(ws, run_id, interaction_id, response, decided_by,
+                                 " ".join(reason.split()))
+        return self.read(ws, run_id)
+
+    def _resolve_locked(self, ws: dict, run_id: str, interaction_id: str,
+                        response: dict, decided_by: str, reason: str) -> None:
         run = self._run_row(ws, run_id)
         interaction = self.interaction(ws, run_id, interaction_id)
+        if interaction["state"] == "resolved":
+            raise BridgeError("Interaction was already answered", "already_answered")
         if interaction["state"] != "pending" or run["phase"] != "active":
             raise BridgeError("Interaction is stale", "interaction_stale")
         adapter = self._bound_run_adapter(ws, run)
@@ -1635,24 +1415,82 @@ class RunCoordinator:
             choice_id = response.get("choiceId")
             if choice_id not in {choice.get("id") for choice in live[native_id].get("choices", [])}:
                 raise BridgeError("Choice is not available", "invalid_arguments")
-        adapter.resolve(native_id, response)
+        # Compare-and-set before forwarding: only the first answer reaches
+        # the plugin, whichever process or connection sent it.
         with self.service.lock, self.service.db:
-            self.service.db.execute(
-                "UPDATE agent_interactions SET state='resolved',response=?,updated=? WHERE id=?",
-                (_safe_payload(response), _now(), interaction_id))
+            claimed = self.service.db.execute(
+                "UPDATE agent_interactions SET state='resolved',response=?,decided_by=?,"
+                "reason=?,decided=?,updated=? WHERE id=? AND state='pending'",
+                (_safe_payload(response), decided_by, _safe(reason, MAX_DECISION_REASON),
+                 _now(), _now(), interaction_id)).rowcount
+        if not claimed:
+            current = self.interaction(ws, run_id, interaction_id)
+            if current["state"] == "resolved":
+                raise BridgeError("Interaction was already answered", "already_answered")
+            raise BridgeError("Interaction is stale", "interaction_stale")
+        try:
+            adapter.resolve(native_id, response)
+        except BaseException as exc:
+            # The plugin refused or could not be reached: the answer did not
+            # take effect, so the claim is released. A stale native request
+            # stays stale instead of becoming answerable again.
+            state = "stale" if getattr(exc, "code", "") == "interaction_stale" else "pending"
+            with self.service.lock, self.service.db:
+                self.service.db.execute(
+                    "UPDATE agent_interactions SET state=?,response=NULL,decided_by=NULL,"
+                    "reason=NULL,decided=NULL,updated=? WHERE id=? AND state='resolved'",
+                    (state, _now(), interaction_id))
+            raise
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(run, "answered", interaction_id)
         self.run_events.publish(run_id)
-        return self.read(ws, run_id)
+
+    def decisions(self, decided_by: str | None = None, offset: int = 0,
+                  limit: int = 50) -> dict:
+        """The approval log: answered interactions, newest first."""
+        if decided_by is not None and decided_by not in DECIDERS:
+            raise BridgeError("decided_by must be chatgpt, owner or manager", "invalid_arguments")
+        sql = ("SELECT i.*,r.workspace,r.adapter_id,r.runtime_type FROM agent_interactions i "
+               "JOIN agent_runs r ON r.id=i.run WHERE i.decided_by IS NOT NULL")
+        args: list = []
+        if decided_by is not None:
+            sql += " AND i.decided_by=?"
+            args.append(decided_by)
+        sql += " ORDER BY i.decided DESC, i.id LIMIT ? OFFSET ?"
+        args.extend([limit + 1, offset])
+        with self.service.lock:
+            rows = self.service.db.execute(sql, args).fetchall()
+        items = []
+        for row in rows[:limit]:
+            view = self._interaction_view(row)
+            details = view["details"]
+            choice_id = view["decision"]["choice_id"]
+            label = next((item.get("label") for item in details.get("choices", [])
+                          if isinstance(item, dict) and item.get("id") == choice_id), None)
+            items.append({"interaction_id": row["id"], "run_id": row["run"],
+                          "workspace_id": row["workspace"], "adapter_id": row["adapter_id"],
+                          "runtime_type": row["runtime_type"], "kind": row["kind"],
+                          "title": details.get("title"), "choice_label": label,
+                          **view["decision"]})
+        return {"decisions": items, "next_offset": offset + limit if len(rows) > limit else None}
 
     def cancel(self, ws: dict, run_id: str) -> dict:
         run = self._run_row(ws, run_id)
         if run["phase"] == "terminal":
             return self._public(run)
         self._bound_run_adapter(ws, run).cancel(run["native_id"])
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(run, "stopped", "stop")
         return self.read(ws, run_id)
 
     def input(self, ws: dict, run_id: str, instruction: str,
-              request_id: str, mode: str) -> dict:
+              request_id: str, mode: str, origin: str = "chatgpt") -> dict:
         """Send one bounded instruction to the positively identified owned run."""
+        with self.input_lock(run_id):
+            return self._input_locked(ws, run_id, instruction, request_id, mode, origin)
+
+    def _input_locked(self, ws: dict, run_id: str, instruction: str,
+                      request_id: str, mode: str, origin: str = "chatgpt") -> dict:
         if (mode not in {"steer", "queue"} or not isinstance(instruction, str)
                 or not instruction.strip() or len(instruction) > 8000
                 or not isinstance(request_id, str)
@@ -1677,10 +1515,9 @@ class RunCoordinator:
         if security.get("source") == "profile":
             matches = (binding.get("source") == "profile"
                 and binding.get("profile") == {"id": security.get("profile_id"),
-                                              "revision": security.get("bound_revision")})
+                                              "revision": security.get("revision")})
         else:
-            matches = (binding.get("source") == "runtime-config"
-                and binding.get("revision") == security.get("bound_revision"))
+            matches = binding.get("source") == "native"
         if not matches:
             raise BridgeError("Runtime run security binding changed", "binding_mismatch")
         self._validate_submission_authority(ws, run, {
@@ -1696,13 +1533,43 @@ class RunCoordinator:
             raise RuntimeUnavailable("Runtime did not confirm the input receipt")
         self._persist_snapshot(run, native, adapter.interactions(run["native_id"]),
                                adapter.activities(run["native_id"]))
+        if origin == "manager":
+            self._mark_input_origin(run["id"], request_id, origin)
+        with self.service.lock, self.service.db:
+            self._record_action_event_locked(
+                run, "queued" if mode == "queue" else "steered", request_id)
         result = self.read(ws, run_id, sync=False)
-        result["input_message"] = receipt
+        result["input_message"] = {**receipt, "origin": origin}
         if native["phase"] == "active":
             result["input_capabilities"] = {
                 "steer": descriptor.supports("steering"),
                 "queue": descriptor.supports("queueing")}
         return result
+
+    def _mark_input_origin(self, run_id: str, request_id: str, origin: str) -> None:
+        """Remember that a person, not ChatGPT, sent this input; later snapshots keep it."""
+        with self.service.lock, self.service.db:
+            row = self.service.db.execute(
+                "SELECT id,payload FROM agent_activities WHERE run=? AND native_id=?",
+                (run_id, "bridge-input:" + request_id)).fetchone()
+            if row is not None:
+                payload = json.loads(row["payload"])
+                payload["origin"] = origin
+                self.service.db.execute("UPDATE agent_activities SET payload=? WHERE id=?",
+                                        (_safe_payload(payload), row["id"]))
+
+    def _record_action_event_locked(self, run: dict, action: str, subject: str) -> None:
+        """One durable action-notice path for Manager/API and MCP operations.
+
+        Call only after native acceptance (or a local abandon transition).
+        Stable run/action/subject keys deduplicate successful retries.
+        The caller owns the service DB lock and transaction.
+        """
+        self.service.notification_manager.record_run_event_locked(
+            run_id=run["id"], workspace_id=run["workspace"], job_id=run["handoff"],
+            adapter_id=run["adapter_id"], runtime_type=run["runtime_type"],
+            event_type="run_action", subject_id=subject, action=action,
+            occurred_at=_now())
 
     def activities(self, ws: dict, run_id: str, offset: int = 0,
                    limit: int = 50, *, newest_first: bool = False,
@@ -1919,6 +1786,7 @@ class RunCoordinator:
         self._thread = threading.Thread(target=self._sweep, name="wbrp-reconcile",
                                         daemon=True)
         self._thread.start()
+        self.checkpoints.start()
 
     @staticmethod
     def _event_authority(run: dict) -> tuple[str, str, str, str]:
@@ -2006,12 +1874,22 @@ class RunCoordinator:
     def _sweep(self) -> None:
         while not self._stop.is_set():
             self._wake.clear()
+            try:
+                self.interrupt_stranded_runs()
+            except Exception:  # noqa: BLE001 - the next sweep retries
+                pass
             with self.service.lock:
                 if self._stop.is_set():
                     return
+                # Only runs whose captured authority is currently usable can make
+                # progress; disabled or changed ones must not starve the rest.
+                # Least recently updated first, so every run gets a turn.
                 rows = self.service.db.execute(
-                    "SELECT * FROM agent_runs WHERE phase IN ('starting','active') "
-                    "ORDER BY created LIMIT 100").fetchall()
+                    "SELECT r.* FROM agent_runs r JOIN nodes n ON n.id=r.node_id "
+                    "JOIN node_adapters a ON a.adapter_id=r.adapter_id "
+                    "WHERE r.phase IN ('starting','active') AND n.enabled=1 AND a.enabled=1 "
+                    "AND n.revision=r.node_revision AND a.revision=r.adapter_revision "
+                    "AND a.node_id=r.node_id ORDER BY r.updated,r.id LIMIT 100").fetchall()
             self._manage_event_readers([dict(row) for row in rows])
             for row in rows:
                 if self._stop.is_set():
@@ -2052,6 +1930,7 @@ class RunCoordinator:
         deadline = time.monotonic() + 5
         if self._thread is not None:
             self._thread.join(timeout=max(0, deadline - time.monotonic()))
+        self.checkpoints.close(deadline)
         for reader in readers:
             if reader.thread is not None:
                 reader.thread.join(timeout=max(0, deadline - time.monotonic()))

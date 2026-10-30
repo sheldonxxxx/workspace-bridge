@@ -9,7 +9,7 @@ def call(env, name, **args):
     return env["service"].call(env["id"], env["token"], name, args)
 
 def prepare(env, payload):
-    return call(env, "prepare_handoff", **Handoff.model_validate(payload).model_dump())
+    return call(env, "save_handoff", **Handoff.model_validate(payload).model_dump())
 
 
 
@@ -47,12 +47,15 @@ def test_paginated_reads(env):
 
 
 
-def test_failed_publish_preserves_source(env, payload):
-    (env["root"] / HANDOFF).symlink_to(env["tmp"], target_is_directory=True)
+def test_publish_never_writes_through_a_handoff_symlink(env, payload):
+    target = env["tmp"] / "elsewhere"
+    target.mkdir()
+    (env["root"] / HANDOFF).symlink_to(target, target_is_directory=True)
     before = (env["root"] / "src/main.py").read_bytes()
-    with pytest.raises(BridgeError): prepare(env, payload)
+    job = prepare(env, payload)
+    assert job["stored"] == "bridge"
     assert (env["root"] / "src/main.py").read_bytes() == before
-    with pytest.raises(BridgeError, match="Previous publication failed"): prepare(env, payload)
+    assert list(target.iterdir()) == []
 
 
 def test_diagnostic_service_does_not_recover_active_publication(env, payload):

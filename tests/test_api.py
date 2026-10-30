@@ -3,11 +3,12 @@ import json
 import time
 import httpx
 import pytest
+from mcp_helpers import argument_error, McpTransport
 from workspace_bridge.api import make_admin, make_mcp, TOOLS, AdminSessionStore
 
 @pytest.fixture
 def mcp(env):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env["service"])), base_url="http://127.0.0.1:8765", headers={"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"})
+    return httpx.AsyncClient(transport=McpTransport(make_mcp(env["service"])), base_url="http://127.0.0.1:8765", headers={"X-Bridge-Token": env["token"], "Accept": "application/json, text/event-stream"})
 
 async def rpc(client, env, method, params=None, call_id=1):
     params = dict(params or {})
@@ -22,14 +23,28 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) == 28
+        assert len(tools) == len(TOOLS) == 24
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)
         schemas = {tool["name"]: tool["inputSchema"] for tool in tools}
-        for name in ("list_agent_models", "start_agent_run", "list_agent_runs"):
+        for name in ("list_targets", "start_run", "list_runs"):
             assert "adapter_id" in schemas[name]["properties"]
             assert "runtime" not in schemas[name]["properties"]
+
+async def test_each_client_and_protocol_version_is_recorded_once(env, mcp):
+    def recorded():
+        with env["service"].lock:
+            return [row["outcome"] for row in env["service"].db.execute(
+                "SELECT outcome FROM events WHERE action='mcp_client' ORDER BY id")]
+    async with mcp:
+        for _ in range(2):
+            await rpc(mcp, env, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                               "clientInfo": {"name": "Chat\nGPT <x>", "version": "9"}})
+        await rpc(mcp, env, "tools/list")
+    assert recorded() == ["2025-06-18 Chat?GPT ?x?", "2025-03-26 unknown"]
+    assert env["token"] not in " ".join(recorded())
+
 
 async def test_http_tool_read(env, mcp):
     async with mcp:
@@ -55,17 +70,35 @@ async def test_unknown_and_invalid_calls(env, mcp):
         r = await rpc(mcp, env, "tools/call", {"name":"execute_shell", "arguments":{"command":"rm -rf /"}})
         assert r.json()["error"]["code"] == -32602
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"README.md", "workspace":"other"}})
-        assert r.json()["error"]["code"] == -32602
+        assert "workspace: Extra inputs are not permitted" in argument_error(r.json())
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"../secret"}})
         assert r.json()["result"]["isError"] is True
+
+async def test_invalid_arguments_name_the_problem_without_echoing_values(env, mcp):
+    secret = "sk-" + "A" * 40
+    async with mcp:
+        r = await rpc(mcp, env, "tools/call", {"name": "apply_patch", "arguments": {
+            "workspace_id": env["id"], "message": "Note.", "changes": [{"op": secret, "path": "a.md"}]}})
+        tag = argument_error(r.json())
+        assert "changes.0: expected one of 'edit', 'create', 'move', 'delete'" in tag
+        r = await rpc(mcp, env, "tools/call", {"name": "save_handoff", "arguments": {
+            "workspace_id": env["id"], "request_id": secret + "!", "title": "t", "goal": "g",
+            "plan": "p", "acceptance": "a"}})
+        message = argument_error(r.json())
+        assert message.startswith("Invalid tool arguments: request_id: String should match pattern")
+        assert secret not in tag and secret not in message
 
 async def test_notifications_no_write_and_invalid_batch(env, mcp):
     async with mcp:
         path = "/mcp"
         r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"notifications/initialized"})
         assert r.status_code == 202 and not r.content
-        r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"tools/call", "params":{"name":"prepare_handoff"}})
-        assert r.status_code == 400
+        # A tool call sent as a notification is acknowledged and never run.
+        r = await mcp.post(path, json={"jsonrpc":"2.0", "method":"tools/call", "params":{"name":"save_handoff",
+            "arguments":{"workspace_id": env["id"], "request_id":"note", "title":"t", "goal":"g", "plan":"p", "acceptance":"a"}}})
+        assert r.status_code == 202 and not r.content
+        r = await rpc(mcp, env, "tools/call", {"name":"list_handoffs", "arguments":{}})
+        assert json.loads(r.json()["result"]["content"][0]["text"])["handoffs"] == []
         r = await mcp.post(path, json=[{"jsonrpc":"2.0", "id":1, "method":"ping"}])
         assert r.status_code == 400
         r = await mcp.post(path, content="{broken", headers={"Content-Type":"application/json"})
@@ -95,7 +128,7 @@ async def test_admin_auth_policy_and_mapping(env):
         assert diagnostics.status_code == 200
         assert set(diagnostics.json()) == {
             "generated_at", "mode", "overall", "checks", "runnable_routes",
-            "release"
+            "versions"
         }
         assert (await c.post("/api/diagnostics")).status_code == 405
         assert (await c.get("/api/status", headers={"Origin":"http://evil.local"})).status_code == 403
@@ -117,16 +150,17 @@ async def test_body_limits(env, mcp):
 
 async def test_http_handoff_roundtrip(env, mcp, payload):
     async with mcp:
-        r = await rpc(mcp, env, "tools/call", {"name":"prepare_handoff", "arguments":payload})
+        r = await rpc(mcp, env, "tools/call", {"name":"save_handoff", "arguments":payload})
         assert not r.json()["result"]["isError"]
         job = json.loads(r.json()["result"]["content"][0]["text"])
         (env["root"] / "README.md").write_text("# Updated\n")
         r = await rpc(mcp, env, "tools/call", {"name":"read_file", "arguments":{"path":"README.md"}})
         value = json.loads(r.json()["result"]["content"][0]["text"])
         assert value["lines"][0]["text"] == "# Updated"
-        r = await rpc(mcp, env, "tools/call", {"name":"read_handoff", "arguments":{"job_id":job["id"],"document":"TASK.md"}})
-        task = json.loads(r.json()["result"]["content"][0]["text"])
-        assert "paste your reply" in task["content"]
+        r = await rpc(mcp, env, "tools/call", {"name":"list_handoffs", "arguments":{"job_id":job["id"],"document":"PROMPT.md"}})
+        prompt = json.loads(r.json()["result"]["content"][0]["text"])
+        assert "paste your reply" in prompt["content"]
+        assert "===== TASK.md =====" in prompt["content"]
         assert job["completion_tracking"] == "not_tracked"
 
 
@@ -265,3 +299,32 @@ async def test_admin_session_bounded_count(env):
     for i in range(store.MAX_SESSIONS + 10):
         store.create()
     assert store.count <= store.MAX_SESSIONS
+
+
+async def test_admin_node_reads_run_off_the_event_loop(env, mcp, payload, monkeypatch):
+    """Route and handoff-document reads contact the Node; they must not block the loop."""
+    import threading
+    service = env["service"]
+    async with mcp:
+        r = await rpc(mcp, env, "tools/call", {"name": "save_handoff", "arguments": payload})
+        job = json.loads(r.json()["result"]["content"][0]["text"])
+    loop_thread = threading.current_thread()
+    seen = {}
+    for name in ("workspace_route_policy", "read_handoff"):
+        original = getattr(service, name)
+
+        def recorded(*args, _name=name, _original=original, **kwargs):
+            seen[_name] = threading.current_thread()
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(service, name, recorded)
+    app = make_admin(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as c:
+        c.headers["Cookie"] = admin_cookie(app)
+        assert (await c.get(f"/api/workspaces/{env['id']}/routes")).status_code == 200
+        document = await c.get(f"/api/workspaces/{env['id']}/document",
+                               params={"job_id": job["id"], "document": "TASK.md"})
+        assert document.status_code == 200, document.text
+    assert set(seen) == {"workspace_route_policy", "read_handoff"}
+    assert all(thread is not loop_thread for thread in seen.values())

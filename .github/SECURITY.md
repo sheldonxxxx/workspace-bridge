@@ -16,12 +16,11 @@ Please **do not open a public issue** for a vulnerability.
 
 Report it privately through
 [GitHub private vulnerability reporting](https://github.com/sheldonxxxx/workspace-bridge/security/advisories/new).
-Include the affected version, your deployment shape (native or Docker; which
-runtimes), reproduction steps, and the impact you observed.
+Include the affected version, your deployment shape (single host or paired
+Nodes; which runtimes), reproduction steps, and the impact you observed.
 
-Never include real tokens, passwords, private source, or unreviewed support
-bundles in a report. Use synthetic values; we will ask for anything else we
-need.
+Never include real tokens, passwords, private source, or unreviewed logs in a
+report. Use synthetic values; we will ask for anything else we need.
 
 This is a small project; we will acknowledge reports as soon as we can and
 agree a disclosure date with you once a fix is available.

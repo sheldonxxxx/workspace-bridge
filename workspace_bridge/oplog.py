@@ -1,7 +1,8 @@
-"""Operational container logging contract (Python side).
+"""Operational logging contract (Python side).
 
-One-line JSON records for Docker json-file logs. No logging dependency beyond
-the standard library.
+One-line JSON records on stderr in the foreground; a managed service
+(``WB_SERVICE=1``) writes them to its own size-capped file under
+``<state>/logs`` instead. No logging dependency beyond the standard library.
 
 Shared level semantics (Python Bridge and native adapters):
 - DEBUG: high-frequency troubleshooting details.
@@ -21,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,16 +39,20 @@ COMPONENT = "bridge"
 # Stable event names emitted by the bridge process.
 EVENTS = frozenset({
     "bridge_ready", "boundary_reject", "request_error", "process_error",
+    "node_link_connected", "node_link_disconnected", "node_link_retry", "mcp_client",
 })
 
 # Bounded scalar fields only. IDs/state names/counts/durations/sanitized
 # codes and boolean health flags are acceptable; everything else is dropped.
 ALLOWED_FIELDS = frozenset({
     "workspace_id", "reason", "code", "action", "source", "version",
-    "runtime_configured", "workspace_count", "enabled_count",
+    "runtime_configured", "workspace_count", "enabled_count", "client", "protocol",
 })
 
 _MAX_STR = 200
+LOG_FILE_BYTES = 10 * 1024 * 1024
+LOG_FILE_BACKUPS = 2
+CRASH_LOG_BYTES = 1024 * 1024
 
 
 INVALID_LOG_LEVEL_CODE = "invalid_log_level"
@@ -71,23 +78,48 @@ def log_level_from_env(environ: dict | None = None) -> str:
     return parse_log_level(raw)
 
 
-def configure_operational_logging(level: str | None = None,
-                                  environ: dict | None = None) -> str:
-    """Configure application logging so INFO records reach stdout/stderr.
+def _service_handler(log_file: Path) -> logging.Handler:
+    """Size-capped private log file for a managed service.
 
-    Uvicorn itself stays warning-level (callers keep access_log=False and
-    log_level="warning"); this only ensures the workspace_bridge loggers
-    emit at the configured level with a plain one-line format.
+    The service manager's own stdout/stderr file only receives what escapes
+    logging (an interpreter crash), so it is trimmed here at each start.
     """
-    resolved = parse_log_level(level) if level is not None else log_level_from_env(environ)
+    log_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    crash = log_file.with_name(log_file.stem + ".stderr.log")
+    try:
+        if crash.stat().st_size > CRASH_LOG_BYTES:
+            os.truncate(crash, 0)
+    except OSError:
+        pass
+    return logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS, encoding="utf-8")
+
+
+def configure_operational_logging(level: str | None = None, environ: dict | None = None,
+                                  *, log_file: Path | None = None) -> str:
+    """Configure application logging at the resolved level, one record per line.
+
+    In the foreground records go to stderr. A managed service (``WB_SERVICE=1``)
+    with a ``log_file`` writes to that size-capped file instead. Uvicorn itself
+    stays warning-level (callers keep access_log=False and log_level="warning").
+    """
+    env = environ if environ is not None else os.environ
+    resolved = parse_log_level(level) if level is not None else log_level_from_env(env)
     numeric = getattr(logging, resolved, logging.INFO)
-    handler = logging.StreamHandler()
+    service = log_file is not None and env.get("WB_SERVICE") == "1"
+    handler = _service_handler(log_file) if service else logging.StreamHandler()
     handler.setLevel(numeric)
     handler.setFormatter(logging.Formatter("%(message)s"))
     for name in ("workspace_bridge", "workspace_bridge.ops", "workspace_bridge.boundary"):
         logger = logging.getLogger(name)
         logger.setLevel(numeric)
-        if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        if service:
+            for old in [h for h in logger.handlers if isinstance(h, logging.StreamHandler)]:
+                logger.removeHandler(old)
+                if old is not handler and isinstance(old, logging.FileHandler):
+                    old.close()
+            logger.addHandler(handler)
+        elif not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
             logger.addHandler(handler)
         logger.propagate = False
     return resolved

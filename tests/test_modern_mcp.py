@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 from workspace_bridge.api import make_mcp, TOOLS
-from workspace_bridge.protocol import PREFIX, MODERN
+from mcp_helpers import McpTransport, PREFIX, MODERN
 
 async def modern_call(env, method='server/discover', params=None, *, header_changes=None, body_changes=None):
     params = dict(params or {})
@@ -19,7 +19,7 @@ async def modern_call(env, method='server/discover', params=None, *, header_chan
         if v is None: headers.pop(k, None)
         else: headers[k] = v
     if body_changes: body_changes(message)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=make_mcp(env['service'])), base_url='http://127.0.0.1:8765') as client:
+    async with httpx.AsyncClient(transport=McpTransport(make_mcp(env['service'])), base_url='http://127.0.0.1:8765') as client:
         return await client.post('/mcp', json=message, headers=headers)
 
 async def test_modern_discovery_no_initialize(env):
@@ -29,6 +29,12 @@ async def test_modern_discovery_no_initialize(env):
     assert result['resultType'] == 'complete' and MODERN in result['supportedVersions']
     assert result['_meta'][PREFIX+'serverInfo']['name'] == 'workspace-bridge'
 
+async def test_modern_requests_record_their_protocol_version(env):
+    await modern_call(env)
+    with env['service'].lock:
+        rows = [r['outcome'] for r in env['service'].db.execute("SELECT outcome FROM events WHERE action='mcp_client'")]
+    assert rows == [MODERN + ' unknown']
+
 async def test_modern_tools_list_and_read(env):
     response = await modern_call(env, 'tools/list')
     assert len(response.json()['result']['tools']) == len(TOOLS)
@@ -37,7 +43,8 @@ async def test_modern_tools_list_and_read(env):
     assert result['resultType'] == 'complete' and not result['isError']
     assert 'Alpha' in result['content'][0]['text']
 
-@pytest.mark.parametrize('change', [{'Mcp-Method':None}, {'Mcp-Method':'tools/call'}, {'MCP-Protocol-Version':None}, {'MCP-Protocol-Version':'2025-11-25'}])
+# The SDK picks the era from MCP-Protocol-Version; a modern request must then carry a matching Mcp-Method.
+@pytest.mark.parametrize('change', [{'Mcp-Method':None}, {'Mcp-Method':'tools/call'}])
 async def test_metadata_headers_required_and_match(env, change):
     r = await modern_call(env, header_changes=change)
     assert r.status_code == 400 and r.json()['error']['code'] == -32020
@@ -66,8 +73,9 @@ async def test_modern_unknown_method(env):
     assert r.status_code == 404 and r.json()['error']['code'] == -32601
 
 async def test_modern_handoff_workflow(env, payload):
-    r = await modern_call(env, 'tools/call', {'name':'prepare_handoff', 'arguments':payload})
+    r = await modern_call(env, 'tools/call', {'name':'save_handoff', 'arguments':payload})
     result = r.json()['result']
     assert not result['isError']
     handoff = json.loads(result['content'][0]['text'])
-    assert (env['root']/'.workspace-handoff'/'jobs'/handoff['id']/'TASK.md').is_file()
+    assert handoff['stored'] == 'bridge'
+    assert not (env['root']/'.workspace-handoff').exists()

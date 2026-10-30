@@ -7,6 +7,7 @@ import test from "node:test";
 import { PiAdapter } from "../adapter.mjs";
 import { PiRuntimeProtocol } from "../wbrp.mjs";
 import { createFakeTransport } from "./fake-sdk.mjs";
+import { securityBlock } from "./security-block.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-input-"));
@@ -21,8 +22,9 @@ function fixture() {
     agentDir, projectsRoot, piVersion: "test", sessions: new Map(), busy: false,
     queued: [], received: [], submissions: [], aborts: 0,
     listModelsFn: async () => [],
-    async createSession() {
-      this.sessions.set("native", { sessionFile, disposed: false });
+    async createSession(_cwd, _title, options) {
+      this.sessions.set("native", { sessionFile, disposed: false,
+        policyRevision: options.policy_revision });
       return { id: "native", directory };
     },
     async sessionStatus() { return this.busy ? "busy" : "idle"; },
@@ -57,10 +59,10 @@ function fixture() {
 }
 
 async function runIn({ protocol, directory }) {
-  const profile = protocol.profileList().profiles[0];
+  const security = securityBlock();
   const conversation = await protocol.createConversation({ workspaceId: "ws", directory,
-    securityProfile: { id: profile.id, revision: profile.revision } });
-  return protocol.startRun(conversation.id, { input: [{ type: "text", text: "original" }] });
+    security });
+  return protocol.startRun(conversation.id, { security: securityBlock(), input: [{ type: "text", text: "original" }] });
 }
 
 const input = (runId, requestId, text) => ({ expectedRunId: runId, requestId,

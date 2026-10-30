@@ -17,6 +17,14 @@ export class PathError extends Error {
   }
 }
 
+export function canonicalizeWorktreesDir(raw) {
+  const value = String(raw || "").trim();
+  if (!value || !path.isAbsolute(value)) return null;
+  const real = fs.realpathSync(value);
+  if (!fs.statSync(real).isDirectory()) throw new PathError("Worktrees directory is not a directory", "rejected");
+  return real;
+}
+
 export function canonicalizeProjectsDir(raw) {
   const value = String(raw || "").trim();
   if (!value) throw new PathError("WB_PI_PROJECTS_DIR is not configured", "not_configured");
@@ -44,7 +52,9 @@ function isWithin(parent, candidate) {
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
-export function resolveSessionDir(projectsRoot, requested, homeDir = os.homedir()) {
+// `worktreesRoot` is the Node's folder of run worktrees: a run in isolation
+// works in <worktreesRoot>/<workspace>/<worktree>, outside the projects parent.
+export function resolveSessionDir(projectsRoot, requested, homeDir = os.homedir(), worktreesRoot = null) {
   const value = String(requested || "").trim();
   if (!value) throw new PathError("directory is required", "rejected");
   const home = path.normalize(homeDir || os.homedir());
@@ -74,6 +84,7 @@ export function resolveSessionDir(projectsRoot, requested, homeDir = os.homedir(
     throw new PathError("directory is not accessible", "not_found");
   }
   if (!stat.isDirectory()) throw new PathError("directory is not a directory", "rejected");
+  if (worktreesRoot && path.dirname(path.dirname(real)) === worktreesRoot) return real;
   if (real === projectsRoot) throw new PathError("directory must be a workspace under the projects parent", "rejected");
   if (!isWithin(projectsRoot, real)) {
     throw new PathError("directory is outside the projects parent", "rejected");
