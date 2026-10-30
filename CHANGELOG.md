@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.0 — 2026-10-30
+
 - Discord run-action notices now use one shared path for Manager/API and MCP
   starts, stops, interaction answers, steering, queued input and abandonment.
   Successful retries are deduplicated; rejected actions do not send notices.
@@ -12,8 +14,6 @@
   workspace settings explain what each ChatGPT file access level allows;
   empty run lists point to Handoffs; Change password moves into the mobile
   menu; the profile editor stacks below 1100px.
-
-## 1.0.0
 
 - **Breaking:** the Manager's live updates move from server-sent events
   (`/api/run-events`) to one WebSocket at `/api/ws` that carries only
