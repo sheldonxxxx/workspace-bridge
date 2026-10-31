@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The Manager's sign-in screen drops the "loopback only · never tunnelled"
+  footer, which misdescribes a Bridge that is reachable over a tunnel.
+
 ## 1.0.0 — 2026-10-30
 
 - Discord run-action notices now use one shared path for Manager/API and MCP

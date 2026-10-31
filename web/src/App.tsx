@@ -2072,7 +2072,6 @@ export default function App() {
             </small>
           </div>
         </main>
-        <footer className="login-foot">loopback only · never tunnelled</footer>
       </div>
     );
   return (

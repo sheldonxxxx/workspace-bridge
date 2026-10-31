@@ -1799,11 +1799,6 @@ a {
   font-size: 11px;
   display: block;
 }
-.login-foot {
-  color: var(--quiet);
-  padding: 20px clamp(24px, 5vw, 75px);
-  font-size: 11px;
-}
 .loading-shell {
   flex-direction: column;
   justify-content: center;
@@ -2879,9 +2874,6 @@ a {
   }
   .login-panel {
     padding: 23px;
-  }
-  .login-foot {
-    padding: 17px;
   }
   .detail-sheet,
   .run-sheet {
