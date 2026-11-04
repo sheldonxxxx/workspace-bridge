@@ -105,9 +105,13 @@ across reboot or remount even when device identity changes; each request
 re-validates the current root and still enforces containment, exclusions,
 and scopes. A genuinely missing root fails as unavailable, and a
 symlink or file replacement fails closed. Existing mappings, including
-disabled ones, cannot be overlapped. There is no destructive delete or
-remap operation and no automatic search for moved repositories; use fresh
-state with a preserved archive when a mapping must be recreated.
+disabled ones, cannot be overlapped. Rename changes only the display name.
+Delete removes the mapping and its Node registration together with Bridge
+run history, handoffs, event subscriptions and Node-owned checkpoints,
+worktrees, checks and uploads; it never changes project files or Git history.
+After deletion the same root can be mapped again. There is no path remap operation
+and no automatic search for moved repositories; use fresh state with a
+preserved archive when a mapping must be recreated.
 
 ## Limits and incomplete coverage
 
@@ -132,15 +136,28 @@ local-admin `GET /api/diagnostics` endpoint returns the same schema;
 `GET /api/diagnostics?offline=1` selects offline mode. Doctor and the API
 use one server-side evaluator.
 
+Live CLI Doctor requests a fresh report from the running Bridge over
+`doctor.sock` in the selected private state directory. The Unix socket is
+accessible only to the service account; it exposes diagnostics only, with no
+credential or new network listener. The report's `generated_at` is the observation
+time. If the service is stopped, older, busy, or unreachable, Doctor falls back
+to local configuration checks and marks adapter/model observations as unknown.
+It never starts a competing plugin process or removes an adapter's state lock.
+Restart an older Bridge to enable live CLI diagnostics. State directories must
+be owned by the service account with mode 0700 for the local socket to be enabled.
+
 Doctor inspects only the selected state: use
 `workspace-bridge --state /path/to/bridge-state doctor`, and add `--offline`
 to skip network probes.
 
 Statuses are `pass`, `warning`, `action_required`, `failed`, and `unknown`.
 Overall severity ranks failed, action required, unknown, warning, then pass.
-Doctor exits nonzero for failed or action-required reports and zero for
-pass, warning, or unknown-only reports. Unknown adapter, profile, or model
-freshness is not success. A route is ready only when the exact
+Doctor exits zero when it completes a diagnostic report, including reports
+with failed or action-required findings. Nonzero means Doctor itself could
+not initialize or generate a report. For health automation, inspect JSON
+`overall.status` and the check statuses; exit zero does not mean the deployment
+is healthy. Offline workspace roots, adapter, profile, and model freshness
+that were not checked are unknown. A route is ready only when the exact
 workspace/adapter mapping, accessible root, shared MCP gateway, enabled
 workspace route and adapter, and the adapter's current security profile all
 pass. A configured model policy is validated; an unconfigured policy is
@@ -297,7 +314,8 @@ The Bridge records when each paired Node connected, was last seen (every
 30 seconds) and disconnected. `doctor` reports it as connected, disconnected
 since a time, never connected, or unknown when the running Bridge has not
 reported for 90 seconds (for example because it is stopped). Workspace roots
-on paired Nodes show as unknown in `doctor`; the Manager checks them live. On
+on paired Nodes are checked live when CLI Doctor can query the running Bridge;
+otherwise those roots show as unknown. On
 the Node, `node service status` reads the dial-out loop's private
 `link-status.json`: `connected` with the time, `disconnected` with the last
 error code, `stopped`, or `unknown` when the status is stale.

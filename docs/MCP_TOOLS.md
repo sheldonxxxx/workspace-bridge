@@ -7,7 +7,7 @@ header belongs in the local tunnel configuration/environment, not tool
 arguments. A request without an `id` is a notification and is never executed;
 `GET /mcp` answers 405.
 
-24 tools are advertised:
+26 tools are advertised:
 
 | Group | Tools |
 |---|---|
@@ -15,7 +15,7 @@ arguments. A request without an `id` is a notification and is never executed;
 | Reading | `list_dir`, `glob`, `grep`, `read_file` |
 | Editing | `apply_patch`, `undo_edit`, `upload_image` |
 | Git and checks | `git_status`, `git_diff`, `run_checks` |
-| Handoffs | `save_handoff`, `list_handoffs` |
+| Handoffs | `save_handoff`, `list_handoffs`, `edit_handoff`, `delete_handoff` |
 | Agent runs | `list_targets`, `start_run`, `list_runs`, `read_run`, `run_log`, `send_run_input`, `cancel_run`, `answer_interaction`, `apply_run`, `discard_run` |
 
 All arguments are strictly typed and unknown fields rejected. A tool failure,
@@ -256,6 +256,8 @@ save_handoff(workspace_id, request_id, title, goal, plan, acceptance,
              constraints=..., context=..., context_hashes={}, attachments=[])
 list_handoffs(workspace_id, offset=0, limit=20, job_id=null, document=null,
               start_line=1, max_lines=100)
+edit_handoff(workspace_id, job_id, title, documents, expected_title, expected_documents)
+delete_handoff(workspace_id, job_id, expected_title, expected_documents)
 ```
 
 `save_handoff` stores TASK.md, CONTEXT.md and ACCEPTANCE.md in Bridge state.
@@ -291,6 +293,15 @@ hashes and any matching `context_hashes` must agree. Referenced context and
 attachments share a 64 MiB total read budget. A missing upload, a changed or
 unavailable workspace file, a non-image or a duplicate reference fails before
 publication.
+
+`edit_handoff` replaces all three documents, and `delete_handoff` removes the
+Bridge record and Node plan copy. Supply `expected_documents` as a map from each
+document name to the SHA-256 in the handoff summary and `expected_title` as
+the current title; stale requests fail.
+Both operations are blocked after a Bridge run has used the handoff. Manual
+dispatch is not tracked: do not change or delete a plan an agent is using.
+The editor preserves uploaded attachments; retain their references in CONTEXT.md
+when needed. Editing does not revalidate planning-time workspace hashes.
 
 `list_handoffs` without `job_id` lists the workspace's handoffs. With `job_id`
 it returns that handoff's summary (the same shape `save_handoff` returns).
@@ -447,12 +458,15 @@ digit. IDs are unique per run across both modes. Retry with exactly the
 same instruction and mode to check the existing receipt; changed input under
 the same ID fails closed. A run retains at most 50 message receipts and allows
 at most 20 pending inputs. `input_message` is the accepted request's receipt;
-`input_messages` on run reads contains text-free receipt history with
+`input_messages` on run reads contains receipt history with
 `requestId`, `mode`, and `status` (`queued`, `delivered`, `discarded`, or
-`unknown`). Delivered means native submission, not successful completion.
+`unknown`), plus redacted `text` for instructions accepted by this Bridge
+version. Older receipts may have no text. Delivered means native submission,
+not successful completion.
 Unknown delivery is never retried automatically. Failure, cancellation, and
 adapter restart discard pending inputs; prompt text is never persisted as a
-replay queue. The Manager shows the receipts and can steer or queue by hand as a last
+replay queue. Saved text is display-only history. The Manager shows the message
+text with its delivery status and can steer or queue by hand as a last
 resort; those receipts carry `origin: "manager"` (`"chatgpt"` otherwise), so
 re-read the run before sending more input.
 

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Doctor exits zero after producing a report, regardless of its findings;
+  invocation and report-generation errors remain nonzero. Offline workspace
+  roots are unknown rather than incorrectly requiring administrator action.
+
+- CLI Doctor queries the running Bridge through an owner-only local socket,
+  avoiding competing adapter processes and false Codex lock failures. Without
+  the service, adapter and model observations are unknown; offline checks never
+  contact it.
+
+- Security profiles accept shell commands up to 65,536 characters across Codex,
+  Claude, OpenCode and Pi. Oversized command denials report the length and limit;
+  Codex retains the policy reason when a run ends without a native error.
+
+- Recent run messages show the redacted steering or follow-up text and a clearer
+  "Sent" status. Older receipts without saved text show that it is unavailable.
+
+- Edit or delete unused handoffs from the Manager or MCP; handoffs referenced by Bridge runs are protected.
+
+- The Manager can rename a workspace and delete it. Delete removes the Bridge
+  mapping and its Node registration together with run history, handoffs and
+  Node-owned checkpoints, worktrees, checks and uploads; project files and Git
+  history are never touched, and the same root can be mapped again afterwards.
 - The Manager's sign-in screen drops the "loopback only · never tunnelled"
   footer, which misdescribes a Bridge that is reachable over a tunnel.
 

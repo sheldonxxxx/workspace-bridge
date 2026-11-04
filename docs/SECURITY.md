@@ -174,7 +174,7 @@ closed on invalid values. Prefer SSH port-forwarding or VPN; plain HTTP bears
 admin credentials in clear, so use TLS termination and firewall rules when remote
 is unavoidable.
 
-A disabled mapping retains its history. Token rotation revokes the old token for subsequent calls. Neither action erases copies already returned to ChatGPT, cancels completed reads, or necessarily interrupts work already holding the service lock.
+A disabled mapping retains its history. Deleting a workspace removes its mapping and Bridge/Node-owned history without touching project files. Token rotation revokes the old token for subsequent calls. Neither action erases copies already returned to ChatGPT, cancels completed reads, or necessarily interrupts work already holding the service lock.
 
 ## Review boundary
 
@@ -274,11 +274,20 @@ adapter URLs, credentials, raw environment values, prompts, tool arguments,
 provider payloads, or full external paths. Runtime failure text is reduced to
 fixed safe summaries.
 
-Doctor uses a SQLite `mode=ro` connection, starts no run-reconciliation or
+Live CLI Doctor first requests the canonical report over an owner-only Unix
+socket in the selected state directory. The directory must be owned by the
+service account with mode 0700 and the socket has mode 0600. Filesystem access
+authenticates that local account; no bearer token, TCP listener, arbitrary
+method, or mutation operation is exposed. Responses and request sizes are
+bounded, only one report is evaluated at a time, and provider exceptions return
+fixed summaries. The existing authenticated Manager API remains unchanged.
+
+Standalone fallback uses a SQLite `mode=ro` connection, starts no run-reconciliation or
 notification worker, does not recover `sending` deliveries, and does not take or
 create the serve process lock. It reads database facts under the shared service
-lock, releases that lock before bounded private runtime calls, and performs no
-state mutation. Offline Doctor does not call runtime adapters; remote-dependent
+lock and performs no state mutation. Its read-only Node cannot start plugin
+processes; unobserved adapters and models are unknown. Offline Doctor contacts
+neither the live diagnostics socket nor runtime adapters; remote-dependent
 checks become unknown, which prevents a route from being reported ready.
 
 ## Local policy control

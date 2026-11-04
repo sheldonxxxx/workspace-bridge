@@ -33,7 +33,7 @@ flowchart TB
 Component responsibilities:
 
 - `api.py`: strict typed tool schemas, the MCP server on the official MCP
-  Python SDK (24 tools plus the skills extension), and the loopback Manager
+  Python SDK (26 tools plus the skills extension), and the loopback Manager
   API.
 - `service.py`: auth, mappings, Node-routed operations, handoff publication,
   write policy, adapter references, workspace routes.
