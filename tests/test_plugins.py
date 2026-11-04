@@ -134,6 +134,27 @@ def test_requests_round_trip_and_errors_keep_their_v1_meaning(node):
     assert "secret" not in str(hidden.value)
 
 
+def test_read_only_probe_leaves_owned_plugin_and_active_run_untouched(node):
+    service, projects = node
+    adapter_id = add(service, projects)["id"]
+    plugin = client(service, adapter_id)
+    instance = plugin.descriptor().instance_id
+    run = plugin.start_run("conv1", {"clientRunId": "active-probe-test", "input": []})
+    started = service.state / "plugins" / adapter_id / "state" / "started"
+    pid = started.read_text()
+    readonly = NodeService(service.state, service.config, read_only=True)
+    try:
+        with pytest.raises(RuntimeUnavailable, match="Read-only diagnostics"):
+            client(readonly, adapter_id).descriptor()
+    finally:
+        readonly.close()
+    assert started.read_text() == pid
+    assert plugin.descriptor().instance_id == instance
+    assert plugin.run(run["id"]) == run
+    assert run["phase"] == "active"
+    assert not started.with_name("closed").exists()
+
+
 def test_stray_stdout_and_node_environment_never_reach_the_protocol(node, monkeypatch):
     service, projects = node
     monkeypatch.setenv("WB_NODE_SECRET", "do-not-pass")

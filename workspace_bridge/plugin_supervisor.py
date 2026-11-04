@@ -309,13 +309,18 @@ class PluginProcess:
 class PluginRegistry:
     """The Node's running plugins, keyed by adapter id and configuration revision."""
 
-    def __init__(self, root: Path, *, worktrees_root: Path | None = None):
+    def __init__(self, root: Path, *, worktrees_root: Path | None = None,
+                 read_only: bool = False):
         self.root = root
         self.worktrees_root = worktrees_root
+        self.read_only = read_only
         self._lock = threading.Lock()
         self._processes: dict[str, tuple[str, PluginProcess]] = {}
 
     def process(self, row: dict, manifest: dict) -> PluginProcess:
+        if self.read_only:
+            raise RuntimeUnavailable("Read-only diagnostics cannot start agent plugins; "
+                                     "query the running Bridge")
         stale = None
         with self._lock:
             current = self._processes.get(row["id"])

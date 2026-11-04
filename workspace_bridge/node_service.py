@@ -187,7 +187,8 @@ class NodeService:
             self.db.close()
             raise BridgeError("Node state schema is incompatible", "state_schema_incompatible")
         self.browser = Browser(self)
-        self.plugins = PluginRegistry(self.state / "plugins", worktrees_root=self.state / "worktrees")
+        self.plugins = PluginRegistry(self.state / "plugins", worktrees_root=self.state / "worktrees",
+                                      read_only=read_only)
         self._checkpoints = None
         self._journal = None
         self._checks = None

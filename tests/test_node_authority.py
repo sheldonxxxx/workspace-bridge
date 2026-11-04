@@ -9,6 +9,7 @@ import pytest
 from admin_helpers import admin_cookie
 from workspace_bridge.api import make_admin
 from workspace_bridge.node_service import NodeService
+from workspace_bridge.runtime import RuntimeUnavailable
 from workspace_bridge.security import BridgeError, digest
 
 from conftest import create_test_adapter, register_test_node, start_test_node, patch_node_runtime
@@ -29,6 +30,10 @@ def test_read_only_node_service_does_not_create_or_mutate_state(tmp_path):
     live_readonly = NodeService(state, config, read_only=True)
     try:
         assert live_readonly.status()["runtime_adapters"] == 1
+        with pytest.raises(RuntimeUnavailable, match="Read-only diagnostics"):
+            live_readonly.plugins.process({}, {})
+        assert not live_readonly.plugins._processes
+        assert not (state / "plugins").exists()
     finally:
         live_readonly.close()
     writable.close()

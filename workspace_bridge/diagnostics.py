@@ -208,7 +208,12 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
     """Observe local prerequisites and each explicit (workspace, adapter) route."""
     del runtime_configuration_error  # No environment adapter registry exists in v2.
     mode = "offline" if offline else "live"
+    standalone = bool(getattr(service, "read_only", False))
     out = _Builder()
+    if standalone and not offline:
+        out.add("core.live_service", "core", "unknown",
+                "The running Bridge could not be queried; runtime checks were not performed.",
+                remediation="Start or restart the Bridge, or use the Manager's diagnostics.")
     listener = listener or {}
     with service.lock:
         gateway = service.db.execute("SELECT token_hash,enabled FROM gateway WHERE id=1").fetchone()
@@ -310,7 +315,10 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             except Exception:
                 root_ok = False
         root_access[wid] = root_ok
-        if ws["node_id"] in unobserved_nodes:
+        if offline:
+            out.add("workspace.root_accessible", "workspaces", "unknown",
+                    "Workspace root accessibility was not checked offline.", workspace_id=wid)
+        elif ws["node_id"] in unobserved_nodes:
             # Only the running Bridge can reach a paired Node.
             out.add("workspace.root_accessible", "workspaces", "unknown",
                     "Workspace root on a paired Node is checked only by the running Bridge.",
@@ -343,7 +351,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             out.add("git.evidence", "git_evidence", git_status, git_summary, workspace_id=wid)
 
     adapter_health: dict[str, tuple[Descriptor | None, dict | None]] = {}
-    if not offline:
+    if not offline and not standalone:
         with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bridge-adapter-diagnostic") as pool:
             futures = {pool.submit(_adapter_probe, service, row): row for row in adapters
                        if row["enabled"]}
@@ -356,11 +364,12 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                     remediation="Enable the adapter in the local Manager.", adapter_id=aid,
                     runtime_type=row["runtime_type"])
             adapter_health[aid] = (None, {"kind": "disabled"})
-        elif offline:
+        elif offline or standalone:
             out.add("adapter.freshness", "adapters", "unknown",
-                    "Adapter reachability was not checked offline.", adapter_id=aid,
+                    "Adapter reachability was not checked offline." if offline else
+                    "Adapter reachability must be checked through the running Bridge.", adapter_id=aid,
                     runtime_type=row["runtime_type"])
-            adapter_health[aid] = (None, {"kind": "offline"})
+            adapter_health[aid] = (None, {"kind": "offline" if offline else "unobserved"})
         else:
             descriptor, error = adapter_health.get(aid, (None, {"kind": "unavailable"}))
             if descriptor:
@@ -398,7 +407,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
             codes.append("workspace.root_accessible")
     route_probes = routes[:MAX_PROBES]
     probe_results: dict[tuple[str, str], tuple[dict | None, list[dict] | None]] = {}
-    if not offline:
+    if not offline and not standalone:
         with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bridge-route-diagnostic") as pool:
             futures = {}
             for route in route_probes:
@@ -440,7 +449,7 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
         elif not node_health.get(route["node_id"], False):
             blockers.append("node.unavailable")
         if route["adapter_enabled"] and not descriptor:
-            blockers.append("adapter.reachable")
+            blockers.append("adapter.unobserved_by_doctor" if standalone or offline else "adapter.reachable")
         # An unconfigured model policy is optional governance: models are
         # unrestricted by Bridge policy and the runtime chooses its default.
         out.add("workspace_route.enabled", "workspaces",
@@ -477,9 +486,10 @@ def evaluate(service, *, offline: bool = False, listener: dict | None = None,
                         workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
                 blockers.append("route.security_binding")
 
-        if offline:
+        if offline or standalone:
             out.add("model.default_freshness", "models_profiles", "unknown",
-                    "Default model availability was not checked offline.",
+                    "Default model availability was not checked offline." if offline else
+                    "Default model availability must be checked through the running Bridge.",
                     workspace_id=wid, adapter_id=aid, runtime_type=runtime_type)
             blockers.append("model.default_freshness")
         elif policy["configured"]:

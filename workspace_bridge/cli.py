@@ -310,6 +310,12 @@ def _doctor(state: Path, *, offline: bool, as_json: bool) -> int:
         "extra_admin_host_count": len(extra_hosts),
         "invalid_admin_host_config": invalid_admin_host_config,
     }
+    if not offline:
+        from .doctor_rpc import read_report
+        report = read_report(state)
+        if report is not None:
+            _print_doctor(report, as_json)
+            return 0
     try:
         service = Service(state, config, read_only=True,
                           run_coordinator_background=False)
@@ -327,12 +333,18 @@ def _doctor(state: Path, *, offline: bool, as_json: bool) -> int:
                                 summary="Private Bridge state database could not be opened.")
         _print_doctor(report, as_json)
         return 1
+    exit_code = 0
     try:
         report = service.diagnostic_report(offline=offline, listener=listener)
+    except Exception:
+        report = failure_report(mode="offline" if offline else "live",
+                                code="doctor.evaluation_failed",
+                                summary="Doctor could not complete the diagnostic report.")
+        exit_code = 1
     finally:
         service.close()
     _print_doctor(report, as_json)
-    return 1 if report["overall"]["status"] in {"failed", "action_required"} else 0
+    return exit_code
 
 
 def _print_doctor(report: dict, as_json: bool) -> None:
@@ -394,9 +406,19 @@ async def serve(service: Service, config: dict, *,
                                       daemon=True)
     gateway_thread.start()
     tasks = [asyncio.create_task(s.serve()) for s in servers]
+    from .doctor_rpc import LocalDiagnostics
+    local_diagnostics = LocalDiagnostics(service, {
+        "mcp_port": config["mcp_port"], "admin_port": config["admin_port"],
+        "extra_admin_host_count": len(extra_admin_hosts),
+    })
+    if not local_diagnostics.start():
+        emit(_ops_log, "WARNING", "bridge", "request_error",
+             code="local_diagnostics_unavailable", source="local", action="diagnostics")
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        # Finish diagnostics while the Node gateway can still answer probes.
+        await asyncio.to_thread(local_diagnostics.close)
         for server in servers:
             server.should_exit = True
         gateway_server.should_exit = True

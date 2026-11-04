@@ -275,3 +275,49 @@ def test_fresh_state_schema_and_private_mode(tmp_path):
 def test_diagnostics_route_output_is_bounded(diagnostic_env):
     report = diagnostic_env["service"].diagnostic_report(offline=True)
     assert len(report["runnable_routes"]) <= MAX_ROUTES
+
+
+def test_offline_roots_are_unknown_and_live_denials_remain_findings(diagnostic_env, monkeypatch):
+    env = diagnostic_env
+    ready_workspace(env)
+    service = env["service"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline Doctor must not call the Node")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service.node_registry, "client", forbidden)
+        report = service.diagnostic_report(offline=True)
+    roots = [row for row in report["checks"] if row["code"] == "workspace.root_accessible"]
+    assert roots and all(row["status"] == "unknown" for row in roots)
+    assert all(not row["ready"] for row in report["runnable_routes"])
+    # A real live refusal is still reported; exit-code changes must not hide findings.
+    def denied(*args, **kwargs):
+        raise BridgeError("Root denied", "root_denied")
+    monkeypatch.setattr(env["node"]["service"], "safe_root", denied)
+    live = service.diagnostic_report()
+    roots = [row for row in live["checks"] if row["code"] == "workspace.root_accessible"]
+    assert roots and all(row["status"] == "action_required" for row in roots)
+
+
+def test_read_only_diagnostics_do_not_probe_adapters_or_models(diagnostic_env, monkeypatch):
+    env = diagnostic_env
+    ws = ready_workspace(env)
+    doctor = Service(env["state"], env["service"].config, read_only=True,
+                     run_coordinator_background=False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Standalone diagnostics must not contact an agent plugin")
+
+    monkeypatch.setattr(doctor.adapter_registry, "client", forbidden)
+    try:
+        report = doctor.diagnostic_report()
+    finally:
+        doctor.close()
+    freshness = [row for row in report["checks"] if row["code"] == "adapter.freshness"]
+    assert len(freshness) == len(env["adapters"])
+    assert all(row["status"] == "unknown" for row in freshness)
+    routes = [row for row in report["runnable_routes"] if row["workspace_id"] == ws["id"]]
+    assert routes and all(not row["ready"] for row in routes)
+    assert all("adapter.unobserved_by_doctor" in row["blockers"] for row in routes)
+    assert all("adapter.reachable" not in row["blockers"] for row in routes)
