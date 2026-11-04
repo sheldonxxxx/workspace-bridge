@@ -89,13 +89,27 @@ test("bash permission input keeps only bounded exact command+timeout", async () 
   assert.equal(vNorm.timeoutMs, vOrig.timeoutMs);
 });
 
-test("malformed and truncated bash inputs fail closed in permission metadata", async () => {
+test("large allowed bash commands retain exact permission identity with bounded audit", async () => {
+  const { evaluateToolCall, extractBashCommand, BUILTINS } = await import("../policy.mjs");
+  const command = "echo " + "x".repeat(65531);
+  const event = normalizeToolStart({ type: "tool_execution_start", toolCallId: "large",
+    toolName: "bash", args: { command, timeout: 20 } });
+  assert.deepEqual(event.input, { command, timeoutMs: 20000 });
+  assert.equal(event.auditInput.command.length, 16384);
+  assert.equal(event.auditInput.truncated, true);
+  const verdict = evaluateToolCall({ cwd: "/tmp", policy: BUILTINS.trusted,
+    toolName: "bash", input: event.input });
+  assert.equal(verdict.effect, "allow");
+  assert.equal(verdict.commandHash, extractBashCommand({ command }).commandHash);
+});
+
+test("malformed and oversized bash inputs fail closed in permission metadata", async () => {
   const seen = [
     normalizeToolStart({ type: "tool_execution_start", toolCallId: "m1", toolName: "bash", args: {} }),
     normalizeToolStart({ type: "tool_execution_start", toolCallId: "m2", toolName: "bash",
       args: { command: "" } }),
     normalizeToolStart({ type: "tool_execution_start", toolCallId: "m3", toolName: "bash",
-      args: { command: "x".repeat(20000) } }),
+      args: { command: "x".repeat(65537) } }),
     normalizeToolStart({ type: "tool_execution_start", toolCallId: "m4", toolName: "bash" }),
   ];
   assert.equal(seen.length, 4);

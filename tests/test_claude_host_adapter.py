@@ -293,8 +293,17 @@ def test_unknown_tools_and_bad_inputs_fail_closed(tmp_path):
     assert decide_tool_use(TRUSTED, str(tmp_path), "Agent", "x")[0] == "deny"
     assert decide_tool_use(TRUSTED, str(tmp_path), "Bash", {"command": ""})[0] == "deny"
     assert decide_tool_use(TRUSTED, str(tmp_path), "Bash",
-                           {"command": "x" * 20000})[0] == "deny"
+                           {"command": "x" * 65537})[0] == "deny"
     assert decide_tool_use(TRUSTED, str(tmp_path), "Bash", "ls")[0] == "deny"
+
+
+def test_shell_command_limit_reports_length_without_command_text(tmp_path):
+    assert decide_tool_use(TRUSTED, str(tmp_path), "Bash",
+                           {"command": "echo " + "x" * 17778}) == ("allow", "")
+    mode, reason = decide_tool_use(TRUSTED, str(tmp_path), "Bash",
+                                    {"command": "echo " + "x" * 65532})
+    assert mode == "deny"
+    assert reason == "Shell command length 65537 characters exceeds the limit of 65536 characters"
 
 
 def test_extensions_follow_the_profile_and_meta_tools_are_allowed(tmp_path):

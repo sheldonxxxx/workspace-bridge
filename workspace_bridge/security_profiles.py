@@ -35,7 +35,7 @@ MAX_ROOTS = 32
 MAX_ROOT_CHARS = 1024
 MAX_COMMANDS = 64
 MAX_COMMAND_CHARS = 200
-MAX_SHELL_COMMAND_CHARS = 16384
+MAX_SHELL_COMMAND_CHARS = 65536
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 _PATTERN_CHARS = re.compile(r"[A-Za-z0-9_.\-/*?\[\]!+@#%^()=:,{} ]+")
 _SHELL_SPLIT = re.compile(r"&&|\|\||[;&|\n()`]|\$\(")
@@ -401,9 +401,11 @@ def command_mode(rules: dict, command: Any, _depth: int = 0) -> tuple[str, str]:
     its script; a script nested deeper hides its commands, so it asks at
     least whenever the profile has ask or deny command rules.
     """
-    if (not isinstance(command, str) or not command.strip()
-            or len(command) > MAX_SHELL_COMMAND_CHARS or "\x00" in command):
-        return "deny", "Shell command is missing or too long"
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        return "deny", "Shell command is missing or invalid"
+    if len(command) > MAX_SHELL_COMMAND_CHARS:
+        return "deny", (f"Shell command length {len(command)} characters exceeds "
+                        f"the limit of {MAX_SHELL_COMMAND_CHARS} characters")
     whole = _shell_words(command)
     if (whole is not None and len(whole) == 3 and _runs_script(whole)
             and _depth < _MAX_SHELL_NESTING):

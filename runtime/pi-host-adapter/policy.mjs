@@ -39,7 +39,8 @@ export const MAX_ROOTS = 32;
 export const MAX_ROOT_CHARS = 1024;
 export const MAX_COMMANDS = 64;
 export const MAX_COMMAND_CHARS = 200;
-export const MAX_SHELL_COMMAND_CHARS = 16384;
+export const MAX_SHELL_COMMAND_CHARS = 65536;
+const MAX_SHELL_COMMAND_PREVIEW_CHARS = 16384;
 export const MAX_REASON_CHARS = 200;
 
 const RANK = { allow: 0, ask: 1, deny: 2 };
@@ -470,9 +471,12 @@ function runsScript(words) {
 // script; a script nested deeper hides its commands, so it asks at least
 // whenever the profile has ask or deny command rules.
 export function commandMode(rules, command, depth = 0) {
-  if (typeof command !== "string" || !pyStrip(command)
-      || codePoints(command) > MAX_SHELL_COMMAND_CHARS || command.includes("\0")) {
-    return ["deny", "Shell command is missing or too long"];
+  if (typeof command !== "string" || !pyStrip(command) || command.includes("\0")) {
+    return ["deny", "Shell command is missing or invalid"];
+  }
+  const length = codePoints(command);
+  if (length > MAX_SHELL_COMMAND_CHARS) {
+    return ["deny", `Shell command length ${length} characters exceeds the limit of ${MAX_SHELL_COMMAND_CHARS} characters`];
   }
   const whole = shellWords(command);
   if (whole !== null && whole.length === 3 && runsScript(whole) && depth < MAX_SHELL_NESTING) {
@@ -534,8 +538,8 @@ export function extractBashCommand(input) {
   }
   const raw = input.command ?? input.cmd ?? input.script ?? input.code ?? null;
   if (typeof raw !== "string" || !raw) return { ok: false };
-  const command = raw.slice(0, MAX_SHELL_COMMAND_CHARS);
-  const truncated = raw.length > MAX_SHELL_COMMAND_CHARS;
+  const command = raw.slice(0, MAX_SHELL_COMMAND_PREVIEW_CHARS);
+  const truncated = raw.length > MAX_SHELL_COMMAND_PREVIEW_CHARS;
   let timeoutMs = 30000;
   const msCandidate = input.timeoutMs ?? input.timeout_ms ?? null;
   const secCandidate = input.timeout ?? null;

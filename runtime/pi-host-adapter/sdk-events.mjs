@@ -12,7 +12,7 @@
 // multi-megabyte tool result is summarized to bounded evidence while the
 // session stays usable. That removes the old MAX_LINE_BYTES failure class
 // entirely instead of raising it.
-import { SHELL_TOOL, SUPPORTED_TOOLS, extractBashCommand } from "./policy.mjs";
+import { MAX_SHELL_COMMAND_CHARS, SHELL_TOOL, SUPPORTED_TOOLS, extractBashCommand } from "./policy.mjs";
 import { summarizeExtensionInput, summarizeExtensionResult, summarizeInput, summarizeResult } from "./executions.mjs";
 
 // Managed Bridge built-ins governed by file/shell policy. Any other tool
@@ -77,13 +77,13 @@ export function normalizeToolStart(message) {
     // command hash and verified timeout as from the original Pi args.
     // Only {command, timeoutMs} are retained; aliases (cmd/script/code)
     // canonicalize to command and second-based timeouts canonicalize to
-    // verified milliseconds. Truncated (oversized) commands cannot
-    // preserve the exact hash identity, so they fail closed as null
-    // instead of authorizing the truncated prefix.
+    // verified milliseconds. Keep the full command within the execution
+    // limit even when its audit preview is truncated. Oversized commands
+    // fail closed as null instead of authorizing a truncated prefix.
     try {
       const extracted = extractBashCommand(args ?? {});
-      if (extracted.ok && !extracted.truncated) {
-        input = { command: extracted.command, timeoutMs: extracted.timeoutMs };
+      if (extracted.ok && [...extracted.raw].length <= MAX_SHELL_COMMAND_CHARS) {
+        input = { command: extracted.raw, timeoutMs: extracted.timeoutMs };
       } else {
         input = null;
       }

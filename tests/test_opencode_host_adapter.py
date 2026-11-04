@@ -136,6 +136,20 @@ def wait_terminal(a,ident):
     raise AssertionError('Run did not finish')
 
 
+def test_shell_command_limit_reports_policy_reason(adapter):
+    a, native, root = adapter
+    security = sp.wire('trusted', sp.BUILTINS['trusted'])
+    conv = conversation(a, root, security)
+    start(a, conv, security)
+    body = {'directory': str(root), 'sessions': [conv['nativeId']],
+            'tool': 'bash', 'input': {'command': 'echo ' + 'x' * 17778}}
+    assert a._policy('/tool', body) == {'effect': 'allow'}
+    body['input']['command'] = 'echo ' + 'x' * 65532
+    assert a._policy('/tool', body) == {
+        'effect': 'deny',
+        'reason': 'Shell command length 65537 characters exceeds the limit of 65536 characters'}
+
+
 def test_native_completion_activities_and_usage(adapter):
     a,native,root=adapter
     conv=conversation(a,root)

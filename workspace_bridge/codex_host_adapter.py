@@ -1269,6 +1269,13 @@ class CodexHostAdapter:
                         "WHERE run=? AND status='queued'", (run_id,))
 
     def _finish_run(self, run: dict, outcome: str, error: str = "") -> None:
+        # Codex may end a declined command as an interruption with no error.
+        # Retain the adapter's durable policy explanation in that case only;
+        # a recovered denial must not turn a successful run into an error.
+        if not error and outcome in ("interrupted", "failed"):
+            prior_error = self._run(run["id"])["error"]
+            if prior_error.startswith("Security profile denied a command: "):
+                error = prior_error
         self._discard_queued(run["id"])
         self._turn_settings.pop(run["id"], None)
         self._next_turn_start.discard(run["id"])
@@ -1694,31 +1701,32 @@ class CodexHostAdapter:
                                     (_clean(item.get("text"), 20000), _now(), run["id"]))
             self._emit("activity." + status, run["conversation"], run["id"], activity_id)
 
-    def _approval_mode(self, rules: dict, cwd: str, method: str, params: dict) -> str:
+    def _approval_mode(self, rules: dict, cwd: str, method: str,
+                       params: dict) -> tuple[str, str]:
         """Decide one native approval from a profile run's rules."""
         if method == "item/permissions/requestApproval":
             # Extra sandbox permissions would outlive the decision at hand.
-            return "deny"
+            return "deny", "Additional sandbox permissions are not allowed"
         if method == "item/commandExecution/requestApproval":
             command = params.get("command")
             if isinstance(command, list):
                 # Quoted, so an argv like [zsh, -lc, script] keeps its script whole.
                 command = shlex.join(str(part) for part in command)
-            return profiles.command_mode(rules, command)[0]
+            return profiles.command_mode(rules, command)
         with self.lock:
             paths = self._file_changes.get(params.get("itemId"))
         if not paths:
             # Unknown targets could be protected paths: never allow blindly.
             if rules["write_inside"] == "deny" and rules["write_outside"] == "deny":
-                return "deny"
-            return "ask"
+                return "deny", "File writes are disabled by this security profile"
+            return "ask", ""
         mode = "allow"
         for path in paths:
-            decision = profiles.path_mode(rules, cwd, path, write=True)[0]
+            decision, reason = profiles.path_mode(rules, cwd, path, write=True)
             if decision == "deny":
-                return "deny"
+                return "deny", reason
             mode = profiles.stricter(mode, decision)
-        return mode
+        return mode, ""
 
     def _answer_approval(self, request_id: int | str, method: str, params: dict,
                          mode: str) -> None:
@@ -1772,8 +1780,13 @@ class CodexHostAdapter:
             owned = self._conversation(row["conversation"])
             rules = self._run_rules.get(run_id)
             if rules is not None and method.endswith("requestApproval"):
-                mode = self._approval_mode(rules, owned["cwd"], method, params)
+                mode, reason = self._approval_mode(rules, owned["cwd"], method, params)
                 if mode != "ask":
+                    if mode == "deny" and method == "item/commandExecution/requestApproval":
+                        with self.db:
+                            self.db.execute("UPDATE runs SET error=?,updated=? WHERE id=?",
+                                (_clean("Security profile denied a command: " + reason, 300),
+                                 _now(), run_id))
                     self._answer_approval(request_id, method, params, mode)
                     return
             interaction_id = _id("int_")

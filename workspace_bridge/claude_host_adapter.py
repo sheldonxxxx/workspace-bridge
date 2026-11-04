@@ -138,7 +138,7 @@ _CONFIG_FILES = frozenset({".mcp.json"})
 SETTING_SOURCES = ("user", "project", "local")
 DEFAULT_SETTING_SOURCES = SETTING_SOURCES
 NATIVE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk")
-MAX_SHELL_COMMAND_CHARS = 16384
+MAX_SHELL_COMMAND_CHARS = profiles.MAX_SHELL_COMMAND_CHARS
 _PATH_INPUT_KEYS = ("file_path", "notebook_path", "path")
 _GLOB_CHARS = frozenset("*?[]{}")
 

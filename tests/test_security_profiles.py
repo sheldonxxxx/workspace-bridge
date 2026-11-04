@@ -57,6 +57,22 @@ def test_vector_commands(case):
     assert sp.command_mode(rules, case["command"])[0] == case["mode"]
 
 
+@pytest.mark.parametrize("length", [17783, 65536, 65537])
+def test_shell_command_limit_and_policy_still_apply(length):
+    command = "echo " + "x" * (length - 5)
+    mode, reason = sp.command_mode(sp.BUILTINS["trusted"], command)
+    if length <= 65536:
+        assert (mode, reason) == ("allow", "")
+        guarded = sp.validate({**sp.BUILTINS["trusted"],
+                               "commands": [{"prefix": "echo", "mode": "deny"}]})
+        assert sp.command_mode(guarded, command)[0] == "deny"
+        assert sp.command_mode(sp.BUILTINS["reviewed"], command)[0] == "ask"
+    else:
+        assert mode == "deny"
+        assert reason == "Shell command length 65537 characters exceeds the limit of 65536 characters"
+        assert "xxx" not in reason
+
+
 @pytest.mark.parametrize("case", VECTORS["paths"],
                          ids=lambda case: f"{case['profile']}:{case['path']}:{case['write']}")
 def test_vector_paths(case, layout):

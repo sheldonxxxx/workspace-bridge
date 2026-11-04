@@ -66,6 +66,26 @@ test("vectors: globs, fixed protected paths and commands", () => {
   }
 });
 
+test("shell command limits allow scripts while preserving previews and policy rules", () => {
+  for (const length of [17783, 65536, 65537]) {
+    const command = "echo " + "x".repeat(length - 5);
+    const [mode, reason] = commandMode(BUILTINS.trusted, command);
+    if (length <= 65536) {
+      assert.equal(mode, "allow");
+      assert.equal(commandMode(BUILTINS.reviewed, command)[0], "ask");
+      assert.equal(commandMode({ ...BUILTINS.trusted,
+        commands: [{ prefix: "echo", mode: "deny" }] }, command)[0], "deny");
+      const extracted = extractBashCommand({ command });
+      assert.equal(extracted.command.length, 16384);
+      assert.equal(extracted.truncated, true);
+      assert.equal(extracted.raw, command);
+    } else {
+      assert.equal(mode, "deny");
+      assert.equal(reason, "Shell command length 65537 characters exceeds the limit of 65536 characters");
+    }
+  }
+});
+
 test("vectors: path modes", () => {
   const layout = makeLayout();
   for (const item of VECTORS.paths) {
@@ -134,7 +154,7 @@ test("bash follows command rules and the shell mode", () => {
   assert.equal(ask.effect, "ask");
   const extracted = extractBashCommand({ command: "make", timeout: 5 });
   assert.equal(ask.grantKey, `bash\n${extracted.commandHash}\n5000`);
-  assert.equal(call("x".repeat(16385)).effect, "deny");
+  assert.equal(call("x".repeat(65537)).effect, "deny");
   assert.equal(evaluateToolCall({ cwd: os.tmpdir(), policy, toolName: SHELL_TOOL, input: {} }).code,
     "malformed_input");
 });

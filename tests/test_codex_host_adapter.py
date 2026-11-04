@@ -629,6 +629,38 @@ def test_profile_thread_stays_read_only_and_approvals_follow_the_rules(codex_ada
     assert len(asked) == 2
 
 
+@pytest.mark.parametrize("status,native_error", [
+    ("interrupted", None), ("failed", None), ("completed", None),
+    ("failed", {"message": "native failure"}),
+])
+def test_command_limit_denial_survives_empty_terminal_error(codex_adapter, status, native_error):
+    adapter, workspace, rpc = codex_adapter
+    conversation = new_conversation(adapter, workspace)
+    run = adapter.start_run(conversation["id"], {
+        "security": _SECURITY[conversation["id"]],
+        "input": [{"type": "text", "text": "Work"}]})
+    ids = {"threadId": conversation["nativeId"], "turnId": run["nativeId"],
+           "availableDecisions": ["accept", "decline", "cancel"]}
+    adapter._request(1, "item/commandExecution/requestApproval",
+                     {**ids, "command": "echo " + "x" * (17783 - 5)})
+    assert rpc.responses[-1] == (1, {"decision": "accept"}, None)
+    adapter._request(2, "item/commandExecution/requestApproval",
+                     {**ids, "command": "echo " + "x" * (65537 - 5)})
+    assert rpc.responses[-1] == (2, {"decision": "decline"}, None)
+    denial = ("Security profile denied a command: Shell command length 65537 characters "
+              "exceeds the limit of 65536 characters")
+    # The reason is durable even before Codex sends its terminal snapshot.
+    assert adapter._run(run["id"])["error"] == denial
+    assert not adapter.interactions(run["id"])["interactions"]
+    adapter._notification("turn/completed", {
+        "threadId": conversation["nativeId"],
+        "turn": {"id": run["nativeId"], "status": status, "error": native_error}})
+    result = adapter.run(run["id"])
+    assert result["phase"] == "terminal"
+    assert result["error"] == ("native failure" if native_error else
+                               "" if status == "completed" else denial)
+
+
 def test_native_conversation_keeps_codex_configuration(codex_adapter):
     adapter, workspace, rpc = codex_adapter
     conversation = new_conversation(adapter, workspace, "native")

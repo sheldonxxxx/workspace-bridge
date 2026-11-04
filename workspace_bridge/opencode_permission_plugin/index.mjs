@@ -33,7 +33,9 @@ export default {
         sessions: await ancestry(event.sessionID), tool: event.tool,
         input: event.input, nativeId: event.id, directory: ctx.location.directory,
       });
-      if (answer.effect !== 'allow') throw new Error('Denied by Workspace Bridge security profile');
+      if (answer.effect !== 'allow') {
+        throw new Error(answer.reason || 'Denied by Workspace Bridge security profile');
+      }
     });
     await ctx.permission.hook('evaluate', async (event) => {
       const answer = await check('/permission', {

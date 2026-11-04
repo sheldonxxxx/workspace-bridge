@@ -265,6 +265,9 @@ class OpenCodeHostAdapter:
         if path != '/tool':
             return {'effect': 'deny'}
         effect = tool_decision(rules, cwd, body.get('tool'), body.get('input'), registered_extension=body.get('registeredExtension') is True)
+        if effect == 'deny' and body.get('tool') in _SHELL and isinstance(body.get('input'), dict):
+            _, reason = profiles.command_mode(rules, body['input'].get('command'))
+            return {'effect': 'deny', 'reason': reason}
         if effect != 'ask' or row['owner'] == 'human':
             return {'effect': 'allow' if effect == 'ask' else effect}
         with self.lock:
