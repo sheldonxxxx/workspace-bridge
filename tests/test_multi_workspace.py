@@ -67,6 +67,45 @@ async def test_new_mapping_needs_no_reconnection_or_new_token(env):
     assert value(await request(env, "workspace_info", {"workspace_id": new}))["name"] == "Beta"
 
 
+async def test_workspace_rename_and_delete(env, payload):
+    beta, root = add(env)
+    env["service"].call(beta, env["token"], "save_handoff",
+                        Handoff.model_validate(payload).model_dump())
+    app = make_admin(env["service"])
+    admin = admin_cookie(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1:8766") as c:
+        c.headers["Cookie"] = admin
+        renamed = await c.post(f"/api/workspaces/{beta}",
+                               json={"operation": "rename", "name": "  Beta Renamed  "})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["workspace"]["name"] == "Beta Renamed"
+        assert renamed.json()["note"] == "Workspace renamed."
+        listed = (await c.get("/api/workspaces")).json()["workspaces"]
+        assert {row["name"] for row in listed} >= {"Alpha", "Beta Renamed"}
+
+        deleted = await c.delete(f"/api/workspaces/{beta}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["deleted"] == beta
+        assert beta not in {row["id"] for row in (await c.get("/api/workspaces")).json()["workspaces"]}
+
+    assert env["node"]["service"].db.execute(
+        "SELECT 1 FROM node_workspaces WHERE id=?", (beta,)).fetchone() is None
+    with pytest.raises(BridgeError, match="unavailable"):
+        env["service"].workspace(beta)
+
+    # Deleting unbinds the root on the Node, so it can be mapped again.
+    again = env["service"].add_workspace("Beta Again", str(root), [])["workspace"]
+    assert again["id"] != beta
+
+
+def test_workspace_rename_rejects_blank_names(env):
+    with pytest.raises(BridgeError, match="Invalid workspace name"):
+        env["service"].manage_workspace(env["id"], "rename", name="   ")
+    with pytest.raises(BridgeError, match="Rename needs only a workspace name"):
+        env["service"].manage_workspace(env["id"], "rename")
+
+
 async def test_interleaved_calls_never_switch_active_workspace(env):
     beta, _ = add(env)
     tasks = [request(env, "read_file", {"workspace_id": ident, "path": "README.md"})

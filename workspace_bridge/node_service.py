@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -312,6 +313,57 @@ class NodeService:
                             (json.dumps(excludes), write_scope, _now(), workspace_id))
         return {"updated": True, "workspace_id": workspace_id}
 
+    def unregister_workspace(self, workspace_id: str) -> dict:
+        """Drop one mapping and the Node state kept only for that workspace.
+
+        Project files, Git history and the workspace's own ``.git`` are never
+        touched. Unknown identities are already unregistered, so a retried
+        delete still succeeds.
+        """
+        if not isinstance(workspace_id, str) or not re.fullmatch(
+                r"ws_[0-9a-f]{24}", workspace_id):
+            raise BridgeError("Invalid workspace identity", "invalid_arguments")
+        with self.lock:
+            row = self.db.execute("SELECT * FROM node_workspaces WHERE id=?",
+                                  (workspace_id,)).fetchone()
+        if row is None:
+            return {"unregistered": True, "workspace_id": workspace_id, "removed": False}
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM node_workspaces WHERE id=?", (workspace_id,))
+        # The mapping is gone; reclaim the Node-owned copies it left behind.
+        try:
+            self.checkpoints.purge({"id": workspace_id}, everything=True)
+        except (BridgeError, OSError):
+            pass
+        try:
+            with self.safe_root({"root": row["root"],
+                                 "excludes": json.loads(row["excludes"])}) as safe:
+                self.worktrees.purge_workspace(workspace_id, safe)
+        except (BridgeError, OSError):
+            try:
+                self.worktrees.purge_workspace(workspace_id)
+            except (BridgeError, OSError):
+                pass
+        if self._journal is not None:
+            try:
+                self._journal.purge_workspace(workspace_id)
+            except (BridgeError, OSError):
+                pass
+        try:
+            if self._checks is not None or (self.state / "checks.sqlite3").is_file():
+                self.checks.purge_workspace(workspace_id)
+            else:
+                (self.state / "checks" / f"{workspace_id}.toml").unlink(missing_ok=True)
+        except (BridgeError, OSError):
+            pass
+        for folder in (self.state / "uploads" / workspace_id,
+                       self.state / "handoffs" / workspace_id):
+            if folder.is_symlink():
+                folder.unlink(missing_ok=True)
+            elif folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+        return {"unregistered": True, "workspace_id": workspace_id, "removed": True}
+
     def authoritative_workspace(self, supplied: dict) -> dict:
         workspace_id = supplied.get("id") if isinstance(supplied, dict) else None
         with self.lock:
@@ -521,6 +573,13 @@ class NodeService:
                 if operation == "worktree_remove":
                     return self.worktrees.remove(safe, ws, args["worktree_id"])
                 return self.worktrees.commit(safe, ws, args["worktree_id"])
+        if operation == "delete_plan":
+            if self.read_only:
+                raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")
+            args = body.get("arguments")
+            if not isinstance(args, dict) or set(args) != {"job_id"}:
+                raise BridgeError("Invalid plan arguments", "invalid_arguments")
+            return PlanStore(self.state).delete(workspace["id"], args["job_id"])
         if operation == "write_plan":
             if self.read_only:
                 raise BridgeError("Plan files are unavailable in read-only mode", "plan_unavailable")

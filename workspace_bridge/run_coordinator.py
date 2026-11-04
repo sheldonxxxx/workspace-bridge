@@ -518,7 +518,7 @@ class RunCoordinator:
             self.service.adapter_registry.get(adapter_id), row["security_source"], row["profile_id"])
 
     def model_policy(self, adapter_id: str) -> dict:
-        self.adapter(adapter_id)
+        self.service.adapter_registry.get(adapter_id)
         with self.service.lock:
             row = self.service.db.execute(
                 "SELECT enabled_models_json,default_model,reasoning_defaults_json "
@@ -691,8 +691,9 @@ class RunCoordinator:
         # and idle-conversation selection before submitting a native run.
         # Both are scoped to one workspace route.
         with self.admission_lock(ws["id"], adapter_id):
-            return self._start_locked(ws, adapter_id, job_id, request_id,
-                                      model, parent_run_id, continue_from_run_id, images, isolation)
+            with self.service.handoff_lock(ws["id"], job_id):
+                return self._start_locked(ws, adapter_id, job_id, request_id,
+                                          model, parent_run_id, continue_from_run_id, images, isolation)
 
     def _start_locked(self, ws: dict, adapter_id: str, job_id: str, request_id: str,
                       model: str | None, parent_run_id: str | None,
@@ -1040,7 +1041,8 @@ class RunCoordinator:
         input_messages = []
         for row in receipts:
             stored = json.loads(row["payload"])
-            input_messages.append({**stored["receipt"], "origin": stored.get("origin", "chatgpt")})
+            input_messages.append({**stored["receipt"], "origin": stored.get("origin", "chatgpt"),
+                                   **({"text": stored["text"]} if "text" in stored else {})})
         with self.service.lock:
             image_row = self.service.db.execute("SELECT refs,metadata FROM agent_run_images WHERE run=?", (run["id"],)).fetchone()
             native_conversation = self.service.db.execute("SELECT native_id FROM agent_conversations WHERE id=?", (run["conversation"],)).fetchone()
@@ -1189,11 +1191,10 @@ class RunCoordinator:
                 existing = self.service.db.execute(
                     "SELECT payload FROM agent_activities WHERE run=? AND native_id=?",
                     (run["id"], native_id)).fetchone()
-                origin = {}
+                metadata = {}
                 if existing:
                     stored = json.loads(existing["payload"])
-                    if "origin" in stored:
-                        origin = {"origin": stored["origin"]}
+                    metadata = {key: stored[key] for key in ("origin", "text") if key in stored}
                     prior = stored["receipt"]
                     if prior["mode"] != receipt["mode"]:
                         raise RuntimeUnavailable("Runtime input receipt changed mode")
@@ -1203,8 +1204,11 @@ class RunCoordinator:
                     if (prior["status"] in {"delivered", "discarded"}
                             or prior["status"] == "unknown" and receipt["status"] == "queued"):
                         continue
-                payload = _safe_payload({"receipt": receipt, **origin,
-                    "title": f"{receipt['mode'].capitalize()} input: {receipt['status']}"})
+                payload = json.loads(_safe_payload({"receipt": receipt,
+                    "title": f"{receipt['mode'].capitalize()} input: {receipt['status']}"}))
+                # Display-only metadata was redacted on acceptance; preserve it
+                # in full when a queued receipt changes state. Never replay it.
+                payload = json.dumps({**payload, **metadata}, ensure_ascii=False)
                 self.service.db.execute(
                     "INSERT INTO agent_activities VALUES(?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(run,native_id) DO UPDATE SET status=excluded.status,"
@@ -1533,30 +1537,37 @@ class RunCoordinator:
             raise RuntimeUnavailable("Runtime did not confirm the input receipt")
         self._persist_snapshot(run, native, adapter.interactions(run["native_id"]),
                                adapter.activities(run["native_id"]))
-        if origin == "manager":
-            self._mark_input_origin(run["id"], request_id, origin)
+        self._record_input_message(run["id"], request_id, origin, instruction)
         with self.service.lock, self.service.db:
             self._record_action_event_locked(
                 run, "queued" if mode == "queue" else "steered", request_id)
         result = self.read(ws, run_id, sync=False)
-        result["input_message"] = {**receipt, "origin": origin}
+        result["input_message"] = next(item for item in result["input_messages"]
+                                       if item["requestId"] == request_id)
         if native["phase"] == "active":
             result["input_capabilities"] = {
                 "steer": descriptor.supports("steering"),
                 "queue": descriptor.supports("queueing")}
         return result
 
-    def _mark_input_origin(self, run_id: str, request_id: str, origin: str) -> None:
-        """Remember that a person, not ChatGPT, sent this input; later snapshots keep it."""
+    def _record_input_message(self, run_id: str, request_id: str,
+                              origin: str, instruction: str) -> None:
+        """Keep accepted, redacted text for display only, never as a replay queue."""
         with self.service.lock, self.service.db:
             row = self.service.db.execute(
                 "SELECT id,payload FROM agent_activities WHERE run=? AND native_id=?",
                 (run_id, "bridge-input:" + request_id)).fetchone()
             if row is not None:
                 payload = json.loads(row["payload"])
+                if payload.get("origin") == origin and "text" in payload:
+                    return
                 payload["origin"] = origin
+                # Input admission bounds the instruction to 8000 characters.
+                # Redact the entire text before storing, including multiline keys.
+                payload.setdefault("text", redact(instruction)[0])
                 self.service.db.execute("UPDATE agent_activities SET payload=? WHERE id=?",
-                                        (_safe_payload(payload), row["id"]))
+                                        (json.dumps(payload, ensure_ascii=False), row["id"]))
+        self.run_events.publish(run_id)
 
     def _record_action_event_locked(self, run: dict, action: str, subject: str) -> None:
         """One durable action-notice path for Manager/API and MCP operations.

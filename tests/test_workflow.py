@@ -72,3 +72,54 @@ def test_diagnostic_service_does_not_recover_active_publication(env, payload):
     assert svc.job(ws, result['id'])['state'] == 'failed'
 
 
+
+
+def test_edit_delete_handoff_updates_node_and_checks_stale(env, payload):
+    job = prepare(env, payload)
+    service = env['service']; ws = service.workspace(env['id'])
+    original = service.job(ws, job['id'])
+    docs = json.loads(original['content'])
+    hashes = json.loads(original['documents'])
+    docs['TASK.md'] = 'Updated task\n'
+    updated = call(env, 'edit_handoff', job_id=job['id'], documents=docs, expected_documents=hashes, title='Updated title', expected_title=original['title'])
+    assert 'Updated task' in updated['copy_prompt']
+    assert (env['node']['service'].state / 'handoffs' / env['id'] / job['id'] / 'TASK.md').read_text() == docs['TASK.md']
+    with pytest.raises(BridgeError, match='changed'):
+        call(env, 'delete_handoff', job_id=job['id'], expected_documents=hashes, expected_title=original['title'])
+    new_hashes = json.loads(service.job(ws, job['id'])['documents'])
+    assert call(env, 'delete_handoff', job_id=job['id'], expected_documents=new_hashes, expected_title='Updated title')['deleted']
+    assert not (env['node']['service'].state / 'handoffs' / env['id'] / job['id']).exists()
+    with pytest.raises(BridgeError, match='not found'):
+        service.job(ws, job['id'])
+
+
+def test_used_handoff_cannot_change(env, payload):
+    job = prepare(env, payload)
+    service = env['service']; ws = service.workspace(env['id'])
+    stored = service.job(ws, job['id'])
+    # Model an existing run without requiring an adapter process.
+    with service.lock:
+        service.db.execute('PRAGMA foreign_keys=OFF')
+        service.db.execute("INSERT INTO agent_runs (id, conversation, workspace, node_id, node_revision, adapter_id, runtime_type, adapter_revision, handoff, request_id, request_hash, model, phase, effective_security, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ('run_test', 'conv', ws['id'], ws['node_id'], 'rev', 'adapter', 'pi', 'rev', job['id'], 'req', 'hash', 'model', 'completed', '{}', 'now', 'now'))
+        service.db.commit()
+        service.db.execute('PRAGMA foreign_keys=ON')
+    hashes = json.loads(stored['documents'])
+    for name, args in [('delete_handoff', {}), ('edit_handoff', {'documents': json.loads(stored['content']), 'title': stored['title']})]:
+        with pytest.raises(BridgeError, match='used by a run'):
+            call(env, name, job_id=job['id'], expected_documents=hashes, expected_title=stored['title'], **args)
+    assert service.handoff_summary(ws, stored)['used'] is True
+
+
+def test_node_failure_preserves_bridge_handoff(env, payload, monkeypatch):
+    job = prepare(env, payload)
+    service = env['service']; ws = service.workspace(env['id'])
+    stored = service.job(ws, job['id'])
+    client = service.node_registry.client(ws['node_id'])
+    def unavailable(*args, **kwargs):
+        raise BridgeError('Node unavailable', 'plan_unavailable')
+    monkeypatch.setattr(client, 'workspace', unavailable)
+    monkeypatch.setattr(service.node_registry, 'client', lambda *args, **kwargs: client)
+    hashes = json.loads(stored['documents'])
+    with pytest.raises(BridgeError, match='Node unavailable'):
+        call(env, 'delete_handoff', job_id=job['id'], expected_title=stored['title'], expected_documents=hashes)
+    assert service.job(ws, job['id'])['content'] == stored['content']

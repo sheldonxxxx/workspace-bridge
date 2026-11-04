@@ -289,6 +289,7 @@ export interface Run {
 }
 export interface RunInputReceipt {
   requestId: string;
+  text?: string;
   mode: "steer" | "queue";
   status: "queued" | "delivered" | "discarded" | "unknown";
   origin?: "chatgpt" | "manager";
@@ -321,6 +322,7 @@ export interface Handoff {
   id: string;
   title: string;
   state: string;
+  used: boolean;
   path: string;
   copy_prompt: string;
 }

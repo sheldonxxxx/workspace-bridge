@@ -536,7 +536,8 @@ def test_concurrent_manager_and_mcp_start_with_same_request_submit_native_once(m
     assert sum(bool(result.get("idempotent")) for result in results) == 1
 
 
-def test_queued_mcp_mutation_reauthenticates_after_gateway_token_rotation(modern_env):
+@pytest.mark.parametrize("queue_kind", ["admission", "handoff"])
+def test_queued_mcp_mutation_reauthenticates_after_gateway_token_rotation(modern_env, queue_kind):
     service, ws_id, token, job, _, _ = modern_env
     direct = service.run_coordinator.adapter(ADAPTER_ID)
     calls, errors = [], []
@@ -551,7 +552,8 @@ def test_queued_mcp_mutation_reauthenticates_after_gateway_token_rotation(modern
         except Exception as exc:
             errors.append(exc)
 
-    queue = service.run_coordinator.admission_lock(ws_id, ADAPTER_ID)
+    queue = (service.run_coordinator.admission_lock(ws_id, ADAPTER_ID) if queue_kind == "admission"
+             else service.handoff_lock(ws_id, job["id"]))
     queue.__enter__()
     thread = threading.Thread(target=mutation)
     thread.start()

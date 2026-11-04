@@ -108,6 +108,22 @@ class PlanStore:
     def __init__(self, state: Path):
         self.root = state / "handoffs"
 
+    def delete(self, workspace_id: object, job_id: object) -> dict:
+        workspace_id = _ident(workspace_id, "workspace")
+        job_id = _ident(job_id, "handoff")
+        parent = self.root / workspace_id
+        folder = parent / job_id
+        try:
+            if self.root.is_symlink() or parent.is_symlink():
+                raise BridgeError("Invalid plan storage", "plan_unavailable")
+            if folder.is_symlink():
+                folder.unlink()
+            elif folder.exists():
+                shutil.rmtree(folder)
+        except OSError:
+            raise BridgeError("The Node could not delete the plan files", "plan_unavailable") from None
+        return {"deleted": True}
+
     def write(self, workspace_id: object, job_id: object, documents: object, uploads: object = ()) -> dict:
         if not isinstance(workspace_id, str) or not IDENT.fullmatch(workspace_id) \
                 or not isinstance(job_id, str) or not IDENT.fullmatch(job_id):

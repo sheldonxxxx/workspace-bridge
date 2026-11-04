@@ -340,3 +340,18 @@ class WorktreeStore:
         except BridgeError:
             repo = None  # The repository is gone; still drop the Node's copy.
         return {"worktree_id": worktree_id, "removed": self._remove(repo, ws["id"], worktree_id)}
+
+    def purge_workspace(self, workspace_id: str, safe: SafeRoot | None = None) -> dict:
+        """Drop every worktree this Node made for a deleted workspace."""
+        folder = self.root / workspace_id
+        removed = 0
+        if folder.is_symlink():
+            folder.unlink(missing_ok=True)
+        elif folder.is_dir():
+            for item in sorted(folder.iterdir()):
+                if (item.is_dir() and not item.is_symlink()
+                        and WORKTREE_ID.fullmatch(item.name)):
+                    self.remove(safe, {"id": workspace_id}, item.name)
+                    removed += 1
+            shutil.rmtree(folder, ignore_errors=True)
+        return {"worktrees": removed, "removed": not folder.exists()}

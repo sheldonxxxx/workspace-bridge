@@ -242,6 +242,13 @@ class CheckRunner:
         with self.lock:
             self.db.close()
 
+    def purge_workspace(self, workspace_id: str) -> None:
+        """Forget one deleted workspace's check config and batch history."""
+        path = config_path(self.state, workspace_id)
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM batches WHERE workspace=?", (workspace_id,))
+        path.unlink(missing_ok=True)
+
     def load(self, workspace: dict) -> dict[str, dict]:
         path = config_path(self.state, workspace["id"])
         try:

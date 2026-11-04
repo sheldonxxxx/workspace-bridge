@@ -21,6 +21,7 @@ import {
   Menu,
   Moon,
   Pause,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -30,6 +31,7 @@ import {
   Shield,
   SquareTerminal,
   Sun,
+  Trash2,
   Workflow,
   X,
 } from "lucide-react";
@@ -38,6 +40,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { EditHandoffDialog } from "@/EditHandoffDialog";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -502,6 +505,8 @@ function WorkspaceCard({
   onDetail: (detail: TextDetail) => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(ws.name);
   const [excludes, setExcludes] = useState(() => {
     try {
       return (JSON.parse(ws.excludes) as string[]).join("\n");
@@ -537,25 +542,76 @@ function WorkspaceCard({
           <FolderClosed size={19} />
         </div>
         <div className="workspace-name">
-          <div className="workspace-name-line">
-            <h3>{ws.name}</h3>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={`Copy workspace ID for ${ws.name}`}
-              title="Copy workspace ID"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(ws.id);
-                  onNotice("Workspace ID copied.");
-                } catch {
-                  onDetail({ title: "Workspace ID", content: ws.id });
+          {renaming ? (
+            <form
+              className="workspace-rename"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const name = nameDraft.trim();
+                if (!name || name === ws.name) {
+                  setRenaming(false);
+                  return;
                 }
+                void onManage(ws, "rename", { name }).then(() =>
+                  setRenaming(false),
+                );
               }}
             >
-              <Clipboard size={14} />
-            </Button>
-          </div>
+              <Input
+                aria-label="Workspace name"
+                autoFocus
+                maxLength={80}
+                value={nameDraft}
+                onChange={(event) => setNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setRenaming(false);
+                }}
+              />
+              <Button type="submit" size="sm" disabled={!nameDraft.trim()}>
+                Save
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setRenaming(false)}
+              >
+                Cancel
+              </Button>
+            </form>
+          ) : (
+            <div className="workspace-name-line">
+              <h3>{ws.name}</h3>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Rename ${ws.name}`}
+                title="Rename workspace"
+                onClick={() => {
+                  setNameDraft(ws.name);
+                  setRenaming(true);
+                }}
+              >
+                <Pencil size={14} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Copy workspace ID for ${ws.name}`}
+                title="Copy workspace ID"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(ws.id);
+                    onNotice("Workspace ID copied.");
+                  } catch {
+                    onDetail({ title: "Workspace ID", content: ws.id });
+                  }
+                }}
+              >
+                <Clipboard size={14} />
+              </Button>
+            </div>
+          )}
           <p className="path-text" title={ws.root}>
             {ws.root}
           </p>
@@ -846,6 +902,33 @@ function WorkspaceCard({
             onConfirm={onConfirm}
             onNotice={onNotice}
           />
+          <div className="settings-danger">
+            <div>
+              <strong>Delete workspace</strong>
+              <p>
+                Removes this mapping from the Bridge and its Node. Run history,
+                handoffs and Node-owned checkpoints are discarded; project files
+                and Git history stay untouched.
+              </p>
+            </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() =>
+                change(
+                  "Delete workspace?",
+                  `Remove “${ws.name}” from the Bridge and its Node? Project files and Git history are not changed. This cannot be undone.`,
+                  async () => {
+                    await api(`/api/workspaces/${ws.id}`, "DELETE");
+                    onNotice("Workspace deleted.");
+                  },
+                  true,
+                )
+              }
+            >
+              <Trash2 size={14} /> Delete workspace
+            </Button>
+          </div>
         </div>
       )}
     </article>
@@ -1167,6 +1250,7 @@ export default function App() {
     string | null
   >(null);
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
+  const [editingHandoff, setEditingHandoff] = useState<Handoff | null>(null);
   const [workspaceRuns, setWorkspaceRuns] = useState<Run[]>([]);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [addOpen, setAddOpen] = useState(false);
@@ -1603,6 +1687,17 @@ export default function App() {
   }
   const selected = workspaces.find((w) => w.id === selectedWorkspace) || null;
   const onlyWorkspace = workspaces.length === 1 ? workspaces[0] : null;
+  useEffect(() => {
+    // A deleted workspace leaves the Handoffs page without a selection.
+    if (
+      selectedWorkspace &&
+      !workspaces.some((w) => w.id === selectedWorkspace)
+    ) {
+      setSelectedWorkspace(null);
+      setHandoffs([]);
+      setWorkspaceRuns([]);
+    }
+  }, [selectedWorkspace, workspaces]);
   useEffect(() => {
     // With a single workspace there is nothing to choose: open its handoffs.
     if (section === "handoffs" && !selectedWorkspace && onlyWorkspace)
@@ -2741,9 +2836,61 @@ export default function App() {
                               }
                             />
                             <h3>{h.title}</h3>
+                            {h.used && (
+                              <small>
+                                Used by a run; editing and deletion are
+                                unavailable.
+                              </small>
+                            )}
                             <p className="path-text">{h.path}</p>
                           </div>
                           <div className="row-actions">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={h.used}
+                              onClick={() => setEditingHandoff(h)}
+                            >
+                              <Pencil size={14} /> Edit
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={h.used}
+                              onClick={async () => {
+                                try {
+                                  const plan = await api<{
+                                    expected_documents: Record<string, string>;
+                                    expected_title: string;
+                                  }>(
+                                    `/api/workspaces/${selected.id}/jobs/${h.id}`,
+                                  );
+                                  ask({
+                                    title: "Delete handoff?",
+                                    description:
+                                      "This removes the handoff and its Node plan copy. Manual dispatch is not tracked; ensure no agent is using it.",
+                                    destructive: true,
+                                    action: async () => {
+                                      await api(
+                                        `/api/workspaces/${selected.id}/jobs/${h.id}`,
+                                        "DELETE",
+                                        {
+                                          expected_documents:
+                                            plan.expected_documents,
+                                          expected_title: plan.expected_title,
+                                        },
+                                      );
+                                      await loadWorkspaceDetails(selected.id);
+                                      notify("Handoff deleted.");
+                                    },
+                                  });
+                                } catch (error) {
+                                  notify((error as Error).message);
+                                }
+                              }}
+                            >
+                              <Trash2 size={14} /> Delete
+                            </Button>
                             <Button
                               variant="outline"
                               size="sm"
@@ -3595,6 +3742,18 @@ export default function App() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {editingHandoff && (
+        <EditHandoffDialog
+          workspaceId={selectedWorkspace || ""}
+          handoff={editingHandoff}
+          onClose={() => setEditingHandoff(null)}
+          onSaved={async () => {
+            if (selectedWorkspace)
+              await loadWorkspaceDetails(selectedWorkspace);
+            notify("Handoff updated.");
+          }}
+        />
+      )}
       {notice && (
         <div className="notice" role="status">
           <span>{notice}</span>

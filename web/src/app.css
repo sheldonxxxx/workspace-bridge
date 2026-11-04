@@ -917,6 +917,15 @@ a {
   flex: none;
   color: var(--quiet);
 }
+.workspace-rename {
+  align-items: center;
+  gap: 8px;
+  display: flex;
+}
+.workspace-rename input {
+  min-width: 0;
+  flex: 1;
+}
 .workspace-name p {
   color: var(--quiet);
   text-overflow: ellipsis;
@@ -1231,6 +1240,25 @@ a {
 .settings-save {
   grid-column: 1/-1;
   justify-self: end;
+}
+.settings-danger {
+  border-top: 1px solid var(--line);
+  grid-column: 1/-1;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+}
+.settings-danger strong {
+  font-size: 12px;
+}
+.settings-danger p {
+  color: var(--quiet);
+  max-width: 560px;
+  margin-top: 3px;
+  font-size: 11px;
 }
 .native-select {
   border: 1px solid var(--input);
@@ -2350,9 +2378,20 @@ a {
 }
 .run-input-receipts li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+}
+.run-input-message {
+  min-width: 0;
+}
+.run-input-message small {
+  color: var(--quiet);
+}
+.run-input-message p {
+  margin: 0.25rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .feed-older {
   padding: 13px 0 4px;

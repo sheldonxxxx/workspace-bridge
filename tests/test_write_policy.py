@@ -39,7 +39,7 @@ def edit(e, path, old, new, sha):
 
 
 def test_generic_tools_replace_handoff_names_without_aliases(env):
-    assert len(TOOLS) == 24
+    assert len(TOOLS) == 26
     assert {'read_file','apply_patch','undo_edit'} <= TOOLS.keys()
     for name in ['write_file','edit_file','write_handoff_file','edit_handoff_file','review_changes','read_change','record_audit']:
         assert name not in TOOLS

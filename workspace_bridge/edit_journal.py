@@ -392,6 +392,11 @@ class EditJournal:
     def close(self):
         self.db.close()
 
+    def purge_workspace(self, workspace: str):
+        """Forget every edit this workspace journaled; files are untouched."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM edits WHERE workspace=?", (workspace,))
+
     def begin(self, workspace: str, actor: str, message: str, kind: str,
               plan: list[FileChange], folders: list[str], undoes: str | None = None) -> str:
         edit_id = "edit_" + secrets.token_hex(12)

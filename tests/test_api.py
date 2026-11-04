@@ -23,7 +23,7 @@ async def test_initialize_and_discovery(env, mcp):
         assert "mcp-session-id" not in r.headers
         r = await rpc(mcp, env, "tools/list")
         tools = r.json()["result"]["tools"]
-        assert len(tools) == len(TOOLS) == 24
+        assert len(tools) == len(TOOLS) == 26
         assert set(t["name"] for t in tools) == set(TOOLS)
         assert all(("workspace_id" in t["inputSchema"].get("required", [])) == (t["name"] not in {"list_workspaces"}) for t in tools)
         assert not any("shell" == t["name"] for t in tools)
@@ -328,3 +328,27 @@ async def test_admin_node_reads_run_off_the_event_loop(env, mcp, payload, monkey
         assert document.status_code == 200, document.text
     assert set(seen) == {"workspace_route_policy", "read_handoff"}
     assert all(thread is not loop_thread for thread in seen.values())
+
+async def test_handoff_manager_and_mcp_edit_delete(env, mcp, payload):
+    from workspace_bridge.api import Handoff
+    job = env['service'].call(env['id'], env['token'], 'save_handoff', Handoff.model_validate(payload).model_dump())
+    app = make_admin(env['service'])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8766', headers={'Cookie': admin_cookie(app)}) as client:
+        path = f"/api/workspaces/{env['id']}/jobs/{job['id']}"
+        response = await client.get(path)
+        assert response.status_code == 200
+        plan = response.json()
+        plan['title'] = 'Edited title'
+        plan['documents']['TASK.md'] = 'Edited task\n'
+        assert (await client.put(path, json=plan)).status_code == 200
+        changed = (await client.get(path)).json()
+        assert changed['title'] == 'Edited title' and changed['documents']['TASK.md'] == 'Edited task\n'
+        stale = await client.request('DELETE', path, json={'expected_title': plan['expected_title'], 'expected_documents': plan['expected_documents']})
+        assert stale.status_code == 400 and 'changed' in stale.json()['error']
+    async with mcp:
+        changed['documents']['CONTEXT.md'] = 'MCP edit\n'
+        result = await rpc(mcp, env, 'tools/call', {'name': 'edit_handoff', 'arguments': {'job_id': job['id'], **changed}})
+        assert not result.json()['result'].get('isError', False)
+        updated = env['service'].job(env['service'].workspace(env['id']), job['id'])
+        result = await rpc(mcp, env, 'tools/call', {'name': 'delete_handoff', 'arguments': {'job_id': job['id'], 'expected_title': updated['title'], 'expected_documents': json.loads(updated['documents'])}})
+        assert not result.json()['result'].get('isError', False)

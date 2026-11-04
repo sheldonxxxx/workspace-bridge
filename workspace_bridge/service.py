@@ -974,41 +974,99 @@ class Service:
         """Serialize writes and policy changes for one workspace only."""
         return self.keyed_locks.hold(("workspace", ident))
 
+    def handoff_lock(self, workspace_id: str, job_id: str):
+        return self.keyed_locks.hold(("handoff", workspace_id, job_id))
+
     def manage_workspace(self, ident: str, operation: str, excludes: list[str] | None = None,
-                         write_scope: str | None = None) -> dict:
+                         write_scope: str | None = None, name: str | None = None) -> dict:
         with self.workspace_lock(ident):
             ws = self.workspace(ident, False)
-            if write_scope is not None and operation not in ("set_write_scope", "set_settings"):
-                raise BridgeError("write_scope requires set_write_scope or set_settings", "invalid_arguments")
-            if operation in {"set_write_scope", "set_settings"} and write_scope not in BRIDGE_WRITE_SCOPES:
-                raise BridgeError("write_scope must be none (read-only) or workspace (edit)", "invalid_arguments")
-            if operation in {"set_settings", "set_excludes"}:
-                validate_excludes(excludes)
-            if operation not in {"enable", "disable", "set_write_scope", "set_settings", "set_excludes"}:
-                raise BridgeError("Unknown management operation")
-            # Node calls happen before, never inside, the database transaction.
-            if operation in {"set_write_scope", "set_settings", "set_excludes"}:
-                next_scope = write_scope if operation in {"set_write_scope", "set_settings"} else ws["write_scope"]
-                next_excludes = excludes if operation in {"set_settings", "set_excludes"} else json.loads(ws["excludes"])
-                self.node_registry.client(ws["node_id"], timeout=5).configure_workspace(
-                    ws["id"], next_excludes, next_scope)
-            if operation == "enable":
-                self.node_registry.client(ws["node_id"], timeout=5).validate_root(
-                    ws["root"], json.loads(ws["excludes"]))
-            statements = {
-                "enable": ("UPDATE workspaces SET enabled=1 WHERE id=?", (ident,)),
-                "disable": ("UPDATE workspaces SET enabled=0 WHERE id=?", (ident,)),
-                "set_write_scope": ("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident)),
-                "set_settings": ("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
-                                 (write_scope, encoded(excludes or []).decode(), ident)),
-                "set_excludes": ("UPDATE workspaces SET excludes=? WHERE id=?",
-                                 (encoded(excludes or []).decode(), ident)),
-            }
-            sql, params = statements[operation]
-            with self.lock, self.db:
-                self.db.execute(sql, params)
+            if operation == "rename":
+                if name is None or write_scope is not None or excludes is not None:
+                    raise BridgeError("Rename needs only a workspace name", "invalid_arguments")
+                name = name.strip()
+                if not 1 <= len(name) <= 80 or any(ord(c) < 32 for c in name):
+                    raise BridgeError("Invalid workspace name")
+                with self.lock, self.db:
+                    self.db.execute("UPDATE workspaces SET name=? WHERE id=?", (name, ident))
+            else:
+                if write_scope is not None and operation not in ("set_write_scope", "set_settings"):
+                    raise BridgeError("write_scope requires set_write_scope or set_settings", "invalid_arguments")
+                if operation in {"set_write_scope", "set_settings"} and write_scope not in BRIDGE_WRITE_SCOPES:
+                    raise BridgeError("write_scope must be none (read-only) or workspace (edit)", "invalid_arguments")
+                if operation in {"set_settings", "set_excludes"}:
+                    validate_excludes(excludes)
+                if operation not in {"enable", "disable", "set_write_scope", "set_settings", "set_excludes"}:
+                    raise BridgeError("Unknown management operation")
+                # Node calls happen before, never inside, the database transaction.
+                if operation in {"set_write_scope", "set_settings", "set_excludes"}:
+                    next_scope = write_scope if operation in {"set_write_scope", "set_settings"} else ws["write_scope"]
+                    next_excludes = excludes if operation in {"set_settings", "set_excludes"} else json.loads(ws["excludes"])
+                    self.node_registry.client(ws["node_id"], timeout=5).configure_workspace(
+                        ws["id"], next_excludes, next_scope)
+                if operation == "enable":
+                    self.node_registry.client(ws["node_id"], timeout=5).validate_root(
+                        ws["root"], json.loads(ws["excludes"]))
+                statements = {
+                    "enable": ("UPDATE workspaces SET enabled=1 WHERE id=?", (ident,)),
+                    "disable": ("UPDATE workspaces SET enabled=0 WHERE id=?", (ident,)),
+                    "set_write_scope": ("UPDATE workspaces SET write_scope=? WHERE id=?", (write_scope, ident)),
+                    "set_settings": ("UPDATE workspaces SET write_scope=?, excludes=? WHERE id=?",
+                                     (write_scope, encoded(excludes or []).decode(), ident)),
+                    "set_excludes": ("UPDATE workspaces SET excludes=? WHERE id=?",
+                                     (encoded(excludes or []).decode(), ident)),
+                }
+                sql, params = statements[operation]
+                with self.lock, self.db:
+                    self.db.execute(sql, params)
         self.event(ident, operation, write_scope if operation == "set_write_scope" else "ok")
-        return {"workspace": self.public_workspace(self.workspace(ident, False))}
+        return {"workspace": self.public_workspace(self.workspace(ident, False)),
+                **({"note": "Workspace renamed."} if operation == "rename" else {})}
+
+    def delete_workspace(self, ident: str) -> dict:
+        """Remove one mapping and the Bridge history that can never be reused.
+
+        The Node unbinds the mapping first; project files and Git history are
+        never touched. Runs still starting or active block deletion because
+        removing their workspace would strand them.
+        """
+        with self.workspace_lock(ident):
+            ws = self.workspace(ident, False)
+            with self.lock:
+                active = self.db.execute(
+                    "SELECT COUNT(*) FROM agent_runs WHERE workspace=? "
+                    "AND phase IN ('starting','active')", (ident,)).fetchone()[0]
+            if active:
+                raise BridgeError("Stop or abandon this workspace's active runs before deleting it",
+                                  "conflict")
+            self.node_registry.client(ws["node_id"], timeout=10).unregister_workspace(ident)
+            with self.lock, self.db:
+                # Run rows reference handoffs and each other; remove children first.
+                self.db.execute(
+                    "DELETE FROM agent_interactions WHERE run IN "
+                    "(SELECT id FROM agent_runs WHERE workspace=?)", (ident,))
+                self.db.execute(
+                    "DELETE FROM agent_activities WHERE run IN "
+                    "(SELECT id FROM agent_runs WHERE workspace=?)", (ident,))
+                self.db.execute(
+                    "DELETE FROM agent_run_images WHERE run IN "
+                    "(SELECT id FROM agent_runs WHERE workspace=?)", (ident,))
+                self.db.execute("DELETE FROM agent_run_checks WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM workspace_checks WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM agent_run_checkpoints WHERE workspace=?", (ident,))
+                self.db.execute(
+                    "DELETE FROM agent_run_worktrees WHERE run IN "
+                    "(SELECT id FROM agent_runs WHERE workspace=?)", (ident,))
+                self.db.execute("DELETE FROM agent_worktrees WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM agent_runs WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM agent_conversations WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM jobs WHERE workspace=?", (ident,))
+                self.db.execute("DELETE FROM mcp_event_subscriptions WHERE workspace_id=?", (ident,))
+                self.db.execute("DELETE FROM workspaces WHERE id=?", (ident,))
+        self.event(ident, "workspace_deleted")
+        return {"deleted": ident,
+                "note": "Workspace removed from the Bridge and Node. Project files were not touched."}
+
     def check_storage(self, additional: int = 0):
         with self.lock:
             allocated = self.db.execute("PRAGMA page_count").fetchone()[0] * self.db.execute("PRAGMA page_size").fetchone()[0]
@@ -1114,6 +1172,8 @@ class Service:
         (or always, for the Manager); otherwise list_handoffs pages PROMPT.md."""
         summary = {"id": job["id"], "title": job["title"], "state": job["state"], "created": job["created"],
                    "completion_tracking": "not_tracked"}
+        with self.lock:
+            summary["used"] = bool(self.db.execute("SELECT 1 FROM agent_runs WHERE workspace=? AND handoff=? LIMIT 1", (ws["id"], job["id"])).fetchone())
         docs = handoffs.documents(job)
         prompt = handoffs.manual_prompt(ws["root"], job)
         summary.update({"stored": "bridge", "documents": {
@@ -1213,6 +1273,46 @@ class Service:
                  encoded(published).decode(), json.dumps(docs), json.dumps(uploads)))
         self.write_plan(ws, self.job(ws, ident))
         return self.handoff_summary(ws, self.job(ws, ident))
+
+    def change_handoff(self, ws: dict, job_id: str, documents: dict | None = None,
+                       expected_documents: dict | None = None, expected_title: str = "", title: str = "") -> dict:
+        with self.workspace_lock(ws["id"]), self.handoff_lock(ws["id"], job_id):
+            job = self.job(ws, job_id)
+            with self.lock:
+                used = self.db.execute("SELECT 1 FROM agent_runs WHERE workspace=? AND handoff=? LIMIT 1", (ws["id"], job_id)).fetchone()
+            if used or job["state"] != "prepared":
+                raise BridgeError("A handoff used by a run cannot be changed or deleted", "conflict")
+            if expected_documents != json.loads(job["documents"]) or expected_title != job["title"]:
+                raise BridgeError("Handoff changed; reload before continuing", "conflict")
+            client = self.node_registry.client(ws["node_id"])
+            if documents is None:
+                client.workspace("delete_plan", ws, {"job_id": job_id})
+                with self.lock, self.db:
+                    self.db.execute("DELETE FROM jobs WHERE workspace=? AND id=?", (ws["id"], job_id))
+                self.event(ws["id"], "delete_handoff")
+                return {"id": job_id, "deleted": True}
+            if set(documents) != set(handoffs.DOCUMENTS) or any(not isinstance(v, str) for v in documents.values()):
+                raise BridgeError("Supply all three handoff documents", "invalid_arguments")
+            file_text(title.encode())
+            for value in documents.values():
+                file_text(value.encode())
+                if len(value.encode()) > 1024 * 1024:
+                    raise BridgeError("A plan document is too large", "invalid_arguments")
+            self.check_storage(sum(len(v.encode()) for v in documents.values()))
+            hashes = {k: digest(v.encode()) for k, v in documents.items()}
+            folder = client.workspace("write_plan", ws, {"job_id": job_id, "documents": documents,
+                "uploads": json.loads(job.get("uploads") or "[]")})["folder"]
+            with self.lock, self.db:
+                self.db.execute("UPDATE jobs SET title=?, content=?, documents=?, plan_folder=?, request_hash=? WHERE workspace=? AND id=?",
+                    (title, json.dumps(documents), encoded(hashes).decode(), folder, "edited:" + digest(encoded(hashes)), ws["id"], job_id))
+            self.event(ws["id"], "edit_handoff")
+            return self.handoff_summary(ws, self.job(ws, job_id))
+
+    def edit_handoff(self, ws: dict, job_id: str, documents: dict, expected_documents: dict, title: str, expected_title: str) -> dict:
+        return self.change_handoff(ws, job_id, documents, expected_documents, expected_title, title)
+
+    def delete_handoff(self, ws: dict, job_id: str, expected_documents: dict, expected_title: str) -> dict:
+        return self.change_handoff(ws, job_id, None, expected_documents, expected_title)
     def list_handoffs(self, ws: dict, offset: int, limit: int, *, include_prompt: bool = False) -> dict:
         with self.lock:
             jobs = self.db.execute(f"SELECT {JOB_COLUMNS} FROM jobs WHERE workspace=? ORDER BY created DESC LIMIT ? OFFSET ?", (ws["id"], limit + 1, offset)).fetchall()
@@ -1263,12 +1363,22 @@ class Service:
                                   "apply_run", "discard_run"})
     RUN_INPUTS = frozenset({"send_run_input", "answer_interaction"})
 
+    @contextlib.contextmanager
+    def _run_start_queue(self, ws_id: str, adapter_id: str, job_id: str | None):
+        with self.run_coordinator.admission_lock(ws_id, adapter_id):
+            if job_id:
+                with self.handoff_lock(ws_id, job_id):
+                    yield
+            else:
+                yield
+
     def _tool_queue(self, ws_id: str | None, name: str, args: dict):
         """The keyed lock a tool call waits on; none for reads and cancel."""
         if not isinstance(ws_id, str) or not isinstance(args, dict):
             return contextlib.nullcontext()
         if name == "start_run" and isinstance(args.get("adapter_id"), str):
-            return self.run_coordinator.admission_lock(ws_id, args["adapter_id"])
+            job_id = args.get("job_id")
+            return self._run_start_queue(ws_id, args["adapter_id"], job_id if isinstance(job_id, str) else None)
         if name in self.RUN_INPUTS and isinstance(args.get("run_id"), str):
             return self.run_coordinator.input_lock(args["run_id"])
         if name in self.WORKSPACE_WRITES:
@@ -1300,6 +1410,7 @@ class Service:
             "git_status": self.git_status, "git_diff": self.git_diff, "run_checks": self.run_checks,
             "save_handoff": lambda workspace, **arguments: self.prepare_handoff(workspace, arguments),
             "list_handoffs": self.handoffs_tool,
+            "edit_handoff": self.edit_handoff, "delete_handoff": self.delete_handoff,
             "list_targets": self.list_targets,
             "start_run": self.start_agent_run,
             "list_runs": self.list_agent_runs,

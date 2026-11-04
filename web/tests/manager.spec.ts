@@ -347,8 +347,19 @@ async function mockApi(
     },
     input_messages: options.activeRun
       ? [
-          { requestId: "chatgpt-queue", mode: "queue", status: "queued" },
-          { requestId: "chatgpt-steer", mode: "steer", status: "delivered" },
+          {
+            requestId: "chatgpt-queue",
+            mode: "queue",
+            status: "queued",
+            text: "Review the tests next.",
+          },
+          {
+            requestId: "chatgpt-steer",
+            mode: "steer",
+            status: "delivered",
+            text: "Focus on the API.\nKeep the existing behavior.",
+          },
+          { requestId: "legacy-steer", mode: "steer", status: "delivered" },
         ]
       : [],
     interactions: options.pendingRequest
@@ -1606,7 +1617,7 @@ test("handoff summaries, blocked defaults, and run security snapshots stay expli
   await expect(page.getByText("150", { exact: true }).first()).toBeVisible();
 });
 
-test("run messages show receipts and Manual control steers by hand", async ({
+test("run messages show instruction text and Manual control steers by hand", async ({
   page,
 }) => {
   const mock = await mockApi(page, { runSnapshot: true, activeRun: true });
@@ -1615,7 +1626,16 @@ test("run messages show receipts and Manual control steers by hand", async ({
   await page.getByRole("button", { name: "Open run" }).click();
   const receipts = page.locator(".run-input-receipts");
   await expect(receipts).toContainText("queued");
-  await expect(receipts).toContainText("delivered");
+  await expect(receipts).toContainText("Sent");
+  await expect(receipts).toContainText("Review the tests next.");
+  await expect(receipts).toContainText("Focus on the API.");
+  await expect(receipts).toContainText("Keep the existing behavior.");
+  await expect(receipts).toContainText("Message text unavailable.");
+  await expect(
+    page.getByText(
+      "Pending messages are discarded if the run stops or restarts.",
+    ),
+  ).toBeHidden();
   await expect(
     page.getByText("ChatGPT has not called the Bridge since it started."),
   ).toBeHidden();
@@ -2057,4 +2077,55 @@ test("built-in profiles cannot be edited or deleted", async ({ page }) => {
       .getByRole("region", { name: "Profile controls" })
       .getByRole("button", { name: "Delete", exact: true }),
   ).toHaveCount(0);
+});
+
+test("unused handoffs can be edited and deleted", async ({ page }) => {
+  await mockApi(page);
+  let saved: Record<string, unknown> | undefined;
+  let deleted: Record<string, unknown> | undefined;
+  const hashes = {
+    "TASK.md": "a".repeat(64),
+    "CONTEXT.md": "b".repeat(64),
+    "ACCEPTANCE.md": "c".repeat(64),
+  };
+  await page.route(
+    `**/api/workspaces/${WS_ID}/jobs/${JOB_ID}`,
+    async (route) => {
+      const method = route.request().method();
+      if (method === "GET")
+        return route.fulfill({
+          json: {
+            title: handoff.title,
+            expected_title: handoff.title,
+            expected_documents: hashes,
+            documents: {
+              "TASK.md": "Task",
+              "CONTEXT.md": "Context",
+              "ACCEPTANCE.md": "Acceptance",
+            },
+          },
+        });
+      if (method === "PUT") saved = route.request().postDataJSON();
+      if (method === "DELETE") deleted = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true } });
+    },
+  );
+  await page.goto("./");
+  await navigate(page, "Handoffs");
+  const row = page.locator(".handoff-row").filter({ hasText: handoff.title });
+  await row.getByRole("button", { name: "Edit" }).click();
+  await page.getByLabel("Title", { exact: true }).fill("New title");
+  await page.getByLabel("TASK.md").fill("New task");
+  await expect(page.getByLabel("CONTEXT.md")).toHaveValue("Context");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => saved?.title).toBe("New title");
+  expect(
+    (saved?.documents as Record<string, string> | undefined)?.["TASK.md"],
+  ).toBe("New task");
+  expect(
+    Object.keys(saved?.documents as Record<string, string>).sort(),
+  ).toEqual(["ACCEPTANCE.md", "CONTEXT.md", "TASK.md"]);
+  await row.getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect.poll(() => deleted?.expected_title).toBe(handoff.title);
 });

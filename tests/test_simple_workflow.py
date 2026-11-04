@@ -18,10 +18,10 @@ EXPECTED = {'list_workspaces', 'workspace_info',
             'list_dir', 'glob', 'grep', 'read_file',
             'apply_patch', 'undo_edit', 'upload_image',
             'git_status', 'git_diff', 'run_checks',
-            'save_handoff', 'list_handoffs',
+            'save_handoff', 'list_handoffs', 'edit_handoff', 'delete_handoff',
             'list_targets', 'start_run', 'list_runs', 'read_run', 'run_log',
             'send_run_input', 'cancel_run', 'apply_run', 'discard_run', 'answer_interaction'}
-MUTATING = {'apply_patch', 'undo_edit', 'upload_image', 'run_checks', 'save_handoff',
+MUTATING = {'apply_patch', 'undo_edit', 'upload_image', 'run_checks', 'save_handoff', 'edit_handoff', 'delete_handoff',
             'start_run', 'send_run_input', 'cancel_run', 'apply_run', 'discard_run', 'answer_interaction'}
 
 

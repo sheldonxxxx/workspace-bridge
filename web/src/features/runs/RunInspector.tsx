@@ -460,25 +460,25 @@ export function RunInspector({
                   <ul className="run-input-receipts">
                     {current.input_messages?.slice(-5).map((message) => (
                       <li key={message.requestId}>
-                        <span>
-                          {message.mode === "steer"
-                            ? "Correction"
-                            : "Follow-up"}
-                          {message.origin === "manager" ? " (from you)" : ""}
-                        </span>
+                        <div className="run-input-message">
+                          <small>
+                            {message.mode === "steer" ? "Steer" : "Follow-up"}
+                            {message.origin === "manager" ? " (from you)" : ""}
+                          </small>
+                          <p>{message.text ?? "Message text unavailable."}</p>
+                        </div>
                         <StateBadge
                           value={
                             message.status === "unknown"
                               ? "Delivery unconfirmed"
-                              : message.status
+                              : message.status === "delivered"
+                                ? "Sent"
+                                : message.status
                           }
                         />
                       </li>
                     ))}
                   </ul>
-                  <p>
-                    Pending messages are discarded if the run stops or restarts.
-                  </p>
                 </section>
               )}
               {current.phase === "active" && (

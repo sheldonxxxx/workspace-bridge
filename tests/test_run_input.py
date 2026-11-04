@@ -91,12 +91,40 @@ def test_input_tools_keep_run_identity_and_receipts(modern_env, mode):
     assert first["input_message"] == retry["input_message"]
     assert first["input_message"]["mode"] == mode
     assert first["input_messages"] == [first["input_message"]]
-    assert "Review the edge case" not in json.dumps(first["input_messages"])
+    assert first["input_message"]["text"] == body["instruction"]
     if mode == "steer":
         assert sum(method == "turn/steer" for method, _ in rpc.calls) == 1
     snapshot = service.call(ws_id, token, "read_run", {"run_id": run["run_id"]})
     assert snapshot["input_capabilities"] == {"steer": True, "queue": True}
     assert snapshot["input_messages"] == first["input_messages"]
+
+
+def test_input_display_text_is_redacted_and_survives_receipt_updates(modern_env):
+    service, ws_id, token, _, native, _ = modern_env
+    run = start(modern_env)
+    secret = "sk-" + "a" * 24
+    private_key = "-----BEGIN PRIVATE KEY-----\nprivate key data\n-----END PRIVATE KEY-----"
+    instruction = "Review this.\n" + "x" * 7000 + f"\n{secret}\n{private_key}\nKeep this ending."
+    accepted = service.call(ws_id, token, "send_run_input", {
+        "run_id": run["run_id"], "instruction": instruction,
+        "request_id": "display", "mode": "queue"})
+    text = accepted["input_message"]["text"]
+    assert text.startswith("Review this.\n") and text.endswith("Keep this ending.")
+    assert "[REDACTED_SECRET]" in text
+    assert secret not in text and "private key data" not in text
+    ws = service.workspace(ws_id)
+    stored = service.run_coordinator._run_row(ws, run["run_id"])
+    snapshot = native.run(stored["native_id"])
+    snapshot["inputMessages"][0]["status"] = "delivered"
+    service.run_coordinator._persist_snapshot(stored, snapshot, [], [])
+    read = service.run_coordinator.read(ws, run["run_id"], sync=False)
+    assert read["input_messages"][0]["text"] == text
+    assert read["input_messages"][0]["status"] == "delivered"
+    with service.lock:
+        payload = service.db.execute(
+            "SELECT payload FROM agent_activities WHERE run=? AND kind='run_input'",
+            (run["run_id"],)).fetchone()["payload"]
+    assert secret not in payload and "private key data" not in payload
 
 
 @pytest.mark.parametrize("mode", ["steer", "queue"])
@@ -312,7 +340,7 @@ def test_stale_receipt_snapshot_does_not_undo_delivery(modern_env):
         "kind": "run_input", "status": "queued"}])
     receipts = service.run_coordinator.read(ws, run["run_id"], sync=False)["input_messages"]
     assert receipts == [{"requestId": "one", "mode": "steer", "status": "delivered",
-                         "origin": "chatgpt"}]
+                         "origin": "chatgpt", "text": "Correction"}]
 
 
 def test_input_tools_are_scoped_mutating_open_world():

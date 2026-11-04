@@ -82,6 +82,11 @@ def _route(service, method: str, path: str, raw: bytes) -> tuple[int, object]:
         body = _body(raw, limit)
         return 200, service.configure_workspace(
             pieces[2], body.get("excludes"), body.get("write_scope"))
+    if path.startswith("/v1/workspaces/") and method == "DELETE":
+        pieces = [item for item in path.split("/") if item]
+        if len(pieces) != 3:
+            return 404, {"error": "Not found"}
+        return 200, service.unregister_workspace(pieces[2])
     if path.startswith("/v1/workspaces/") and method == "POST":
         pieces = [item for item in path.split("/") if item]
         if len(pieces) != 3:

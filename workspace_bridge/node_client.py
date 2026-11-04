@@ -114,12 +114,17 @@ class NodeClient:
         return self._request("POST", f"/v1/workspaces/{workspace_id}/configure",
                              {"excludes": excludes, "write_scope": write_scope})
 
+    def unregister_workspace(self, workspace_id: str) -> dict:
+        if not re.fullmatch(r"ws_[0-9a-f]{24}", workspace_id):
+            raise BridgeError("Invalid workspace identity", "invalid_arguments")
+        return self._request("DELETE", f"/v1/workspaces/{workspace_id}")
+
     def workspace(self, operation: str, workspace: dict, arguments: dict):
         allowed = {"list_dir", "read_file", "glob", "grep_files", "upload_image",
                    "apply_patch", "undo_edit", "list_edits", "git_status", "git_diff",
                    "hash_files", "checkpoint_capture",
                    "checkpoint_changes", "checkpoint_diff", "checkpoint_purge", "checkpoint_stats",
-                   "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan",
+                   "checks_config", "set_checks_config", "start_checks", "read_checks", "write_plan", "delete_plan",
                    "worktree_create", "worktree_commit", "worktree_apply", "worktree_remove"}
         if operation not in allowed:
             raise BridgeError("Unknown Node workspace operation", "invalid_arguments")
