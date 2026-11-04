@@ -335,15 +335,28 @@ def test_pi_package_publish_inventory():
     assert not any(f == "README.md" for f in files)
 
 
-def test_npm_pack_inventory_matches_allowlist():
+def _packed_paths() -> list[str]:
+    """Every path npm would place in the Pi adapter tarball.
+
+    `npm pack --dry-run --json` printed a list of tarballs up to npm 11 and an
+    object keyed by package name from npm 12, so both shapes are read here. One
+    package directory yields exactly one tarball either way.
+    """
     result = subprocess.run(
         ["npm", "pack", "--dry-run", "--json"],
         cwd=str(REPO / "runtime" / "pi-host-adapter"),
         capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert isinstance(data, list) and len(data) == 1
-    paths = sorted(f["path"] for f in data[0]["files"])
+    tarballs = data if isinstance(data, list) else list(data.values())
+    assert len(tarballs) == 1, f"expected one packed tarball, got {data!r}"
+    files = tarballs[0].get("files") if isinstance(tarballs[0], dict) else None
+    assert isinstance(files, list), f"packed inventory is unreadable: {data!r}"
+    return sorted(item["path"] for item in files)
+
+
+def test_npm_pack_inventory_matches_allowlist():
+    paths = _packed_paths()
     for name in EXPECTED_MJS:
         assert name in paths, name
     assert "package.json" in paths
@@ -374,14 +387,7 @@ def test_release_assets_use_gh_upload_no_new_tag():
 
 
 def test_pi_bin_is_packaged():
-    result = subprocess.run(
-        ["npm", "pack", "--dry-run", "--json"],
-        cwd=str(REPO / "runtime" / "pi-host-adapter"),
-        capture_output=True, text=True, timeout=60, check=False)
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
-    assert isinstance(data, list) and len(data) == 1
-    paths = sorted(f["path"] for f in data[0]["files"])
+    paths = _packed_paths()
     assert "pi-adapter.mjs" in paths
     assert "package.json" in paths
 
